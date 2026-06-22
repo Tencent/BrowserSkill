@@ -12,6 +12,8 @@
   <a href="README.md">English</a> · 中文
 </p>
 
+https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
+
 **BrowserSkill** 把 Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent 等支持 Shell 的 AI Agent 连接到你已登录的浏览器。
 
 需要 Agent 操作你已打开的标签页？必须显式借用该标签，任务结束后归还，其余浏览器窗口不受影响。
