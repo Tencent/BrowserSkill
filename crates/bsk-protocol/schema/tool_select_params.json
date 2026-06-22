@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SelectParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "values"
+  ],
+  "properties": {
+    "ref": {
+      "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`. Mutually exclusive with `selector`. Accepts both `\"e3\"` and `\"@e3\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "description": "CSS selector resolved against the live DOM. Mutually exclusive with `ref_`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "description": "Maximum time the daemon waits for the tool call before timing out.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "values": {
+      "description": "Option `value` strings to set as the final selection. For a single-select `<select>` exactly one value is required; for `<select multiple>` the list replaces the current selection (an empty list clears all selections).",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

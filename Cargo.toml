@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/bsk-cli",
+  "crates/bsk-protocol",
+]
+default-members = ["crates/bsk-cli"]
+
+[workspace.package]
+version = "0.1.5"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Tencent/BrowserSkill"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = { version = "1", features = ["serde"] }
+schemars = { version = "0.8", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive"] }
+console = "0.15"
+dialoguer = "0.11"
+dirs = "5"
+fs2 = "0.4"
+tempfile = "3"
+nix = { version = "0.29", features = ["signal", "process"] }
+rand = "0.8"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Workspace crates (version required for `cargo publish` of dependents)
+bsk-protocol = { version = "0.1.5", path = "crates/bsk-protocol" }
+
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequestHelpParams",
+  "type": "object",
+  "required": [
+    "prompt",
+    "session_id"
+  ],
+  "properties": {
+    "prompt": {
+      "description": "Message shown to the user explaining what to do.",
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "targets": {
+      "description": "Optional components to scroll to + flash-highlight.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/HelpTarget"
+      }
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the wait. Defaults to 300000 (5 min), enforced daemon-side via the generic tool timeout.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "title": {
+      "description": "Optional custom title for the help overlay. Falls back to the extension's default localized title when omitted.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "HelpTarget": {
+      "description": "One component the user is asked to look at / interact with. Exactly one of `ref` / `selector` should be supplied (mirrors the click/fill convention). When neither matches a live element the overlay still shows the prompt and reports the miss via [`ResolvedTarget`].",
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

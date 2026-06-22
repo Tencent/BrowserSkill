@@ -1,0 +1,68 @@
+[package]
+name = "bsk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "browser-skill CLI — control your browser from AI agents"
+readme = "README.md"
+keywords = ["browser", "automation", "cli", "ai", "agent"]
+categories = ["command-line-utilities", "web-programming"]
+repository.workspace = true
+homepage = "https://github.com/Tencent/BrowserSkill"
+documentation = "https://docs.rs/bsk"
+build = "build.rs"
+include = [
+    "src/**/*",
+    "skill/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "README.md",
+]
+
+[lib]
+name = "bsk"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bsk"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+clap = { workspace = true }
+console = { workspace = true }
+dialoguer = { workspace = true }
+dirs = { workspace = true }
+fs2 = { workspace = true }
+rand = { workspace = true }
+uuid = { workspace = true }
+bsk-protocol = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }

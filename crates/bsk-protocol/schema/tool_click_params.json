@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ClickParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "button": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/MouseButton"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "click_count": {
+      "description": "Number of consecutive mouse presses (double-click = 2).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "modifiers": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      }
+    },
+    "ref": {
+      "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`. Mutually exclusive with `selector` (caller must supply exactly one). Accepts both `\"e3\"` and `\"@e3\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  },
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "MouseButton": {
+      "description": "Mouse button selector for `tool.click`.",
+      "type": "string",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ]
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "通过 bsk CLI 让 AI Agent 驱动你已登录的浏览器"
+  }
+}

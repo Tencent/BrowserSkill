@@ -1,0 +1,91 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequestHelpResult",
+  "type": "object",
+  "required": [
+    "outcome",
+    "tab_id"
+  ],
+  "properties": {
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "$ref": "#/definitions/HelpOutcome"
+    },
+    "resolved_targets": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ResolvedTarget"
+      }
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "definitions": {
+    "HelpOutcome": {
+      "oneOf": [
+        {
+          "description": "User completed the step and clicked Continue.",
+          "type": "string",
+          "enum": [
+            "continued"
+          ]
+        },
+        {
+          "description": "User declined / aborted via the overlay's Cancel button.",
+          "type": "string",
+          "enum": [
+            "cancelled"
+          ]
+        },
+        {
+          "description": "The wait expired before the user acted.",
+          "type": "string",
+          "enum": [
+            "timed_out"
+          ]
+        },
+        {
+          "description": "The page navigated while waiting (full reload or SPA URL change).",
+          "type": "string",
+          "enum": [
+            "navigated"
+          ]
+        }
+      ]
+    },
+    "ResolvedTarget": {
+      "description": "Per-target resolution status echoed back so the agent can tell which `ref` / `selector` actually matched a live element.",
+      "type": "object",
+      "required": [
+        "matched"
+      ],
+      "properties": {
+        "matched": {
+          "type": "boolean"
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

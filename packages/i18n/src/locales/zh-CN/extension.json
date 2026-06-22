@@ -1,0 +1,72 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "未连接",
+      "connecting": "连接中…",
+      "connected": "已连接",
+      "version_skew": "协议不一致",
+      "disabled": "连接已关闭"
+    },
+    "stateDetail": {
+      "disconnected": "请先打开 BrowserSkill。",
+      "connecting": "正在连接 BrowserSkill…",
+      "connected": "可接收自动化任务。",
+      "version_skew": "部分能力可能不可用。"
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "Action needed",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "BrowserSkill 连接",
+    "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
+    "upgradeAvailable": "可升级",
+    "labelTitle": "浏览器别名",
+    "labelDescription": "用于区分多个浏览器实例。",
+    "labelPlaceholder": "例如：个人 Chrome",
+    "runtimeTitle": "运行版本",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "扩展 v{{version}}",
+    "extensionVersionHint": "扩展版本",
+    "daemonVersionHint": "bsk 版本",
+    "protocolVersion": "协议 v{{version}}",
+    "extensionProtocol": "扩展协议 v{{version}}",
+    "daemonProtocol": "daemon 协议 v{{version}}",
+    "instanceTitle": "实例 ID",
+    "instanceDescription": "本浏览器的唯一连接标识",
+    "copy": "复制",
+    "copied": "已复制",
+    "copyInstanceId": "复制实例 ID"
+  },
+  "controlOverlay": {
+    "status": "Agent 正在控制",
+    "interrupt": "中断",
+    "interrupting": "中断中…"
+  },
+  "borrowConfirmation": {
+    "title": "允许借用标签页？",
+    "titleInactive": "Agent 请求借用标签页",
+    "body": "AI Agent 希望将此标签页移入工作区。您可以拒绝或允许借用。",
+    "targetTab": "目标标签页：",
+    "autoAllow": "{{count}} 秒后自动允许",
+    "deny": "拒绝",
+    "allow": "允许",
+    "notificationTitle": "BrowserSkill：Agent 请求借用标签页",
+    "notificationBody": "请在浏览器中允许或拒绝对「{{tabTitle}}」的借用。"
+  },
+  "helpRequest": {
+    "title": "Agent 需要你的帮助",
+    "noteLabel": "给 Agent 的备注（可选）",
+    "notePlaceholder": "给 Agent 留言（可选）",
+    "continue": "继续",
+    "cancel": "取消",
+    "collapse": "折叠",
+    "expand": "展开",
+    "dragHandle": "拖动以移动",
+    "notificationTitle": "BrowserSkill：Agent 需要你的帮助"
+  }
+}

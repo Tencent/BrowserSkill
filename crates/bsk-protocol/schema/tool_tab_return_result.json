@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabReturnResult",
+  "type": "object",
+  "required": [
+    "returned_to_index",
+    "returned_to_window_id",
+    "tab_id"
+  ],
+  "properties": {
+    "fallback": {
+      "description": "True when the original window had been closed and we fell back to either the last focused normal window or a newly-created window. Lets the CLI surface \"tab returned to a different window\" hints.",
+      "type": "boolean"
+    },
+    "returned_to_index": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "returned_to_window_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

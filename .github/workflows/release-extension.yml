@@ -1,0 +1,128 @@
+name: Release Extension
+
+on:
+  push:
+    tags:
+      - ext-v*
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-extension-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve extension version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$(node -p "require('./apps/extension/package.json').version")"
+          else
+            VERSION="${GITHUB_REF_NAME#ext-v}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=ext-v${VERSION}" >> "$GITHUB_OUTPUT"
+
+  guard:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify tag matches extension package.json version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./apps/extension/package.json').version")"
+          RELEASE_VERSION="${{ needs.resolve.outputs.version }}"
+          if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "apps/extension/package.json version (${PKG_VERSION}) does not match release version (${RELEASE_VERSION})"
+            exit 1
+          fi
+          echo "Version guard passed: ${RELEASE_VERSION}"
+
+  build-extension:
+    needs: [resolve, guard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build extension zip
+        run: pnpm ext:build:zip
+
+      - name: Locate and rename extension zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.resolve.outputs.version }}"
+          ZIP=""
+          for dir in apps/extension/dist apps/extension/.output; do
+            if [ ! -d "$dir" ]; then
+              continue
+            fi
+            candidate="$(find "$dir" -maxdepth 1 -name '*chrome*.zip' -type f 2>/dev/null | head -n 1 || true)"
+            if [ -n "$candidate" ]; then
+              ZIP="$candidate"
+              break
+            fi
+          done
+          if [ -z "$ZIP" ]; then
+            echo "Could not find extension zip under apps/extension/dist or apps/extension/.output"
+            find apps/extension -name '*.zip' -type f || true
+            exit 1
+          fi
+          OUT="browser-skill-extension-v${VERSION}-chrome.zip"
+          cp "$ZIP" "$OUT"
+          echo "ARCHIVE=$OUT" >> "$GITHUB_ENV"
+          echo "Packaged ${ZIP} -> ${OUT}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: extension-zip
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    needs: [resolve, build-extension]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: extension-zip
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: BrowserSkill Extension ${{ needs.resolve.outputs.version }}
+          make_latest: false
+          generate_release_notes: true
+          files: dist/*.zip

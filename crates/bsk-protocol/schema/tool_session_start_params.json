@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStartParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "browser_instance_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    }
+  }
+}

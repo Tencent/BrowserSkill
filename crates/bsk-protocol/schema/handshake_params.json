@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HandshakeParams",
+  "type": "object",
+  "required": [
+    "browser",
+    "client",
+    "instance_id",
+    "label",
+    "protocol_version",
+    "version"
+  ],
+  "properties": {
+    "browser": {
+      "$ref": "#/definitions/BrowserPeerInfo"
+    },
+    "client": {
+      "type": "string"
+    },
+    "instance_id": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "min_compatible_peer": {
+      "description": "**Deprecated** — legacy app-semver floor kept for wire compat with pre-protocol peers. New code sends `\"0.0.0\"` and ignores on read.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "min_compatible_protocol": {
+      "description": "Lowest peer **protocol** version this side accepts (e.g. `\"1.0\"`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "protocol_version": {
+      "description": "Logical protocol revision (for example `\"1.0\"`), independent of SemVer app releases.",
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "BrowserPeerInfo": {
+      "type": "object",
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

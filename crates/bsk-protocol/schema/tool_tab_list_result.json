@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabListResult",
+  "type": "object",
+  "required": [
+    "tabs"
+  ],
+  "properties": {
+    "tabs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TabInfo"
+      }
+    }
+  },
+  "definitions": {
+    "TabInfo": {
+      "description": "A single tab entry returned by [`TabListResult`].\n\n`scope` reports how the requesting session sees this tab: tabs owned by the session's own Agent Window are tagged `agent`; everything else falls into `user`. (Other sessions' Agent Windows are filtered out before they reach this struct.)",
+      "type": "object",
+      "required": [
+        "tab_id"
+      ],
+      "properties": {
+        "active": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Where the tab sits relative to the requesting session: `user` or `agent`. `all` is a request-side filter only and never appears on an individual tab entry.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TabScope"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tab_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "window_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      }
+    },
+    "TabScope": {
+      "description": "View scope for [`TabListParams`] (§6 sandbox table).\n\n* `User` — tabs that live in any window other than an Agent Window. * `Agent` — tabs in the requesting session's Agent Window only. * `All` — both of the above; never reveals other sessions' Agent Windows (cross-session isolation per §6).",
+      "type": "string",
+      "enum": [
+        "user",
+        "agent",
+        "all"
+      ]
+    }
+  }
+}

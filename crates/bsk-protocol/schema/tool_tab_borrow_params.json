@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabBorrowParams",
+  "description": "Params for `tool.tab_borrow`. Moves a *user* tab into the requesting session's Agent Window, recording its original window / index so `tab_return` (or session_stop) can put it back.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "tab_id"
+  ],
+  "properties": {
+    "confirm": {
+      "description": "Whether to wait for an inline user confirmation overlay (M10 will introduce the UI). Currently ignored: the M8 stub always proceeds when `false` and forwards `true` to a no-op approver.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

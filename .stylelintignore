@@ -1,0 +1,5 @@
+**/dist/**
+**/.wxt/**
+**/.output/**
+**/target/**
+**/node_modules/**
