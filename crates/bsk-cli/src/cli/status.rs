@@ -5,6 +5,9 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::{Method, StatusParams, StatusResult};
 
+use crate::cli::browser_wait::{
+    browser_connect_wait, browser_query_ipc_timeout, wait_for_browser_ms,
+};
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::CliError;
 
@@ -19,7 +22,8 @@ pub enum Output {
 /// reuse it.
 pub fn run(output: Output) -> Result<StatusResult, CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let result = query_sock(info.sock_path)?;
+    let wait = browser_connect_wait();
+    let result = query_sock_with_wait(info.sock_path, wait)?;
     match output {
         Output::Human => render_human(&result),
         Output::Json => render_json(&result).map_err(CliError::Local)?,
@@ -27,7 +31,14 @@ pub fn run(output: Output) -> Result<StatusResult, CliError> {
     Ok(result)
 }
 
-pub(crate) fn query_sock(sock: std::path::PathBuf) -> Result<StatusResult, CliError> {
+pub(crate) fn query_sock_with_wait(
+    sock: std::path::PathBuf,
+    wait: Duration,
+) -> Result<StatusResult, CliError> {
+    let params = StatusParams {
+        wait_for_browser_ms: wait_for_browser_ms(wait),
+    };
+    let timeout = browser_query_ipc_timeout(wait, Duration::from_secs(2));
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -36,11 +47,7 @@ pub(crate) fn query_sock(sock: std::path::PathBuf) -> Result<StatusResult, CliEr
     rt.block_on(async move {
         let mut client = crate::ipc_client::Client::connect_path(sock).await?;
         let outcome = client
-            .call::<_, StatusResult>(
-                Method::SystemStatus,
-                &StatusParams::default(),
-                Duration::from_secs(2),
-            )
+            .call::<_, StatusResult>(Method::SystemStatus, &params, timeout)
             .await?;
         outcome.map_err(CliError::from_rpc)
     })

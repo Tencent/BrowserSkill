@@ -5,9 +5,13 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
+use bsk_protocol::system::BrowserListParams;
 use bsk_protocol::system::BrowserStatusEntry;
 use serde::Deserialize;
 
+use crate::cli::browser_wait::{
+    browser_connect_wait, browser_query_ipc_timeout, wait_for_browser_ms,
+};
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 
@@ -22,7 +26,12 @@ pub fn dispatch(format: Format) -> Result<(), CliError> {
 }
 
 fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
-    let reply: ListReply = call(sock, Duration::from_secs(5))?;
+    let wait = browser_connect_wait();
+    let params = BrowserListParams {
+        wait_for_browser_ms: wait_for_browser_ms(wait),
+    };
+    let timeout = browser_query_ipc_timeout(wait, Duration::from_secs(5));
+    let reply: ListReply = call(sock, params, timeout)?;
     match format {
         Format::Json => {
             println!(
@@ -92,7 +101,11 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn call(sock: PathBuf, timeout: Duration) -> Result<ListReply, CliError> {
+fn call(
+    sock: PathBuf,
+    params: BrowserListParams,
+    timeout: Duration,
+) -> Result<ListReply, CliError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -101,7 +114,7 @@ fn call(sock: PathBuf, timeout: Duration) -> Result<ListReply, CliError> {
     rt.block_on(async move {
         let mut client = crate::ipc_client::IpcClient::connect(sock).await?;
         let outcome = client
-            .call::<(), ListReply>("browser-list-1", Method::BrowserList, None, timeout)
+            .call("browser-list-1", Method::BrowserList, Some(params), timeout)
             .await?;
         outcome.map_err(CliError::from_rpc)
     })

@@ -1,22 +1,18 @@
 //! `bsk doctor` — guided diagnostics + repair hints.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use bsk_protocol::StatusResult;
 use console::style;
 use serde::Serialize;
 
+use crate::cli::browser_wait::doctor_browser_connect_wait;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::status::{self, Output};
-use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 use crate::daemon::info::{self, DaemonInfo};
 use crate::daemon::paths;
 use crate::daemon::state::PROTOCOL_VERSION;
-
-/// How often `warm_up` polls `system.status` while waiting for the
-/// browser extension to complete its WS handshake.
-const BROWSER_CONNECT_POLL: Duration = Duration::from_millis(200);
 
 /// Chrome Web Store listing for the browser-skill extension.
 const EXTENSION_STORE_URL: &str =
@@ -99,8 +95,8 @@ impl CheckResult {
 }
 
 pub fn run(output: Output) -> Result<Vec<CheckResult>> {
-    warm_up(output);
-    let checks = collect_checks();
+    let state = resolve_daemon_state(output);
+    let checks = collect_checks(state);
     match output {
         Output::Human => render_human(&checks),
         Output::Json => render_json(&checks)?,
@@ -108,74 +104,47 @@ pub fn run(output: Output) -> Result<Vec<CheckResult>> {
     Ok(checks)
 }
 
-/// Ensure the daemon is up and give the browser extension time to connect.
-///
-/// All errors are silently swallowed — failures are reported by the
-/// individual checks in `collect_checks()` with actionable hints.
-///
-/// Flow:
-/// 1. Read the current daemon state. **Only** proceed for `Missing` and
-///    `StaleDead`: broken states (`ReadError`, `IpcUnreachable`,
-///    `PidMismatch`) are real diagnostic findings that `collect_checks()`
-///    should surface — fixing them here would mask the real problem.
-/// 2. Call `ensure_daemon()` to auto-start the daemon (spawns a detached
-///    child and waits up to 3 s for it to write a valid `daemon.json`).
-/// 3. Poll `system.status` for up to [`EXTENSION_CONNECT_WAIT`] so the MV3
-///    service worker has time to wake up, discover the WS port, and finish
-///    its handshake before the checks are evaluated.
-///    The wait duration can be shortened for tests by setting the env var
-///    `BSK_DOCTOR_BROWSER_WAIT_MS` to a millisecond count.
-fn warm_up(output: Output) {
-    // Only spawn for states where the daemon is genuinely absent or dead.
-    match current_state() {
-        DaemonState::Missing | DaemonState::StaleDead(_) => {}
-        _ => return,
+/// Ensure the daemon is reachable and give the browser extension time to
+/// connect before checks run. Returns a single [`DaemonState`] snapshot
+/// for check evaluation.
+fn resolve_daemon_state(output: Output) -> DaemonState {
+    let mut state = current_state(Duration::ZERO);
+
+    if matches!(state, DaemonState::Missing | DaemonState::StaleDead(_)) && ensure_daemon().is_err()
+    {
+        return current_state(Duration::ZERO);
     }
 
-    let info = match ensure_daemon() {
-        Ok(info) => info,
-        Err(_) => return,
+    if matches!(state, DaemonState::Missing | DaemonState::StaleDead(_)) {
+        state = current_state(Duration::ZERO);
+    }
+
+    let wait = if needs_browser_wait(&state) {
+        doctor_browser_connect_wait()
+    } else {
+        Duration::ZERO
     };
 
-    // Daemon was freshly spawned. Give the MV3 service worker time to
-    // wake up, discover the WS port, and complete its handshake.
-    if output == Output::Human {
+    if wait > Duration::ZERO && output == Output::Human {
         eprintln!("waiting for browser extension to connect…");
     }
 
-    let wait = browser_connect_wait();
-    let deadline = Instant::now() + wait;
-    loop {
-        // Check deadline before sleeping so a zero-duration wait exits
-        // immediately and we never start a query_sock call past the deadline.
-        if Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(BROWSER_CONNECT_POLL);
-        if Instant::now() >= deadline {
-            break;
-        }
-        if let Ok(s) = status::query_sock(info.sock_path.clone()) {
-            if !s.browsers.is_empty() {
-                break;
-            }
-        }
+    if wait.is_zero() {
+        state
+    } else {
+        current_state(wait)
     }
 }
 
-/// The browser connect wait duration for `warm_up`. Defaults to
-/// [`EXTENSION_CONNECT_WAIT`]; can be overridden in tests via the
-/// `BSK_DOCTOR_BROWSER_WAIT_MS` environment variable.
-fn browser_connect_wait() -> Duration {
-    std::env::var("BSK_DOCTOR_BROWSER_WAIT_MS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_millis)
-        .unwrap_or(EXTENSION_CONNECT_WAIT)
+fn needs_browser_wait(state: &DaemonState) -> bool {
+    match state {
+        DaemonState::Verified { status } => status.browsers.is_empty(),
+        _ => false,
+    }
 }
 
 /// What the disk + IPC says about a possibly-running daemon. Threaded
-/// through every check so they share one IPC round-trip.
+/// through every check so they share one snapshot.
 enum DaemonState {
     /// No `daemon.json` at all.
     Missing,
@@ -208,8 +177,7 @@ impl DaemonState {
     }
 }
 
-fn collect_checks() -> Vec<CheckResult> {
-    let state = current_state();
+fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
     vec![
         check_home_writable(),
         check_skill_up_to_date(),
@@ -220,7 +188,7 @@ fn collect_checks() -> Vec<CheckResult> {
     ]
 }
 
-fn current_state() -> DaemonState {
+fn current_state(browser_wait: Duration) -> DaemonState {
     let info = match info::read() {
         Ok(Some(info)) => info,
         Ok(None) => return DaemonState::Missing,
@@ -229,7 +197,7 @@ fn current_state() -> DaemonState {
     if !crate::daemon::lockfile::pid_alive(info.pid) {
         return DaemonState::StaleDead(info);
     }
-    match status::query_sock(info.sock_path.clone()) {
+    match status::query_sock_with_wait(info.sock_path.clone(), browser_wait) {
         Ok(status) => {
             if status.pid == info.pid {
                 DaemonState::Verified { status }

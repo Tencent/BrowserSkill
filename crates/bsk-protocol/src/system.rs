@@ -531,9 +531,25 @@ pub struct SessionStatusEntry {
     pub created_at_ms: i64,
 }
 
-/// `system.status` request payload. Empty.
+/// `system.status` request payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct StatusParams {}
+pub struct StatusParams {
+    /// When set, the daemon polls the browser registry for up to this many
+    /// milliseconds before returning a snapshot. Only applies while zero
+    /// browsers are registered; an existing connection returns immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_browser_ms: Option<u64>,
+}
+
+/// `browser.list` request payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserListParams {
+    /// When set, the daemon polls the browser registry for up to this many
+    /// milliseconds before returning a list. Only applies while zero browsers
+    /// are registered; an existing connection returns immediately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_browser_ms: Option<u64>,
+}
 
 /// One entry per connected browser whose protocol version drifts from
 /// the daemon's (same major). Surfaced in `system.status` for

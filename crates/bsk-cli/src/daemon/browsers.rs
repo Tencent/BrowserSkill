@@ -214,6 +214,24 @@ impl BrowserRegistry {
         self.len() == 0
     }
 
+    /// Poll until at least one browser is registered or `connect_wait` elapses.
+    /// Returns immediately when the registry is already non-empty.
+    pub async fn wait_for_any_connected(&self, connect_wait: Duration) {
+        if connect_wait.is_zero() || !self.is_empty() {
+            return;
+        }
+        let deadline = Instant::now() + connect_wait;
+        loop {
+            if !self.is_empty() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            tokio::time::sleep(EXTENSION_CONNECT_POLL).await;
+        }
+    }
+
     /// Pick the only connected browser when exactly one is online, or
     /// match a specific id / label when supplied. Returns an error code
     /// aligned with §4.5.
@@ -511,21 +529,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_with_connect_wait_does_not_wait_on_ambiguous_label() {
+    async fn wait_for_any_connected_returns_when_browser_registers_late() {
+        let reg = std::sync::Arc::new(BrowserRegistry::new());
+        let reg_bg = reg.clone();
+        let waiter = tokio::spawn(async move {
+            reg_bg
+                .wait_for_any_connected(Duration::from_millis(500))
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        reg.insert(fake_client("late", ""));
+        waiter.await.expect("join");
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn wait_for_any_connected_skips_when_already_populated() {
         let reg = BrowserRegistry::new();
-        reg.insert(fake_client("alpha", "Shared"));
-        reg.insert(fake_client("beta", "Shared"));
+        reg.insert(fake_client("a", ""));
         let started = Instant::now();
-        match reg
-            .select_with_connect_wait(Some("Shared"), Duration::from_secs(1))
-            .await
-        {
-            Err(SelectError::AmbiguousLabel { label, .. }) => assert_eq!(label, "Shared"),
-            other => panic!("expected AmbiguousLabel, got {other:?}"),
-        }
+        reg.wait_for_any_connected(Duration::from_secs(1)).await;
         assert!(
             started.elapsed() < Duration::from_millis(50),
-            "ambiguous label should fail immediately"
+            "should return immediately when browsers already connected"
         );
     }
 }

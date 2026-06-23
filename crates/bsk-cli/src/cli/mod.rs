@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
 pub mod daemon;

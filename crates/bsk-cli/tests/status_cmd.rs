@@ -44,6 +44,7 @@ fn bsk_status_json_returns_structured_payload() {
     let out = Command::new(bsk_bin())
         .args(["--json", "status"])
         .env("BSK_HOME", &home)
+        .env("BSK_BROWSER_WAIT_MS", "0")
         .env("RUST_LOG", "warn")
         .output()
         .expect("run bsk status");

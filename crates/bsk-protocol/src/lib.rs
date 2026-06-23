@@ -12,8 +12,8 @@ pub use error::{DecodeError, ErrorCode, RpcError};
 pub use frame::{EventFrame, EventKind, Frame, RequestFrame, ResponseBody, ResponseFrame, RpcId};
 pub use method::Method;
 pub use system::{
-    BrowserPeerInfo, BrowserStatusEntry, HandshakeCompat, HandshakeParams, HandshakeResult,
-    PingParams, PingResult, SessionStatusEntry, StatusParams, StatusResult, VersionSkewEntry,
-    compare_protocol, evaluate_handshake_compat,
+    BrowserListParams, BrowserPeerInfo, BrowserStatusEntry, HandshakeCompat, HandshakeParams,
+    HandshakeResult, PingParams, PingResult, SessionStatusEntry, StatusParams, StatusResult,
+    VersionSkewEntry, compare_protocol, evaluate_handshake_compat,
 };
 pub use tools::*;

@@ -4,7 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use bsk_protocol::system::{
-    HandshakeParams, HandshakeResult, PingParams, PingResult, StatusParams, StatusResult,
+    BrowserListParams, HandshakeParams, HandshakeResult, PingParams, PingResult, StatusParams,
+    StatusResult,
 };
 use bsk_protocol::tools::*;
 use bsk_protocol::{CancelParams, CancelResult};
@@ -34,6 +35,7 @@ fn main() {
     dump!(PingResult, "system_ping_result");
     dump!(StatusParams, "system_status_params");
     dump!(StatusResult, "system_status_result");
+    dump!(BrowserListParams, "browser_list_params");
 
     dump!(CancelParams, "cancel_params");
     dump!(CancelResult, "cancel_result");

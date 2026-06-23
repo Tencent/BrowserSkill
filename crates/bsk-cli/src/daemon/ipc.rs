@@ -23,12 +23,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bsk_protocol::system::{
-    BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult, VersionSkewEntry,
+    BrowserListParams, BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult,
+    VersionSkewEntry,
 };
 use bsk_protocol::tools::{ReturnFailure, WaitMsParams, WaitMsResult};
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -57,6 +59,8 @@ pub type RpcHandler = Arc<
 >;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound on `wait_for_browser_ms` accepted over IPC.
+const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
 // `session.stop` fast-fails while another tool is active; this budget
 // only needs to cover the stop RPC itself and IPC scheduling grace.
 const DEFAULT_SESSION_STOP_TIMEOUT: Duration =
@@ -213,7 +217,10 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Err(e) => ResponseBody::Err(e),
                 },
                 Method::SessionList => handle_session_list(&state),
-                Method::BrowserList => handle_browser_list(&state),
+                Method::BrowserList => match handle_browser_list(&state, params).await {
+                    Ok(v) => ResponseBody::Ok(v),
+                    Err(e) => ResponseBody::Err(e),
+                },
                 Method::ToolTabList
                 | Method::ToolTabCreate
                 | Method::ToolTabClose
@@ -554,14 +561,40 @@ async fn handle_status(
     state: &Arc<DaemonState>,
     params: Value,
 ) -> Result<Value, RpcError> {
-    if !params.is_null() {
-        let _: StatusParams = serde_json::from_value(params).map_err(|err| RpcError {
+    let params: StatusParams = parse_params_or_default(params)?;
+    maybe_wait_for_browser(state, params.wait_for_browser_ms).await;
+    Ok(serde_json::to_value(status.snapshot_with(state)).unwrap_or(Value::Null))
+}
+
+fn parse_params_or_default<T>(params: Value) -> Result<T, RpcError>
+where
+    T: DeserializeOwned + Default,
+{
+    if params.is_null() {
+        Ok(T::default())
+    } else {
+        serde_json::from_value(params).map_err(|err| RpcError {
             code: ErrorCode::InvalidParams,
             message: err.to_string(),
             data: None,
-        })?;
+        })
     }
-    Ok(serde_json::to_value(status.snapshot_with(state)).unwrap_or(Value::Null))
+}
+
+async fn maybe_wait_for_browser(state: &Arc<DaemonState>, wait_ms: Option<u64>) {
+    if let Some(wait) = clamp_browser_wait(wait_ms) {
+        state.browsers.wait_for_any_connected(wait).await;
+    }
+}
+
+fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
+    let ms = wait_ms?;
+    if ms == 0 {
+        return None;
+    }
+    Some(Duration::from_millis(
+        ms.min(MAX_BROWSER_WAIT.as_millis() as u64),
+    ))
 }
 
 async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
@@ -788,14 +821,16 @@ fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
 }
 
-fn handle_browser_list(state: &Arc<DaemonState>) -> ResponseBody {
+async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let params: BrowserListParams = parse_params_or_default(params)?;
+    maybe_wait_for_browser(state, params.wait_for_browser_ms).await;
     // Reuse the same helper that produces the
     // `multiple_browsers_online.error.data.browsers` payload so the
     // two surfaces always agree on order — sorted by `connected_at_ms`
     // ascending, with `instance_id` as a deterministic tiebreaker
     // (review I1).
     let browsers = snapshot_status_entries(&state.browsers, &state.sessions);
-    ResponseBody::Ok(serde_json::to_value(BrowserListResult { browsers }).unwrap_or(Value::Null))
+    Ok(serde_json::to_value(BrowserListResult { browsers }).unwrap_or(Value::Null))
 }
 
 // ----- Test-helper IpcServer wrapper around the transport layer -----
