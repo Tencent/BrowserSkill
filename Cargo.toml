@@ -7,7 +7,7 @@ members = [
 default-members = ["crates/bsk-cli"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -37,7 +37,7 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Workspace crates (version required for `cargo publish` of dependents)
-bsk-protocol = { version = "0.1.5", path = "crates/bsk-protocol" }
+bsk-protocol = { version = "0.1.6", path = "crates/bsk-protocol" }
 
 [profile.release]
 strip = "symbols"
