@@ -510,6 +510,48 @@ describe("requestBorrowConfirmation", () => {
     expect(cancelMessage.type).toBe("borrow-cancel");
     expect(cancelMessage.requestId).toBe(requestMessage.requestId);
   });
+
+  it("does not fail-open when tabs.get rejects — still surfaces confirmation to a candidate", async () => {
+    // Regression: a transient tabs.get failure (SW teardown / page hiccup)
+    // used to return true immediately, approving the borrow with no
+    // confirmation UI. The tab was already fetched by the borrow pipeline
+    // moments earlier, so the failure is transient — we must fall back to a
+    // generic title and still ask the user.
+    tabs.get.mockRejectedValueOnce(new Error("tab info unavailable"));
+    windows.getLastFocused.mockResolvedValueOnce(
+      userWindowWithActiveTab({ windowId: 50, tabId: 7, url: "https://app.example/" }),
+    );
+    tabs.sendMessage.mockResolvedValueOnce({ type: "borrow-response", allowed: false });
+
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+    });
+    await vi.runAllTimersAsync();
+    const allowed = await pending;
+
+    // The user's explicit deny must be honoured — NOT auto-allowed by the
+    // earlier tabs.get rejection.
+    expect(allowed).toBe(false);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(notifications.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("still allows an explicit overlay allow after a tabs.get rejection", async () => {
+    tabs.get.mockRejectedValueOnce(new Error("tab info unavailable"));
+    windows.getLastFocused.mockResolvedValueOnce(
+      userWindowWithActiveTab({ windowId: 50, tabId: 7, url: "https://app.example/" }),
+    );
+    tabs.sendMessage.mockResolvedValueOnce({ type: "borrow-response", allowed: true });
+
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+    });
+    await vi.runAllTimersAsync();
+    const allowed = await pending;
+
+    expect(allowed).toBe(true);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("isInjectableContentScriptUrl", () => {
