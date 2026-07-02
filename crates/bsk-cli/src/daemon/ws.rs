@@ -416,10 +416,10 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
         }
         Frame::Event(ev) => match ev.event {
             bsk_protocol::EventKind::SessionWindowClosed => {
-                handle_session_window_closed(state, &ev.payload);
+                handle_session_window_closed(state, &client.id, &ev.payload);
             }
             bsk_protocol::EventKind::SessionUserInterrupt => {
-                handle_session_user_interrupt(state, &ev.payload);
+                handle_session_user_interrupt(state, &client.id, &ev.payload);
             }
             other => {
                 debug!(event = ?other, "event received (no handler yet)");
@@ -432,7 +432,11 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
     }
 }
 
-fn handle_session_window_closed(state: &Arc<DaemonState>, payload: &serde_json::Value) {
+fn handle_session_window_closed(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    payload: &serde_json::Value,
+) {
     let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
         warn!("session.window_closed event missing session_id");
         return;
@@ -448,6 +452,24 @@ fn handle_session_window_closed(state: &Arc<DaemonState>, payload: &serde_json::
         })
         .unwrap_or_default();
     let session_id = super::sessions::SessionId(session_id.to_string());
+    // Reject events that target a session owned by a *different* browser.
+    // Without this, any connected extension (or any same-machine process
+    // that completed the WS handshake) could tear down another browser's
+    // session by emitting window_closed with its session_id. A session
+    // that is already gone cannot be verified but is harmless to "forget"
+    // (forget_session is a no-op), so we only reject when a live owner
+    // disagrees.
+    if let Some(session) = state.sessions.get(&session_id)
+        && session.browser_id != *sender
+    {
+        warn!(
+            session = %session_id,
+            sender = %sender,
+            owner = %session.browser_id,
+            "ignoring session.window_closed from a browser that does not own this session"
+        );
+        return;
+    }
     if super::sessions::forget_session(
         &state.sessions,
         &state.tool_queues,
@@ -485,11 +507,29 @@ fn extract_session_id(payload: &serde_json::Value) -> Option<super::sessions::Se
 /// forwarded over WS we additionally push a per-RPC cancel frame so
 /// the extension's dispatcher can abort its `AbortController` —
 /// this is the same shape `handle_cancel` uses, just iterated.
-fn handle_session_user_interrupt(state: &Arc<DaemonState>, payload: &serde_json::Value) {
+fn handle_session_user_interrupt(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    payload: &serde_json::Value,
+) {
     let Some(sid) = extract_session_id(payload) else {
         warn!("session.user_interrupt event missing session_id");
         return;
     };
+    // Same ownership guard as window_closed: a browser must not be able
+    // to cancel another browser's inflight tools or trip its interrupt
+    // marker by sending user_interrupt with a foreign session_id.
+    if let Some(session) = state.sessions.get(&sid)
+        && session.browser_id != *sender
+    {
+        warn!(
+            session = %sid,
+            sender = %sender,
+            owner = %session.browser_id,
+            "ignoring session.user_interrupt from a browser that does not own this session"
+        );
+        return;
+    }
     let snapshots = state.tool_inflight.cancel_session(&sid);
     info!(session = %sid, count = snapshots.len(), "user-interrupt: cancelled inflight tools");
 
@@ -547,6 +587,7 @@ mod tests {
 #[cfg(test)]
 mod session_user_interrupt_tests {
     use super::*;
+    use crate::daemon::browsers::BrowserId;
     use crate::daemon::inflight::CancelReason;
     use crate::daemon::sessions::SessionId;
 
@@ -587,7 +628,13 @@ mod session_user_interrupt_tests {
             .register("b".into(), sid_b.clone())
             .unwrap();
 
-        handle_session_user_interrupt(&state, &serde_json::json!({"session_id": "A"}));
+        // No live session is registered, so the ownership guard treats the
+        // session as unknown and lets the interrupt through (legacy path).
+        handle_session_user_interrupt(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": "A"}),
+        );
 
         assert_eq!(g_a.entry().cancel_reason(), Some(CancelReason::UserAborted));
         assert!(g_b.entry().cancel_reason().is_none());
@@ -599,7 +646,11 @@ mod session_user_interrupt_tests {
         let sid_a = SessionId("A".into());
         let sid_b = SessionId("B".into());
 
-        handle_session_user_interrupt(&state, &serde_json::json!({"session_id": "A"}));
+        handle_session_user_interrupt(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": "A"}),
+        );
 
         assert!(
             state.session_interrupts.try_consume(&sid_a),
@@ -608,6 +659,89 @@ mod session_user_interrupt_tests {
         assert!(
             !state.session_interrupts.try_consume(&sid_b),
             "session B must not be marked"
+        );
+    }
+
+    #[test]
+    fn handle_session_user_interrupt_honoured_from_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        let guard = state
+            .tool_inflight
+            .register("rpc-1".into(), sid.clone())
+            .unwrap();
+
+        handle_session_user_interrupt(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        assert_eq!(
+            guard.entry().cancel_reason(),
+            Some(CancelReason::UserAborted),
+            "owning browser may interrupt its own session"
+        );
+    }
+
+    #[test]
+    fn handle_session_user_interrupt_ignored_from_non_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let attacker = BrowserId("attacker-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        let guard = state
+            .tool_inflight
+            .register("rpc-1".into(), sid.clone())
+            .unwrap();
+
+        handle_session_user_interrupt(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            guard.entry().cancel_reason().is_none(),
+            "non-owning browser must not cancel another session's tools"
+        );
+        assert!(
+            !state.session_interrupts.try_consume(&sid),
+            "interrupt marker must not be set by a non-owning browser"
+        );
+    }
+
+    #[test]
+    fn handle_session_window_closed_honoured_from_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+
+        handle_session_window_closed(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            state.sessions.get(&sid).is_none(),
+            "owning browser may close its own session"
+        );
+    }
+
+    #[test]
+    fn handle_session_window_closed_ignored_from_non_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let attacker = BrowserId("attacker-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+
+        handle_session_window_closed(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            state.sessions.get(&sid).is_some(),
+            "non-owning browser must not be able to tear down another session"
         );
     }
 
