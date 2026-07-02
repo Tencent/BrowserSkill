@@ -282,6 +282,16 @@ export interface TabManagementDeps {
   approveBorrow?: BorrowConfirmationApprover;
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
+  /**
+   * Reports whether `windowId` is any live session's Agent Window.
+   * `tab_return`'s fallback window picker uses this to avoid moving a
+   * returned borrowed tab into *another* session's Agent Window (Agent
+   * Windows are created with `type: "normal"`, so they otherwise match
+   * the `getLastFocused({ windowTypes: ["normal"] })` query). Production
+   * callers derive this from the `SessionManager`; the `() => false`
+   * default only preserves legacy behaviour for direct/test callers.
+   */
+  isAgentWindowId?: (windowId: number) => boolean;
 }
 
 function getTabsApi(deps: TabManagementDeps): TabMutationApi {
@@ -290,6 +300,10 @@ function getTabsApi(deps: TabManagementDeps): TabMutationApi {
 
 function getWindowsApi(deps: TabManagementDeps): ChromeWindowsApi {
   return deps.windows ?? chromeWindowsApi;
+}
+
+function getIsAgentWindowId(deps: TabManagementDeps): (windowId: number) => boolean {
+  return deps.isAgentWindowId ?? (() => false);
 }
 
 function getAgentOverlayResetApi(deps: TabManagementDeps): AgentOverlayResetApi {
@@ -818,12 +832,20 @@ function describeError(err: unknown): string {
 async function chooseFallbackWindow(
   ctx: SessionContext,
   windowsApi: ChromeWindowsApi,
+  isAgentWindowId: (windowId: number) => boolean,
 ): Promise<{ windowId: number; index: number } | RpcError> {
   let lastFocusedError: unknown;
   try {
     const last = await windowsApi.getLastFocused({ windowTypes: ["normal"] });
     const lastId = typeof last?.id === "number" ? last.id : null;
-    if (lastId !== null && lastId !== ctx.agentWindowId) {
+    // Never relocate a user tab into *any* session's Agent Window: this
+    // session's is excluded explicitly, and other sessions' are excluded
+    // via `isAgentWindowId` (Agent Windows are `type: "normal"`, so they
+    // otherwise survive the `windowTypes: ["normal"]` filter). Parking a
+    // returned tab in another session's Agent Window would let that
+    // session write to it and, worse, see it destroyed when that session
+    // stops and closes its window.
+    if (lastId !== null && lastId !== ctx.agentWindowId && !isAgentWindowId(lastId)) {
       return { windowId: lastId, index: -1 };
     }
   } catch (err) {
@@ -888,6 +910,7 @@ export async function returnBorrowedTab(
   }
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
+  const isAgentWindowId = getIsAgentWindowId(deps);
 
   let targetWindowId = entry.originalWindowId;
   let targetIndex = entry.originalIndex;
@@ -903,7 +926,7 @@ export async function returnBorrowedTab(
   }
   if (!originalAlive) {
     fallback = true;
-    const target = await chooseFallbackWindow(ctx, windowsApi);
+    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId);
     if ("code" in target) return target;
     targetWindowId = target.windowId;
     targetIndex = target.index;
@@ -925,7 +948,7 @@ export async function returnBorrowedTab(
     };
   } catch (err) {
     if (!fallback) {
-      const target = await chooseFallbackWindow(ctx, windowsApi);
+      const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId);
       if ("code" in target) {
         return {
           code: "cdp_failed",
@@ -979,7 +1002,11 @@ export async function handleTabReturn(
       message: `tab_return: tab ${params.tab_id} is not borrowed by this session`,
     };
   }
-  const outcome = await returnBorrowedTab(ctx, params.tab_id, deps);
+  const outcome = await returnBorrowedTab(ctx, params.tab_id, {
+    ...deps,
+    isAgentWindowId:
+      deps.isAgentWindowId ?? ((windowId) => manager.findByWindowId(windowId) !== null),
+  });
   if (isRpcError(outcome)) return outcome;
   ctx.borrowedTabs.delete(params.tab_id);
   const result: TabReturnResult = {

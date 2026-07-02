@@ -113,7 +113,13 @@ export async function handleSessionStop(
   const borrowedIds = Array.from(ctx.borrowedTabs.keys());
   for (const tabId of borrowedIds) {
     try {
-      const outcome = await returnBorrowedTab(ctx, tabId, deps.tabManagement ?? {});
+      const tabManagement = {
+        ...(deps.tabManagement ?? {}),
+        isAgentWindowId:
+          deps.tabManagement?.isAgentWindowId ??
+          ((windowId: number) => manager.findByWindowId(windowId) !== null),
+      };
+      const outcome = await returnBorrowedTab(ctx, tabId, tabManagement);
       if (typeof outcome === "object" && "code" in outcome) {
         console.warn(`[bsk session_stop] auto-return failed for tab ${tabId}`, outcome);
         returnFailures?.push({

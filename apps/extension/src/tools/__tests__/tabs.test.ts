@@ -613,6 +613,65 @@ describe("handleTabReturn", () => {
     expect(winSpies.create).toHaveBeenCalledOnce();
   });
 
+  it("does not fall back into another session's Agent Window (creates a new window instead)", async () => {
+    // Regression: a returned borrowed tab whose original window is gone
+    // must never be parked in *another* session's Agent Window. Agent
+    // Windows are `type: "normal"`, so getLastFocused({windowTypes:
+    // ["normal"]}) can return session bb22's window (200). Without the
+    // isAgentWindowId guard the tab would be moved into window 200,
+    // letting bb22 write to it and destroying it when bb22 stops.
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 200]) });
+    const ctx = await sm.start("aa11");
+    await sm.start("bb22"); // owns Agent Window 200
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 300, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set([300]),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi, spies: winSpies } = makeWindowsApi(state, {
+      lastFocused: 200, // session bb22's Agent Window
+      createWindowId: 777,
+    });
+    const res = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, windows: windowsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.returned_to_window_id).toBe(777);
+    expect(res.fallback).toBe(true);
+    expect(winSpies.create).toHaveBeenCalledOnce();
+    expect(spies.move).not.toHaveBeenCalledWith(7, expect.objectContaining({ windowId: 200 }));
+  });
+
+  it("returnBorrowedTab honours an explicit isAgentWindowId predicate", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 300, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set([300]),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi, spies: winSpies } = makeWindowsApi(state, {
+      lastFocused: 555,
+      createWindowId: 777,
+    });
+    const res = await returnBorrowedTab(ctx, 7, {
+      tabs: api,
+      windows: windowsApi,
+      isAgentWindowId: (windowId) => windowId === 555,
+    });
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.toWindowId).toBe(777);
+    expect(res.fallback).toBe(true);
+    expect(winSpies.create).toHaveBeenCalledOnce();
+    expect(spies.move).not.toHaveBeenCalledWith(7, expect.objectContaining({ windowId: 555 }));
+  });
+
   it("returns not_found when the tab is not borrowed by this session", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
