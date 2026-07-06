@@ -383,17 +383,25 @@ export async function requestBorrowConfirmation(
   const isAgentWindowId = deps.isAgentWindowId ?? (() => false);
   const copy = deps.notificationCopy ?? DEFAULT_NOTIFICATION_COPY;
 
-  let tab: chrome.tabs.Tab;
+  // The borrow pipeline already fetched this tab moments earlier
+  // (validateBorrowTarget in tabs.ts), so a failure here is a transient
+  // SW/page hiccup, not a missing tab. Do NOT fail-open: silently allowing
+  // a borrow with no confirmation UI contradicts the gate's purpose and is
+  // not one of the documented fail-open cases (no candidate window; abort;
+  // timeout — see this function's doc comment). Fall back to a generic
+  // title and still surface the overlay + notification so the user gets a
+  // real chance to approve or deny.
+  let tabTitle: string;
   try {
-    tab = await tabsApi.get(tabId);
+    const tab = await tabsApi.get(tabId);
+    tabTitle = tab.title ?? tab.url ?? String(tabId);
   } catch (err) {
-    console.warn("[bsk borrow] could not get tab info — proceeding", {
+    console.warn("[bsk borrow] could not get tab info — using fallback title", {
       tabId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return true;
+    tabTitle = String(tabId);
   }
-  const tabTitle = tab.title ?? tab.url ?? String(tabId);
 
   const candidates = await listConfirmationCandidates(windowsApi, isAgentWindowId);
   if (candidates.length === 0) {
