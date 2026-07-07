@@ -428,8 +428,8 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
     let (ws_sink, ws_stream) = ws.split();
     let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
 
-    // Fake extension: replies to session_start AND to snapshot
-    // (snapshot must succeed transparently). Records click count
+    // Fake extension: replies to session_start, console, and snapshot
+    // (read-only tools must succeed transparently). Records click count
     // — must remain 0 because the daemon should reject the click
     // without forwarding.
     let ws_sink_for_responder = Arc::clone(&ws_sink);
@@ -454,6 +454,12 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
                         })
                         .unwrap(),
                     ),
+                    Method::ToolConsole => ResponseBody::Ok(json!({
+                        "tab_id": 7,
+                        "entries": [],
+                        "next_since": 0,
+                        "truncated": false
+                    })),
                     Method::ToolSnapshot => ResponseBody::Ok(json!({"ok": true})),
                     Method::ToolClick => {
                         observed_click_count_clone
@@ -511,8 +517,24 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
     let state = handle.state();
     wait_for_session_interrupt_pending(&state, &start.session_id).await;
 
-    // Read-only snapshot must succeed AND must not consume the
-    // marker.
+    // Read-only console must succeed AND must not consume the marker.
+    let console_outcome = ipc
+        .call::<_, serde_json::Value>(
+            "console-after-interrupt",
+            Method::ToolConsole,
+            Some(json!({"session_id": start.session_id.clone()})),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert!(
+        console_outcome.is_ok(),
+        "read-only tool.console must pass through transparently (got {:?})",
+        console_outcome
+    );
+
+    // Existing read-only snapshot must still succeed after console,
+    // proving console did not consume the marker.
     let snapshot_outcome = ipc
         .call::<_, serde_json::Value>(
             "snap-after-interrupt",

@@ -10,9 +10,9 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
-    GetHtmlParams, GetHtmlResult, ScreenshotParams, ScreenshotResult, SessionStartParams,
-    SessionStartResult, SnapshotParams, SnapshotResult, TabInfo, TabListParams, TabListResult,
-    TabScope,
+    ConsoleEntry, ConsoleEntryKind, ConsoleParams, ConsoleResult, GetHtmlParams, GetHtmlResult,
+    ScreenshotParams, ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams,
+    SnapshotResult, TabInfo, TabListParams, TabListResult, TabScope,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -308,6 +308,63 @@ async fn screenshot_forwards_ref_to_extension() {
     .expect("screenshot with ref ok");
     assert_eq!(result.width, 100);
     assert_eq!(result.height, 60);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn console_returns_buffered_entries() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolConsole);
+        let params: ConsoleParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(7));
+        assert_eq!(params.since, Some(3));
+        assert_eq!(params.limit, Some(50));
+        assert_eq!(params.max_text_chars, Some(1000));
+        assert_eq!(params.include_stack, Some(false));
+        ResponseBody::Ok(
+            serde_json::to_value(ConsoleResult {
+                tab_id: 7,
+                entries: vec![ConsoleEntry {
+                    sequence: 4,
+                    kind: ConsoleEntryKind::Console,
+                    level: "warn".into(),
+                    text: "deprecated API".into(),
+                    url: Some("https://example.test/app.js".into()),
+                    line: Some(10),
+                    column: Some(2),
+                    timestamp: None,
+                    stack_trace: vec![],
+                    truncated: false,
+                }],
+                next_since: 4,
+                truncated: false,
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: ConsoleResult = ipc_tool_call(
+        &sock,
+        Method::ToolConsole,
+        ConsoleParams {
+            session_id,
+            tab_id: Some(7),
+            since: Some(3),
+            limit: Some(50),
+            max_text_chars: Some(1000),
+            include_stack: Some(false),
+        },
+    )
+    .await
+    .expect("console ok");
+    assert_eq!(result.tab_id, 7);
+    assert_eq!(result.next_since, 4);
+    assert_eq!(result.entries[0].text, "deprecated API");
     handle.shutdown().await;
 }
 

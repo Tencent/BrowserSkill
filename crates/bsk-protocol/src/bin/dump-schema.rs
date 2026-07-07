@@ -82,6 +82,10 @@ fn main() {
     dump!(GetHtmlResult, "tool_get_html_result");
     dump!(ScreenshotParams, "tool_screenshot_params");
     dump!(ScreenshotResult, "tool_screenshot_result");
+    dump!(ConsoleParams, "tool_console_params");
+    dump!(ConsoleResult, "tool_console_result");
+    dump!(ConsoleEntry, "tool_console_entry");
+    dump!(ConsoleStackFrame, "tool_console_stack_frame");
 
     dump!(EvaluateParams, "tool_evaluate_params");
     dump!(EvaluateResult, "tool_evaluate_result");

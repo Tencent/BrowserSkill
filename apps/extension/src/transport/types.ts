@@ -134,6 +134,44 @@ export interface JavaScriptDialogInfo {
   sequence: number;
 }
 
+export type ConsoleEntryKind = "console" | "exception" | "log";
+
+export interface ConsoleStackFrame {
+  function_name?: string;
+  url?: string;
+  line?: number;
+  column?: number;
+}
+
+export interface ConsoleEntry {
+  sequence: number;
+  kind: ConsoleEntryKind;
+  level: string;
+  text: string;
+  url?: string;
+  line?: number;
+  column?: number;
+  timestamp?: number;
+  stack_trace?: ConsoleStackFrame[];
+  truncated: boolean;
+}
+
+export interface ConsoleParams {
+  session_id: string;
+  tab_id?: number;
+  since?: number;
+  limit?: number;
+  max_text_chars?: number;
+  include_stack?: boolean;
+}
+
+export interface ConsoleResult {
+  tab_id: number;
+  entries: ConsoleEntry[];
+  next_since: number;
+  truncated: boolean;
+}
+
 export type TabScopeFilter = "user" | "agent" | "all";
 
 export interface TabInfo {

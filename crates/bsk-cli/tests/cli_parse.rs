@@ -68,6 +68,43 @@ fn parses_top_level_status_and_doctor() {
 }
 
 #[test]
+fn parses_console_command_with_context_safety_flags() {
+    let cli = parse(&[
+        "bsk",
+        "console",
+        "--session",
+        "s1",
+        "--tab-id",
+        "9",
+        "--since",
+        "12",
+        "--limit",
+        "75",
+        "--max-text-chars",
+        "2048",
+        "--include-stack",
+    ]);
+    let Command::Console(args) = cli.command else {
+        panic!("expected console command");
+    };
+    assert_eq!(args.session, "s1");
+    assert_eq!(args.tab_id, Some(9));
+    assert_eq!(args.since, Some(12));
+    assert_eq!(args.limit, Some(75));
+    assert_eq!(args.max_text_chars, Some(2048));
+    assert!(args.include_stack);
+}
+
+#[test]
+fn rejects_zero_console_bounds() {
+    assert!(Cli::try_parse_from(["bsk", "console", "--session", "s1", "--limit", "0"]).is_err());
+    assert!(
+        Cli::try_parse_from(["bsk", "console", "--session", "s1", "--max-text-chars", "0"])
+            .is_err()
+    );
+}
+
+#[test]
 fn parses_install_skill_subcommand() {
     let cli = parse(&["bsk", "install-skill", "--list"]);
     assert!(matches!(cli.command, Command::InstallSkill(_)));

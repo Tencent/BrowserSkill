@@ -1,7 +1,9 @@
+import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
 import type {
   ClickParams,
+  ConsoleParams,
   EvaluateParams,
   FillParams,
   GetHtmlParams,
@@ -11,17 +13,19 @@ import type {
   PressParams,
   ProtocolFrame,
   ReloadParams,
-  RequestHelpParams,
   RequestFrame,
+  RequestHelpParams,
   ResponseFrame,
   RpcError,
-  SelectParams,
   ScreenshotParams,
+  SelectParams,
   SnapshotParams,
   WaitForNavigationParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
+import { handleConsole } from "./console";
 import { handleEvaluate } from "./evaluate";
+import { defaultWatchTabNavigation, handleRequestHelp } from "./human-loop";
 import { handleClick, handleFill, handlePress, handleSelect } from "./interaction";
 import {
   handleNavigate,
@@ -42,16 +46,15 @@ import {
   type SessionStartParams,
   type SessionStopParams,
 } from "./session";
-import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { chromeTabsApi } from "./shared";
 import {
+  type BorrowConfirmationApprover,
   handleTabBorrow,
   handleTabClose,
   handleTabCreate,
   handleTabList,
   handleTabReturn,
   handleTabSelect,
-  type BorrowConfirmationApprover,
   type TabBorrowParams,
   type TabCloseParams,
   type TabCreateParams,
@@ -59,7 +62,6 @@ import {
   type TabReturnParams,
   type TabSelectParams,
 } from "./tabs";
-import { defaultWatchTabNavigation, handleRequestHelp } from "./human-loop";
 import { handleWaitForNavigation } from "./waits";
 
 export interface DispatcherDeps {
@@ -276,6 +278,12 @@ export class ToolDispatcher {
           this.cdp
             ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi, captureApi: chromeTabsCaptureApi }
             : undefined,
+        );
+      case "tool.console":
+        return handleConsole(
+          this.sessions,
+          req.params as ConsoleParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
         );
       case "tool.snapshot":
         return handleSnapshot(

@@ -20,7 +20,14 @@
 //   record the payload for tool results, and auto-accept so automation
 //   can continue.
 
-import type { JavaScriptDialogInfo, JavaScriptDialogType } from "@/transport/types";
+import type {
+  ConsoleEntry,
+  ConsoleEntryKind,
+  ConsoleResult,
+  ConsoleStackFrame,
+  JavaScriptDialogInfo,
+  JavaScriptDialogType,
+} from "@/transport/types";
 
 /**
  * Minimal slice of `chrome.debugger` the rest of the extension
@@ -77,6 +84,9 @@ export type DialogCursor = number;
 
 const MAX_DIALOG_BUFFER = 32;
 const MAX_DIALOG_FIELD_LENGTH = 4096;
+const MAX_CONSOLE_BUFFER = 200;
+const MAX_CONSOLE_FIELD_LENGTH = 4096;
+const MAX_CONSOLE_STACK_FRAMES = 20;
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -85,6 +95,8 @@ interface ParsedDialogOpening {
   defaultPrompt?: string;
   hasBrowserHandler?: boolean;
 }
+
+interface ParsedConsoleEntry extends Omit<ConsoleEntry, "sequence"> {}
 
 /**
  * Wrapper around `chrome.debugger` that owns the "attach once per
@@ -97,13 +109,18 @@ export class ChromiumCdp {
   private readonly tabOwners = new Map<number, Set<string>>();
   private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
   private readonly dialogSequences = new Map<number, number>();
+  private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
+  private readonly consoleSequences = new Map<number, number>();
+  private readonly consoleDomainsAttemptedTabs = new Set<number>();
   private detachSubscription: { dispose(): void } | null = null;
   private dialogSubscription: { dispose(): void } | null = null;
+  private consoleSubscription: { dispose(): void } | null = null;
 
   constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
     this.api = api;
     this.bindAutoDetach();
     this.bindDialogHandler();
+    this.bindConsoleHandler();
   }
 
   /** Attach to `tabId` if we haven't already in this driver. */
@@ -117,6 +134,7 @@ export class ChromiumCdp {
     const attach = (async () => {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       await this.enablePageDomain(tabId);
+      await this.enableConsoleDomains(tabId);
       this.attachedTabs.add(tabId);
     })()
       .catch((err) => {
@@ -159,12 +177,52 @@ export class ChromiumCdp {
     return buf.filter((entry) => entry.sequence > cursor);
   }
 
+  /** Ensure CDP domains for console capture are enabled for this tab. */
+  async ensureConsoleCapture(tabId: number): Promise<void> {
+    if (!this.attachedTabs.has(tabId)) {
+      await this.ensureAttached(tabId);
+      return;
+    }
+    await this.enableConsoleDomains(tabId);
+  }
+
+  /** Console entries observed on `tabId`, bounded for agent context safety. */
+  consoleEntriesSince(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+    includeStack: boolean,
+  ): ConsoleResult {
+    const buf = this.consoleBuffers.get(tabId) ?? [];
+    const hasCursor = typeof since === "number";
+    const candidates = hasCursor
+      ? buf.filter((entry) => entry.sequence > since)
+      : buf.slice(Math.max(0, buf.length - limit));
+    const limited = hasCursor ? candidates.slice(0, limit) : candidates;
+    const entries = limited.map((entry) => projectConsoleEntry(entry, maxTextChars, includeStack));
+    const lastReturned = entries.at(-1)?.sequence;
+    const nextSince = lastReturned ?? this.consoleSequences.get(tabId) ?? 0;
+    const droppedEntries = (this.consoleSequences.get(tabId) ?? 0) > buf.length;
+    const truncated =
+      droppedEntries ||
+      candidates.length > limited.length ||
+      entries.some((entry) => entry.truncated);
+    return {
+      tab_id: tabId,
+      entries,
+      next_since: nextSince,
+      truncated,
+    };
+  }
+
   /** Detach if attached; never throws. */
   async detach(tabId: number): Promise<void> {
     this.attachInFlight.delete(tabId);
     if (!this.attachedTabs.has(tabId)) return;
     this.attachedTabs.delete(tabId);
     this.clearDialogState(tabId);
+    this.clearConsoleState(tabId);
     try {
       await this.api.detach({ tabId });
     } catch (err) {
@@ -204,6 +262,9 @@ export class ChromiumCdp {
     this.attachedTabs.clear();
     this.dialogBuffers.clear();
     this.dialogSequences.clear();
+    this.consoleBuffers.clear();
+    this.consoleSequences.clear();
+    this.consoleDomainsAttemptedTabs.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -217,6 +278,18 @@ export class ChromiumCdp {
 
   private async enablePageDomain(tabId: number): Promise<void> {
     await this.api.sendCommand({ tabId }, "Page.enable", {});
+  }
+
+  private async enableConsoleDomains(tabId: number): Promise<void> {
+    if (this.consoleDomainsAttemptedTabs.has(tabId)) return;
+    this.consoleDomainsAttemptedTabs.add(tabId);
+    for (const method of ["Runtime.enable", "Log.enable"]) {
+      try {
+        await this.api.sendCommand({ tabId }, method, {});
+      } catch (err) {
+        console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
+      }
+    }
   }
 
   private bindDialogHandler(): void {
@@ -272,6 +345,47 @@ export class ChromiumCdp {
     this.dialogSequences.delete(tabId);
   }
 
+  private bindConsoleHandler(): void {
+    if (this.consoleSubscription) return;
+    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== "number") return;
+      switch (method) {
+        case "Runtime.consoleAPICalled":
+          this.appendConsole(tabId, parseConsoleApiCalled(params));
+          break;
+        case "Runtime.exceptionThrown":
+          this.appendConsole(tabId, parseExceptionThrown(params));
+          break;
+        case "Log.entryAdded":
+          this.appendConsole(tabId, parseLogEntry(params));
+          break;
+      }
+    };
+    this.api.onEvent.addListener(listener);
+    this.consoleSubscription = {
+      dispose: () => this.api.onEvent.removeListener(listener),
+    };
+  }
+
+  private appendConsole(tabId: number, entry: ParsedConsoleEntry | null): void {
+    if (!entry) return;
+    const sequence = (this.consoleSequences.get(tabId) ?? 0) + 1;
+    this.consoleSequences.set(tabId, sequence);
+    const buf = this.consoleBuffers.get(tabId) ?? [];
+    buf.push({ ...entry, sequence });
+    while (buf.length > MAX_CONSOLE_BUFFER) {
+      buf.shift();
+    }
+    this.consoleBuffers.set(tabId, buf);
+  }
+
+  private clearConsoleState(tabId: number): void {
+    this.consoleBuffers.delete(tabId);
+    this.consoleSequences.delete(tabId);
+    this.consoleDomainsAttemptedTabs.delete(tabId);
+  }
+
   private bindAutoDetach(): void {
     if (this.detachSubscription) return;
     const listener = (source: chrome.debugger.Debuggee, _reason: string) => {
@@ -280,6 +394,7 @@ export class ChromiumCdp {
         this.attachInFlight.delete(source.tabId);
         this.tabOwners.delete(source.tabId);
         this.clearDialogState(source.tabId);
+        this.clearConsoleState(source.tabId);
       }
     };
     this.api.onDetach.addListener(listener);
@@ -294,6 +409,8 @@ export class ChromiumCdp {
     this.detachSubscription = null;
     this.dialogSubscription?.dispose();
     this.dialogSubscription = null;
+    this.consoleSubscription?.dispose();
+    this.consoleSubscription = null;
   }
 
   /** Detach tabs only when no other live session has claimed them. */
@@ -337,6 +454,154 @@ function normalizeDialogType(value: unknown): JavaScriptDialogType {
 function truncateDialogField(value: string): string {
   if (value.length <= MAX_DIALOG_FIELD_LENGTH) return value;
   return `${value.slice(0, MAX_DIALOG_FIELD_LENGTH)}... [truncated]`;
+}
+
+function parseConsoleApiCalled(params: unknown): ParsedConsoleEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const args = Array.isArray(raw.args) ? raw.args : [];
+  const text = args.map(remoteObjectToText).filter(Boolean).join(" ");
+  const stackTrace = parseStackTrace(raw.stackTrace);
+  const top = stackTrace[0];
+  return makeConsoleEntry({
+    kind: "console",
+    level: typeof raw.type === "string" ? raw.type : "log",
+    text,
+    url: top?.url,
+    line: top?.line,
+    column: top?.column,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    stack_trace: stackTrace,
+  });
+}
+
+function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const details = (raw.exceptionDetails ?? {}) as Record<string, unknown>;
+  const exception = (details.exception ?? {}) as Record<string, unknown>;
+  const text =
+    firstLine(typeof exception.description === "string" ? exception.description : undefined) ||
+    firstLine(typeof details.text === "string" ? details.text : undefined) ||
+    "Uncaught (unknown error)";
+  return makeConsoleEntry({
+    kind: "exception",
+    level: "error",
+    text,
+    url: typeof details.url === "string" ? details.url : undefined,
+    line: typeof details.lineNumber === "number" ? details.lineNumber + 1 : undefined,
+    column: typeof details.columnNumber === "number" ? details.columnNumber + 1 : undefined,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    stack_trace: parseStackTrace(details.stackTrace),
+  });
+}
+
+function parseLogEntry(params: unknown): ParsedConsoleEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const entry = (raw.entry ?? {}) as Record<string, unknown>;
+  return makeConsoleEntry({
+    kind: "log",
+    level: typeof entry.level === "string" ? entry.level : "info",
+    text: typeof entry.text === "string" ? entry.text : "",
+    url: typeof entry.url === "string" ? entry.url : undefined,
+    line: typeof entry.lineNumber === "number" ? entry.lineNumber : undefined,
+    timestamp: typeof entry.timestamp === "number" ? entry.timestamp : undefined,
+    stack_trace: [],
+  });
+}
+
+function makeConsoleEntry(input: {
+  kind: ConsoleEntryKind;
+  level: string;
+  text: string;
+  url?: string;
+  line?: number;
+  column?: number;
+  timestamp?: number;
+  stack_trace: ConsoleStackFrame[];
+}): ParsedConsoleEntry {
+  const projected = truncateConsoleText(input.text, MAX_CONSOLE_FIELD_LENGTH);
+  return {
+    kind: input.kind,
+    level: input.level,
+    text: projected.text,
+    url: truncateOptionalConsoleField(input.url),
+    line: input.line,
+    column: input.column,
+    timestamp: input.timestamp,
+    stack_trace: input.stack_trace.slice(0, MAX_CONSOLE_STACK_FRAMES).map((frame) => ({
+      function_name: truncateOptionalConsoleField(frame.function_name),
+      url: truncateOptionalConsoleField(frame.url),
+      line: frame.line,
+      column: frame.column,
+    })),
+    truncated: projected.truncated || input.stack_trace.length > MAX_CONSOLE_STACK_FRAMES,
+  };
+}
+
+function projectConsoleEntry(
+  entry: ConsoleEntry,
+  maxTextChars: number,
+  includeStack: boolean,
+): ConsoleEntry {
+  const projected = truncateConsoleText(entry.text, maxTextChars);
+  return {
+    sequence: entry.sequence,
+    kind: entry.kind,
+    level: entry.level,
+    text: projected.text,
+    url: entry.url,
+    line: entry.line,
+    column: entry.column,
+    timestamp: entry.timestamp,
+    ...(includeStack && entry.stack_trace && entry.stack_trace.length > 0
+      ? { stack_trace: entry.stack_trace }
+      : {}),
+    truncated: entry.truncated || projected.truncated,
+  };
+}
+
+function remoteObjectToText(value: unknown): string {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  if ("value" in raw && raw.value !== undefined) return String(raw.value);
+  if (typeof raw.description === "string") return raw.description;
+  if (typeof raw.unserializableValue === "string") return raw.unserializableValue;
+  if (typeof raw.type === "string") return `[${raw.type}]`;
+  return "";
+}
+
+function parseStackTrace(value: unknown): ConsoleStackFrame[] {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  const frames = Array.isArray(raw.callFrames) ? raw.callFrames : [];
+  return frames
+    .filter(
+      (frame): frame is Record<string, unknown> => frame !== null && typeof frame === "object",
+    )
+    .map((frame) => ({
+      function_name:
+        typeof frame.functionName === "string" && frame.functionName.length > 0
+          ? frame.functionName
+          : undefined,
+      url: typeof frame.url === "string" && frame.url.length > 0 ? frame.url : undefined,
+      line: typeof frame.lineNumber === "number" ? frame.lineNumber + 1 : undefined,
+      column: typeof frame.columnNumber === "number" ? frame.columnNumber + 1 : undefined,
+    }));
+}
+
+function firstLine(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return value.split(/\r?\n/, 1)[0] || undefined;
+}
+
+function truncateConsoleText(
+  value: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (value.length <= maxChars) return { text: value, truncated: false };
+  return { text: value.slice(0, maxChars), truncated: true };
+}
+
+function truncateOptionalConsoleField(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return truncateConsoleText(value, MAX_CONSOLE_FIELD_LENGTH).text;
 }
 
 function normalizeError(err: unknown): Error {

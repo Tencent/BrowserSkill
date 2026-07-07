@@ -62,6 +62,8 @@ pub enum Method {
     ToolGetHtml,
     #[serde(rename = "tool.screenshot")]
     ToolScreenshot,
+    #[serde(rename = "tool.console")]
+    ToolConsole,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
     #[serde(rename = "tool.wait_for_navigation")]
@@ -124,6 +126,7 @@ impl Method {
             | Method::ToolSnapshot
             | Method::ToolGetHtml
             | Method::ToolScreenshot
+            | Method::ToolConsole
             | Method::ToolWaitForNavigation
             | Method::ToolWaitMs
             | Method::ToolRequestHelp => false,
@@ -160,6 +163,13 @@ mod tests {
     }
 
     #[test]
+    fn console_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("tool.console")).unwrap();
+        assert_eq!(method, Method::ToolConsole);
+        assert_eq!(serde_json::to_value(method).unwrap(), json!("tool.console"));
+    }
+
+    #[test]
     fn cancel_params_and_result_round_trip() {
         let params: CancelParams = serde_json::from_value(json!({ "rpc_id": "wait-1" })).unwrap();
         assert_eq!(params.rpc_id, "wait-1");
@@ -176,6 +186,7 @@ mod tests {
         assert!(!Method::ToolSnapshot.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
+        assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
     }

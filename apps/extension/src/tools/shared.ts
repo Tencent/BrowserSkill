@@ -6,11 +6,10 @@
 // exactly the same sandbox + visibility rules as the M6 observation
 // handlers (review parity).
 
-import { normaliseRef } from "@/session-manager/ref-store";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
-import type { RpcError } from "@/transport/types";
-import type { JavaScriptDialogInfo } from "@/transport/types";
 import type { DialogCursor } from "@/browser-driver/chromium-cdp";
+import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import { normaliseRef } from "@/session-manager/ref-store";
+import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 
 /**
@@ -46,6 +45,14 @@ export interface CdpRunner {
   };
   dialogCursor?(tabId: number): DialogCursor;
   dialogsSince?(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[];
+  ensureConsoleCapture?(tabId: number): Promise<void>;
+  consoleEntriesSince?(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+    includeStack: boolean,
+  ): ConsoleResult;
 }
 
 /**

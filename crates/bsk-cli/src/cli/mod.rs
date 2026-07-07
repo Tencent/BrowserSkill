@@ -5,6 +5,7 @@ use std::time::Duration;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
+pub mod console;
 pub mod daemon;
 pub mod dialogs;
 pub mod doctor;
@@ -27,6 +28,7 @@ pub mod waits;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::cli::console::ConsoleArgs;
 use crate::cli::daemon::DaemonCmd;
 use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
@@ -109,6 +111,9 @@ pub enum Command {
 
     /// Produce an indented aria-snapshot with @eN refs.
     Snapshot(SnapshotArgs),
+
+    /// Read buffered console/log/exception messages.
+    Console(ConsoleArgs),
 
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]
