@@ -25,9 +25,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use support::{
-    wait_for_abort_registered, wait_for_inflight_forwarded, wait_until,
-};
+use support::{wait_for_abort_registered, wait_for_inflight_forwarded, wait_until};
 
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
@@ -551,9 +549,7 @@ async fn cancel_arriving_during_promote_critical_section_keeps_request_cancel_in
     wait_until(
         "extension snapshot/cancel counters to match",
         Duration::from_secs(2),
-        || {
-            snapshots_clone.load(AOrdering::SeqCst) == cancels_clone.load(AOrdering::SeqCst)
-        },
+        || snapshots_clone.load(AOrdering::SeqCst) == cancels_clone.load(AOrdering::SeqCst),
     )
     .await;
 

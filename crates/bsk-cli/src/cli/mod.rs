@@ -24,6 +24,7 @@ pub mod session;
 pub mod snapshot;
 pub mod status;
 pub mod tab;
+pub mod update;
 pub mod waits;
 
 use clap::{Args, Parser, Subcommand};
@@ -40,6 +41,7 @@ use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
+use crate::cli::update::UpdateArgs;
 use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
 
 /// Tool calls wait slightly longer than the daemon's 30s tool timeout so
@@ -93,6 +95,9 @@ pub enum Command {
     /// Install the browser-skill agent skill into local agent harnesses.
     #[command(name = "install-skill")]
     InstallSkill(InstallSkillArgs),
+
+    /// Check for and install bsk CLI updates.
+    Update(UpdateArgs),
 
     /// Print (and optionally follow) the daemon log file.
     Logs(LogsCmd),

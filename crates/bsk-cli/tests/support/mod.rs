@@ -8,9 +8,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bsk::daemon::queue::ToolQueueRegistry;
 use bsk::daemon::sessions::SessionId;
 use bsk::daemon::state::DaemonState;
-use bsk::daemon::queue::ToolQueueRegistry;
 use bsk_protocol::RpcId;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -81,11 +81,9 @@ pub async fn wait_for_inflight_forwarded(state: &Arc<DaemonState>, rpc_id: &RpcI
 
 pub async fn wait_for_abort_registered(state: &Arc<DaemonState>, rpc_id: &RpcId) {
     let id = rpc_id.clone();
-    wait_until(
-        &format!("abort token for {id}"),
-        DEFAULT_TIMEOUT,
-        || state.abort_registry.contains(&id),
-    )
+    wait_until(&format!("abort token for {id}"), DEFAULT_TIMEOUT, || {
+        state.abort_registry.contains(&id)
+    })
     .await;
 }
 

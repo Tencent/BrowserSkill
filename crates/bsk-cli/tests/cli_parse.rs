@@ -111,6 +111,17 @@ fn parses_install_skill_subcommand() {
 }
 
 #[test]
+fn parses_update_subcommand_with_flags() {
+    let cli = parse(&["bsk", "update", "--check", "--yes", "--no-restart-daemon"]);
+    let Command::Update(args) = cli.command else {
+        panic!("expected update subcommand");
+    };
+    assert!(args.check);
+    assert!(args.yes);
+    assert!(!args.restart_daemon);
+}
+
+#[test]
 fn duration_parser_accepts_units() {
     assert_eq!(parse_duration("750ms").unwrap(), Duration::from_millis(750));
     assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));

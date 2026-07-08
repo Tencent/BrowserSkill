@@ -25,7 +25,7 @@ pub enum DaemonCmd {
     Restart(StartArgs),
 }
 
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, Default, clap::Args)]
 pub struct StartArgs {
     /// Override the WebSocket port (default 52800).
     #[arg(long, value_name = "PORT")]

@@ -48,6 +48,11 @@ fs2 = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 bsk-protocol = { workspace = true }
+reqwest = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }

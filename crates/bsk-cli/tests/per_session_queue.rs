@@ -272,9 +272,7 @@ async fn same_session_dispatches_run_after_previous_completes() {
             .expect("request did not reach extension")
             .expect("request channel closed");
         assert_eq!(tag, format!("job-{i}"));
-        reply_tx
-            .send((rpc_id, json!({"acked": true})))
-            .unwrap();
+        reply_tx.send((rpc_id, json!({"acked": true}))).unwrap();
         let r = dispatch_task.await.unwrap();
         assert!(r.is_ok(), "dispatch should succeed, got {r:?}");
     }
@@ -333,7 +331,10 @@ async fn session_stop_fast_fails_while_tool_is_in_flight() {
     )
     .await;
     assert!(
-        matches!(stop_result, Err(bsk::daemon::sessions::StopSessionError::SessionBusy)),
+        matches!(
+            stop_result,
+            Err(bsk::daemon::sessions::StopSessionError::SessionBusy)
+        ),
         "session.stop should fast-fail while a tool is active, got {stop_result:?}"
     );
     assert!(
@@ -437,7 +438,10 @@ async fn concurrent_same_session_dispatch_returns_session_busy_immediately() {
     let rpc = DispatchError::SessionBusy.into_rpc();
     assert_eq!(rpc.code, ErrorCode::Timeout);
     assert_eq!(
-        rpc.data.as_ref().and_then(|d| d.get("reason")).and_then(|v| v.as_str()),
+        rpc.data
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str()),
         Some(bsk::rpc_reason::SESSION_BUSY)
     );
 
@@ -471,7 +475,10 @@ async fn concurrent_same_session_dispatch_returns_session_busy_immediately() {
         .send((after_rpc_id, json!({"acked": true})))
         .unwrap();
     let after = after_task.await.unwrap();
-    assert!(after.is_ok(), "dispatch should succeed after first completes, got {after:?}");
+    assert!(
+        after.is_ok(),
+        "dispatch should succeed after first completes, got {after:?}"
+    );
 
     handle.shutdown().await;
 }

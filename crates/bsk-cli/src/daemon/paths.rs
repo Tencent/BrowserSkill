@@ -81,6 +81,10 @@ pub fn log_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("daemon.log"))
 }
 
+pub fn update_check_path() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("update-check.json"))
+}
+
 pub fn log_dir() -> Result<PathBuf> {
     bsk_home()
 }
@@ -157,6 +161,7 @@ mod tests {
             assert_eq!(lock_path().unwrap(), home.join("daemon.lock"));
             assert_eq!(info_path().unwrap(), home.join("daemon.json"));
             assert_eq!(log_path().unwrap(), home.join("daemon.log"));
+            assert_eq!(update_check_path().unwrap(), home.join("update-check.json"));
             assert_eq!(sock_path().unwrap(), home.join("run").join("daemon.sock"));
         });
     }

@@ -162,7 +162,10 @@ fn render_info_for(err: &CliError) -> Option<render_error::RenderInfo> {
 
 /// Hint line for human / JSON rendering, including the local-failure
 /// fallback when there is no daemon [`ErrorCode`].
-fn hint_for(err: &CliError, render_info: Option<&render_error::RenderInfo>) -> Option<&'static str> {
+fn hint_for(
+    err: &CliError,
+    render_info: Option<&render_error::RenderInfo>,
+) -> Option<&'static str> {
     render_info
         .and_then(|info| info.hint)
         .or(if matches!(err, CliError::Local(_)) {

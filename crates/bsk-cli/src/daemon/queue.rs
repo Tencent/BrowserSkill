@@ -218,9 +218,7 @@ impl ToolQueueRegistry {
     /// Whether `sid`'s queue is still accepting new tool dispatches.
     pub fn is_accepting(&self, sid: &SessionId) -> bool {
         let guard = self.queues.lock().expect("tool queue registry poisoned");
-        guard
-            .get(sid)
-            .is_some_and(|entry| entry.accepting)
+        guard.get(sid).is_some_and(|entry| entry.accepting)
     }
 
     /// Spawn the worker task for a session id. Idempotent: spawning the
@@ -342,10 +340,21 @@ impl ToolQueueRegistry {
             entry.accepting = false;
             (entry.sender.clone(), Arc::clone(&entry.state))
         };
-        dispatch_with_sender(sender, state, sid.clone(), method, params, timeout, true, None).await
+        dispatch_with_sender(
+            sender,
+            state,
+            sid.clone(),
+            method,
+            params,
+            timeout,
+            true,
+            None,
+        )
+        .await
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_with_sender(
     sender: mpsc::Sender<ToolJob>,
     state: Arc<Mutex<QueueState>>,

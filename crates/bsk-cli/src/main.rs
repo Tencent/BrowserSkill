@@ -25,6 +25,7 @@ fn main() -> ExitCode {
     if !matches!(cli.command, Command::Daemon(_)) {
         init_cli_tracing(&cli.flags);
     }
+    cli::update::maybe_spawn_background_check(&cli.flags, &cli.command);
 
     let format = if cli.flags.json {
         Format::Json
@@ -67,6 +68,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
             };
             cli::install_skill::dispatch(args, output)
         }
+        Command::Update(args) => cli::update::dispatch(args, format),
         Command::Logs(cmd) => cli::logs::run(cli::logs::LogsArgs {
             follow: cmd.follow,
             lines: cmd.lines,

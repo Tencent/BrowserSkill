@@ -139,6 +139,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --server-url "${{ github.server_url }}" \
             --branch "${{ github.event.repository.default_branch }}" \
+            --dist dist \
             --out dist/version.json
 
       - name: Publish GitHub Release
