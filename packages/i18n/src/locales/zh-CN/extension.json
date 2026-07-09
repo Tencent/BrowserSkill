@@ -16,11 +16,11 @@
       "version_skew": "部分能力可能不可用。"
     },
     "stateBadge": {
-      "disconnected": "Standby",
-      "connecting": "Igniting",
-      "connected": "Ready",
-      "version_skew": "Action needed",
-      "disabled": "Off"
+      "disconnected": "待机",
+      "connecting": "启动中",
+      "connected": "就绪",
+      "version_skew": "需处理",
+      "disabled": "已关闭"
     },
     "connectionToggleTitle": "BrowserSkill 连接",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
