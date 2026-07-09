@@ -31,12 +31,9 @@ import { detectBrowserMeta } from "@/transport/handshake";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 
-export const DEFAULT_DAEMON_PORT = 52800;
-
 export default defineBackground(() => {
-  const port = DEFAULT_DAEMON_PORT;
   const controller = new ConnectionController();
-  const transport = new WSTransport({ url: `ws://127.0.0.1:${port}` });
+  const transport = new WSTransport({ url: __BSK_DAEMON_WS_URL__ });
   const sessions = new SessionManager();
   const cdp = new ChromiumCdp();
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
