@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import {
+  eventLoaderIsRelevant,
   handleNavigate,
   handleNavigateBack,
   handleNavigateForward,
   handleReload,
   lifecycleAlreadyReached,
-  eventLoaderIsRelevant,
   lifecycleMeetsOrExceeds,
   shouldTrustReadyStateProbe,
 } from "../navigation";
@@ -60,10 +60,7 @@ function makeFakeCdp(opts?: {
   };
   const events: EventListener[] = [];
   const sent: Array<{ tabId: number; method: string; params?: object }> = [];
-  const methodHandlers: Record<
-    string,
-    (tabId: number, params?: object) => object
-  > = {
+  const methodHandlers: Record<string, (tabId: number, params?: object) => object> = {
     "Page.enable": () => ({}),
     "Page.setLifecycleEventsEnabled": () => ({}),
     "Page.navigate": () => {
@@ -72,9 +69,7 @@ function makeFakeCdp(opts?: {
           name: opts.fireLifecycleDuringNavigate,
           frameId: opts.fireLifecycleDuringNavigateFrameId ?? opts.navigateFrameId ?? "frame-1",
           loaderId:
-            opts.fireLifecycleDuringNavigateLoaderId ??
-            opts.navigateLoaderId ??
-            "loader-after",
+            opts.fireLifecycleDuringNavigateLoaderId ?? opts.navigateLoaderId ?? "loader-after",
         };
         for (const listener of [...events]) {
           listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
@@ -208,9 +203,7 @@ describe("lifecycleMeetsOrExceeds", () => {
 
 describe("eventLoaderIsRelevant", () => {
   it("rejects events from the pre-navigation loader", () => {
-    expect(
-      eventLoaderIsRelevant("loader-before", { beforeLoaderId: "loader-before" }),
-    ).toBe(false);
+    expect(eventLoaderIsRelevant("loader-before", { beforeLoaderId: "loader-before" })).toBe(false);
     expect(
       eventLoaderIsRelevant("loader-after", {
         beforeLoaderId: "loader-before",

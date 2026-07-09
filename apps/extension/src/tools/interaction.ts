@@ -21,10 +21,11 @@ import type {
   MouseButton,
   PressParams,
   PressResult,
+  RpcError,
   SelectParams,
   SelectResult,
-  RpcError,
 } from "@/transport/types";
+import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   backendNodeToObject,
   boxCentre,
@@ -33,7 +34,6 @@ import {
   scrollNodeIntoView,
 } from "./element-geometry";
 import { rpcError } from "./errors";
-import { resolveSnapshotRef } from "./snapshot-ref";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -43,7 +43,7 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
-import { attachDialogs, markDialogCursor } from "./dialogs";
+import { resolveSnapshotRef } from "./snapshot-ref";
 
 export interface InteractionDeps {
   cdp: CdpRunner;
@@ -858,7 +858,9 @@ export async function handleSelect(
       );
     }
     const attrs = described.node.attributes ?? [];
-    const isMultiple = attrs.some((attr, idx) => idx % 2 === 0 && attr.toLowerCase() === "multiple");
+    const isMultiple = attrs.some(
+      (attr, idx) => idx % 2 === 0 && attr.toLowerCase() === "multiple",
+    );
     if (!isMultiple && params.values.length !== 1) {
       return rpcError(
         "invalid_params",

@@ -1,3 +1,7 @@
+import { i18n } from "@browser-skill/i18n";
+import { I18nextProvider } from "@browser-skill/i18n/react";
+import React from "react";
+import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
@@ -12,12 +16,12 @@ import {
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
 import {
+  isOverlayAgentOverlayResetMessage,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentOverlayResetMessage,
   type OverlayAutomationBypassMessage,
   type OverlayWhoAmIResponse,
-  isOverlayAgentOverlayResetMessage,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import { SESSIONS_LIVE_FLAG_KEY } from "@/lib/sessions-live-flag";
@@ -26,10 +30,6 @@ import type {
   BorrowRequestMessage,
   BorrowResponseMessage,
 } from "@/tools/borrow-confirmation";
-import { i18n } from "@browser-skill/i18n";
-import { I18nextProvider } from "@browser-skill/i18n/react";
-import React from "react";
-import ReactDOM from "react-dom/client";
 
 // Run at document_end so the overlay does not block first paint. Only attach
 // in the top-level frame so iframes do not double-render overlays.
@@ -117,10 +117,7 @@ export default defineContentScript({
       }
       overlays.setInterrupting(true);
       renderOverlay();
-      void sendInterrupt(
-        (msg) => chrome.runtime.sendMessage(msg),
-        sessionId,
-      ).then((reply) => {
+      void sendInterrupt((msg) => chrome.runtime.sendMessage(msg), sessionId).then((reply) => {
         // Always retract the mask after the round trip resolves
         // (success, failure, or timeout). Cancellation is fire-and-
         // forget on the daemon side; the user must not be stuck

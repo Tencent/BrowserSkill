@@ -6,7 +6,6 @@
 // until the user clicks Continue / Cancel, the wait times out, or the
 // daemon cancels the RPC.
 
-import type { SessionManager } from "@/session-manager/manager";
 import {
   HELP_CANCEL,
   HELP_REQUEST,
@@ -15,6 +14,7 @@ import {
   type HelpRequestMessage,
   type HelpResponseMessage,
 } from "@/lib/help-bridge";
+import type { SessionManager } from "@/session-manager/manager";
 import type {
   HelpTarget,
   RequestHelpParams,
@@ -22,7 +22,6 @@ import type {
   ResolvedTarget,
   RpcError,
 } from "@/transport/types";
-import { lookupSnapshotRef } from "./snapshot-ref";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -32,6 +31,7 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
+import { lookupSnapshotRef } from "./snapshot-ref";
 
 const DEFAULT_HELP_TIMEOUT_MS = 300_000;
 /** Attribute the overlay highlights for resolved `ref` targets. */
@@ -46,7 +46,9 @@ export type TabNavigationUnsubscribe = () => void;
 
 export interface RequestHelpDeps {
   tabsApi: ChromeTabsApi;
-  windows: { update(windowId: number, info: { focused?: boolean }): Promise<chrome.windows.Window> };
+  windows: {
+    update(windowId: number, info: { focused?: boolean }): Promise<chrome.windows.Window>;
+  };
   /** Activate a tab inside its window. */
   activateTab(tabId: number): Promise<void>;
   /** Send the help-request to the tab's content script and await reply. */
@@ -68,10 +70,7 @@ export function defaultWatchTabNavigation(
   tabId: number,
   onNavigated: () => void,
 ): TabNavigationUnsubscribe {
-  const listener = (
-    updatedTabId: number,
-    changeInfo: chrome.tabs.TabChangeInfo,
-  ) => {
+  const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
     if (updatedTabId !== tabId) return;
     if (changeInfo.url !== undefined || changeInfo.status === "loading") {
       chrome.tabs.onUpdated.removeListener(listener);
@@ -102,7 +101,8 @@ function getDefaultDeps(): RequestHelpDeps {
               else resolve(rid ?? id);
             }),
           ),
-        clear: (id) => new Promise((resolve) => chrome.notifications.clear(id, (c) => resolve(c ?? false))),
+        clear: (id) =>
+          new Promise((resolve) => chrome.notifications.clear(id, (c) => resolve(c ?? false))),
       },
     };
   }
@@ -167,7 +167,9 @@ async function selectorExists(
 async function clearRefTags(cdp: CdpRunner | undefined, tabId: number): Promise<void> {
   if (!cdp) return;
   try {
-    const doc = await cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", { depth: 0 });
+    const doc = await cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
+      depth: 0,
+    });
     const rootId = doc.root?.nodeId;
     if (rootId === undefined) return;
     const { nodeIds } = await cdp.send<{ nodeIds: number[] }>(tabId, "DOM.querySelectorAll", {

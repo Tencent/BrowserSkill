@@ -43,7 +43,6 @@
   --input: oklch(0.35 0.02 60);
   --ring: oklch(0.7 0.18 45);
 }
-
 @theme inline {
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
@@ -68,7 +67,6 @@
   --color-input: var(--input);
   --color-ring: var(--ring);
 }
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -84,7 +82,6 @@
 
   body {
     font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-
     @apply bg-background text-foreground;
   }
 }

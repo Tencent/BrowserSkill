@@ -18,6 +18,7 @@
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
 import type { EvaluateError, EvaluateParams, EvaluateResult, RpcError } from "@/transport/types";
+import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -27,7 +28,6 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
-import { attachDialogs, markDialogCursor } from "./dialogs";
 
 export interface EvaluateDeps {
   cdp: CdpRunner;

@@ -1,5 +1,5 @@
 import { useTranslation } from "@browser-skill/i18n/react";
-import { Badge, Button, Input, Label, cn } from "@browser-skill/ui";
+import { Badge, Button, cn, Input, Label } from "@browser-skill/ui";
 import { RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
@@ -75,12 +75,7 @@ export function App() {
       data-version-skew={isSkewed ? "true" : undefined}
     >
       <header className="flex items-center gap-2" data-slot="popup-brand-header">
-        <img
-          src={getLogoSrc()}
-          alt=""
-          className="size-7 rounded-lg"
-          data-slot="popup-brand-logo"
-        />
+        <img src={getLogoSrc()} alt="" className="size-7 rounded-lg" data-slot="popup-brand-logo" />
         <h1 className="text-sm font-semibold tracking-tight">{t("popup.brandName")}</h1>
       </header>
 
@@ -91,10 +86,7 @@ export function App() {
         <div className="flex items-center justify-between gap-2" data-slot="popup-status">
           <div className="flex min-w-0 items-center gap-2">
             <ConnectionStatusIndicator state={statusState} />
-            <span
-              className="truncate text-sm font-medium"
-              data-slot="popup-state-label"
-            >
+            <span className="truncate text-sm font-medium" data-slot="popup-state-label">
               {t(STATE_LABEL_KEYS[statusState])}
             </span>
           </div>

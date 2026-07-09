@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
+  isOverlayAgentOverlayResetMessage,
   OVERLAY_AGENT_OVERLAY_RESET,
   OVERLAY_MSG_INTERRUPT,
   type OverlayInterruptRequest,
   type OverlayInterruptResponse,
-  isOverlayAgentOverlayResetMessage,
 } from "@/lib/overlay-bridge";
 
 describe("OVERLAY_MSG_INTERRUPT", () => {

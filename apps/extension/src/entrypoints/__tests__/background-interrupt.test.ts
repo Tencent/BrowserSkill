@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 // `background.ts` is a WXT entrypoint that calls the global `defineBackground`
 // at module load. WXT injects that helper at build time via auto-imports;

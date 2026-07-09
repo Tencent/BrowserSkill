@@ -167,9 +167,9 @@ export default defineBackground(() => {
           // silently doing nothing (review M4/M5 C2).
           console.warn("[browser-skill] set_port is not wired yet; ignoring", msg.value);
         } else if (msg.kind === "set_connection_enabled") {
-          void controller.setConnectionEnabled(msg.value).then(() =>
-            persistConnectionEnabled(msg.value),
-          );
+          void controller
+            .setConnectionEnabled(msg.value)
+            .then(() => persistConnectionEnabled(msg.value));
         }
       }
     });

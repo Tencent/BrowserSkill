@@ -20,9 +20,7 @@ describe("lookupSession", () => {
     expect(lookupSession(sm, { session_id: "" }, "tool.test")).toMatchObject({
       code: "invalid_params",
     });
-    expect(
-      lookupSession(sm, { session_id: 42 as unknown as string }, "tool.test"),
-    ).toMatchObject({
+    expect(lookupSession(sm, { session_id: 42 as unknown as string }, "tool.test")).toMatchObject({
       code: "invalid_params",
     });
   });

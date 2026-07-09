@@ -1,6 +1,6 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { RiCloseLine } from "@remixicon/react";
-import { useEffect, useRef, useState, type TransitionEvent } from "react";
+import { type TransitionEvent, useEffect, useRef, useState } from "react";
 import logoUrl from "../../assets/logo.png";
 
 export interface BorrowRequestData {

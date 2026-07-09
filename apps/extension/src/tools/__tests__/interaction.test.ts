@@ -982,4 +982,3 @@ describe("handleSelect", () => {
     expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
   });
 });
-

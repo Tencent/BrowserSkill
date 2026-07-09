@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 
 describe("sendInterrupt", () => {

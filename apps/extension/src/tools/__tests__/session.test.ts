@@ -139,9 +139,13 @@ describe("handleSessionStop with auto-return", () => {
       resetAgentOverlays: vi.fn(async () => {}),
     } satisfies AgentOverlayResetApi;
 
-    const res = await handleSessionStop(sm, { session_id: "aa11" }, {
-      tabManagement: { tabs, windows, agentOverlayReset },
-    });
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      {
+        tabManagement: { tabs, windows, agentOverlayReset },
+      },
+    );
 
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(agentOverlayReset.resetAgentOverlays).toHaveBeenCalledWith(7, "aa11");

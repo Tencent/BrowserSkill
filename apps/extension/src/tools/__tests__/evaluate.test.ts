@@ -284,6 +284,9 @@ describe("handleEvaluate", () => {
       { session_id: "aa11", expression: "1+1", tab_id: 11 },
       { cdp: fake.cdp, tabsApi: fake.tabsApi },
     );
-    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
   });
 });

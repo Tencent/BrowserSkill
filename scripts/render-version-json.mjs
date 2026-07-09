@@ -85,10 +85,7 @@ function assetEntry(platformKey, triple) {
 }
 
 const assets = Object.fromEntries(
-  Object.entries(PLATFORMS).map(([key, triple]) => [
-    key,
-    assetEntry(key, triple),
-  ]),
+  Object.entries(PLATFORMS).map(([key, triple]) => [key, assetEntry(key, triple)]),
 );
 
 const manifest = {

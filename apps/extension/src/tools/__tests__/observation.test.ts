@@ -42,8 +42,7 @@ function makeScreenshotDeps(
     opts.get ??
     vi.fn(async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab);
   const query =
-    opts.query ??
-    vi.fn(async () => [{ id: 7, windowId: 100, active: true } as chrome.tabs.Tab]);
+    opts.query ?? vi.fn(async () => [{ id: 7, windowId: 100, active: true } as chrome.tabs.Tab]);
   const captureVisibleTab =
     opts.captureVisibleTab ?? vi.fn(async () => `data:image/png;base64,${TINY_PNG}`);
   const tabsApi = { get, query };
@@ -118,7 +117,11 @@ describe("handleScreenshot", () => {
     const res = await handleScreenshot(
       sm,
       { session_id: "aa11" },
-      makeScreenshotDeps({ captureVisibleTab: vi.fn(), get: emptyGet, query: vi.fn(async () => []) }),
+      makeScreenshotDeps({
+        captureVisibleTab: vi.fn(),
+        get: emptyGet,
+        query: vi.fn(async () => []),
+      }),
     );
     expect(res).toMatchObject({ code: "not_found" });
   });

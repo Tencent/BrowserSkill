@@ -14,8 +14,8 @@ import type {
   SnapshotParams,
   SnapshotResult,
 } from "@/transport/types";
+import { attachDialogs, markDialogCursor } from "./dialogs";
 import { nodeBoundingRect, scrollNodeIntoView } from "./element-geometry";
-import { resolveSnapshotRef } from "./snapshot-ref";
 import { rpcError } from "./errors";
 import {
   type ChromeTabsApi,
@@ -25,7 +25,7 @@ import {
   type CdpRunner as SharedCdpRunner,
   normaliseRef as sharedNormaliseRef,
 } from "./shared";
-import { attachDialogs, markDialogCursor } from "./dialogs";
+import { resolveSnapshotRef } from "./snapshot-ref";
 
 // ---------------------------------------------------------------------------
 // Shared helpers (legacy aliases — observation.ts kept exporting these

@@ -1,12 +1,12 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { RiArrowDownSLine } from "@remixicon/react";
 import {
+  type PointerEvent as ReactPointerEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
   useState,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 import logoUrl from "../../assets/logo.png";
 
@@ -239,25 +239,29 @@ export function HelpRequestOverlay({ request }: Props) {
     };
   }, [request]);
 
-  const onHeaderPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    if (e.target instanceof Element && e.target.closest("button, input, textarea, a, select")) return;
-    const banner = bannerRef.current;
-    if (!banner) return;
-    const rect = banner.getBoundingClientRect();
-    dragStartRef.current = {
-      pointerX: e.clientX,
-      pointerY: e.clientY,
-      originLeft: rect.left,
-      originTop: rect.top,
-      panelW: banner.offsetWidth || PANEL_WIDTH,
-      panelH: banner.offsetHeight || (collapsed ? FALLBACK_PANEL_H_COLLAPSED : FALLBACK_PANEL_H),
-    };
-    userMovedRef.current = true;
-    setDragPos({ top: rect.top, left: rect.left });
-    setDragging(true);
-    e.preventDefault();
-  }, [collapsed]);
+  const onHeaderPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      if (e.target instanceof Element && e.target.closest("button, input, textarea, a, select"))
+        return;
+      const banner = bannerRef.current;
+      if (!banner) return;
+      const rect = banner.getBoundingClientRect();
+      dragStartRef.current = {
+        pointerX: e.clientX,
+        pointerY: e.clientY,
+        originLeft: rect.left,
+        originTop: rect.top,
+        panelW: banner.offsetWidth || PANEL_WIDTH,
+        panelH: banner.offsetHeight || (collapsed ? FALLBACK_PANEL_H_COLLAPSED : FALLBACK_PANEL_H),
+      };
+      userMovedRef.current = true;
+      setDragPos({ top: rect.top, left: rect.left });
+      setDragging(true);
+      e.preventDefault();
+    },
+    [collapsed],
+  );
 
   useEffect(() => {
     if (!dragging) return;
@@ -636,7 +640,11 @@ export function HelpRequestOverlay({ request }: Props) {
         </div>
 
         <div className="bsk-help-header">
-          <img src={logoUrl} alt="browser-skill" style={{ width: 22, height: 22, borderRadius: 4 }} />
+          <img
+            src={logoUrl}
+            alt="browser-skill"
+            style={{ width: 22, height: 22, borderRadius: 4 }}
+          />
           <span className="bsk-help-title">{request.title ?? t("helpRequest.title")}</span>
           <div className="bsk-help-header-actions" aria-hidden={!collapsed}>
             <button

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const scriptPath = join(scriptDir, "render-version-json.mjs");
@@ -20,14 +20,8 @@ test("renders asset URLs with sha256 checksums from dist files", () => {
   mkdirSync(dist);
   writeFileSync(join(dist, archive), archiveBytes);
   writeFileSync(join(dist, `bsk-v${version}-x86_64-apple-darwin.tar.gz`), "darwin x64\n");
-  writeFileSync(
-    join(dist, `bsk-v${version}-x86_64-unknown-linux-musl.tar.gz`),
-    "linux x64\n",
-  );
-  writeFileSync(
-    join(dist, `bsk-v${version}-aarch64-unknown-linux-musl.tar.gz`),
-    "linux arm64\n",
-  );
+  writeFileSync(join(dist, `bsk-v${version}-x86_64-unknown-linux-musl.tar.gz`), "linux x64\n");
+  writeFileSync(join(dist, `bsk-v${version}-aarch64-unknown-linux-musl.tar.gz`), "linux arm64\n");
   writeFileSync(join(dist, `bsk-v${version}-x86_64-pc-windows-msvc.zip`), "windows x64\n");
 
   execFileSync(process.execPath, [

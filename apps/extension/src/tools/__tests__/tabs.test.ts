@@ -292,7 +292,10 @@ describe("handleTabClose", () => {
     };
     const { api } = makeTabMutationApi(state);
     const res = await handleTabClose(sm, { session_id: "aa11", tab_id: 9 }, { tabs: api });
-    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
   });
 
   it("rejects when another session has borrowed the tab", async () => {
@@ -338,7 +341,10 @@ describe("handleTabSelect", () => {
     };
     const { api } = makeTabMutationApi(state);
     const res = await handleTabSelect(sm, { session_id: "aa11", tab_id: 3 }, { tabs: api });
-    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
   });
 
   it("rejects a borrowed tab that is no longer in the Agent Window", async () => {
@@ -352,7 +358,10 @@ describe("handleTabSelect", () => {
     };
     const { api } = makeTabMutationApi(state);
     const res = await handleTabSelect(sm, { session_id: "aa11", tab_id: 3 }, { tabs: api });
-    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
   });
 });
 
@@ -444,7 +453,10 @@ describe("handleTabBorrow", () => {
     };
     const { api } = makeTabMutationApi(state);
     const res = await handleTabBorrow(sm, { session_id: "aa11", tab_id: 7 }, { tabs: api });
-    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
   });
 
   it("returns cancelled when the approver declines", async () => {

@@ -36,13 +36,21 @@ function baseDeps(over: Partial<RequestHelpDeps> = {}): RequestHelpDeps {
 
 describe("handleRequestHelp", () => {
   it("rejects unknown session", async () => {
-    const res = await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams({ session_id: "zzzz" }), baseDeps());
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ session_id: "zzzz" }),
+      baseDeps(),
+    );
     expect("code" in res && res.code).toBe("not_found");
   });
 
   it("brings the tab to the foreground and returns the user outcome", async () => {
     const deps = baseDeps();
-    const res = await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams({ tab_id: 5 }), deps);
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5 }),
+      deps,
+    );
     expect(deps.windows.update).toHaveBeenCalledWith(99, { focused: true });
     expect(deps.activateTab).toHaveBeenCalledWith(5);
     expect(res).toMatchObject({ outcome: "continued", note: "ok", tab_id: 5 });
@@ -79,7 +87,11 @@ describe("handleRequestHelp", () => {
         return unwatch;
       }),
     });
-    const res = await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams({ tab_id: 5 }), deps);
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5 }),
+      deps,
+    );
     expect(res).toMatchObject({ outcome: "navigated", tab_id: 5 });
     expect(unwatch).toHaveBeenCalled();
   });
@@ -107,12 +119,19 @@ describe("handleRequestHelp", () => {
     const mgr = {
       get: (id: string) =>
         id === "abcd"
-          ? { sessionId: "abcd", agentWindowId: 99, refStore: { resolve: () => 42 }, borrowedTabs: new Map() }
+          ? {
+              sessionId: "abcd",
+              agentWindowId: 99,
+              refStore: { resolve: () => 42 },
+              borrowedTabs: new Map(),
+            }
           : null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
     } as unknown as SessionManager;
     const deps = baseDeps({
-      cdp: { send: vi.fn(async () => ({ object: { objectId: "obj-1" } })) } as unknown as RequestHelpDeps["cdp"],
+      cdp: {
+        send: vi.fn(async () => ({ object: { objectId: "obj-1" } })),
+      } as unknown as RequestHelpDeps["cdp"],
     });
     const res = await handleRequestHelp(
       mgr,
@@ -177,7 +196,11 @@ describe("handleRequestHelp", () => {
         throw new Error("no receiver");
       }),
     });
-    const res = await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams({ tab_id: 5 }), deps);
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5 }),
+      deps,
+    );
     expect("code" in res && res.code).toBe("protocol_error");
   });
 
@@ -254,7 +277,11 @@ describe("handleRequestHelp", () => {
   it("returns cancelled when the signal aborts", async () => {
     const ac = new AbortController();
     const deps = baseDeps({ signal: ac.signal, sendToTab: vi.fn(() => new Promise(() => {})) });
-    const p = handleRequestHelp(fakeManager("abcd", 99, 5), baseParams({ tab_id: 5, timeout_ms: 60_000 }), deps);
+    const p = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+      deps,
+    );
     ac.abort();
     const res = await p;
     expect("code" in res ? res.code : (res as { outcome: string }).outcome).toMatch(/cancelled/);

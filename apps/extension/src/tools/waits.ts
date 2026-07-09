@@ -20,6 +20,7 @@ import type {
   WaitForNavigationResult,
   WaitUntil,
 } from "@/transport/types";
+import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpLifecycleName, ensureCdpReady, waitForLifecyclePassive } from "./navigation";
 import {
   type CdpRunner,
@@ -30,7 +31,6 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
-import { attachDialogs, markDialogCursor } from "./dialogs";
 
 export interface WaitForNavigationDeps {
   cdp: CdpRunner;

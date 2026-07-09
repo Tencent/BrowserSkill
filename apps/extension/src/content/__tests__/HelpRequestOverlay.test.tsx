@@ -3,7 +3,7 @@ import { I18nextProvider } from "@browser-skill/i18n/react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HelpRequestOverlay, type HelpRequestData } from "../HelpRequestOverlay";
+import { type HelpRequestData, HelpRequestOverlay } from "../HelpRequestOverlay";
 
 function renderOverlay(req: HelpRequestData) {
   return render(
@@ -79,7 +79,7 @@ describe("HelpRequestOverlay", () => {
     renderOverlay(baseRequest({ selectors: ["#login", "#missing"] }));
     // One highlight box rendered for the matched selector.
     expect(document.querySelectorAll("[data-slot='help-highlight']").length).toBe(1);
-    expect((el.scrollIntoView as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    expect(el.scrollIntoView as ReturnType<typeof vi.fn>).toHaveBeenCalled();
     el.remove();
   });
 
@@ -115,8 +115,8 @@ describe("HelpRequestOverlay", () => {
       ),
     );
 
-    expect((elA.scrollIntoView as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
-    expect((elB.scrollIntoView as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    expect(elA.scrollIntoView as ReturnType<typeof vi.fn>).toHaveBeenCalled();
+    expect(elB.scrollIntoView as ReturnType<typeof vi.fn>).toHaveBeenCalled();
     elA.remove();
     elB.remove();
   });
@@ -286,9 +286,7 @@ describe("HelpRequestOverlay", () => {
   it("does not start drag when pointer down on a button in the header", () => {
     const { container } = renderOverlay(baseRequest());
     const banner = container.querySelector("[data-slot='help-request-banner']") as HTMLElement;
-    const collapseBtn = screen.getByLabelText(
-      i18n.t("helpRequest.collapse", { ns: "extension" }),
-    );
+    const collapseBtn = screen.getByLabelText(i18n.t("helpRequest.collapse", { ns: "extension" }));
 
     fireEvent.pointerDown(collapseBtn, { button: 0, clientX: 10, clientY: 10, pointerId: 1 });
 

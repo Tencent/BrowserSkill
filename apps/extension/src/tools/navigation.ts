@@ -28,6 +28,7 @@ import type {
   RpcError,
   WaitUntil,
 } from "@/transport/types";
+import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -37,7 +38,6 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "./shared";
-import { attachDialogs, markDialogCursor } from "./dialogs";
 
 export interface NavigationDeps {
   cdp: CdpRunner;
@@ -120,9 +120,7 @@ export function lifecycleAlreadyReached(readyState: string, targetName: string):
     case "DOMContentLoaded":
       return readyState === "interactive" || readyState === "complete";
     case "commit":
-      return (
-        readyState === "interactive" || readyState === "complete" || readyState === "loading"
-      );
+      return readyState === "interactive" || readyState === "complete" || readyState === "loading";
     case "networkIdle":
       // Must come from `Page.lifecycleEvent`; readyState does not imply network idle.
       return false;
@@ -285,7 +283,13 @@ function startLifecycleWait(
 
     const maybeFinishPending = () => {
       if (settled || !pendingLifecycle) return;
-      if (!acceptLifecycleEvent(pendingLifecycle.name, pendingLifecycle.frameId, pendingLifecycle.loaderId)) {
+      if (
+        !acceptLifecycleEvent(
+          pendingLifecycle.name,
+          pendingLifecycle.frameId,
+          pendingLifecycle.loaderId,
+        )
+      ) {
         return;
       }
       if (lifecycleMeetsOrExceeds(pendingLifecycle.name, targetName)) {

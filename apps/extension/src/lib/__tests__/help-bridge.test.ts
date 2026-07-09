@@ -51,12 +51,8 @@ describe("help-bridge", () => {
   });
 
   it("type-guards a help-cancel message", () => {
-    expect(
-      isHelpCancelMessage({ type: HELP_CANCEL, requestId: "r1" }),
-    ).toBe(true);
-    expect(isHelpCancelMessage({ type: HELP_REQUEST, requestId: "r1" })).toBe(
-      false,
-    );
+    expect(isHelpCancelMessage({ type: HELP_CANCEL, requestId: "r1" })).toBe(true);
+    expect(isHelpCancelMessage({ type: HELP_REQUEST, requestId: "r1" })).toBe(false);
     expect(isHelpCancelMessage(null)).toBe(false);
   });
 });

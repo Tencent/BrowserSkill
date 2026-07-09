@@ -132,8 +132,8 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByText("连接已关闭")).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked")).toBe(
-      "false",
-    );
+    expect(
+      screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked"),
+    ).toBe("false");
   });
 });

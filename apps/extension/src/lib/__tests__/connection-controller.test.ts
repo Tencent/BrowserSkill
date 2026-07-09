@@ -1,10 +1,8 @@
-import { ConnectionController, __testing__ } from "../connection-controller";
-import type { Transport } from "../../transport/transport";
-import type { ConnectionState } from "../../transport/types";
-import type { ConnectionStateHandler } from "../../transport/transport";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MIN_COMPATIBLE_PROTOCOL } from "../../transport/handshake";
-import type { HandshakeResult } from "../../transport/types";
+import type { ConnectionStateHandler, Transport } from "../../transport/transport";
+import type { ConnectionState, HandshakeResult } from "../../transport/types";
+import { __testing__, ConnectionController } from "../connection-controller";
 
 vi.mock("../instance-id", () => ({
   getOrCreateInstanceId: vi.fn(async () => "a1b2c3d4"),
