@@ -150,7 +150,9 @@ export async function handleScreenshot(
   manager: SessionManager,
   params: ScreenshotParams,
   deps: ScreenshotDeps = defaultScreenshotDeps(),
+  signal?: AbortSignal,
 ): Promise<ScreenshotResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "screenshot aborted" };
   const ctxOrErr = lookupSession(manager, params, "screenshot");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -170,6 +172,7 @@ export async function handleScreenshot(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const captured = await captureElementScreenshot(deps.cdp, target.tabId, node.backendNodeId);
     if (isRpcError(captured)) return captured;
+    if (signal?.aborted) return { code: "cancelled", message: "screenshot aborted" };
     return withShotDialogs({
       image_base64: captured.image_base64,
       width: captured.width,
@@ -189,6 +192,7 @@ export async function handleScreenshot(
 
   try {
     const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
+    if (signal?.aborted) return { code: "cancelled", message: "screenshot aborted" };
     const image_base64 = stripDataUrlPrefix(dataUrl);
     const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
     return withShotDialogs({
@@ -459,7 +463,9 @@ export async function handleGetHtml(
   manager: SessionManager,
   params: GetHtmlParams,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<GetHtmlResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "get_html aborted" };
   const ctxOrErr = lookupSession(manager, params, "get_html");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -498,6 +504,7 @@ export async function handleGetHtml(
       });
       html = resp.outerHTML ?? "";
     }
+    if (signal?.aborted) return { code: "cancelled", message: "get_html aborted" };
     const originalBytes = utf8ByteLength(html);
     const { out, truncated } = truncateBytes(html, maxBytes);
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
@@ -518,7 +525,9 @@ export async function handleSnapshot(
   manager: SessionManager,
   params: SnapshotParams,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<SnapshotResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "snapshot aborted" };
   const ctxOrErr = lookupSession(manager, params, "snapshot");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -534,6 +543,7 @@ export async function handleSnapshot(
       "Accessibility.getFullAXTree",
       {},
     );
+    if (signal?.aborted) return { code: "cancelled", message: "snapshot aborted" };
     const rendered = renderAxTree(result.nodes ?? [], {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,

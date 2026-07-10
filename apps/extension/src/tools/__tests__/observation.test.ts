@@ -524,6 +524,41 @@ describe("handleSnapshot", () => {
     expect(ctx.refStore.resolve("e2")).toBe(200);
   });
 
+  it("does not overwrite refs when cancellation arrives during CDP capture", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 999, { tabId: 4 });
+    const controller = new AbortController();
+    let resolveTree: (value: { nodes: CdpAxNode[] }) => void = () => {};
+    const deps = makeDeps([]);
+    deps.send.mockImplementation(async (_tabId: number, method: string) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") {
+        return new Promise((resolve) => {
+          resolveTree = resolve;
+        });
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+
+    const pending = handleSnapshot(sm, { session_id: "aa11" }, deps, controller.signal);
+    await vi.waitFor(() => expect(deps.send).toHaveBeenCalledTimes(2));
+    controller.abort();
+    resolveTree({
+      nodes: [
+        {
+          nodeId: "new",
+          role: { type: "role", value: "button" },
+          name: { type: "computedString", value: "New" },
+          backendDOMNodeId: 123,
+        },
+      ],
+    });
+
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    expect(ctx.refStore.resolve("e1")).toBe(999);
+  });
+
   it("resets the RefStore on every fresh snapshot", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
