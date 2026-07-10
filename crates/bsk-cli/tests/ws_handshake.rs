@@ -8,7 +8,6 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::{BrowserPeerInfo, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -17,9 +16,7 @@ pub const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop"; // 32 chars in
 
 pub async fn spawn_daemon() -> daemon::DaemonHandle {
     // Bind to any free TCP port.
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
 
     let config = DaemonConfig::new(port);
     daemon::run(config, None).await.unwrap()

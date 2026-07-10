@@ -15,7 +15,6 @@ use bsk_protocol::system::{BrowserListParams, HandshakeParams, HandshakeResult, 
 use bsk_protocol::{BrowserPeerInfo, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -77,9 +76,7 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
 
     let config = DaemonConfig::new(port);
     let sock = tempfile_path("bsk-test-browser-wait");
