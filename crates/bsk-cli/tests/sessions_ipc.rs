@@ -15,7 +15,6 @@ use bsk_protocol::tools::{SessionStartParams, SessionStartResult, SessionStopPar
 use bsk_protocol::{BrowserPeerInfo, Frame, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
-use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -39,9 +38,7 @@ async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
 }
 
 async fn spawn_daemon_with_connect_wait(connect_wait: Duration) -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
 
     let config = DaemonConfig::new(port).with_extension_connect_wait(connect_wait);
     let sock = tempfile_path("bsk-test-ipc");
