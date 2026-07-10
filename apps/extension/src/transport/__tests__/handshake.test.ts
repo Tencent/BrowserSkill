@@ -198,6 +198,25 @@ describe("performHandshake", () => {
       result: { server: "browser-skill-daemon", protocol_version: "1.0" },
     });
   });
+
+  it("stops waiting immediately when the connection generation is aborted", async () => {
+    const { transport } = deferredFakeTransport();
+    const controller = new AbortController();
+    const pending = performHandshake(
+      transport,
+      {
+        instanceId: "x",
+        browser: { name: "chrome", version: "131" },
+        label: "",
+        rpcId: "hs-abort",
+      },
+      { signal: controller.signal, timeoutMs: 60_000 },
+    );
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("detectBrowserMeta", () => {
