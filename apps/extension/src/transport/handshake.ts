@@ -57,7 +57,7 @@ function ridToString(): string {
 export function performHandshake(
   transport: Transport,
   input: HandshakeInput,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<HandshakeOutcome> {
   const id = input.rpcId ?? ridToString();
   const params: HandshakeParams = {
@@ -75,6 +75,12 @@ export function performHandshake(
   const timeoutMs = options.timeoutMs ?? 10_000;
 
   return new Promise<HandshakeOutcome>((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      const err = new Error("[handshake] aborted because the connection changed");
+      err.name = "AbortError";
+      reject(err);
+    };
     const timer = setTimeout(() => {
       cleanup();
       reject(new Error("[handshake] timed out waiting for daemon response"));
@@ -97,7 +103,14 @@ export function performHandshake(
     function cleanup() {
       clearTimeout(timer);
       sub.dispose();
+      options.signal?.removeEventListener("abort", onAbort);
     }
+
+    if (options.signal?.aborted) {
+      onAbort();
+      return;
+    }
+    options.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
       transport.send(req);

@@ -9,6 +9,8 @@ import type { ConnectionState, HandshakeResult } from "../transport/types";
 import { getLabel, getOrCreateInstanceId } from "./instance-id";
 import { compareProtocol, parseProtocolMajor } from "./semver";
 
+const HANDSHAKE_RETRY_DELAY_MS = 1_000;
+
 export interface SnapshotInfo {
   state: ConnectionState;
   instanceId: string;
@@ -43,7 +45,9 @@ export class ConnectionController {
   private lastError: string | null = null;
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
-  private handshakeInFlight = false;
+  private connectionGeneration = 0;
+  private handshakeAbort: AbortController | null = null;
+  private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private lifecycleHooks: ConnectionLifecycleHooks = {};
   private disconnectRecovery: Promise<void> | null = null;
 
@@ -87,6 +91,9 @@ export class ConnectionController {
 
     transport.onConnectionStateChange((s) => {
       if (s === "disconnected") {
+        // Cancel any in-flight handshake (PR #19) before local teardown and
+        // reconnect recovery (#17).
+        this.cancelHandshake();
         this.handshake = null;
         if (this.connectionEnabled) {
           this.setState("disconnected");
@@ -96,7 +103,7 @@ export class ConnectionController {
       }
       if (!this.connectionEnabled) return;
       if (s === "connected") {
-        void this.runHandshake(browser);
+        this.startHandshake(browser);
         return;
       }
       this.setState(s);
@@ -142,18 +149,33 @@ export class ConnectionController {
     this.fire();
   }
 
-  private async runHandshake(browser: { name: string; version: string }): Promise<void> {
+  private startHandshake(browser: { name: string; version: string }): void {
+    this.cancelHandshake();
+    const generation = ++this.connectionGeneration;
+    const abort = new AbortController();
+    this.handshakeAbort = abort;
+    void this.runHandshake(browser, generation, abort.signal);
+  }
+
+  private async runHandshake(
+    browser: { name: string; version: string },
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!this.transport) return;
     if (!this.connectionEnabled) return;
-    if (this.handshakeInFlight) return;
-    this.handshakeInFlight = true;
     this.setState("connecting");
     try {
-      const outcome = await performHandshake(this.transport, {
-        instanceId: this.instanceId,
-        browser,
-        label: this.label,
-      });
+      const outcome = await performHandshake(
+        this.transport,
+        {
+          instanceId: this.instanceId,
+          browser,
+          label: this.label,
+        },
+        { signal },
+      );
+      if (generation !== this.connectionGeneration || signal.aborted) return;
       this.handshake = outcome.result;
       const verdict = computeConnectedState(outcome.result);
       if (verdict.kind === "rejected") {
@@ -163,18 +185,24 @@ export class ConnectionController {
         this.setState("disconnected");
         return;
       }
+      this.clearHandshakeRetry();
       this.lastError = null;
       this.setState(verdict.kind);
     } catch (err) {
+      if (generation !== this.connectionGeneration || signal.aborted || isAbortError(err)) return;
       this.handshake = null;
       this.lastError = err instanceof Error ? err.message : String(err);
+      await this.transport.disconnect().catch(() => {});
       this.setState("disconnected");
+      this.scheduleHandshakeRetry(browser);
     } finally {
-      this.handshakeInFlight = false;
+      if (generation === this.connectionGeneration) this.handshakeAbort = null;
     }
   }
 
   private async applyDisabledState(): Promise<void> {
+    this.cancelHandshake();
+    this.clearHandshakeRetry();
     this.handshake = null;
     this.lastError = null;
     await this.lifecycleHooks.beforeDisconnect?.();
@@ -214,6 +242,30 @@ export class ConnectionController {
     return this.disconnectRecovery;
   }
 
+  private cancelHandshake(): void {
+    this.connectionGeneration += 1;
+    this.handshakeAbort?.abort();
+    this.handshakeAbort = null;
+  }
+
+  private scheduleHandshakeRetry(browser: { name: string; version: string }): void {
+    if (this.handshakeRetryTimer || !this.connectionEnabled) return;
+    this.handshakeRetryTimer = setTimeout(() => {
+      this.handshakeRetryTimer = null;
+      if (!this.connectionEnabled || !this.transport) return;
+      void this.transport.connect().catch((err) => {
+        this.lastError = err instanceof Error ? err.message : String(err);
+        this.setState("disconnected");
+      });
+    }, HANDSHAKE_RETRY_DELAY_MS);
+  }
+
+  private clearHandshakeRetry(): void {
+    if (!this.handshakeRetryTimer) return;
+    clearTimeout(this.handshakeRetryTimer);
+    this.handshakeRetryTimer = null;
+  }
+
   private setState(next: ConnectionState): void {
     if (this.currentState === next) return;
     this.currentState = next;
@@ -230,6 +282,12 @@ export class ConnectionController {
       }
     }
   }
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    typeof err === "object" && err !== null && (err as { name?: string }).name === "AbortError"
+  );
 }
 
 /**
