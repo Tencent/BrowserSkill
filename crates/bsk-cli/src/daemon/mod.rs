@@ -44,10 +44,16 @@ pub async fn run(
         Some(path) => Some(ipc::IpcServer::new(Arc::clone(&state)).bind(path).await?),
         None => None,
     };
+    let session_idle_task = start::spawn_session_idle_reaper(Arc::clone(&state));
     // Ensure WS/IPC accept loops have polled `shutdown.notified()` before any
     // caller can invoke `DaemonHandle::shutdown()` — `Notify::notify_waiters()`
     // drops wakeups when nothing is registered yet, which otherwise hangs
     // shutdown forever (hit by tests that connect/shutdown immediately).
     tokio::task::yield_now().await;
-    Ok(DaemonHandle::new(state, ws_handle, ipc_handle))
+    Ok(DaemonHandle::new(
+        state,
+        ws_handle,
+        ipc_handle,
+        session_idle_task,
+    ))
 }

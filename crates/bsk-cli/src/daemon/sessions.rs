@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
 use bsk_protocol::tools::{
@@ -66,6 +66,9 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     inner: Mutex<HashMap<SessionId, Session>>,
+    /// Operational metadata kept outside the public `Session` wire/domain
+    /// shape so idle enforcement does not break external struct users.
+    last_activity: Mutex<HashMap<SessionId, Instant>>,
 }
 
 impl SessionRegistry {
@@ -100,10 +103,13 @@ impl SessionRegistry {
     }
 
     pub fn insert(&self, session: Session) {
-        self.inner
+        let session_id = session.id.clone();
+        let mut sessions = self.inner.lock().expect("session registry poisoned");
+        sessions.insert(session_id.clone(), session);
+        self.last_activity
             .lock()
-            .expect("session registry poisoned")
-            .insert(session.id.clone(), session);
+            .expect("session activity registry poisoned")
+            .insert(session_id, Instant::now());
     }
 
     /// Reserve a fresh, collision-free [`SessionId`] under the registry
@@ -141,6 +147,10 @@ impl SessionRegistry {
                     created_at_ms: now_ms_fn(),
                 },
             );
+            self.last_activity
+                .lock()
+                .expect("session activity registry poisoned")
+                .insert(candidate.clone(), Instant::now());
             return Some(candidate);
         }
         None
@@ -168,13 +178,23 @@ impl SessionRegistry {
             .lock()
             .expect("session registry poisoned")
             .remove(session_id);
+        self.last_activity
+            .lock()
+            .expect("session activity registry poisoned")
+            .remove(session_id);
     }
 
     pub fn remove(&self, id: &SessionId) -> Option<Session> {
-        self.inner
+        let removed = self
+            .inner
             .lock()
             .expect("session registry poisoned")
-            .remove(id)
+            .remove(id);
+        self.last_activity
+            .lock()
+            .expect("session activity registry poisoned")
+            .remove(id);
+        removed
     }
 
     pub fn get(&self, id: &SessionId) -> Option<Session> {
@@ -183,6 +203,42 @@ impl SessionRegistry {
             .expect("session registry poisoned")
             .get(id)
             .cloned()
+    }
+
+    /// Record accepted or completed tool activity for a live session.
+    pub fn touch(&self, id: &SessionId) -> bool {
+        if !self
+            .inner
+            .lock()
+            .expect("session registry poisoned")
+            .contains_key(id)
+        {
+            return false;
+        }
+        self.last_activity
+            .lock()
+            .expect("session activity registry poisoned")
+            .insert(id.clone(), Instant::now());
+        true
+    }
+
+    /// Return sessions whose last tool activity is at least `idle_for`
+    /// old. The caller supplies `now` to keep boundary tests deterministic.
+    pub fn idle_ids_at(&self, idle_for: Duration, now: Instant) -> Vec<SessionId> {
+        let sessions = self.inner.lock().expect("session registry poisoned");
+        let activity = self
+            .last_activity
+            .lock()
+            .expect("session activity registry poisoned");
+        sessions
+            .values()
+            .filter(|session| {
+                activity
+                    .get(&session.id)
+                    .is_some_and(|last| now.saturating_duration_since(*last) >= idle_for)
+            })
+            .map(|session| session.id.clone())
+            .collect()
     }
 
     /// Drop all sessions owned by `browser_id` (e.g. on disconnect).
@@ -195,6 +251,13 @@ impl SessionRegistry {
             .collect();
         for s in &drained {
             guard.remove(&s.id);
+        }
+        let mut activity = self
+            .last_activity
+            .lock()
+            .expect("session activity registry poisoned");
+        for session in &drained {
+            activity.remove(&session.id);
         }
         drained
     }
