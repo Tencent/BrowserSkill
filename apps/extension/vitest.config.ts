@@ -21,9 +21,7 @@ export default defineConfig({
   },
   define: {
     __BSK_EXT_VERSION__: JSON.stringify(pkg.version),
-    __BSK_DAEMON_WS_URL__: JSON.stringify(
-      process.env.BSK_DAEMON_WS_URL ?? "ws://127.0.0.1:52800",
-    ),
+    __BSK_DAEMON_WS_URL__: JSON.stringify(process.env.BSK_DAEMON_WS_URL ?? "ws://127.0.0.1:52800"),
   },
   resolve: {
     alias: {
