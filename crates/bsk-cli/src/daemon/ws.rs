@@ -286,6 +286,17 @@ async fn drive_connection(
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
     let browser_id = BrowserId(params.instance_id.clone());
+    // A fresh socket represents a fresh extension control plane. The
+    // extension tears down its local sessions before reconnecting, so any
+    // daemon-side sessions left under the same instance id are stale. Purge
+    // them before replacing the browser registration; otherwise an old WS
+    // cleanup racing with this handshake can preserve rows that no longer
+    // have an Agent Window on the extension side.
+    for session in state.sessions.purge_browser(&browser_id) {
+        state.tool_queues.remove(&session.id);
+        state.session_interrupts.drop_session(&session.id);
+        debug!(session = %session.id, "purged stale session before browser reconnect");
+    }
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
     let generation = super::browsers::next_browser_generation();
     let connected_at_ms = std::time::SystemTime::now()

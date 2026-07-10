@@ -21,6 +21,13 @@ export interface SnapshotInfo {
 
 type Listener = (s: SnapshotInfo) => void;
 
+export interface ConnectionLifecycleHooks {
+  /** Safe local teardown that must finish before an intentional disconnect. */
+  beforeDisconnect?: () => void | Promise<void>;
+  /** Best-effort teardown after an unexpected transport loss. */
+  onDisconnected?: () => void | Promise<void>;
+}
+
 /**
  * Orchestrates Transport + handshake lifecycle for the background SW.
  *
@@ -37,6 +44,8 @@ export class ConnectionController {
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
   private handshakeInFlight = false;
+  private lifecycleHooks: ConnectionLifecycleHooks = {};
+  private disconnectRecovery: Promise<void> | null = null;
 
   get isConnectionEnabled(): boolean {
     return this.connectionEnabled;
@@ -68,20 +77,27 @@ export class ConnectionController {
     transport: Transport,
     browser: { name: string; version: string },
     connectionEnabled = true,
+    lifecycleHooks: ConnectionLifecycleHooks = {},
   ): Promise<void> {
     this.transport = transport;
     this.connectionEnabled = connectionEnabled;
+    this.lifecycleHooks = lifecycleHooks;
     this.instanceId = await getOrCreateInstanceId();
     this.label = await getLabel();
 
     transport.onConnectionStateChange((s) => {
+      if (s === "disconnected") {
+        this.handshake = null;
+        if (this.connectionEnabled) {
+          this.setState("disconnected");
+          void this.recoverFromDisconnect();
+        }
+        return;
+      }
       if (!this.connectionEnabled) return;
       if (s === "connected") {
         void this.runHandshake(browser);
         return;
-      }
-      if (s === "disconnected") {
-        this.handshake = null;
       }
       this.setState(s);
     });
@@ -161,12 +177,41 @@ export class ConnectionController {
   private async applyDisabledState(): Promise<void> {
     this.handshake = null;
     this.lastError = null;
+    await this.lifecycleHooks.beforeDisconnect?.();
     if (this.transport) {
       await this.transport.disconnect().catch(() => {});
     }
     const was = this.currentState;
     this.setState("disconnected");
     if (was === "disconnected") this.fire();
+  }
+
+  private recoverFromDisconnect(): Promise<void> {
+    if (this.disconnectRecovery) return this.disconnectRecovery;
+    const recovery = (async () => {
+      // WSTransport schedules its reconnect timer immediately after notifying
+      // state listeners. Yield once, then disconnect explicitly so that timer
+      // is cancelled before local session teardown begins.
+      await Promise.resolve();
+      if (!this.connectionEnabled || !this.transport) return;
+      await this.transport.disconnect().catch(() => {});
+      try {
+        await this.lifecycleHooks.onDisconnected?.();
+      } catch (err) {
+        console.warn("[browser-skill] session cleanup after disconnect failed", err);
+      }
+      if (!this.connectionEnabled) return;
+      try {
+        await this.transport.connect();
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : String(err);
+        this.setState("disconnected");
+      }
+    })();
+    this.disconnectRecovery = recovery.finally(() => {
+      this.disconnectRecovery = null;
+    });
+    return this.disconnectRecovery;
   }
 
   private setState(next: ConnectionState): void {
