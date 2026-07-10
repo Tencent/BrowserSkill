@@ -30,7 +30,6 @@ use rand::Rng;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
@@ -53,9 +52,7 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
     let sock = tempfile_path("bsk-test-tools-m9");
     let handle = daemon::run(DaemonConfig::new(port), Some(sock.clone()))
         .await
