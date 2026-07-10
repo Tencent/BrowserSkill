@@ -60,7 +60,11 @@ export async function handleSessionStart(
     const ctx = await manager.start(params.session_id, { signal: deps.signal });
     return { agent_window_id: ctx.agentWindowId };
   } catch (err) {
-    if (typeof err === "object" && err !== null && (err as { name?: string }).name === "AbortError") {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { name?: string }).name === "AbortError"
+    ) {
       return { code: "cancelled", message: "session_start aborted" };
     }
     // chrome.windows.create / SessionManager failures are not CDP
