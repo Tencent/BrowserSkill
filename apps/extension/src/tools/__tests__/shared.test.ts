@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import { lookupSession } from "../shared";
+import { lookupSession, resolveTargetTab } from "../shared";
 
 function fakeAgentWindow() {
   return {
@@ -38,5 +38,34 @@ describe("lookupSession", () => {
     const ctx = await sm.start("aa11");
     const result = lookupSession(sm, { session_id: "aa11" }, "tool.test");
     expect(result).toBe(ctx);
+  });
+});
+
+describe("resolveTargetTab", () => {
+  it("requires a user tab to be borrowed into the Agent Window before access", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const ctx = await sm.start("aa11");
+
+    const result = await resolveTargetTab(sm, ctx, 9, {
+      get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
+      query: vi.fn(),
+    });
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+  });
+
+  it("allows an explicit tab in the current session's Agent Window", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const ctx = await sm.start("aa11");
+
+    await expect(
+      resolveTargetTab(sm, ctx, 9, {
+        get: vi.fn(async () => ({ id: 9, windowId: 100, active: true }) as chrome.tabs.Tab),
+        query: vi.fn(),
+      }),
+    ).resolves.toEqual({ tabId: 9, windowId: 100, active: true });
   });
 });

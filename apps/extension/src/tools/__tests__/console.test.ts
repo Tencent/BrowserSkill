@@ -72,14 +72,14 @@ describe("handleConsole", () => {
     expect(deps.consoleEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000, false);
   });
 
-  it("reads an explicit tab and forwards bounded options", async () => {
+  it("rejects an explicit user tab before touching CDP", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const deps = makeDeps({
       get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
     });
 
-    await handleConsole(
+    const res = await handleConsole(
       sm,
       {
         session_id: "aa11",
@@ -92,8 +92,12 @@ describe("handleConsole", () => {
       deps,
     );
 
-    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(9);
-    expect(deps.consoleEntriesSince).toHaveBeenCalledWith(9, 12, 200, 4096, true);
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(deps.ensureConsoleCapture).not.toHaveBeenCalled();
+    expect(deps.consoleEntriesSince).not.toHaveBeenCalled();
   });
 
   it("rejects invalid bounds before touching CDP", async () => {
