@@ -114,9 +114,8 @@ const pendingBorrowNotifications = new Map<string, PendingBorrowNotification>();
  *
  * This is the *fallback* authorization path that fires when no candidate
  * user window could host the in-page overlay (every `chrome.tabs.sendMessage`
- * was rejected because the content script was not present). Without it the
- * background-task fail-open at the end of `tryCandidate` would silently
- * allow the borrow without any user-visible authorization step.
+ * was rejected because the content script was not present). It preserves an
+ * explicit authorization path without weakening the fail-closed timeout.
  */
 const pendingBorrowDecisions = new Map<string, (allowed: boolean) => void>();
 
@@ -170,7 +169,7 @@ export function attachBorrowNotificationClickHandler(deps: {
  * Allow / Deny buttons on the OS notification can resolve the matching
  * pending `requestBorrowConfirmation`. This is the explicit-authorization
  * fallback path used when every candidate user window's content script was
- * missing — without it we'd be back to silently fail-opening the borrow.
+ * missing.
  *
  * Button index convention (matches `BorrowNotificationCopy`):
  *   - 0 → Allow → `resolve(true)`
@@ -326,8 +325,7 @@ async function listConfirmationCandidates(
     if (typeof w.id !== "number") continue;
     // Never bounce the overlay back into a session's Agent Window — those
     // pages can't host a content script when they're on the about:blank
-    // bootstrap URL, so sendMessage would fail-open and silently allow the
-    // borrow with no UI shown.
+    // bootstrap URL, so they cannot surface an authorization decision.
     if (isAgentWindowId(w.id)) continue;
     const activeTab = w.tabs?.find((t) => t.active === true) ?? null;
     if (!activeTab || typeof activeTab.id !== "number") continue;
@@ -360,16 +358,14 @@ async function listConfirmationCandidates(
  * *explicit-authorization fallback* when every candidate fails sendMessage:
  * we no longer silently allow the borrow in that case, the promise stays
  * pending until the user clicks a notification button (resolves true/false)
- * or `BACKGROUND_TIMEOUT_MS` fires (last-resort fail-open so the agent
- * doesn't hang forever when even the notification path is broken).
+ * or `BACKGROUND_TIMEOUT_MS` fires and safely denies the request.
  *
  * Clicking the notification body (vs. its buttons) focuses the chosen user
  * window so the overlay becomes visible — the previous behaviour.
  *
- * Returns `true` on user-allow (overlay or notification) OR last-resort
- * fail-open (no candidate window at all; abort signal; timeout). Returns
- * `false` only on explicit user-deny (overlay button or notification Deny
- * button).
+ * Returns `true` only on an explicit user allow from the overlay or
+ * notification. Missing UI, aborts, malformed responses, and timeouts all
+ * fail closed and return `false`.
  */
 export async function requestBorrowConfirmation(
   tabId: number,
@@ -385,12 +381,9 @@ export async function requestBorrowConfirmation(
 
   // The borrow pipeline already fetched this tab moments earlier
   // (validateBorrowTarget in tabs.ts), so a failure here is a transient
-  // SW/page hiccup, not a missing tab. Do NOT fail-open: silently allowing
-  // a borrow with no confirmation UI contradicts the gate's purpose and is
-  // not one of the documented fail-open cases (no candidate window; abort;
-  // timeout — see this function's doc comment). Fall back to a generic
-  // title and still surface the overlay + notification so the user gets a
-  // real chance to approve or deny.
+  // SW/page hiccup, not a missing tab. Fall back to a generic title and still
+  // surface the overlay + notification so the user gets a real chance to
+  // approve or deny.
   let tabTitle: string;
   try {
     const tab = await tabsApi.get(tabId);
@@ -405,10 +398,10 @@ export async function requestBorrowConfirmation(
 
   const candidates = await listConfirmationCandidates(windowsApi, isAgentWindowId);
   if (candidates.length === 0) {
-    console.warn("[bsk borrow] no injectable user window available — proceeding without overlay", {
+    console.warn("[bsk borrow] no injectable user window available — denying borrow", {
       tabId,
     });
-    return true;
+    return false;
   }
 
   const requestId = createBorrowRequestId(tabId);
@@ -419,7 +412,7 @@ export async function requestBorrowConfirmation(
   // overlay immediately.
   const notificationAnchor = candidates[0];
   if (!notificationAnchor) {
-    return true;
+    return false;
   }
 
   return new Promise<boolean>((resolve) => {
@@ -463,7 +456,7 @@ export async function requestBorrowConfirmation(
           });
         });
       }
-      settle(true);
+      settle(false);
     };
 
     if (signal?.aborted) {
@@ -473,19 +466,17 @@ export async function requestBorrowConfirmation(
     signal?.addEventListener("abort", onAbort, { once: true });
 
     timeout = setTimeout(() => {
-      console.info("[bsk borrow] confirmation timed out — proceeding", {
+      console.info("[bsk borrow] confirmation timed out — denying borrow", {
         tabId,
         messageTabId: activeMessageTabId,
       });
-      settle(true);
+      settle(false);
     }, BACKGROUND_TIMEOUT_MS);
 
     // Surface the OS notification *before* messaging any candidate so the
     // user has a parallel signal even if every content script is missing.
     // The Allow / Deny buttons let the user authorize explicitly when the
-    // in-page overlay never reached them — without those buttons we'd have
-    // to fail-open after `tryCandidate` exhausts its candidates, which is
-    // exactly the silent-allow bug we're fixing here.
+    // in-page overlay never reached them.
     if (notificationsApi) {
       pendingBorrowNotifications.set(notificationId, {
         windowId: notificationAnchor.windowId,
@@ -499,7 +490,7 @@ export async function requestBorrowConfirmation(
           title: copy.title,
           message: copy.body(tabTitle),
           priority: 2,
-          requireInteraction: false,
+          requireInteraction: true,
           silent: false,
           buttons: [{ title: copy.allowButton }, { title: copy.denyButton }],
         })
@@ -523,15 +514,12 @@ export async function requestBorrowConfirmation(
     ): void => {
       if (settled) return;
       if (index >= candidates.length) {
-        // Every candidate rejected sendMessage. We deliberately do NOT
-        // fail-open here anymore: silently allowing a borrow with zero
-        // user-visible authorization UI is the bug. Instead we keep the
-        // promise pending and rely on:
+        // Every candidate rejected sendMessage. Keep the promise pending and
+        // rely on:
         //   • the OS notification's Allow / Deny buttons for an explicit
         //     user choice (preferred), or
-        //   • the BACKGROUND_TIMEOUT_MS fail-open as the last-resort
-        //     soft-fail so the agent doesn't hang forever when even the
-        //     notification API is unavailable.
+        //   • the BACKGROUND_TIMEOUT_MS fail-closed result so the agent does
+        //     not hang forever when even the notification API is unavailable.
         // Keep the diagnostics so real-world frequency is still observable.
         console.warn(
           "[bsk borrow] every candidate user window failed sendMessage — awaiting notification button or timeout",
@@ -560,7 +548,9 @@ export async function requestBorrowConfirmation(
         .sendMessage(candidate.tabId, message)
         .then((response) => {
           if (settled) return;
-          const allowed = (response as BorrowResponseMessage | undefined)?.allowed !== false;
+          const candidateResponse = response as BorrowResponseMessage | undefined;
+          const allowed =
+            candidateResponse?.type === "borrow-response" && candidateResponse.allowed === true;
           console.info("[bsk borrow] confirmation response", { tabId, allowed });
           settle(allowed);
         })

@@ -52,7 +52,7 @@
     "titleInactive": "Agent 请求借用标签页",
     "body": "AI Agent 希望将此标签页移入工作区。您可以拒绝或允许借用。",
     "targetTab": "目标标签页：",
-    "autoAllow": "{{count}} 秒后自动允许",
+    "autoDeny": "{{count}} 秒后自动拒绝",
     "deny": "拒绝",
     "allow": "允许",
     "notificationTitle": "BrowserSkill：Agent 请求借用标签页",

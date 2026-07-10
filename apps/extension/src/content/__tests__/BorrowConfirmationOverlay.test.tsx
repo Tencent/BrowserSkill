@@ -12,7 +12,7 @@ describe("BorrowConfirmationOverlay", () => {
     vi.useRealTimers();
   });
 
-  it("auto-allows after countdown reaches zero and progress transition ends", async () => {
+  it("auto-denies after countdown reaches zero and progress transition ends", async () => {
     const onAllow = vi.fn();
     const onDeny = vi.fn();
 
@@ -37,7 +37,7 @@ describe("BorrowConfirmationOverlay", () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
     }
-    expect(screen.getByText("0 秒后自动允许")).toBeTruthy();
+    expect(screen.getByText("0 秒后自动拒绝")).toBeTruthy();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
@@ -54,8 +54,8 @@ describe("BorrowConfirmationOverlay", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
-    expect(onAllow).toHaveBeenCalledTimes(1);
-    expect(onDeny).not.toHaveBeenCalled();
+    expect(onDeny).toHaveBeenCalledTimes(1);
+    expect(onAllow).not.toHaveBeenCalled();
   });
 
   it("only invokes onDeny once when deny is clicked repeatedly", async () => {

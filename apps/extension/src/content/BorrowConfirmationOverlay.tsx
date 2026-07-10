@@ -67,8 +67,8 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   const totalSeconds = Math.ceil(request.timeoutMs / 1000);
   const [secondsLeft, setSecondsLeft] = useState(totalSeconds);
   const [exiting, setExiting] = useState(false);
-  const [awaitingAutoAllow, setAwaitingAutoAllow] = useState(false);
-  const allowedRef = useRef(false);
+  const [awaitingAutoDeny, setAwaitingAutoDeny] = useState(false);
+  const settledRef = useRef(false);
   const onAllowRef = useRef(request.onAllow);
   const onDenyRef = useRef(request.onDeny);
   onAllowRef.current = request.onAllow;
@@ -76,8 +76,8 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
 
   useEffect(() => {
     if (secondsLeft <= 0) {
-      if (!allowedRef.current) {
-        setAwaitingAutoAllow(true);
+      if (!settledRef.current) {
+        setAwaitingAutoDeny(true);
       }
       return;
     }
@@ -86,9 +86,9 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   }, [secondsLeft]);
 
   function triggerAllow() {
-    if (allowedRef.current) return;
-    allowedRef.current = true;
-    setAwaitingAutoAllow(false);
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setAwaitingAutoDeny(false);
     setExiting(true);
     setTimeout(() => onAllowRef.current(), EXIT_ANIMATION_MS);
   }
@@ -98,9 +98,9 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   }
 
   function handleDeny() {
-    if (allowedRef.current) return;
-    allowedRef.current = true;
-    setAwaitingAutoAllow(false);
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setAwaitingAutoDeny(false);
     setExiting(true);
     setTimeout(() => onDenyRef.current(), EXIT_ANIMATION_MS);
   }
@@ -128,13 +128,13 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
             progress={progress}
             seconds={secondsLeft}
             onProgressTransitionEnd={(propertyName) => {
-              if (!awaitingAutoAllow || secondsLeft !== 0) return;
+              if (!awaitingAutoDeny || secondsLeft !== 0) return;
               if (propertyName !== "stroke-dashoffset") return;
-              triggerAllow();
+              handleDeny();
             }}
           />
           <span className="text-[13px] text-gray-500">
-            {t("borrowConfirmation.autoAllow", { count: secondsLeft })}
+            {t("borrowConfirmation.autoDeny", { count: secondsLeft })}
           </span>
         </div>
         <ActionButtons onDeny={handleDeny} onAllow={handleAllow} />
@@ -156,9 +156,9 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
       <BorrowProgressBar
         progress={progress}
         onProgressTransitionEnd={(event) => {
-          if (!awaitingAutoAllow || secondsLeft !== 0) return;
+          if (!awaitingAutoDeny || secondsLeft !== 0) return;
           if (event.propertyName !== "width") return;
-          triggerAllow();
+          handleDeny();
         }}
       />
       <ActionButtons onDeny={handleDeny} onAllow={handleAllow} gapClass="gap-2" />
