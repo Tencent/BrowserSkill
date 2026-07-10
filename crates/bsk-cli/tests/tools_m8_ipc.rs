@@ -24,7 +24,6 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
 use serde_json::Value;
-use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -43,9 +42,7 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
     let sock = tempfile_path("bsk-test-tools-m8");
     let handle = daemon::run(DaemonConfig::new(port), Some(sock.clone()))
         .await
