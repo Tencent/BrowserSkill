@@ -584,7 +584,17 @@ where
 
 async fn maybe_wait_for_browser(state: &Arc<DaemonState>, wait_ms: Option<u64>) {
     if let Some(wait) = clamp_browser_wait(wait_ms) {
-        state.browsers.wait_for_any_connected(wait).await;
+        // Smart wait strategy: if no browser is connected and we're just
+        // checking status (not starting a session), return quickly to
+        // avoid blocking the CLI. The user can always retry if needed.
+        if state.browsers.is_empty() {
+            // Use a shorter wait for status commands - 500ms max
+            // This prevents the CLI from appearing "stuck"
+            let short_wait = Duration::from_millis(500);
+            let _ = tokio::time::timeout(short_wait, state.browsers.wait_for_any_connected(wait)).await;
+        } else {
+            state.browsers.wait_for_any_connected(wait).await;
+        }
     }
 }
 

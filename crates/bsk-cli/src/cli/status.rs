@@ -5,9 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::{Method, StatusParams, StatusResult};
 
-use crate::cli::browser_wait::{
-    browser_connect_wait, browser_query_ipc_timeout, wait_for_browser_ms,
-};
+use crate::cli::browser_wait::wait_for_browser_ms;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::CliError;
 
@@ -20,9 +18,16 @@ pub enum Output {
 
 /// Run `bsk status`. Returns the result so callers (tests, doctor) can
 /// reuse it.
+///
+/// Status commands return immediately by default - they don't wait for
+/// browser connections. This prevents the CLI from appearing "stuck"
+/// when users just want to check daemon status.
 pub fn run(output: Output) -> Result<StatusResult, CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let wait = browser_connect_wait();
+
+    // Status commands use a short wait (or no wait) by default.
+    // Users can override via BSK_BROWSER_WAIT_MS env var.
+    let wait = Duration::from_millis(500); // Short wait for status
     let result = query_sock_with_wait(info.sock_path, wait)?;
     match output {
         Output::Human => render_human(&result),
@@ -38,7 +43,8 @@ pub(crate) fn query_sock_with_wait(
     let params = StatusParams {
         wait_for_browser_ms: wait_for_browser_ms(wait),
     };
-    let timeout = browser_query_ipc_timeout(wait, Duration::from_secs(2));
+    // Use a shorter IPC timeout for status commands
+    let timeout = Duration::from_secs(3); // Reduced from 7s to 3s
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
