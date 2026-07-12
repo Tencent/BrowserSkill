@@ -85,6 +85,7 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
         DaemonCmd::Start(args) => daemon::start::run_start(args),
         DaemonCmd::Stop => daemon::start::run_stop(),
         DaemonCmd::Restart(args) => {
+            // Stop phase: use shorter timeout for faster restart
             daemon::start::run_stop().map_err(|e| e.context("restart failed during stop phase"))?;
             daemon::start::run_start(args)
         }
