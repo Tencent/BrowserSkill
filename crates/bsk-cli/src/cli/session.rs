@@ -63,11 +63,11 @@ struct StartParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct StartReply {
-    session_id: String,
-    browser_instance_id: String,
+pub struct StartReply {
+    pub session_id: String,
+    pub browser_instance_id: String,
     #[serde(default)]
-    agent_window_id: Option<i64>,
+    pub agent_window_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,21 +78,21 @@ struct StopParams {
 }
 
 #[derive(Debug, Deserialize)]
-struct StopReply {
-    stopped: Vec<String>,
+pub struct StopReply {
+    pub stopped: Vec<String>,
     #[serde(default)]
-    failed: Vec<StopFailure>,
+    pub failed: Vec<StopFailure>,
     #[serde(default)]
-    returned_tab_ids: Vec<i64>,
+    pub returned_tab_ids: Vec<i64>,
     #[serde(default)]
-    return_failures: Vec<ReturnFailure>,
+    pub return_failures: Vec<ReturnFailure>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct StopFailure {
-    session_id: String,
-    code: ErrorCode,
-    message: String,
+pub struct StopFailure {
+    pub session_id: String,
+    pub code: ErrorCode,
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,14 +113,7 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
-    let result: Result<StartReply, CliError> = call(
-        sock,
-        Method::SessionStart,
-        Some(StartParams {
-            browser_instance_id: args.browser,
-        }),
-        Duration::from_secs(30),
-    );
+    let result = start_session(sock, args.browser);
     match result {
         Ok(reply) => match format {
             Format::Json => {
@@ -141,6 +134,31 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
         Err(err) => return Err(handle_start_error(err, format)),
     }
     Ok(())
+}
+
+/// Start a session and open the Agent Window. Used by `session start` and `record start`.
+pub fn start_session(sock: PathBuf, browser: Option<String>) -> Result<StartReply, CliError> {
+    call(
+        sock,
+        Method::SessionStart,
+        Some(StartParams {
+            browser_instance_id: browser,
+        }),
+        Duration::from_secs(30),
+    )
+}
+
+/// Stop a single session by id.
+pub fn stop_session(sock: PathBuf, session_id: &str) -> Result<StopReply, CliError> {
+    call(
+        sock,
+        Method::SessionStop,
+        Some(StopParams {
+            session_id: Some(session_id.to_string()),
+            all: false,
+        }),
+        SESSION_STOP_IPC_TIMEOUT,
+    )
 }
 
 /// Render a `session.start` failure (review I3).

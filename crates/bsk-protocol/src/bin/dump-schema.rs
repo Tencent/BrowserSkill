@@ -97,4 +97,13 @@ fn main() {
     dump!(WaitMsResult, "tool_wait_ms_result");
     dump!(RequestHelpParams, "tool_request_help_params");
     dump!(RequestHelpResult, "tool_request_help_result");
+
+    dump!(Trace, "trace");
+    dump!(TraceStep, "trace_step");
+    dump!(RecordStartParams, "tool_record_start_params");
+    dump!(RecordStartResult, "tool_record_start_result");
+    dump!(RecordStopParams, "tool_record_stop_params");
+    dump!(RecordStopResult, "tool_record_stop_result");
+    dump!(RecordAwaitParams, "tool_record_await_params");
+    dump!(RecordAwaitResult, "tool_record_await_result");
 }

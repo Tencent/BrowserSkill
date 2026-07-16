@@ -25,7 +25,7 @@ export default defineConfig({
     name: "BrowserSkill",
     description:
       "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
-    permissions: ["alarms", "debugger", "notifications", "tabs", "storage", "windows"],
+    permissions: ["alarms", "debugger", "notifications", "tabs", "storage", "webNavigation", "windows"],
     host_permissions: ["<all_urls>"],
     icons: {
       16: "icon/logo.png",

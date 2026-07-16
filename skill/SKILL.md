@@ -46,6 +46,20 @@ Optional: `bsk session start --browser <instance-id-or-label>` when multiple bro
 
 Emergency cleanup: `bsk session stop --all` or the Agent Window overlay **Stop all**.
 
+## Stop when the goal is met
+
+Tasks may come from a **user description** (“play 传奇 on QQ Music”) and/or an optional **`trace.json` textbook**. Either way, treat the session as a short goal loop — not an open-ended browsing session.
+
+1. **State the done condition** up front (from the user’s words, `purpose`, or the last essential textbook step). Example: “《传奇》已开始播放”.
+2. **Take the shortest path** to that condition. Prefer one snapshot → act → (optional) one check.
+3. **As soon as the goal is met, stop acting and `bsk session stop <id>`** unless the user explicitly asked to keep the window open (“先别关”, “keep browsing”, etc.).
+4. **No post-success exploration** — after success, do **not** click again, refresh, re-search, switch tabs, or “make sure it’s really playing”. Extra verification is a new task, not part of finishing.
+5. If unsure whether you’re done: at most **one** extra `bsk snapshot`, then either stop (goal looks met) or ask the user — do not keep clicking.
+
+**With a textbook:** execute `importance: essential` steps in order; after the last essential step (or when its `effect` / success hint is satisfied), apply rules 3–4 immediately. The textbook is guidance, not a license to keep controlling the browser.
+
+**Without a textbook:** the user’s request *is* the done condition. Completing that request ends the task — same stop rules.
+
 ## Core interaction loop
 
 Write operations only affect tabs in the **Agent Window** (or tabs you **borrowed** into it).
@@ -216,13 +230,32 @@ Human errors print `error:` + `hint:` on stderr; `--json` includes `code`, `mess
 
 Always **`bsk session stop <id>`** in a `finally`-style path so the Agent Window closes and borrowed tabs return.
 
+### Record a semantic flow textbook
+
+When the human wants to capture “how I do X in the browser” for later LLM-driven automation:
+
+```bash
+bsk record start --purpose "How to create and publish a document in the wiki." --url https://… [--output trace.json]
+# `--url` is required on a fresh session (about:blank cannot host the content script).
+# Blocks until the user clicks Finish in the browser recording panel.
+# Writes ./trace.json (override with --output) and closes the window.
+
+bsk record stop [--output trace.json]   # terminal fallback if the panel is unavailable
+```
+
+- The trace is a **semantic textbook** (`version: 3`: intent/page/effect + role/name/tag summaries; variable inputs left for the LLM). Recording stops once `trace.json` is written.
+- `--purpose` is optional metadata for post-hoc LLM context; it does **not** change what gets captured.
+- There is **no** `bsk replay` and **no** new execute-from-trace path — to redo the flow, reuse **existing** `session` / `snapshot` / `@eN` / `click` / `fill` tools after reading the textbook. Follow **Stop when the goal is met** when executing from a textbook or from a plain user request.
+- Do **not** record on banking/SSO/password-manager pages; password fields are redacted but traces may still contain sensitive text.
+
 ## Red lines
 
 1. **No token theft** — do not `bsk evaluate` on sensitive sites to read `localStorage`, cookies, or auth headers for exfiltration.
 2. **No long borrow** — do not leave a user's personal tab in the Agent Window across unrelated tasks.
 3. **No skip stop** — always `bsk session stop <id>`; never assume idle timeout will clean up.
-4. **No observe escalation before snapshot** — use `bsk snapshot` first; only use `bsk get-html` or `bsk screenshot` when the snapshot is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot ref — never skip snapshot just to grab a visual.
-5. **`evaluate` is powerful and risky** — use only when snapshot + click/fill/select cannot suffice; never on credential surfaces.
+4. **No post-success control** — once the user’s goal (or last textbook essential step) is met, do not keep operating the page; stop the session unless they asked to keep it open.
+5. **No observe escalation before snapshot** — use `bsk snapshot` first; only use `bsk get-html` or `bsk screenshot` when the snapshot is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot ref — never skip snapshot just to grab a visual.
+6. **`evaluate` is powerful and risky** — use only when snapshot + click/fill/select cannot suffice; never on credential surfaces.
 
 ---
 

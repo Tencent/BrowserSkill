@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RecordStartParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "purpose": {
+      "description": "Optional goal text stored on the exported trace for LLM context.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "url": {
+      "description": "Optional URL to navigate before recording begins.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

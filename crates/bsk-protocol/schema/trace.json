@@ -1,0 +1,385 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Trace",
+  "description": "Persisted semantic action trace exported by `tool.record_stop` / `await`.",
+  "type": "object",
+  "required": [
+    "recorded_at",
+    "steps",
+    "version"
+  ],
+  "properties": {
+    "entry": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TraceEntry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "purpose": {
+      "description": "Optional user-provided goal for post-hoc LLM context.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recorded_at": {
+      "description": "RFC 3339 timestamp when recording stopped.",
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TraceStep"
+      }
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "version": {
+      "description": "Schema version — LLM textbook traces are `3`.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "NavDestination": {
+      "description": "Navigate destination.",
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "url_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PageContext": {
+      "description": "Page context attached to a step.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PageRole"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PageRole": {
+      "description": "Coarse page role for LLM textbook steps.",
+      "type": "string",
+      "enum": [
+        "home",
+        "list",
+        "editor",
+        "dialog",
+        "other"
+      ]
+    },
+    "StepEffect": {
+      "description": "Side effect of a step (typically navigation).",
+      "type": "object",
+      "properties": {
+        "navigated_to": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url_pattern_after": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TargetDescriptor": {
+      "description": "Stable semantic handle for an interacted element.",
+      "type": "object",
+      "required": [
+        "tag"
+      ],
+      "properties": {
+        "name": {
+          "description": "Visible accessible name (label, button text, `aria-label`, …).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name_attr": {
+          "description": "`name` attribute when present (form fields).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nearby_label": {
+          "description": "Nearby visible label text when inferred.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placeholder": {
+          "description": "Placeholder text when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "description": "Accessibility / ARIA role when known (`button`, `textbox`, `link`, …).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag": {
+          "description": "HTML tag name, lowercased (`input`, `button`, `a`, …).",
+          "type": "string"
+        }
+      }
+    },
+    "TraceEntry": {
+      "description": "Entry-point context for the recorded flow.",
+      "type": "object",
+      "properties": {
+        "site": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_url_pattern": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TraceImportance": {
+      "description": "Whether the step should stay in the exported textbook.",
+      "type": "string",
+      "enum": [
+        "essential",
+        "optional"
+      ]
+    },
+    "TraceIntent": {
+      "description": "High-level intent of a textbook step.",
+      "type": "string",
+      "enum": [
+        "open_entry",
+        "navigate",
+        "search",
+        "open_item",
+        "provide_input",
+        "toggle",
+        "confirm",
+        "submit_key",
+        "other"
+      ]
+    },
+    "TraceOp": {
+      "description": "Action kind.",
+      "type": "string",
+      "enum": [
+        "click",
+        "fill",
+        "press",
+        "select",
+        "navigate"
+      ]
+    },
+    "TraceStep": {
+      "description": "One recorded user action (trace v3 flat textbook step).",
+      "type": "object",
+      "required": [
+        "id",
+        "op"
+      ],
+      "properties": {
+        "destination": {
+          "description": "navigate",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NavDestination"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effect": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StepEffect"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "importance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceImportance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "intent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TraceIntent"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "key": {
+          "description": "press",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "labels": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "modifiers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/KeyModifier"
+          }
+        },
+        "op": {
+          "$ref": "#/definitions/TraceOp"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PageContext"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redacted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TargetDescriptor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "value": {
+          "description": "fill",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "values": {
+          "description": "select",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

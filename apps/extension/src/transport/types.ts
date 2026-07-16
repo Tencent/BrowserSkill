@@ -506,3 +506,152 @@ export interface RequestHelpResult {
   tab_id: number;
   resolved_targets?: ResolvedTarget[];
 }
+
+// --------------------------------------------------------------------------
+// Semantic record payloads — mirror bsk-protocol record.rs (Trace v2)
+// --------------------------------------------------------------------------
+
+export interface TargetDescriptor {
+  role?: string;
+  name?: string;
+  tag: string;
+  name_attr?: string;
+  placeholder?: string;
+  nearby_label?: string;
+}
+
+export type TraceIntent =
+  | "open_entry"
+  | "navigate"
+  | "search"
+  | "open_item"
+  | "provide_input"
+  | "toggle"
+  | "confirm"
+  | "submit_key"
+  | "other";
+
+export type TraceImportance = "essential" | "optional";
+
+export type PageRole = "home" | "list" | "editor" | "dialog" | "other";
+
+export interface PageContext {
+  url?: string;
+  url_pattern?: string;
+  title?: string;
+  role?: PageRole;
+}
+
+export interface StepEffect {
+  navigated_to?: string;
+  url_pattern_after?: string;
+}
+
+export interface NavDestination {
+  url: string;
+  url_pattern?: string;
+}
+
+/** Capture/buffer draft before v3 textbook reduction. */
+export type DraftTraceStep =
+  | {
+      op: "click";
+      target: TargetDescriptor;
+      summary?: string;
+      navigated_to?: string;
+      page_url?: string;
+    }
+  | {
+      op: "fill";
+      target: TargetDescriptor;
+      value: string;
+      summary?: string;
+      redacted?: boolean;
+      page_url?: string;
+    }
+  | {
+      op: "press";
+      key: string;
+      target?: TargetDescriptor;
+      modifiers?: KeyModifier[];
+      summary?: string;
+      navigated_to?: string;
+      page_url?: string;
+    }
+  | {
+      op: "select";
+      target: TargetDescriptor;
+      values: string[];
+      labels?: string[];
+      summary?: string;
+      page_url?: string;
+    }
+  | {
+      op: "navigate";
+      url: string;
+      summary?: string;
+      page_url?: string;
+    };
+
+/** Exported textbook step (trace v3). */
+export interface TraceStep {
+  id: number;
+  op: "click" | "fill" | "press" | "select" | "navigate";
+  intent?: TraceIntent;
+  importance?: TraceImportance;
+  page?: PageContext;
+  summary?: string;
+  target?: TargetDescriptor;
+  effect?: StepEffect;
+  value?: string;
+  redacted?: boolean;
+  key?: string;
+  modifiers?: KeyModifier[];
+  values?: string[];
+  labels?: string[];
+  destination?: NavDestination;
+}
+
+export interface TraceEntry {
+  start_url?: string;
+  start_url_pattern?: string;
+  site?: string;
+}
+
+export interface Trace {
+  version: number;
+  purpose?: string;
+  recorded_at: string;
+  entry?: TraceEntry;
+  tab_id?: number;
+  steps: TraceStep[];
+}
+
+export interface RecordStartParams {
+  session_id: string;
+  tab_id?: number;
+  url?: string;
+  purpose?: string;
+}
+
+export interface RecordStartResult {
+  tab_id: number;
+  recording: boolean;
+}
+
+export interface RecordStopParams {
+  session_id: string;
+}
+
+export interface RecordStopResult {
+  trace: Trace;
+}
+
+export interface RecordAwaitParams {
+  session_id: string;
+  timeout_ms?: number;
+}
+
+export interface RecordAwaitResult {
+  trace: Trace;
+}

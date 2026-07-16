@@ -1,4 +1,4 @@
-//! Typed params/results for the 21 `tool.*` RPC methods (§7).
+//! Typed params/results for the `tool.*` RPC methods (§7).
 
 pub mod console;
 pub mod dialog;
@@ -6,6 +6,7 @@ pub mod human_loop;
 pub mod interaction;
 pub mod navigation;
 pub mod observation;
+pub mod record;
 pub mod script;
 pub mod session;
 pub mod tabs;
@@ -17,6 +18,7 @@ pub use human_loop::*;
 pub use interaction::*;
 pub use navigation::*;
 pub use observation::*;
+pub use record::*;
 pub use script::*;
 pub use session::*;
 pub use tabs::*;

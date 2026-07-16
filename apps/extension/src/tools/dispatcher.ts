@@ -12,6 +12,9 @@ import type {
   NavigateParams,
   PressParams,
   ProtocolFrame,
+  RecordAwaitParams,
+  RecordStartParams,
+  RecordStopParams,
   ReloadParams,
   RequestFrame,
   RequestHelpParams,
@@ -40,6 +43,7 @@ import {
   handleScreenshot,
   handleSnapshot,
 } from "./observation";
+import { handleRecordAwait, handleRecordStart, handleRecordStop } from "./record";
 import {
   handleSessionStart,
   handleSessionStop,
@@ -385,6 +389,45 @@ export class ToolDispatcher {
           ...(this.cdp ? { cdp: this.cdp } : {}),
           notifications: makeHelpNotifications(),
           notificationCopy: this.helpNotificationCopy?.(),
+          signal,
+        });
+      case "tool.record_start":
+        return handleRecordStart(this.sessions, req.params as RecordStartParams, {
+          tabsApi: chromeTabsApi,
+          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
+          bypassOverlay: async (tabId, enabled) => {
+            try {
+              await chrome.tabs.sendMessage(tabId, {
+                type: OVERLAY_AUTOMATION_BYPASS,
+                enabled,
+              });
+            } catch {
+              // Content script may be unavailable on restricted pages.
+            }
+          },
+          ...(this.cdp ? { cdp: this.cdp } : {}),
+          signal,
+        });
+      case "tool.record_stop":
+        return handleRecordStop(this.sessions, req.params as RecordStopParams, {
+          tabsApi: chromeTabsApi,
+          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
+          bypassOverlay: async (tabId, enabled) => {
+            try {
+              await chrome.tabs.sendMessage(tabId, {
+                type: OVERLAY_AUTOMATION_BYPASS,
+                enabled,
+              });
+            } catch {
+              // Content script may be unavailable on restricted pages.
+            }
+          },
+          signal,
+        });
+      case "tool.record_await":
+        return handleRecordAwait(this.sessions, req.params as RecordAwaitParams, {
+          tabsApi: chromeTabsApi,
+          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
           signal,
         });
       default:

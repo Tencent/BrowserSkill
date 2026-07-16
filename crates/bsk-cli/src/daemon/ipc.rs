@@ -241,7 +241,10 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolSelect
                 | Method::ToolEvaluate
                 | Method::ToolWaitForNavigation
-                | Method::ToolRequestHelp => {
+                | Method::ToolRequestHelp
+                | Method::ToolRecordStart
+                | Method::ToolRecordStop
+                | Method::ToolRecordAwait => {
                     handle_tool_dispatch(&state, rpc_id, method, params).await
                 }
                 Method::ToolWaitMs => handle_wait_ms(&state.abort_registry, rpc_id, params).await,
@@ -318,10 +321,19 @@ async fn handle_tool_dispatch(
         }
     };
     let entry = inflight_guard.entry();
-    let outcome = state
-        .tool_queues
-        .dispatch(&session_id, method, params, timeout, Some(entry))
-        .await;
+    // `record_stop` must reach the extension while `record_await` holds the
+    // serial busy lock — finishing the recording unblocks await.
+    let outcome = if method == Method::ToolRecordStop {
+        state
+            .tool_queues
+            .dispatch_unlocked(&session_id, method, params, timeout, Some(entry))
+            .await
+    } else {
+        state
+            .tool_queues
+            .dispatch(&session_id, method, params, timeout, Some(entry))
+            .await
+    };
     drop(inflight_guard);
     match outcome {
         Ok(v) => ResponseBody::Ok(v),
