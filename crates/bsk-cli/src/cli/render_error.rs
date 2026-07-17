@@ -93,7 +93,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::NotFound => RenderInfo {
             summary: "requested resource does not exist",
             hint: Some(
-                "the session, tab, or browser may have stopped; run `bsk sessions` / `bsk browsers` to see current state",
+                "the session, tab, or browser may have stopped; run `bsk session list` / `bsk browsers` to see current state",
             ),
             exit_code: 1,
         },
