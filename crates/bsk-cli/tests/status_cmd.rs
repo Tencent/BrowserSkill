@@ -92,7 +92,7 @@ fn bsk_doctor_runs_without_running_daemon() {
         .env("BSK_DOCTOR_BROWSER_WAIT_MS", "200")
         .output()
         .expect("run bsk doctor");
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(
         stdout.contains("bsk home writable"),
@@ -137,7 +137,7 @@ fn bsk_doctor_json_returns_structured_checks() {
         .env("BSK_DOCTOR_BROWSER_WAIT_MS", "200")
         .output()
         .expect("run bsk doctor --json");
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8(out.stdout).unwrap();
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("doctor --json should be valid JSON");
@@ -203,7 +203,7 @@ fn bsk_doctor_does_not_treat_live_non_daemon_pid_as_running() {
         .env("RUST_LOG", "warn")
         .output()
         .expect("run bsk doctor --json");
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8(out.stdout).unwrap();
     let checks: Vec<serde_json::Value> = serde_json::from_str(stdout.trim()).unwrap();
     let daemon = checks
@@ -262,7 +262,7 @@ fn bsk_doctor_flags_pid_mismatch_against_running_daemon() {
         .env("RUST_LOG", "warn")
         .output()
         .expect("bsk doctor --json");
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(1));
     let stdout = String::from_utf8(out.stdout).unwrap();
     let checks: Vec<serde_json::Value> = serde_json::from_str(stdout.trim()).unwrap();
 

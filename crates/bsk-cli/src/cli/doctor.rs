@@ -104,6 +104,12 @@ pub fn run(output: Output) -> Result<Vec<CheckResult>> {
     Ok(checks)
 }
 
+/// Whether the rendered doctor report contains an active failure.
+/// `NotApplicable` remains informational and must not change the exit code.
+pub fn has_failures(checks: &[CheckResult]) -> bool {
+    checks.iter().any(|check| check.status == CheckStatus::Fail)
+}
+
 /// Ensure the daemon is reachable and give the browser extension time to
 /// connect before checks run. Returns a single [`DaemonState`] snapshot
 /// for check evaluation.
@@ -498,6 +504,21 @@ mod m2_tests {
             hint.contains(EXTENSION_STORE_URL),
             "hint should include Chrome Web Store URL: {hint}"
         );
+    }
+
+    #[test]
+    fn only_active_failures_make_doctor_unsuccessful() {
+        let healthy = vec![
+            CheckResult::ok("ok", "ready"),
+            CheckResult::na("optional", "not connected"),
+        ];
+        assert!(!has_failures(&healthy));
+
+        let unhealthy = vec![
+            CheckResult::ok("ok", "ready"),
+            CheckResult::fail("broken", "not ready", "repair it"),
+        ];
+        assert!(has_failures(&unhealthy));
     }
 
     #[test]

@@ -56,9 +56,12 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
             } else {
                 Output::Human
             };
-            cli::doctor::run(output)
-                .map(|_| ())
-                .map_err(CliError::Local)
+            let checks = cli::doctor::run(output).map_err(CliError::Local)?;
+            if cli::doctor::has_failures(&checks) {
+                Err(CliError::RenderedExit { exit_code: 1 })
+            } else {
+                Ok(())
+            }
         }
         Command::InstallSkill(args) => {
             let output = if cli.flags.json {

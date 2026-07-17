@@ -43,6 +43,12 @@ pub enum CliError {
     #[error("{message}")]
     Rendered { code: ErrorCode, message: String },
 
+    /// Command already rendered its result and only needs to communicate
+    /// a command-specific non-zero status. Unlike `Rendered`, this is not
+    /// pretending that a daemon protocol error occurred.
+    #[error("command reported an unsuccessful status")]
+    RenderedExit { exit_code: u8 },
+
     /// Local transport / setup failure (e.g. couldn't reach the
     /// daemon, JSON encode failed). Maps to exit code 2.
     #[error(transparent)]
@@ -63,6 +69,7 @@ impl CliError {
         match self {
             CliError::Rpc { code, .. } => Some(*code),
             CliError::Rendered { code, .. } => Some(*code),
+            CliError::RenderedExit { .. } => None,
             CliError::Local(_) => None,
         }
     }
@@ -76,6 +83,9 @@ impl CliError {
 
     /// Map this error to the CLI exit code (§3.1).
     pub fn exit_code(&self) -> u8 {
+        if let CliError::RenderedExit { exit_code } = self {
+            return *exit_code;
+        }
         match self.code() {
             Some(code) => exit_code_for(code),
             None => 2, // local / protocol-level transport failure
@@ -207,7 +217,10 @@ pub fn render_with_extras(
     extras: Option<&dyn RenderExtras>,
 ) -> ExitCode {
     let exit = err.exit_code();
-    if matches!(err, CliError::Rendered { .. }) {
+    if matches!(
+        err,
+        CliError::Rendered { .. } | CliError::RenderedExit { .. }
+    ) {
         return ExitCode::from(exit);
     }
     let render_info = render_info_for(err);
@@ -259,7 +272,10 @@ pub fn render_with_extras(
 #[cfg(test)]
 pub(crate) fn render_human_to_string(err: &CliError, extras: Option<&dyn RenderExtras>) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    if matches!(err, CliError::Rendered { .. }) {
+    if matches!(
+        err,
+        CliError::Rendered { .. } | CliError::RenderedExit { .. }
+    ) {
         return String::new();
     }
     let render_info = render_info_for(err);
@@ -338,6 +354,13 @@ mod tests {
         };
         assert_eq!(err.code(), Some(ErrorCode::CdpFailed));
         assert_eq!(err.exit_code(), 3);
+    }
+
+    #[test]
+    fn rendered_exit_uses_command_specific_status_without_protocol_code() {
+        let err = CliError::RenderedExit { exit_code: 1 };
+        assert_eq!(err.code(), None);
+        assert_eq!(err.exit_code(), 1);
     }
 
     /// Review I2: the `--json` payload must be flat at the top level.

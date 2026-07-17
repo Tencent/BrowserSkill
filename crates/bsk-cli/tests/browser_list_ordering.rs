@@ -16,7 +16,6 @@ use bsk_protocol::system::BrowserStatusEntry;
 use bsk_protocol::{ErrorCode, Method};
 use rand::Rng;
 use serde::Deserialize;
-use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 fn tempfile_path(prefix: &str) -> PathBuf {
@@ -30,9 +29,7 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
-    let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
+    let port = 0;
 
     let config = DaemonConfig::new(port);
     let sock = tempfile_path("bsk-test-browser-list");
