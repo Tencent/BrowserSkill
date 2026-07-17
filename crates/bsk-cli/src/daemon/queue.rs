@@ -300,7 +300,8 @@ impl ToolQueueRegistry {
             queue_state.busy = true;
             (entry.sender.clone(), Arc::clone(&entry.state))
         };
-        dispatch_with_sender(
+        self.sessions.touch(sid);
+        let outcome = dispatch_with_sender(
             sender,
             state,
             sid.clone(),
@@ -310,7 +311,13 @@ impl ToolQueueRegistry {
             false,
             inflight,
         )
-        .await
+        .await;
+        // A long-running request may outlive the idle threshold. Touching
+        // after completion prevents the reaper from immediately closing it;
+        // while it is running, session.stop observes SessionBusy and retries
+        // on a later sweep rather than interrupting the tool.
+        self.sessions.touch(sid);
+        outcome
     }
 
     /// Stop accepting new jobs for `sid`, enqueue one final control RPC,

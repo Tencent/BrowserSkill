@@ -23,8 +23,11 @@ use tracing::{debug, info, warn};
 
 use crate::cli::daemon::StartArgs;
 use crate::daemon::{
-    browsers::EXTENSION_CONNECT_WAIT, info as daemon_info, ipc, lockfile, paths,
-    state::DaemonState, ws,
+    browsers::EXTENSION_CONNECT_WAIT,
+    info as daemon_info, ipc, lockfile, paths,
+    sessions::{StopSessionError, forget_session, stop_session},
+    state::DaemonState,
+    ws,
 };
 
 /// Internal env-var contract: the parent sets this on the spawned child
@@ -196,6 +199,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             .with_context(|| format!("bind IPC endpoint {}", sock_path.display()))?;
 
         let state = Arc::new(DaemonState::new(cfg.clone()));
+        let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
@@ -355,6 +359,8 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 
         let _ = ipc_shutdown_tx.send(());
         let _ = ipc_task.await;
+        session_idle_task.abort();
+        let _ = session_idle_task.await;
         ws_handle.shutdown.notify_waiters();
         let _ = ws_handle.task.await;
 
@@ -365,6 +371,55 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 
     drop(lock);
     Ok(())
+}
+
+/// Spawn the cooperative session-idle reaper shared by the production
+/// foreground daemon and the test/embed daemon entry point.
+pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let session_idle = state.config.session_idle;
+        let tick = (session_idle / 4)
+            .max(Duration::from_millis(100))
+            .min(Duration::from_secs(30));
+        let mut ticker = tokio::time::interval(tick);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval`'s first tick is immediate. Consume it so a zero/very
+        // short test setting still gets one real inactivity window.
+        ticker.tick().await;
+
+        loop {
+            ticker.tick().await;
+            let idle_ids = state.sessions.idle_ids_at(session_idle, Instant::now());
+            for session_id in idle_ids {
+                match stop_session(
+                    &state.browsers,
+                    &state.sessions,
+                    &state.tool_queues,
+                    &state.session_interrupts,
+                    &session_id,
+                    Duration::from_secs(10),
+                )
+                .await
+                {
+                    Ok(_) => info!(session = %session_id, "idle session stopped"),
+                    Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
+                        debug!(session = %session_id, "idle session still active; retrying later");
+                    }
+                    Err(StopSessionError::NotFound | StopSessionError::BrowserGone) => {
+                        forget_session(
+                            &state.sessions,
+                            &state.tool_queues,
+                            &state.session_interrupts,
+                            &session_id,
+                        );
+                    }
+                    Err(err) => {
+                        warn!(session = %session_id, error = %err, "failed to stop idle session");
+                    }
+                }
+            }
+        }
+    })
 }
 
 fn record_activity(activity: &Arc<Mutex<Instant>>) {
