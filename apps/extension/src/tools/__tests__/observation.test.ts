@@ -126,7 +126,7 @@ describe("handleScreenshot", () => {
     expect(res).toMatchObject({ code: "not_found" });
   });
 
-  it("captures an explicit active user tab in its real window", async () => {
+  it("rejects an explicit active user tab until it is borrowed", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const capture = vi.fn(async (_w: number) => `data:image/png;base64,${TINY_PNG}`);
@@ -136,9 +136,11 @@ describe("handleScreenshot", () => {
       { session_id: "aa11", tab_id: 9 },
       makeScreenshotDeps({ captureVisibleTab: capture, get, query: vi.fn() }),
     );
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.tab_id).toBe(9);
-    expect(capture).toHaveBeenCalledWith(200, { format: "png" });
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it("rejects screenshots for inactive explicit tabs", async () => {

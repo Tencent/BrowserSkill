@@ -82,10 +82,9 @@ export function lookupSession(
 }
 
 /**
- * Resolve the target tab for a tool call. Explicit `tabId` values are
- * checked against the session visibility rules: user tabs and the
- * current session's Agent Window are visible, other sessions' Agent
- * Windows are not.
+ * Resolve the target tab for a tool call. Explicit `tabId` values must
+ * belong to the current session's Agent Window. A user-owned tab becomes
+ * eligible only after `tab_borrow` moves it into that window.
  *
  * Returns the resolved `{tabId, windowId, active}` triple, or an
  * `RpcError` the caller propagates verbatim.
@@ -124,6 +123,13 @@ export async function resolveTargetTab(
         code: "not_found",
         message: `tab ${tabId} not found in session scope`,
       };
+    }
+    if (tab.windowId !== ctx.agentWindowId) {
+      return rpcError(
+        "permission_denied",
+        "agent_window_scope",
+        `tab ${tabId} is outside the Agent Window; borrow it before reading or interacting with it`,
+      );
     }
     return { tabId: tab.id, windowId: tab.windowId, active: tab.active === true };
   }
