@@ -28,8 +28,9 @@ export const CONFIRMATION_TIMEOUT_MS = 5000;
 const EXIT_ANIMATION_MS = 150;
 /** Matches BorrowConfirmationOverlay progress ring/bar transition (duration-1000). */
 export const PROGRESS_TRANSITION_MS = 1000;
-// UI auto-allows after countdown + progress transition + exit fade. Background
-// timeout must not fire before that chain completes or deny is ignored.
+// UI auto-denies after countdown + progress transition + exit fade. Background
+// timeout must not fire before that chain completes or the UI decision races
+// with an already-settled deny.
 export const BACKGROUND_TIMEOUT_MS =
   CONFIRMATION_TIMEOUT_MS + PROGRESS_TRANSITION_MS + EXIT_ANIMATION_MS + 500;
 
@@ -441,21 +442,24 @@ export async function requestBorrowConfirmation(
       resolve(allowed);
     };
 
-    const onAbort = () => {
-      if (activeMessageTabId !== null) {
-        const cancelMessage: BorrowCancelMessage = {
-          type: "borrow-cancel",
+    const dismissPendingOverlay = () => {
+      if (activeMessageTabId === null) return;
+      const cancelMessage: BorrowCancelMessage = {
+        type: "borrow-cancel",
+        requestId,
+      };
+      void Promise.resolve(tabsApi.sendMessage(activeMessageTabId, cancelMessage)).catch((err) => {
+        console.debug("[bsk borrow] cancel message failed", {
+          tabId,
+          messageTabId: activeMessageTabId,
           requestId,
-        };
-        void tabsApi.sendMessage(activeMessageTabId, cancelMessage).catch((err) => {
-          console.debug("[bsk borrow] cancel message failed", {
-            tabId,
-            messageTabId: activeMessageTabId,
-            requestId,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          error: err instanceof Error ? err.message : String(err),
         });
-      }
+      });
+    };
+
+    const onAbort = () => {
+      dismissPendingOverlay();
       settle(false);
     };
 
@@ -470,6 +474,7 @@ export async function requestBorrowConfirmation(
         tabId,
         messageTabId: activeMessageTabId,
       });
+      dismissPendingOverlay();
       settle(false);
     }, BACKGROUND_TIMEOUT_MS);
 

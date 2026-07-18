@@ -62,6 +62,9 @@ function BorrowToastStack({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Matches BorrowProgressBar / CountdownRing transition duration (duration-1000). */
+const PROGRESS_TRANSITION_MS = 1000;
+
 function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; isModal: boolean }) {
   const { t } = useTranslation("extension");
   const totalSeconds = Math.ceil(request.timeoutMs / 1000);
@@ -73,17 +76,6 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   const onDenyRef = useRef(request.onDeny);
   onAllowRef.current = request.onAllow;
   onDenyRef.current = request.onDeny;
-
-  useEffect(() => {
-    if (secondsLeft <= 0) {
-      if (!settledRef.current) {
-        setAwaitingAutoDeny(true);
-      }
-      return;
-    }
-    const id = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
-    return () => clearTimeout(id);
-  }, [secondsLeft]);
 
   function triggerAllow() {
     if (settledRef.current) return;
@@ -104,6 +96,27 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
     setExiting(true);
     setTimeout(() => onDenyRef.current(), EXIT_ANIMATION_MS);
   }
+
+  useEffect(() => {
+    if (secondsLeft <= 0) {
+      if (!settledRef.current) {
+        setAwaitingAutoDeny(true);
+      }
+      return;
+    }
+    const id = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [secondsLeft]);
+
+  // Prefer transitionend for visual sync, but fall back to a timer so
+  // background tabs / suppressed CSS transitions still auto-deny.
+  useEffect(() => {
+    if (!awaitingAutoDeny || settledRef.current) return;
+    const id = setTimeout(() => {
+      handleDeny();
+    }, PROGRESS_TRANSITION_MS);
+    return () => clearTimeout(id);
+  }, [awaitingAutoDeny]);
 
   const progress = secondsLeft / totalSeconds;
   const truncatedTitle =

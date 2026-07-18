@@ -437,6 +437,7 @@ describe("requestBorrowConfirmation", () => {
     expect(notificationId.startsWith(BORROW_NOTIFICATION_PREFIX)).toBe(true);
     expect(options.type).toBe("basic");
     expect(options.title).toMatch(/borrow/i);
+    expect(options.requireInteraction).toBe(true);
     expect(notifications.clear).toHaveBeenCalledWith(notificationId);
   });
 
@@ -463,10 +464,12 @@ describe("requestBorrowConfirmation", () => {
       userWindowWithActiveTab({ windowId: 77, tabId: 4242, url: "https://docs.example/" }),
     );
     // Keep sendMessage pending so the request stays live while we click.
+    // A second call may arrive if the background timeout dismisses the overlay.
     let resolveSend: (v: { type: string; allowed: boolean }) => void = () => undefined;
     tabs.sendMessage.mockImplementationOnce(
       () => new Promise((res) => (resolveSend = res as never)),
     );
+    tabs.sendMessage.mockResolvedValue(undefined);
 
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
@@ -476,7 +479,7 @@ describe("requestBorrowConfirmation", () => {
 
     // Simulate user clicking the OS notification.
     for (const l of listeners) l(notificationId);
-    await vi.runAllTimersAsync();
+    await Promise.resolve();
     expect(windows.update).toHaveBeenCalledWith(77, { focused: true });
 
     // Finish the borrow so the test resolves cleanly.
@@ -491,12 +494,20 @@ describe("requestBorrowConfirmation", () => {
       userWindowWithActiveTab({ windowId: 11, tabId: 42, url: "https://app.example/" }),
     );
     tabs.sendMessage.mockImplementationOnce(() => new Promise(() => undefined));
+    tabs.sendMessage.mockResolvedValueOnce(undefined);
 
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
     });
     await vi.advanceTimersByTimeAsync(BACKGROUND_TIMEOUT_MS);
     expect(await pending).toBe(false);
+    // Timeout must dismiss any in-flight overlay so Allow cannot linger.
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
+    const cancelMessage = tabs.sendMessage.mock.calls[1][1] as {
+      type: string;
+      requestId: string;
+    };
+    expect(cancelMessage.type).toBe("borrow-cancel");
   });
 
   it("dismisses the pending overlay and denies when aborted", async () => {
