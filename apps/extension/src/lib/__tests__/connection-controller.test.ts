@@ -152,6 +152,36 @@ describe("ConnectionController connectionEnabled", () => {
     expect(controller.snapshot().lastError).toBeNull();
   });
 
+  it("runs safe session cleanup before an intentional disconnect", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const order: string[] = [];
+    transport.disconnect.mockImplementation(async () => {
+      order.push("disconnect");
+    });
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      beforeDisconnect: async () => {
+        order.push("cleanup");
+      },
+    });
+
+    await controller.setConnectionEnabled(false);
+
+    expect(order).toEqual(["cleanup", "disconnect"]);
+  });
+
+  it("runs session cleanup when the transport disconnects unexpectedly", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const onDisconnected = vi.fn(async () => {});
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      onDisconnected,
+    });
+
+    transport.emitState("disconnected");
+    await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
+  });
+
   it("reconnects when connection is re-enabled", async () => {
     const controller = new ConnectionController();
     const transport = makeMockTransport();

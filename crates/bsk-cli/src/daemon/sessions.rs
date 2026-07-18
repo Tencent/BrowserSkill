@@ -535,10 +535,9 @@ pub async fn stop_session(
             Ok(result)
         }
         Err(DispatchError::Rpc(err)) => {
-            // After an extension SW restart the daemon still owns the
-            // session entry (the generation-guard ensures we do not
-            // purge across reconnects), but the extension's in-memory
-            // SessionManager is reset and now answers `not_found`.
+            // A legacy extension or an unusual reconnect race may still
+            // leave a daemon session after the extension's in-memory
+            // SessionManager has reset and now answers `not_found`.
             // Treat that as an authoritative signal that the session is
             // already gone and reconcile our local state instead of
             // leaving an orphan row visible to `bsk session list`
