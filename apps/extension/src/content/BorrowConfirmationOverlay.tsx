@@ -62,33 +62,25 @@ function BorrowToastStack({ children }: { children: React.ReactNode }) {
   );
 }
 
+/** Matches BorrowProgressBar / CountdownRing transition duration (duration-1000). */
+const PROGRESS_TRANSITION_MS = 1000;
+
 function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; isModal: boolean }) {
   const { t } = useTranslation("extension");
   const totalSeconds = Math.ceil(request.timeoutMs / 1000);
   const [secondsLeft, setSecondsLeft] = useState(totalSeconds);
   const [exiting, setExiting] = useState(false);
-  const [awaitingAutoAllow, setAwaitingAutoAllow] = useState(false);
-  const allowedRef = useRef(false);
+  const [awaitingAutoDeny, setAwaitingAutoDeny] = useState(false);
+  const settledRef = useRef(false);
   const onAllowRef = useRef(request.onAllow);
   const onDenyRef = useRef(request.onDeny);
   onAllowRef.current = request.onAllow;
   onDenyRef.current = request.onDeny;
 
-  useEffect(() => {
-    if (secondsLeft <= 0) {
-      if (!allowedRef.current) {
-        setAwaitingAutoAllow(true);
-      }
-      return;
-    }
-    const id = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
-    return () => clearTimeout(id);
-  }, [secondsLeft]);
-
   function triggerAllow() {
-    if (allowedRef.current) return;
-    allowedRef.current = true;
-    setAwaitingAutoAllow(false);
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setAwaitingAutoDeny(false);
     setExiting(true);
     setTimeout(() => onAllowRef.current(), EXIT_ANIMATION_MS);
   }
@@ -98,12 +90,33 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   }
 
   function handleDeny() {
-    if (allowedRef.current) return;
-    allowedRef.current = true;
-    setAwaitingAutoAllow(false);
+    if (settledRef.current) return;
+    settledRef.current = true;
+    setAwaitingAutoDeny(false);
     setExiting(true);
     setTimeout(() => onDenyRef.current(), EXIT_ANIMATION_MS);
   }
+
+  useEffect(() => {
+    if (secondsLeft <= 0) {
+      if (!settledRef.current) {
+        setAwaitingAutoDeny(true);
+      }
+      return;
+    }
+    const id = setTimeout(() => setSecondsLeft((s) => s - 1), 1000);
+    return () => clearTimeout(id);
+  }, [secondsLeft]);
+
+  // Prefer transitionend for visual sync, but fall back to a timer so
+  // background tabs / suppressed CSS transitions still auto-deny.
+  useEffect(() => {
+    if (!awaitingAutoDeny || settledRef.current) return;
+    const id = setTimeout(() => {
+      handleDeny();
+    }, PROGRESS_TRANSITION_MS);
+    return () => clearTimeout(id);
+  }, [awaitingAutoDeny]);
 
   const progress = secondsLeft / totalSeconds;
   const truncatedTitle =
@@ -128,13 +141,13 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
             progress={progress}
             seconds={secondsLeft}
             onProgressTransitionEnd={(propertyName) => {
-              if (!awaitingAutoAllow || secondsLeft !== 0) return;
+              if (!awaitingAutoDeny || secondsLeft !== 0) return;
               if (propertyName !== "stroke-dashoffset") return;
-              triggerAllow();
+              handleDeny();
             }}
           />
           <span className="text-[13px] text-gray-500">
-            {t("borrowConfirmation.autoAllow", { count: secondsLeft })}
+            {t("borrowConfirmation.autoDeny", { count: secondsLeft })}
           </span>
         </div>
         <ActionButtons onDeny={handleDeny} onAllow={handleAllow} />
@@ -156,9 +169,9 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
       <BorrowProgressBar
         progress={progress}
         onProgressTransitionEnd={(event) => {
-          if (!awaitingAutoAllow || secondsLeft !== 0) return;
+          if (!awaitingAutoDeny || secondsLeft !== 0) return;
           if (event.propertyName !== "width") return;
-          triggerAllow();
+          handleDeny();
         }}
       />
       <ActionButtons onDeny={handleDeny} onAllow={handleAllow} gapClass="gap-2" />

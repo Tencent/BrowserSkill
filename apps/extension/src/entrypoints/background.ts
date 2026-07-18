@@ -54,8 +54,7 @@ export default defineBackground(() => {
         deps: {
           // Skip every Agent Window when choosing where to render the
           // overlay — Agent Windows boot on about:blank, which has no
-          // content script, so sendMessage would fail-open and silently
-          // allow the borrow without any UI shown.
+          // content script, so they cannot surface an authorization decision.
           isAgentWindowId: (windowId) => sessions.findByWindowId(windowId) !== null,
           // Resolve i18n strings per-borrow so language switches take effect
           // without re-creating the dispatcher.
@@ -82,8 +81,8 @@ export default defineBackground(() => {
   // The Allow / Deny buttons on the OS notification are the *explicit*
   // authorization fallback when every candidate user window's content
   // script was missing (extension just reloaded, page in BFCache, etc.).
-  // Without this listener those button clicks would land nowhere and we'd
-  // be back to fail-open-after-sendMessage-failure.
+  // Without this listener those button clicks would land nowhere and the
+  // request would only resolve via the fail-closed background timeout.
   if (typeof chrome.notifications?.onButtonClicked?.addListener === "function") {
     attachBorrowNotificationButtonHandler({
       onButtonClicked: chrome.notifications.onButtonClicked,

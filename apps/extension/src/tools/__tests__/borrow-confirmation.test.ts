@@ -162,6 +162,22 @@ describe("requestBorrowConfirmation", () => {
     expect(await pending).toBe(false);
   });
 
+  it("denies malformed or missing confirmation responses", async () => {
+    tabs.get.mockResolvedValue({ id: 42, title: "Tab" });
+    windows.getLastFocused.mockResolvedValue(
+      userWindowWithActiveTab({ windowId: 11, tabId: 42, url: "https://app.example/" }),
+    );
+
+    for (const response of [undefined, {}, { allowed: true }, { type: "borrow-response" }]) {
+      tabs.sendMessage.mockResolvedValueOnce(response);
+      const pending = requestBorrowConfirmation(42, {
+        deps: { tabs, windows, notifications },
+      });
+      await vi.runAllTimersAsync();
+      expect(await pending).toBe(false);
+    }
+  });
+
   it("skips the Agent Window when it is lastFocusedWindow and falls back to a real user window", async () => {
     tabs.get.mockResolvedValueOnce({
       id: 42,
@@ -250,7 +266,7 @@ describe("requestBorrowConfirmation", () => {
     expect(tabs.sendMessage.mock.calls[1]?.[0]).toBe(301);
   });
 
-  it("does NOT fail-open immediately when every candidate's sendMessage fails — waits for notification button or timeout", async () => {
+  it("waits for a notification decision and denies when every UI path times out", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Tab" });
     windows.getLastFocused.mockResolvedValueOnce(
@@ -282,13 +298,13 @@ describe("requestBorrowConfirmation", () => {
 
     expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     // CRITICAL: previously this would already be settled(true). Now we
-    // require an explicit user choice (notification button) or timeout.
+    // require an explicit user choice (notification button) or safe timeout.
     expect(resolved).toBe(false);
 
-    // Allow the BACKGROUND_TIMEOUT_MS fail-open to fire so the test resolves.
+    // The background timeout must resolve the request without authorizing it.
     await vi.advanceTimersByTimeAsync(BACKGROUND_TIMEOUT_MS);
-    expect(await pending).toBe(true);
-    expect(resolvedValue).toBe(true);
+    expect(await pending).toBe(false);
+    expect(resolvedValue).toBe(false);
 
     const exhaustedWarn = warnSpy.mock.calls.find(
       (call) =>
@@ -375,7 +391,7 @@ describe("requestBorrowConfirmation", () => {
     expect(await pending).toBe(false);
   });
 
-  it("fail-opens when no injectable user window exists at all", async () => {
+  it("denies when no injectable user window exists at all", async () => {
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Stranded Tab" });
     windows.getLastFocused.mockResolvedValueOnce(
       userWindowWithActiveTab({ windowId: 500, tabId: 5001, url: "about:blank" }),
@@ -394,7 +410,7 @@ describe("requestBorrowConfirmation", () => {
     });
     await vi.runAllTimersAsync();
 
-    expect(await pending).toBe(true);
+    expect(await pending).toBe(false);
     expect(tabs.sendMessage).not.toHaveBeenCalled();
     // No notification either — there's no actionable target window.
     expect(notifications.create).not.toHaveBeenCalled();
@@ -421,6 +437,7 @@ describe("requestBorrowConfirmation", () => {
     expect(notificationId.startsWith(BORROW_NOTIFICATION_PREFIX)).toBe(true);
     expect(options.type).toBe("basic");
     expect(options.title).toMatch(/borrow/i);
+    expect(options.requireInteraction).toBe(true);
     expect(notifications.clear).toHaveBeenCalledWith(notificationId);
   });
 
@@ -447,10 +464,12 @@ describe("requestBorrowConfirmation", () => {
       userWindowWithActiveTab({ windowId: 77, tabId: 4242, url: "https://docs.example/" }),
     );
     // Keep sendMessage pending so the request stays live while we click.
+    // A second call may arrive if the background timeout dismisses the overlay.
     let resolveSend: (v: { type: string; allowed: boolean }) => void = () => undefined;
     tabs.sendMessage.mockImplementationOnce(
       () => new Promise((res) => (resolveSend = res as never)),
     );
+    tabs.sendMessage.mockResolvedValue(undefined);
 
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
@@ -460,7 +479,7 @@ describe("requestBorrowConfirmation", () => {
 
     // Simulate user clicking the OS notification.
     for (const l of listeners) l(notificationId);
-    await vi.runAllTimersAsync();
+    await Promise.resolve();
     expect(windows.update).toHaveBeenCalledWith(77, { focused: true });
 
     // Finish the borrow so the test resolves cleanly.
@@ -469,21 +488,29 @@ describe("requestBorrowConfirmation", () => {
     await pending;
   });
 
-  it("fail-opens after background timeout when content script never responds", async () => {
+  it("denies after background timeout when content script never responds", async () => {
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Tab" });
     windows.getLastFocused.mockResolvedValueOnce(
       userWindowWithActiveTab({ windowId: 11, tabId: 42, url: "https://app.example/" }),
     );
     tabs.sendMessage.mockImplementationOnce(() => new Promise(() => undefined));
+    tabs.sendMessage.mockResolvedValueOnce(undefined);
 
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
     });
     await vi.advanceTimersByTimeAsync(BACKGROUND_TIMEOUT_MS);
-    expect(await pending).toBe(true);
+    expect(await pending).toBe(false);
+    // Timeout must dismiss any in-flight overlay so Allow cannot linger.
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
+    const cancelMessage = tabs.sendMessage.mock.calls[1][1] as {
+      type: string;
+      requestId: string;
+    };
+    expect(cancelMessage.type).toBe("borrow-cancel");
   });
 
-  it("dismisses pending overlay and fail-opens when aborted", async () => {
+  it("dismisses the pending overlay and denies when aborted", async () => {
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Borrow Target" });
     windows.getLastFocused.mockResolvedValueOnce(
       userWindowWithActiveTab({ windowId: 11, tabId: 7, url: "https://app.example/" }),
@@ -500,7 +527,7 @@ describe("requestBorrowConfirmation", () => {
     controller.abort();
     await vi.runAllTimersAsync();
 
-    expect(await pending).toBe(true);
+    expect(await pending).toBe(false);
     expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const requestMessage = tabs.sendMessage.mock.calls[0][1] as { requestId: string };
     const cancelMessage = tabs.sendMessage.mock.calls[1][1] as {

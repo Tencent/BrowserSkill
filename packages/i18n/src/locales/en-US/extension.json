@@ -52,7 +52,7 @@
     "titleInactive": "Agent wants to borrow a tab",
     "body": "An AI agent wants to move this tab into its workspace. You can deny or allow the borrow.",
     "targetTab": "Target tab:",
-    "autoAllow": "Auto-allowing in {{count}}s",
+    "autoDeny": "Request expires in {{count}}s",
     "deny": "Deny",
     "allow": "Allow",
     "notificationTitle": "BrowserSkill: Agent wants to borrow a tab",

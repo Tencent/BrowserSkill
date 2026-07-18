@@ -12,7 +12,7 @@ describe("BorrowConfirmationOverlay", () => {
     vi.useRealTimers();
   });
 
-  it("auto-allows after countdown reaches zero and progress transition ends", async () => {
+  it("auto-denies after countdown reaches zero and progress transition ends", async () => {
     const onAllow = vi.fn();
     const onDeny = vi.fn();
 
@@ -37,10 +37,7 @@ describe("BorrowConfirmationOverlay", () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
     }
-    expect(screen.getByText("0 秒后自动允许")).toBeTruthy();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(1000);
-    });
+    expect(screen.getByText("0 秒后自动拒绝")).toBeTruthy();
     const progressCircle = container.querySelectorAll("svg circle")[1];
     expect(progressCircle).toBeTruthy();
     await act(() => {
@@ -54,8 +51,44 @@ describe("BorrowConfirmationOverlay", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150);
     });
-    expect(onAllow).toHaveBeenCalledTimes(1);
-    expect(onDeny).not.toHaveBeenCalled();
+    expect(onDeny).toHaveBeenCalledTimes(1);
+    expect(onAllow).not.toHaveBeenCalled();
+  });
+
+  it("auto-denies via timer fallback when progress transitionend never fires", async () => {
+    const onAllow = vi.fn();
+    const onDeny = vi.fn();
+
+    render(
+      <BorrowConfirmationOverlay
+        requests={[
+          {
+            id: "req-fallback",
+            isActiveTab: true,
+            tabTitle: "Example",
+            timeoutMs: 5000,
+            onAllow,
+            onDeny,
+          },
+        ]}
+      />,
+    );
+
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+    }
+    expect(screen.getByText("0 秒后自动拒绝")).toBeTruthy();
+    // No transitionend — the PROGRESS_TRANSITION_MS fallback must still deny.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150);
+    });
+    expect(onDeny).toHaveBeenCalledTimes(1);
+    expect(onAllow).not.toHaveBeenCalled();
   });
 
   it("only invokes onDeny once when deny is clicked repeatedly", async () => {
