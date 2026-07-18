@@ -172,6 +172,37 @@ export interface ConsoleResult {
   truncated: boolean;
 }
 
+export type NetworkEntryKind = "response" | "failure";
+
+export interface NetworkEntry {
+  sequence: number;
+  kind: NetworkEntryKind;
+  method?: string;
+  url?: string;
+  status?: number;
+  status_text?: string;
+  mime_type?: string;
+  resource_type?: string;
+  error_text?: string;
+  timestamp?: number;
+  truncated: boolean;
+}
+
+export interface NetworkParams {
+  session_id: string;
+  tab_id?: number;
+  since?: number;
+  limit?: number;
+  max_text_chars?: number;
+}
+
+export interface NetworkResult {
+  tab_id: number;
+  entries: NetworkEntry[];
+  next_since: number;
+  truncated: boolean;
+}
+
 export type TabScopeFilter = "user" | "agent" | "all";
 
 export interface TabInfo {

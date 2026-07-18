@@ -106,6 +106,13 @@ describe("ToolDispatcher", () => {
       send: vi.fn(),
       detachSession: vi.fn(async () => {}),
       ensureConsoleCapture: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
       consoleEntriesSince: vi.fn(
         () =>
           ({
@@ -149,6 +156,13 @@ describe("ToolDispatcher", () => {
     const cdp = {
       send: vi.fn(),
       detachSession: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();

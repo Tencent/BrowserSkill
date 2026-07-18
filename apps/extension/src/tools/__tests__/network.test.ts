@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
-import type { ConsoleResult } from "@/transport/types";
-import { handleConsole } from "../console";
+import type { NetworkResult } from "@/transport/types";
+import { handleNetwork, type NetworkCdpRunner } from "../network";
 
 function fakeAgentWindow(ids: number[]) {
   let i = 0;
@@ -21,7 +20,8 @@ function makeDeps(
   opts: {
     get?: (tabId: number) => Promise<chrome.tabs.Tab>;
     query?: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>;
-    result?: ConsoleResult;
+    result?: NetworkResult;
+    captureError?: Error;
   } = {},
 ) {
   const result =
@@ -31,14 +31,17 @@ function makeDeps(
       entries: [],
       next_since: 0,
       truncated: false,
-    } satisfies ConsoleResult);
-  const ensureConsoleCapture = vi.fn(async () => {});
-  const consoleEntriesSince = vi.fn(() => result);
+    } satisfies NetworkResult);
+  const ensureNetworkCapture = vi.fn(async () => {
+    if (opts.captureError) throw opts.captureError;
+  });
+  const networkEntriesSince = vi.fn(() => result);
+  const trackSessionTab = vi.fn();
   const cdp = {
-    send: vi.fn(),
-    ensureConsoleCapture,
-    consoleEntriesSince,
-  } as unknown as CdpRunner;
+    trackSessionTab,
+    ensureNetworkCapture,
+    networkEntriesSince,
+  } satisfies NetworkCdpRunner;
   const tabsApi = {
     get:
       opts.get ??
@@ -48,28 +51,30 @@ function makeDeps(
     query:
       opts.query ?? vi.fn(async () => [{ id: 7, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
-  return { cdp, tabsApi, ensureConsoleCapture, consoleEntriesSince };
+  return { cdp, tabsApi, ensureNetworkCapture, networkEntriesSince, trackSessionTab };
 }
 
-describe("handleConsole", () => {
+describe("handleNetwork", () => {
   it("reads the Agent Window active tab with safe defaults", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const deps = makeDeps({
       result: {
         tab_id: 7,
-        entries: [{ sequence: 3, kind: "console", level: "log", text: "hello", truncated: false }],
+        entries: [
+          { sequence: 3, kind: "response", url: "https://x/api", status: 404, truncated: false },
+        ],
         next_since: 3,
         truncated: false,
       },
     });
 
-    const res = await handleConsole(sm, { session_id: "aa11" }, deps);
+    const res = await handleNetwork(sm, { session_id: "aa11" }, deps);
 
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.entries[0].text).toBe("hello");
-    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(7);
-    expect(deps.consoleEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000, false);
+    expect(res.entries[0].status).toBe(404);
+    expect(deps.ensureNetworkCapture).toHaveBeenCalledWith(7);
+    expect(deps.networkEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000);
   });
 
   it("reads an explicit tab and forwards cursor options", async () => {
@@ -79,7 +84,7 @@ describe("handleConsole", () => {
       get: vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab),
     });
 
-    await handleConsole(
+    await handleNetwork(
       sm,
       {
         session_id: "aa11",
@@ -87,13 +92,24 @@ describe("handleConsole", () => {
         since: 12,
         limit: 75,
         max_text_chars: 1500,
-        include_stack: true,
       },
       deps,
     );
 
-    expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(9);
-    expect(deps.consoleEntriesSince).toHaveBeenCalledWith(9, 12, 75, 1500, true);
+    expect(deps.ensureNetworkCapture).toHaveBeenCalledWith(9);
+    expect(deps.networkEntriesSince).toHaveBeenCalledWith(9, 12, 75, 1500);
+  });
+
+  it("surfaces network capture failures as cdp_failed", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const deps = makeDeps({ captureError: new Error("Network.enable denied") });
+
+    const res = await handleNetwork(sm, { session_id: "aa11" }, deps);
+
+    expect(res).toEqual({ code: "cdp_failed", message: "Network.enable denied" });
+    expect(deps.trackSessionTab).toHaveBeenCalledWith("aa11", 7);
+    expect(deps.networkEntriesSince).not.toHaveBeenCalled();
   });
 
   it("hides other sessions' Agent Window tabs", async () => {
@@ -104,9 +120,9 @@ describe("handleConsole", () => {
       get: vi.fn(async () => ({ id: 9, windowId: 101, active: true }) as chrome.tabs.Tab),
     });
 
-    const res = await handleConsole(sm, { session_id: "aa11", tab_id: 9 }, deps);
+    const res = await handleNetwork(sm, { session_id: "aa11", tab_id: 9 }, deps);
 
     expect(res).toMatchObject({ code: "not_found" });
-    expect(deps.ensureConsoleCapture).not.toHaveBeenCalled();
+    expect(deps.ensureNetworkCapture).not.toHaveBeenCalled();
   });
 });

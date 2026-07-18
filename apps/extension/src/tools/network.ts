@@ -1,8 +1,7 @@
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
-import type { ConsoleParams, ConsoleResult, RpcError } from "@/transport/types";
+import type { NetworkParams, NetworkResult, RpcError } from "@/transport/types";
 import {
-  type CdpRunner,
   type ChromeTabsApi,
   chromeTabsApi,
   isRpcError,
@@ -11,42 +10,49 @@ import {
   resolveTargetTab,
 } from "./shared";
 
-export interface ConsoleDeps {
-  cdp: CdpRunner;
+export interface NetworkCdpRunner {
+  trackSessionTab?(sessionId: string, tabId: number): void;
+  ensureNetworkCapture(tabId: number): Promise<void>;
+  networkEntriesSince(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+  ): NetworkResult;
+}
+
+export interface NetworkDeps {
+  cdp: NetworkCdpRunner;
   tabsApi: ChromeTabsApi;
 }
 
-function defaultConsoleDeps(): ConsoleDeps {
+function defaultNetworkDeps(): NetworkDeps {
   return {
     cdp: new ChromiumCdp(),
     tabsApi: chromeTabsApi,
   };
 }
 
-export async function handleConsole(
+export async function handleNetwork(
   manager: SessionManager,
-  params: ConsoleParams,
-  deps: ConsoleDeps = defaultConsoleDeps(),
-): Promise<ConsoleResult | RpcError> {
-  const ctxOrErr = lookupSession(manager, params, "console");
+  params: NetworkParams,
+  deps: NetworkDeps = defaultNetworkDeps(),
+): Promise<NetworkResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "network");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const bounds = parseBufferedReadBounds(params);
   if (isRpcError(bounds)) return bounds;
   const target = await resolveTargetTab(manager, ctxOrErr, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
-  if (!deps.cdp.ensureConsoleCapture || !deps.cdp.consoleEntriesSince) {
-    return { code: "cdp_failed", message: "console capture requires CDP console support" };
-  }
 
   try {
-    await deps.cdp.ensureConsoleCapture(target.tabId);
     deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
-    return deps.cdp.consoleEntriesSince(
+    await deps.cdp.ensureNetworkCapture(target.tabId);
+    return deps.cdp.networkEntriesSince(
       target.tabId,
       bounds.since,
       bounds.limit,
       bounds.maxTextChars,
-      params.include_stack === true,
     );
   } catch (err) {
     return {

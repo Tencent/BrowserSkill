@@ -18,6 +18,7 @@ pub mod install_skill;
 pub mod interaction;
 pub mod logs;
 pub mod navigate;
+pub mod network;
 pub mod render_error;
 pub mod screenshot;
 pub mod session;
@@ -37,6 +38,7 @@ use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
 use crate::cli::interaction::{ClickArgs, FillArgs, PressArgs, SelectArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
+use crate::cli::network::NetworkArgs;
 use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
@@ -119,6 +121,9 @@ pub enum Command {
 
     /// Read buffered console/log/exception messages.
     Console(ConsoleArgs),
+
+    /// Read buffered network responses / failures.
+    Network(NetworkArgs),
 
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]

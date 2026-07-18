@@ -27,6 +27,9 @@ import type {
   ConsoleStackFrame,
   JavaScriptDialogInfo,
   JavaScriptDialogType,
+  NetworkEntry,
+  NetworkEntryKind,
+  NetworkResult,
 } from "@/transport/types";
 
 /**
@@ -87,6 +90,9 @@ const MAX_DIALOG_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_BUFFER = 200;
 const MAX_CONSOLE_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_STACK_FRAMES = 20;
+const MAX_NETWORK_BUFFER = 200;
+const MAX_NETWORK_FIELD_LENGTH = 4096;
+const MAX_NETWORK_REQUEST_META = 1024;
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -97,6 +103,16 @@ interface ParsedDialogOpening {
 }
 
 interface ParsedConsoleEntry extends Omit<ConsoleEntry, "sequence"> {}
+
+interface ParsedNetworkEntry extends Omit<NetworkEntry, "sequence"> {}
+
+/** Bounded request metadata remembered from `requestWillBeSent`. */
+interface NetworkRequestMeta {
+  url: string;
+  method?: string;
+  resourceType?: string;
+  truncated: boolean;
+}
 
 /**
  * Wrapper around `chrome.debugger` that owns the "attach once per
@@ -112,15 +128,21 @@ export class ChromiumCdp {
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
   private readonly consoleSequences = new Map<number, number>();
   private readonly consoleDomainsAttemptedTabs = new Set<number>();
+  private readonly networkBuffers = new Map<number, NetworkEntry[]>();
+  private readonly networkSequences = new Map<number, number>();
+  private readonly networkDomainsEnabledTabs = new Set<number>();
+  private readonly networkRequestMeta = new Map<number, Map<string, NetworkRequestMeta>>();
   private detachSubscription: { dispose(): void } | null = null;
   private dialogSubscription: { dispose(): void } | null = null;
   private consoleSubscription: { dispose(): void } | null = null;
+  private networkSubscription: { dispose(): void } | null = null;
 
   constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
     this.api = api;
     this.bindAutoDetach();
     this.bindDialogHandler();
     this.bindConsoleHandler();
+    this.bindNetworkHandler();
   }
 
   /** Attach to `tabId` if we haven't already in this driver. */
@@ -135,6 +157,7 @@ export class ChromiumCdp {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       await this.enablePageDomain(tabId);
       await this.enableConsoleDomains(tabId);
+      await this.enableNetworkDomainBestEffort(tabId);
       this.attachedTabs.add(tabId);
     })()
       .catch((err) => {
@@ -195,19 +218,44 @@ export class ChromiumCdp {
     includeStack: boolean,
   ): ConsoleResult {
     const buf = this.consoleBuffers.get(tabId) ?? [];
-    const hasCursor = typeof since === "number";
-    const candidates = hasCursor
-      ? buf.filter((entry) => entry.sequence > since)
-      : buf.slice(Math.max(0, buf.length - limit));
-    const limited = hasCursor ? candidates.slice(0, limit) : candidates;
-    const entries = limited.map((entry) => projectConsoleEntry(entry, maxTextChars, includeStack));
-    const lastReturned = entries.at(-1)?.sequence;
-    const nextSince = lastReturned ?? this.consoleSequences.get(tabId) ?? 0;
-    const droppedEntries = (this.consoleSequences.get(tabId) ?? 0) > buf.length;
-    const truncated =
-      droppedEntries ||
-      candidates.length > limited.length ||
-      entries.some((entry) => entry.truncated);
+    const { entries, nextSince, truncated } = readBufferedEntries(
+      buf,
+      this.consoleSequences.get(tabId) ?? 0,
+      since,
+      limit,
+      (entry) => projectConsoleEntry(entry, maxTextChars, includeStack),
+    );
+    return {
+      tab_id: tabId,
+      entries,
+      next_since: nextSince,
+      truncated,
+    };
+  }
+
+  /** Ensure CDP domains for network capture are enabled for this tab. */
+  async ensureNetworkCapture(tabId: number): Promise<void> {
+    if (!this.attachedTabs.has(tabId)) {
+      await this.ensureAttached(tabId);
+    }
+    await this.enableNetworkDomain(tabId);
+  }
+
+  /** Network entries observed on `tabId`, bounded for agent context safety. */
+  networkEntriesSince(
+    tabId: number,
+    since: number | undefined,
+    limit: number,
+    maxTextChars: number,
+  ): NetworkResult {
+    const buf = this.networkBuffers.get(tabId) ?? [];
+    const { entries, nextSince, truncated } = readBufferedEntries(
+      buf,
+      this.networkSequences.get(tabId) ?? 0,
+      since,
+      limit,
+      (entry) => projectNetworkEntry(entry, maxTextChars),
+    );
     return {
       tab_id: tabId,
       entries,
@@ -223,6 +271,7 @@ export class ChromiumCdp {
     this.attachedTabs.delete(tabId);
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
+    this.clearNetworkState(tabId);
     try {
       await this.api.detach({ tabId });
     } catch (err) {
@@ -265,6 +314,10 @@ export class ChromiumCdp {
     this.consoleBuffers.clear();
     this.consoleSequences.clear();
     this.consoleDomainsAttemptedTabs.clear();
+    this.networkBuffers.clear();
+    this.networkSequences.clear();
+    this.networkDomainsEnabledTabs.clear();
+    this.networkRequestMeta.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -289,6 +342,20 @@ export class ChromiumCdp {
       } catch (err) {
         console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
       }
+    }
+  }
+
+  private async enableNetworkDomain(tabId: number): Promise<void> {
+    if (this.networkDomainsEnabledTabs.has(tabId)) return;
+    await this.api.sendCommand({ tabId }, "Network.enable", {});
+    this.networkDomainsEnabledTabs.add(tabId);
+  }
+
+  private async enableNetworkDomainBestEffort(tabId: number): Promise<void> {
+    try {
+      await this.enableNetworkDomain(tabId);
+    } catch (err) {
+      console.debug("[bsk cdp] network domain enable failed", { tabId, err });
     }
   }
 
@@ -372,18 +439,100 @@ export class ChromiumCdp {
     if (!entry) return;
     const sequence = (this.consoleSequences.get(tabId) ?? 0) + 1;
     this.consoleSequences.set(tabId, sequence);
-    const buf = this.consoleBuffers.get(tabId) ?? [];
-    buf.push({ ...entry, sequence });
-    while (buf.length > MAX_CONSOLE_BUFFER) {
-      buf.shift();
-    }
-    this.consoleBuffers.set(tabId, buf);
+    appendBoundedEntry(this.consoleBuffers, tabId, { ...entry, sequence }, MAX_CONSOLE_BUFFER);
   }
 
   private clearConsoleState(tabId: number): void {
     this.consoleBuffers.delete(tabId);
     this.consoleSequences.delete(tabId);
     this.consoleDomainsAttemptedTabs.delete(tabId);
+  }
+
+  private bindNetworkHandler(): void {
+    if (this.networkSubscription) return;
+    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== "number") return;
+      switch (method) {
+        case "Network.requestWillBeSent":
+          this.rememberNetworkRequest(tabId, params);
+          break;
+        case "Network.responseReceived":
+          this.appendNetwork(
+            tabId,
+            parseNetworkResponse(this.takeNetworkRequest(tabId, params), params),
+          );
+          break;
+        case "Network.loadingFailed":
+          this.appendNetwork(
+            tabId,
+            parseNetworkFailure(this.takeNetworkRequest(tabId, params), params),
+          );
+          break;
+      }
+    };
+    this.api.onEvent.addListener(listener);
+    this.networkSubscription = {
+      dispose: () => this.api.onEvent.removeListener(listener),
+    };
+  }
+
+  private appendNetwork(tabId: number, entry: ParsedNetworkEntry | null): void {
+    if (!entry) return;
+    const sequence = (this.networkSequences.get(tabId) ?? 0) + 1;
+    this.networkSequences.set(tabId, sequence);
+    appendBoundedEntry(this.networkBuffers, tabId, { ...entry, sequence }, MAX_NETWORK_BUFFER);
+  }
+
+  /** Remember `requestWillBeSent` metadata so responses/failures can be attributed. */
+  private rememberNetworkRequest(tabId: number, params: unknown): void {
+    const raw = (params ?? {}) as Record<string, unknown>;
+    const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+    const request = (raw.request ?? {}) as Record<string, unknown>;
+    if (!id || typeof request.url !== "string") return;
+    const url = truncateText(request.url, MAX_NETWORK_FIELD_LENGTH);
+    const method = truncateOptionalText(
+      typeof request.method === "string" ? request.method : undefined,
+      MAX_NETWORK_FIELD_LENGTH,
+    );
+    const resourceType = truncateOptionalText(
+      typeof raw.type === "string" ? raw.type : undefined,
+      MAX_NETWORK_FIELD_LENGTH,
+    );
+    const tabMeta = this.networkRequestMeta.get(tabId) ?? new Map<string, NetworkRequestMeta>();
+    tabMeta.delete(id);
+    tabMeta.set(id, {
+      url: url.text,
+      method: method?.text,
+      resourceType: resourceType?.text,
+      truncated:
+        url.truncated || (method?.truncated ?? false) || (resourceType?.truncated ?? false),
+    });
+    while (tabMeta.size > MAX_NETWORK_REQUEST_META) {
+      const oldest = tabMeta.keys().next().value;
+      if (oldest === undefined) break;
+      tabMeta.delete(oldest);
+    }
+    this.networkRequestMeta.set(tabId, tabMeta);
+  }
+
+  /** Consume request metadata once its response or failure has been observed. */
+  private takeNetworkRequest(tabId: number, params: unknown): NetworkRequestMeta | undefined {
+    const raw = (params ?? {}) as Record<string, unknown>;
+    const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+    if (!id) return undefined;
+    const tabMeta = this.networkRequestMeta.get(tabId);
+    const info = tabMeta?.get(id);
+    tabMeta?.delete(id);
+    if (tabMeta?.size === 0) this.networkRequestMeta.delete(tabId);
+    return info;
+  }
+
+  private clearNetworkState(tabId: number): void {
+    this.networkBuffers.delete(tabId);
+    this.networkSequences.delete(tabId);
+    this.networkDomainsEnabledTabs.delete(tabId);
+    this.networkRequestMeta.delete(tabId);
   }
 
   private bindAutoDetach(): void {
@@ -395,6 +544,7 @@ export class ChromiumCdp {
         this.tabOwners.delete(source.tabId);
         this.clearDialogState(source.tabId);
         this.clearConsoleState(source.tabId);
+        this.clearNetworkState(source.tabId);
       }
     };
     this.api.onDetach.addListener(listener);
@@ -411,6 +561,8 @@ export class ChromiumCdp {
     this.dialogSubscription = null;
     this.consoleSubscription?.dispose();
     this.consoleSubscription = null;
+    this.networkSubscription?.dispose();
+    this.networkSubscription = null;
   }
 
   /** Detach tabs only when no other live session has claimed them. */
@@ -425,6 +577,45 @@ export class ChromiumCdp {
     }
     await Promise.all(tabsToDetach.map((tabId) => this.detach(tabId)));
   }
+}
+
+function appendBoundedEntry<T>(
+  buffers: Map<number, T[]>,
+  tabId: number,
+  entry: T,
+  maxEntries: number,
+): void {
+  const buffer = buffers.get(tabId) ?? [];
+  buffer.push(entry);
+  while (buffer.length > maxEntries) buffer.shift();
+  buffers.set(tabId, buffer);
+}
+
+function readBufferedEntries<
+  TEntry extends { sequence: number },
+  TProjected extends { sequence: number; truncated: boolean },
+>(
+  buffer: TEntry[],
+  currentSequence: number,
+  since: number | undefined,
+  limit: number,
+  project: (entry: TEntry) => TProjected,
+): { entries: TProjected[]; nextSince: number; truncated: boolean } {
+  const hasCursor = typeof since === "number";
+  const candidates = hasCursor ? buffer.filter((entry) => entry.sequence > since) : buffer;
+  const limited = hasCursor ? candidates.slice(0, limit) : candidates.slice(-limit);
+  const entries = limited.map(project);
+  const oldestSequence = buffer[0]?.sequence ?? currentSequence + 1;
+  const droppedEntries =
+    currentSequence > buffer.length && (!hasCursor || (since ?? 0) < oldestSequence - 1);
+  return {
+    entries,
+    nextSince: entries.at(-1)?.sequence ?? currentSequence,
+    truncated:
+      droppedEntries ||
+      candidates.length > limited.length ||
+      entries.some((entry) => entry.truncated),
+  };
 }
 
 function parseDialogOpeningParams(params: unknown): ParsedDialogOpening {
@@ -518,7 +709,7 @@ function makeConsoleEntry(input: {
   timestamp?: number;
   stack_trace: ConsoleStackFrame[];
 }): ParsedConsoleEntry {
-  const projected = truncateConsoleText(input.text, MAX_CONSOLE_FIELD_LENGTH);
+  const projected = truncateText(input.text, MAX_CONSOLE_FIELD_LENGTH);
   return {
     kind: input.kind,
     level: input.level,
@@ -542,7 +733,7 @@ function projectConsoleEntry(
   maxTextChars: number,
   includeStack: boolean,
 ): ConsoleEntry {
-  const projected = truncateConsoleText(entry.text, maxTextChars);
+  const projected = truncateText(entry.text, maxTextChars);
   return {
     sequence: entry.sequence,
     kind: entry.kind,
@@ -591,17 +782,120 @@ function firstLine(value: string | undefined): string | undefined {
   return value.split(/\r?\n/, 1)[0] || undefined;
 }
 
-function truncateConsoleText(
-  value: string,
-  maxChars: number,
-): { text: string; truncated: boolean } {
+function truncateText(value: string, maxChars: number): { text: string; truncated: boolean } {
   if (value.length <= maxChars) return { text: value, truncated: false };
   return { text: value.slice(0, maxChars), truncated: true };
 }
 
+function truncateOptionalText(
+  value: string | undefined,
+  maxChars: number,
+): { text: string; truncated: boolean } | undefined {
+  return value === undefined ? undefined : truncateText(value, maxChars);
+}
+
 function truncateOptionalConsoleField(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return truncateConsoleText(value, MAX_CONSOLE_FIELD_LENGTH).text;
+  return truncateOptionalText(value, MAX_CONSOLE_FIELD_LENGTH)?.text;
+}
+
+function parseNetworkResponse(
+  info: NetworkRequestMeta | undefined,
+  params: unknown,
+): ParsedNetworkEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  const response = (raw.response ?? {}) as Record<string, unknown>;
+  const hasResponseUrl = typeof response.url === "string";
+  const url = hasResponseUrl ? (response.url as string) : info?.url;
+  if (!url) return null;
+  return makeNetworkEntry({
+    kind: "response",
+    method: info?.method,
+    url,
+    status: typeof response.status === "number" ? response.status : undefined,
+    status_text: typeof response.statusText === "string" ? response.statusText : undefined,
+    mime_type: typeof response.mimeType === "string" ? response.mimeType : undefined,
+    resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    truncated: info?.truncated === true,
+  });
+}
+
+function parseNetworkFailure(
+  info: NetworkRequestMeta | undefined,
+  params: unknown,
+): ParsedNetworkEntry | null {
+  const raw = (params ?? {}) as Record<string, unknown>;
+  return makeNetworkEntry({
+    kind: "failure",
+    method: info?.method,
+    url: info?.url,
+    error_text: typeof raw.errorText === "string" ? raw.errorText : undefined,
+    resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
+    timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    truncated: info?.truncated === true,
+  });
+}
+
+function makeNetworkEntry(input: {
+  kind: NetworkEntryKind;
+  method?: string;
+  url?: string;
+  status?: number;
+  status_text?: string;
+  mime_type?: string;
+  resource_type?: string;
+  error_text?: string;
+  timestamp?: number;
+  truncated?: boolean;
+}): ParsedNetworkEntry {
+  const projectedMethod = truncateOptionalText(input.method, MAX_NETWORK_FIELD_LENGTH);
+  const projectedUrl = truncateOptionalText(input.url, MAX_NETWORK_FIELD_LENGTH);
+  const projectedStatusText = truncateOptionalText(input.status_text, MAX_NETWORK_FIELD_LENGTH);
+  const projectedMimeType = truncateOptionalText(input.mime_type, MAX_NETWORK_FIELD_LENGTH);
+  const projectedResourceType = truncateOptionalText(input.resource_type, MAX_NETWORK_FIELD_LENGTH);
+  const projectedError =
+    input.error_text !== undefined
+      ? truncateText(input.error_text, MAX_NETWORK_FIELD_LENGTH)
+      : undefined;
+  return {
+    kind: input.kind,
+    method: projectedMethod?.text,
+    url: projectedUrl?.text,
+    status: input.status,
+    status_text: projectedStatusText?.text,
+    mime_type: projectedMimeType?.text,
+    resource_type: projectedResourceType?.text,
+    error_text: projectedError?.text,
+    timestamp: input.timestamp,
+    truncated:
+      input.truncated === true ||
+      (projectedMethod?.truncated ?? false) ||
+      (projectedUrl?.truncated ?? false) ||
+      (projectedStatusText?.truncated ?? false) ||
+      (projectedMimeType?.truncated ?? false) ||
+      (projectedResourceType?.truncated ?? false) ||
+      (projectedError?.truncated ?? false),
+  };
+}
+
+function projectNetworkEntry(entry: NetworkEntry, maxTextChars: number): NetworkEntry {
+  const projectedUrl = truncateOptionalText(entry.url, maxTextChars);
+  const projectedError =
+    entry.error_text !== undefined ? truncateText(entry.error_text, maxTextChars) : undefined;
+  return {
+    sequence: entry.sequence,
+    kind: entry.kind,
+    method: entry.method,
+    url: projectedUrl?.text,
+    status: entry.status,
+    status_text: entry.status_text,
+    mime_type: entry.mime_type,
+    resource_type: entry.resource_type,
+    error_text: projectedError?.text,
+    timestamp: entry.timestamp,
+    truncated:
+      entry.truncated || (projectedUrl?.truncated ?? false) || (projectedError?.truncated ?? false),
+  };
 }
 
 function normalizeError(err: unknown): Error {

@@ -86,6 +86,9 @@ fn main() {
     dump!(ConsoleResult, "tool_console_result");
     dump!(ConsoleEntry, "tool_console_entry");
     dump!(ConsoleStackFrame, "tool_console_stack_frame");
+    dump!(NetworkParams, "tool_network_params");
+    dump!(NetworkResult, "tool_network_result");
+    dump!(NetworkEntry, "tool_network_entry");
 
     dump!(EvaluateParams, "tool_evaluate_params");
     dump!(EvaluateResult, "tool_evaluate_result");

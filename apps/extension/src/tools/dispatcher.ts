@@ -10,6 +10,7 @@ import type {
   NavigateBackParams,
   NavigateForwardParams,
   NavigateParams,
+  NetworkParams,
   PressParams,
   ProtocolFrame,
   ReloadParams,
@@ -33,6 +34,7 @@ import {
   handleNavigateForward,
   handleReload,
 } from "./navigation";
+import { handleNetwork, type NetworkCdpRunner } from "./network";
 import {
   type CdpRunner,
   chromeTabsCaptureApi,
@@ -64,12 +66,15 @@ import {
 } from "./tabs";
 import { handleWaitForNavigation } from "./waits";
 
+type DispatcherCdpRunner = CdpRunner &
+  NetworkCdpRunner & {
+    detachSession(sessionId: string): Promise<void>;
+  };
+
 export interface DispatcherDeps {
   transport: Transport;
   sessions: SessionManager;
-  cdp?: CdpRunner & {
-    detachSession(sessionId: string): Promise<void>;
-  };
+  cdp?: DispatcherCdpRunner;
   /**
    * Invoked whenever a dispatched RPC may have changed the live
    * session set (currently `tool.session_start` and
@@ -103,9 +108,7 @@ export interface DispatcherDeps {
 export class ToolDispatcher {
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
-  private readonly cdp?: CdpRunner & {
-    detachSession(sessionId: string): Promise<void>;
-  };
+  private readonly cdp?: DispatcherCdpRunner;
   private readonly onSessionsChanged?: () => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
@@ -283,6 +286,12 @@ export class ToolDispatcher {
         return handleConsole(
           this.sessions,
           req.params as ConsoleParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+        );
+      case "tool.network":
+        return handleNetwork(
+          this.sessions,
+          req.params as NetworkParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
         );
       case "tool.snapshot":

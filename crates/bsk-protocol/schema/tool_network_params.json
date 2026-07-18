@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NetworkParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "limit": {
+      "description": "Maximum number of entries to return. Extension applies safe defaults and caps.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "max_text_chars": {
+      "description": "Maximum characters returned per URL / error text. Extension applies safe defaults and caps.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "since": {
+      "description": "Return entries with sequence strictly greater than this cursor.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "description": "Optional target tab. Defaults to the Agent Window's currently active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  }
+}

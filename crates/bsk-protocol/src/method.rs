@@ -64,6 +64,8 @@ pub enum Method {
     ToolScreenshot,
     #[serde(rename = "tool.console")]
     ToolConsole,
+    #[serde(rename = "tool.network")]
+    ToolNetwork,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
     #[serde(rename = "tool.wait_for_navigation")]
@@ -127,6 +129,7 @@ impl Method {
             | Method::ToolGetHtml
             | Method::ToolScreenshot
             | Method::ToolConsole
+            | Method::ToolNetwork
             | Method::ToolWaitForNavigation
             | Method::ToolWaitMs
             | Method::ToolRequestHelp => false,
@@ -170,6 +173,13 @@ mod tests {
     }
 
     #[test]
+    fn network_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("tool.network")).unwrap();
+        assert_eq!(method, Method::ToolNetwork);
+        assert_eq!(serde_json::to_value(method).unwrap(), json!("tool.network"));
+    }
+
+    #[test]
     fn cancel_params_and_result_round_trip() {
         let params: CancelParams = serde_json::from_value(json!({ "rpc_id": "wait-1" })).unwrap();
         assert_eq!(params.rpc_id, "wait-1");
@@ -187,6 +197,7 @@ mod tests {
         assert!(!Method::ToolGetHtml.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
+        assert!(!Method::ToolNetwork.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
     }

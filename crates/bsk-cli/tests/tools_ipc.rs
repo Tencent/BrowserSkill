@@ -11,8 +11,9 @@ use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
     ConsoleEntry, ConsoleEntryKind, ConsoleParams, ConsoleResult, GetHtmlParams, GetHtmlResult,
-    ScreenshotParams, ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams,
-    SnapshotResult, TabInfo, TabListParams, TabListResult, TabScope,
+    NetworkEntry, NetworkEntryKind, NetworkParams, NetworkResult, ScreenshotParams,
+    ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams, SnapshotResult,
+    TabInfo, TabListParams, TabListResult, TabScope,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -362,6 +363,62 @@ async fn console_returns_buffered_entries() {
     assert_eq!(result.tab_id, 7);
     assert_eq!(result.next_since, 4);
     assert_eq!(result.entries[0].text, "deprecated API");
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn network_returns_buffered_entries() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolNetwork);
+        let params: NetworkParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(7));
+        assert_eq!(params.since, Some(3));
+        assert_eq!(params.limit, Some(50));
+        assert_eq!(params.max_text_chars, Some(1000));
+        ResponseBody::Ok(
+            serde_json::to_value(NetworkResult {
+                tab_id: 7,
+                entries: vec![NetworkEntry {
+                    sequence: 4,
+                    kind: NetworkEntryKind::Response,
+                    method: Some("GET".into()),
+                    url: Some("https://example.test/api".into()),
+                    status: Some(404),
+                    status_text: Some("Not Found".into()),
+                    mime_type: Some("application/json".into()),
+                    resource_type: Some("Fetch".into()),
+                    error_text: None,
+                    timestamp: None,
+                    truncated: false,
+                }],
+                next_since: 4,
+                truncated: false,
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: NetworkResult = ipc_tool_call(
+        &sock,
+        Method::ToolNetwork,
+        NetworkParams {
+            session_id,
+            tab_id: Some(7),
+            since: Some(3),
+            limit: Some(50),
+            max_text_chars: Some(1000),
+        },
+    )
+    .await
+    .expect("network ok");
+    assert_eq!(result.tab_id, 7);
+    assert_eq!(result.next_since, 4);
+    assert_eq!(result.entries[0].status, Some(404));
     handle.shutdown().await;
 }
 
