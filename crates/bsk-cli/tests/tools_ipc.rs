@@ -386,7 +386,7 @@ async fn network_returns_buffered_entries() {
                     sequence: 4,
                     kind: NetworkEntryKind::Response,
                     method: Some("GET".into()),
-                    url: "https://example.test/api".into(),
+                    url: Some("https://example.test/api".into()),
                     status: Some(404),
                     status_text: Some("Not Found".into()),
                     mime_type: Some("application/json".into()),

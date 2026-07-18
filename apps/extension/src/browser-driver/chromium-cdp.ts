@@ -106,11 +106,12 @@ interface ParsedConsoleEntry extends Omit<ConsoleEntry, "sequence"> {}
 
 interface ParsedNetworkEntry extends Omit<NetworkEntry, "sequence"> {}
 
-/** Request metadata remembered from `requestWillBeSent`, keyed by requestId. */
+/** Bounded request metadata remembered from `requestWillBeSent`. */
 interface NetworkRequestMeta {
   url: string;
   method?: string;
   resourceType?: string;
+  truncated: boolean;
 }
 
 /**
@@ -129,8 +130,8 @@ export class ChromiumCdp {
   private readonly consoleDomainsAttemptedTabs = new Set<number>();
   private readonly networkBuffers = new Map<number, NetworkEntry[]>();
   private readonly networkSequences = new Map<number, number>();
-  private readonly networkDomainsAttemptedTabs = new Set<number>();
-  private readonly networkRequestMeta = new Map<string, NetworkRequestMeta>();
+  private readonly networkDomainsEnabledTabs = new Set<number>();
+  private readonly networkRequestMeta = new Map<number, Map<string, NetworkRequestMeta>>();
   private detachSubscription: { dispose(): void } | null = null;
   private dialogSubscription: { dispose(): void } | null = null;
   private consoleSubscription: { dispose(): void } | null = null;
@@ -156,7 +157,7 @@ export class ChromiumCdp {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       await this.enablePageDomain(tabId);
       await this.enableConsoleDomains(tabId);
-      await this.enableNetworkDomains(tabId);
+      await this.enableNetworkDomainBestEffort(tabId);
       this.attachedTabs.add(tabId);
     })()
       .catch((err) => {
@@ -217,19 +218,13 @@ export class ChromiumCdp {
     includeStack: boolean,
   ): ConsoleResult {
     const buf = this.consoleBuffers.get(tabId) ?? [];
-    const hasCursor = typeof since === "number";
-    const candidates = hasCursor
-      ? buf.filter((entry) => entry.sequence > since)
-      : buf.slice(Math.max(0, buf.length - limit));
-    const limited = hasCursor ? candidates.slice(0, limit) : candidates;
-    const entries = limited.map((entry) => projectConsoleEntry(entry, maxTextChars, includeStack));
-    const lastReturned = entries.at(-1)?.sequence;
-    const nextSince = lastReturned ?? this.consoleSequences.get(tabId) ?? 0;
-    const droppedEntries = (this.consoleSequences.get(tabId) ?? 0) > buf.length;
-    const truncated =
-      droppedEntries ||
-      candidates.length > limited.length ||
-      entries.some((entry) => entry.truncated);
+    const { entries, nextSince, truncated } = readBufferedEntries(
+      buf,
+      this.consoleSequences.get(tabId) ?? 0,
+      since,
+      limit,
+      (entry) => projectConsoleEntry(entry, maxTextChars, includeStack),
+    );
     return {
       tab_id: tabId,
       entries,
@@ -242,9 +237,8 @@ export class ChromiumCdp {
   async ensureNetworkCapture(tabId: number): Promise<void> {
     if (!this.attachedTabs.has(tabId)) {
       await this.ensureAttached(tabId);
-      return;
     }
-    await this.enableNetworkDomains(tabId);
+    await this.enableNetworkDomain(tabId);
   }
 
   /** Network entries observed on `tabId`, bounded for agent context safety. */
@@ -255,19 +249,13 @@ export class ChromiumCdp {
     maxTextChars: number,
   ): NetworkResult {
     const buf = this.networkBuffers.get(tabId) ?? [];
-    const hasCursor = typeof since === "number";
-    const candidates = hasCursor
-      ? buf.filter((entry) => entry.sequence > since)
-      : buf.slice(Math.max(0, buf.length - limit));
-    const limited = hasCursor ? candidates.slice(0, limit) : candidates;
-    const entries = limited.map((entry) => projectNetworkEntry(entry, maxTextChars));
-    const lastReturned = entries.at(-1)?.sequence;
-    const nextSince = lastReturned ?? this.networkSequences.get(tabId) ?? 0;
-    const droppedEntries = (this.networkSequences.get(tabId) ?? 0) > buf.length;
-    const truncated =
-      droppedEntries ||
-      candidates.length > limited.length ||
-      entries.some((entry) => entry.truncated);
+    const { entries, nextSince, truncated } = readBufferedEntries(
+      buf,
+      this.networkSequences.get(tabId) ?? 0,
+      since,
+      limit,
+      (entry) => projectNetworkEntry(entry, maxTextChars),
+    );
     return {
       tab_id: tabId,
       entries,
@@ -328,7 +316,7 @@ export class ChromiumCdp {
     this.consoleDomainsAttemptedTabs.clear();
     this.networkBuffers.clear();
     this.networkSequences.clear();
-    this.networkDomainsAttemptedTabs.clear();
+    this.networkDomainsEnabledTabs.clear();
     this.networkRequestMeta.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
@@ -357,11 +345,15 @@ export class ChromiumCdp {
     }
   }
 
-  private async enableNetworkDomains(tabId: number): Promise<void> {
-    if (this.networkDomainsAttemptedTabs.has(tabId)) return;
-    this.networkDomainsAttemptedTabs.add(tabId);
+  private async enableNetworkDomain(tabId: number): Promise<void> {
+    if (this.networkDomainsEnabledTabs.has(tabId)) return;
+    await this.api.sendCommand({ tabId }, "Network.enable", {});
+    this.networkDomainsEnabledTabs.add(tabId);
+  }
+
+  private async enableNetworkDomainBestEffort(tabId: number): Promise<void> {
     try {
-      await this.api.sendCommand({ tabId }, "Network.enable", {});
+      await this.enableNetworkDomain(tabId);
     } catch (err) {
       console.debug("[bsk cdp] network domain enable failed", { tabId, err });
     }
@@ -447,12 +439,7 @@ export class ChromiumCdp {
     if (!entry) return;
     const sequence = (this.consoleSequences.get(tabId) ?? 0) + 1;
     this.consoleSequences.set(tabId, sequence);
-    const buf = this.consoleBuffers.get(tabId) ?? [];
-    buf.push({ ...entry, sequence });
-    while (buf.length > MAX_CONSOLE_BUFFER) {
-      buf.shift();
-    }
-    this.consoleBuffers.set(tabId, buf);
+    appendBoundedEntry(this.consoleBuffers, tabId, { ...entry, sequence }, MAX_CONSOLE_BUFFER);
   }
 
   private clearConsoleState(tabId: number): void {
@@ -468,13 +455,19 @@ export class ChromiumCdp {
       if (typeof tabId !== "number") return;
       switch (method) {
         case "Network.requestWillBeSent":
-          this.rememberNetworkRequest(params);
+          this.rememberNetworkRequest(tabId, params);
           break;
         case "Network.responseReceived":
-          this.appendNetwork(tabId, parseNetworkResponse(this.networkRequestMeta, params));
+          this.appendNetwork(
+            tabId,
+            parseNetworkResponse(this.takeNetworkRequest(tabId, params), params),
+          );
           break;
         case "Network.loadingFailed":
-          this.appendNetwork(tabId, parseNetworkFailure(this.networkRequestMeta, params));
+          this.appendNetwork(
+            tabId,
+            parseNetworkFailure(this.takeNetworkRequest(tabId, params), params),
+          );
           break;
       }
     };
@@ -488,36 +481,58 @@ export class ChromiumCdp {
     if (!entry) return;
     const sequence = (this.networkSequences.get(tabId) ?? 0) + 1;
     this.networkSequences.set(tabId, sequence);
-    const buf = this.networkBuffers.get(tabId) ?? [];
-    buf.push({ ...entry, sequence });
-    while (buf.length > MAX_NETWORK_BUFFER) {
-      buf.shift();
-    }
-    this.networkBuffers.set(tabId, buf);
+    appendBoundedEntry(this.networkBuffers, tabId, { ...entry, sequence }, MAX_NETWORK_BUFFER);
   }
 
   /** Remember `requestWillBeSent` metadata so responses/failures can be attributed. */
-  private rememberNetworkRequest(params: unknown): void {
+  private rememberNetworkRequest(tabId: number, params: unknown): void {
     const raw = (params ?? {}) as Record<string, unknown>;
     const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
     const request = (raw.request ?? {}) as Record<string, unknown>;
     if (!id || typeof request.url !== "string") return;
-    this.networkRequestMeta.set(id, {
-      url: request.url,
-      method: typeof request.method === "string" ? request.method : undefined,
-      resourceType: typeof raw.type === "string" ? raw.type : undefined,
+    const url = truncateText(request.url, MAX_NETWORK_FIELD_LENGTH);
+    const method = truncateOptionalText(
+      typeof request.method === "string" ? request.method : undefined,
+      MAX_NETWORK_FIELD_LENGTH,
+    );
+    const resourceType = truncateOptionalText(
+      typeof raw.type === "string" ? raw.type : undefined,
+      MAX_NETWORK_FIELD_LENGTH,
+    );
+    const tabMeta = this.networkRequestMeta.get(tabId) ?? new Map<string, NetworkRequestMeta>();
+    tabMeta.delete(id);
+    tabMeta.set(id, {
+      url: url.text,
+      method: method?.text,
+      resourceType: resourceType?.text,
+      truncated:
+        url.truncated || (method?.truncated ?? false) || (resourceType?.truncated ?? false),
     });
-    while (this.networkRequestMeta.size > MAX_NETWORK_REQUEST_META) {
-      const oldest = this.networkRequestMeta.keys().next().value;
+    while (tabMeta.size > MAX_NETWORK_REQUEST_META) {
+      const oldest = tabMeta.keys().next().value;
       if (oldest === undefined) break;
-      this.networkRequestMeta.delete(oldest);
+      tabMeta.delete(oldest);
     }
+    this.networkRequestMeta.set(tabId, tabMeta);
+  }
+
+  /** Consume request metadata once its response or failure has been observed. */
+  private takeNetworkRequest(tabId: number, params: unknown): NetworkRequestMeta | undefined {
+    const raw = (params ?? {}) as Record<string, unknown>;
+    const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
+    if (!id) return undefined;
+    const tabMeta = this.networkRequestMeta.get(tabId);
+    const info = tabMeta?.get(id);
+    tabMeta?.delete(id);
+    if (tabMeta?.size === 0) this.networkRequestMeta.delete(tabId);
+    return info;
   }
 
   private clearNetworkState(tabId: number): void {
     this.networkBuffers.delete(tabId);
     this.networkSequences.delete(tabId);
-    this.networkDomainsAttemptedTabs.delete(tabId);
+    this.networkDomainsEnabledTabs.delete(tabId);
+    this.networkRequestMeta.delete(tabId);
   }
 
   private bindAutoDetach(): void {
@@ -562,6 +577,45 @@ export class ChromiumCdp {
     }
     await Promise.all(tabsToDetach.map((tabId) => this.detach(tabId)));
   }
+}
+
+function appendBoundedEntry<T>(
+  buffers: Map<number, T[]>,
+  tabId: number,
+  entry: T,
+  maxEntries: number,
+): void {
+  const buffer = buffers.get(tabId) ?? [];
+  buffer.push(entry);
+  while (buffer.length > maxEntries) buffer.shift();
+  buffers.set(tabId, buffer);
+}
+
+function readBufferedEntries<
+  TEntry extends { sequence: number },
+  TProjected extends { sequence: number; truncated: boolean },
+>(
+  buffer: TEntry[],
+  currentSequence: number,
+  since: number | undefined,
+  limit: number,
+  project: (entry: TEntry) => TProjected,
+): { entries: TProjected[]; nextSince: number; truncated: boolean } {
+  const hasCursor = typeof since === "number";
+  const candidates = hasCursor ? buffer.filter((entry) => entry.sequence > since) : buffer;
+  const limited = hasCursor ? candidates.slice(0, limit) : candidates.slice(-limit);
+  const entries = limited.map(project);
+  const oldestSequence = buffer[0]?.sequence ?? currentSequence + 1;
+  const droppedEntries =
+    currentSequence > buffer.length && (!hasCursor || (since ?? 0) < oldestSequence - 1);
+  return {
+    entries,
+    nextSince: entries.at(-1)?.sequence ?? currentSequence,
+    truncated:
+      droppedEntries ||
+      candidates.length > limited.length ||
+      entries.some((entry) => entry.truncated),
+  };
 }
 
 function parseDialogOpeningParams(params: unknown): ParsedDialogOpening {
@@ -655,7 +709,7 @@ function makeConsoleEntry(input: {
   timestamp?: number;
   stack_trace: ConsoleStackFrame[];
 }): ParsedConsoleEntry {
-  const projected = truncateConsoleText(input.text, MAX_CONSOLE_FIELD_LENGTH);
+  const projected = truncateText(input.text, MAX_CONSOLE_FIELD_LENGTH);
   return {
     kind: input.kind,
     level: input.level,
@@ -679,7 +733,7 @@ function projectConsoleEntry(
   maxTextChars: number,
   includeStack: boolean,
 ): ConsoleEntry {
-  const projected = truncateConsoleText(entry.text, maxTextChars);
+  const projected = truncateText(entry.text, maxTextChars);
   return {
     sequence: entry.sequence,
     kind: entry.kind,
@@ -728,28 +782,30 @@ function firstLine(value: string | undefined): string | undefined {
   return value.split(/\r?\n/, 1)[0] || undefined;
 }
 
-function truncateConsoleText(
-  value: string,
-  maxChars: number,
-): { text: string; truncated: boolean } {
+function truncateText(value: string, maxChars: number): { text: string; truncated: boolean } {
   if (value.length <= maxChars) return { text: value, truncated: false };
   return { text: value.slice(0, maxChars), truncated: true };
 }
 
+function truncateOptionalText(
+  value: string | undefined,
+  maxChars: number,
+): { text: string; truncated: boolean } | undefined {
+  return value === undefined ? undefined : truncateText(value, maxChars);
+}
+
 function truncateOptionalConsoleField(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return truncateConsoleText(value, MAX_CONSOLE_FIELD_LENGTH).text;
+  return truncateOptionalText(value, MAX_CONSOLE_FIELD_LENGTH)?.text;
 }
 
 function parseNetworkResponse(
-  meta: Map<string, NetworkRequestMeta>,
+  info: NetworkRequestMeta | undefined,
   params: unknown,
 ): ParsedNetworkEntry | null {
   const raw = (params ?? {}) as Record<string, unknown>;
-  const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
   const response = (raw.response ?? {}) as Record<string, unknown>;
-  const info = id ? meta.get(id) : undefined;
-  const url = typeof response.url === "string" ? response.url : info?.url;
+  const hasResponseUrl = typeof response.url === "string";
+  const url = hasResponseUrl ? (response.url as string) : info?.url;
   if (!url) return null;
   return makeNetworkEntry({
     kind: "response",
@@ -760,88 +816,86 @@ function parseNetworkResponse(
     mime_type: typeof response.mimeType === "string" ? response.mimeType : undefined,
     resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
     timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    truncated: info?.truncated === true,
   });
 }
 
 function parseNetworkFailure(
-  meta: Map<string, NetworkRequestMeta>,
+  info: NetworkRequestMeta | undefined,
   params: unknown,
 ): ParsedNetworkEntry | null {
   const raw = (params ?? {}) as Record<string, unknown>;
-  const id = typeof raw.requestId === "string" ? raw.requestId : undefined;
-  const info = id ? meta.get(id) : undefined;
   return makeNetworkEntry({
     kind: "failure",
     method: info?.method,
-    url: info?.url ?? "(unknown)",
+    url: info?.url,
     error_text: typeof raw.errorText === "string" ? raw.errorText : undefined,
     resource_type: typeof raw.type === "string" ? raw.type : info?.resourceType,
     timestamp: typeof raw.timestamp === "number" ? raw.timestamp : undefined,
+    truncated: info?.truncated === true,
   });
 }
 
 function makeNetworkEntry(input: {
   kind: NetworkEntryKind;
   method?: string;
-  url: string;
+  url?: string;
   status?: number;
   status_text?: string;
   mime_type?: string;
   resource_type?: string;
   error_text?: string;
   timestamp?: number;
+  truncated?: boolean;
 }): ParsedNetworkEntry {
-  const projectedUrl = truncateNetworkText(input.url, MAX_NETWORK_FIELD_LENGTH);
+  const projectedMethod = truncateOptionalText(input.method, MAX_NETWORK_FIELD_LENGTH);
+  const projectedUrl = truncateOptionalText(input.url, MAX_NETWORK_FIELD_LENGTH);
+  const projectedStatusText = truncateOptionalText(input.status_text, MAX_NETWORK_FIELD_LENGTH);
+  const projectedMimeType = truncateOptionalText(input.mime_type, MAX_NETWORK_FIELD_LENGTH);
+  const projectedResourceType = truncateOptionalText(input.resource_type, MAX_NETWORK_FIELD_LENGTH);
   const projectedError =
     input.error_text !== undefined
-      ? truncateNetworkText(input.error_text, MAX_NETWORK_FIELD_LENGTH)
+      ? truncateText(input.error_text, MAX_NETWORK_FIELD_LENGTH)
       : undefined;
   return {
     kind: input.kind,
-    method: input.method,
-    url: projectedUrl.text,
+    method: projectedMethod?.text,
+    url: projectedUrl?.text,
     status: input.status,
-    status_text: truncateOptionalNetworkField(input.status_text),
-    mime_type: truncateOptionalNetworkField(input.mime_type),
-    resource_type: input.resource_type,
+    status_text: projectedStatusText?.text,
+    mime_type: projectedMimeType?.text,
+    resource_type: projectedResourceType?.text,
     error_text: projectedError?.text,
     timestamp: input.timestamp,
-    truncated: projectedUrl.truncated || (projectedError?.truncated ?? false),
+    truncated:
+      input.truncated === true ||
+      (projectedMethod?.truncated ?? false) ||
+      (projectedUrl?.truncated ?? false) ||
+      (projectedStatusText?.truncated ?? false) ||
+      (projectedMimeType?.truncated ?? false) ||
+      (projectedResourceType?.truncated ?? false) ||
+      (projectedError?.truncated ?? false),
   };
 }
 
 function projectNetworkEntry(entry: NetworkEntry, maxTextChars: number): NetworkEntry {
-  const projectedUrl = truncateNetworkText(entry.url, maxTextChars);
+  const projectedUrl = truncateOptionalText(entry.url, maxTextChars);
   const projectedError =
-    entry.error_text !== undefined
-      ? truncateNetworkText(entry.error_text, maxTextChars)
-      : undefined;
+    entry.error_text !== undefined ? truncateText(entry.error_text, maxTextChars) : undefined;
   return {
     sequence: entry.sequence,
     kind: entry.kind,
     method: entry.method,
-    url: projectedUrl.text,
+    url: projectedUrl?.text,
     status: entry.status,
     status_text: entry.status_text,
     mime_type: entry.mime_type,
     resource_type: entry.resource_type,
     error_text: projectedError?.text,
     timestamp: entry.timestamp,
-    truncated: entry.truncated || projectedUrl.truncated || (projectedError?.truncated ?? false),
+    truncated:
+      entry.truncated || (projectedUrl?.truncated ?? false) || (projectedError?.truncated ?? false),
   };
-}
-
-function truncateNetworkText(
-  value: string,
-  maxChars: number,
-): { text: string; truncated: boolean } {
-  if (value.length <= maxChars) return { text: value, truncated: false };
-  return { text: value.slice(0, maxChars), truncated: true };
-}
-
-function truncateOptionalNetworkField(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  return truncateNetworkText(value, MAX_NETWORK_FIELD_LENGTH).text;
 }
 
 function normalizeError(err: unknown): Error {

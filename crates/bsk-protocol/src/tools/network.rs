@@ -31,22 +31,14 @@ pub enum NetworkEntryKind {
     Failure,
 }
 
-impl NetworkEntryKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Response => "response",
-            Self::Failure => "failure",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct NetworkEntry {
     pub sequence: u64,
     pub kind: NetworkEntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
-    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// HTTP status code (`response` entries only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u32>,
@@ -108,7 +100,7 @@ mod tests {
                     sequence: 3,
                     kind: NetworkEntryKind::Response,
                     method: Some("GET".into()),
-                    url: "https://example.test/api".into(),
+                    url: Some("https://example.test/api".into()),
                     status: Some(404),
                     status_text: Some("Not Found".into()),
                     mime_type: Some("application/json".into()),
@@ -121,7 +113,7 @@ mod tests {
                     sequence: 4,
                     kind: NetworkEntryKind::Failure,
                     method: Some("GET".into()),
-                    url: "https://example.test/blocked".into(),
+                    url: None,
                     status: None,
                     status_text: None,
                     mime_type: None,
@@ -138,6 +130,7 @@ mod tests {
         assert_eq!(value["entries"][0]["kind"], json!("response"));
         assert_eq!(value["entries"][0]["status"], json!(404));
         assert_eq!(value["entries"][1]["kind"], json!("failure"));
+        assert!(value["entries"][1].get("url").is_none());
         assert_eq!(
             value["entries"][1]["error_text"],
             json!("net::ERR_BLOCKED_BY_CLIENT")

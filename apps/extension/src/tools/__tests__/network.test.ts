@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import type { CdpRunner } from "@/tools/shared";
 import type { NetworkResult } from "@/transport/types";
-import { handleNetwork } from "../network";
+import { handleNetwork, type NetworkCdpRunner } from "../network";
 
 function fakeAgentWindow(ids: number[]) {
   let i = 0;
@@ -22,6 +21,7 @@ function makeDeps(
     get?: (tabId: number) => Promise<chrome.tabs.Tab>;
     query?: (query: chrome.tabs.QueryInfo) => Promise<chrome.tabs.Tab[]>;
     result?: NetworkResult;
+    captureError?: Error;
   } = {},
 ) {
   const result =
@@ -32,13 +32,16 @@ function makeDeps(
       next_since: 0,
       truncated: false,
     } satisfies NetworkResult);
-  const ensureNetworkCapture = vi.fn(async () => {});
+  const ensureNetworkCapture = vi.fn(async () => {
+    if (opts.captureError) throw opts.captureError;
+  });
   const networkEntriesSince = vi.fn(() => result);
+  const trackSessionTab = vi.fn();
   const cdp = {
-    send: vi.fn(),
+    trackSessionTab,
     ensureNetworkCapture,
     networkEntriesSince,
-  } as unknown as CdpRunner;
+  } satisfies NetworkCdpRunner;
   const tabsApi = {
     get:
       opts.get ??
@@ -48,7 +51,7 @@ function makeDeps(
     query:
       opts.query ?? vi.fn(async () => [{ id: 7, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
-  return { cdp, tabsApi, ensureNetworkCapture, networkEntriesSince };
+  return { cdp, tabsApi, ensureNetworkCapture, networkEntriesSince, trackSessionTab };
 }
 
 describe("handleNetwork", () => {
@@ -74,7 +77,7 @@ describe("handleNetwork", () => {
     expect(deps.networkEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000);
   });
 
-  it("reads an explicit tab and forwards bounded options", async () => {
+  it("reads an explicit tab and forwards cursor options", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const deps = makeDeps({
@@ -87,25 +90,25 @@ describe("handleNetwork", () => {
         session_id: "aa11",
         tab_id: 9,
         since: 12,
-        limit: 500,
-        max_text_chars: 9999,
+        limit: 75,
+        max_text_chars: 1500,
       },
       deps,
     );
 
     expect(deps.ensureNetworkCapture).toHaveBeenCalledWith(9);
-    expect(deps.networkEntriesSince).toHaveBeenCalledWith(9, 12, 200, 4096);
+    expect(deps.networkEntriesSince).toHaveBeenCalledWith(9, 12, 75, 1500);
   });
 
-  it("rejects invalid bounds before touching CDP", async () => {
+  it("surfaces network capture failures as cdp_failed", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
-    const deps = makeDeps();
+    const deps = makeDeps({ captureError: new Error("Network.enable denied") });
 
-    const res = await handleNetwork(sm, { session_id: "aa11", limit: 0 }, deps);
+    const res = await handleNetwork(sm, { session_id: "aa11" }, deps);
 
-    expect(res).toMatchObject({ code: "invalid_params", message: /limit/ });
-    expect(deps.ensureNetworkCapture).not.toHaveBeenCalled();
+    expect(res).toEqual({ code: "cdp_failed", message: "Network.enable denied" });
+    expect(deps.trackSessionTab).toHaveBeenCalledWith("aa11", 7);
     expect(deps.networkEntriesSince).not.toHaveBeenCalled();
   });
 

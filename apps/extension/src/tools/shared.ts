@@ -9,13 +9,13 @@
 import type { DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
-import type {
-  ConsoleResult,
-  JavaScriptDialogInfo,
-  NetworkResult,
-  RpcError,
-} from "@/transport/types";
+import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
+
+const DEFAULT_BUFFERED_READ_LIMIT = 50;
+const MAX_BUFFERED_READ_LIMIT = 200;
+const DEFAULT_MAX_TEXT_CHARS = 1000;
+const MAX_TEXT_CHARS = 4096;
 
 /**
  * Subset of `chrome.tabs` we depend on across tool handlers. Kept on
@@ -58,13 +58,52 @@ export interface CdpRunner {
     maxTextChars: number,
     includeStack: boolean,
   ): ConsoleResult;
-  ensureNetworkCapture?(tabId: number): Promise<void>;
-  networkEntriesSince?(
-    tabId: number,
-    since: number | undefined,
-    limit: number,
-    maxTextChars: number,
-  ): NetworkResult;
+}
+
+export interface BufferedReadBounds {
+  since: number | undefined;
+  limit: number;
+  maxTextChars: number;
+}
+
+/** Parse the common cursor and output bounds used by buffered read tools. */
+export function parseBufferedReadBounds(params: {
+  since?: number;
+  limit?: number;
+  max_text_chars?: number;
+}): BufferedReadBounds | RpcError {
+  const since = params.since;
+  if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) {
+    return { code: "invalid_params", message: "since must be a non-negative integer" };
+  }
+  const limit = boundedOptionalInteger(
+    params.limit,
+    DEFAULT_BUFFERED_READ_LIMIT,
+    MAX_BUFFERED_READ_LIMIT,
+    "limit",
+  );
+  if (isRpcError(limit)) return limit;
+  const maxTextChars = boundedOptionalInteger(
+    params.max_text_chars,
+    DEFAULT_MAX_TEXT_CHARS,
+    MAX_TEXT_CHARS,
+    "max_text_chars",
+  );
+  if (isRpcError(maxTextChars)) return maxTextChars;
+  return { since, limit, maxTextChars };
+}
+
+function boundedOptionalInteger(
+  value: number | undefined,
+  defaultValue: number,
+  maxValue: number,
+  field: string,
+): number | RpcError {
+  if (value === undefined) return defaultValue;
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    return { code: "invalid_params", message: `${field} must be a positive integer` };
+  }
+  return Math.min(value, maxValue);
 }
 
 /**

@@ -32,8 +32,7 @@
       "type": "object",
       "required": [
         "kind",
-        "sequence",
-        "url"
+        "sequence"
       ],
       "properties": {
         "error_text": {
@@ -96,7 +95,10 @@
           "type": "boolean"
         },
         "url": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

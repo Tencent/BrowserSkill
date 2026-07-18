@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import { lookupSession } from "../shared";
+import { lookupSession, parseBufferedReadBounds } from "../shared";
 
 function fakeAgentWindow() {
   return {
@@ -38,5 +38,32 @@ describe("lookupSession", () => {
     const ctx = await sm.start("aa11");
     const result = lookupSession(sm, { session_id: "aa11" }, "tool.test");
     expect(result).toBe(ctx);
+  });
+});
+
+describe("parseBufferedReadBounds", () => {
+  it("applies shared defaults and caps", () => {
+    expect(parseBufferedReadBounds({})).toEqual({
+      since: undefined,
+      limit: 50,
+      maxTextChars: 1000,
+    });
+    expect(parseBufferedReadBounds({ since: 12, limit: 500, max_text_chars: 9999 })).toEqual({
+      since: 12,
+      limit: 200,
+      maxTextChars: 4096,
+    });
+  });
+
+  it.each([
+    [{ since: -1 }, "since"],
+    [{ since: 1.5 }, "since"],
+    [{ limit: 0 }, "limit"],
+    [{ max_text_chars: 0 }, "max_text_chars"],
+  ])("rejects invalid bounds in %o", (params, field) => {
+    expect(parseBufferedReadBounds(params)).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining(field),
+    });
   });
 });

@@ -89,17 +89,46 @@ fn render(reply: &NetworkResult, format: Format) -> Result<(), CliError> {
 
 fn render_entry(entry: &NetworkEntry) -> String {
     let method = entry.method.as_deref().unwrap_or("?");
+    let url = entry.url.as_deref().unwrap_or("(unknown)");
     match entry.kind {
         bsk_protocol::tools::NetworkEntryKind::Failure => {
             let err = entry.error_text.as_deref().unwrap_or("failed");
-            format!("#{} FAILED {method} {} — {err}", entry.sequence, entry.url)
+            format!("#{} FAILED {method} {url} - {err}", entry.sequence)
         }
         bsk_protocol::tools::NetworkEntryKind::Response => {
             let status = entry
                 .status
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "?".to_string());
-            format!("#{} {status} {method} {}", entry.sequence, entry.url)
+            format!("#{} {status} {method} {url}", entry.sequence)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bsk_protocol::tools::NetworkEntryKind;
+
+    #[test]
+    fn human_failure_output_uses_ascii_and_displays_unknown_url() {
+        let entry = NetworkEntry {
+            sequence: 7,
+            kind: NetworkEntryKind::Failure,
+            method: Some("GET".into()),
+            url: None,
+            status: None,
+            status_text: None,
+            mime_type: None,
+            resource_type: Some("Fetch".into()),
+            error_text: Some("net::ERR_FAILED".into()),
+            timestamp: None,
+            truncated: false,
+        };
+
+        assert_eq!(
+            render_entry(&entry),
+            "#7 FAILED GET (unknown) - net::ERR_FAILED"
+        );
     }
 }

@@ -7,13 +7,9 @@ import {
   chromeTabsApi,
   isRpcError,
   lookupSession,
+  parseBufferedReadBounds,
   resolveTargetTab,
 } from "./shared";
-
-const DEFAULT_CONSOLE_LIMIT = 50;
-const MAX_CONSOLE_LIMIT = 200;
-const DEFAULT_MAX_TEXT_CHARS = 1000;
-const MAX_TEXT_CHARS = 4096;
 
 export interface ConsoleDeps {
   cdp: CdpRunner;
@@ -34,7 +30,7 @@ export async function handleConsole(
 ): Promise<ConsoleResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "console");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
-  const bounds = parseConsoleBounds(params);
+  const bounds = parseBufferedReadBounds(params);
   if (isRpcError(bounds)) return bounds;
   const target = await resolveTargetTab(manager, ctxOrErr, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
@@ -50,7 +46,7 @@ export async function handleConsole(
       bounds.since,
       bounds.limit,
       bounds.maxTextChars,
-      bounds.includeStack,
+      params.include_stack === true,
     );
   } catch (err) {
     return {
@@ -58,51 +54,4 @@ export async function handleConsole(
       message: err instanceof Error ? err.message : String(err),
     };
   }
-}
-
-function parseConsoleBounds(params: ConsoleParams):
-  | {
-      since: number | undefined;
-      limit: number;
-      maxTextChars: number;
-      includeStack: boolean;
-    }
-  | RpcError {
-  const since = params.since;
-  if (since !== undefined && (!Number.isSafeInteger(since) || since < 0)) {
-    return { code: "invalid_params", message: "since must be a non-negative integer" };
-  }
-  const limit = boundedOptionalInteger(
-    params.limit,
-    DEFAULT_CONSOLE_LIMIT,
-    MAX_CONSOLE_LIMIT,
-    "limit",
-  );
-  if (isRpcError(limit)) return limit;
-  const maxTextChars = boundedOptionalInteger(
-    params.max_text_chars,
-    DEFAULT_MAX_TEXT_CHARS,
-    MAX_TEXT_CHARS,
-    "max_text_chars",
-  );
-  if (isRpcError(maxTextChars)) return maxTextChars;
-  return {
-    since,
-    limit,
-    maxTextChars,
-    includeStack: params.include_stack === true,
-  };
-}
-
-function boundedOptionalInteger(
-  value: number | undefined,
-  defaultValue: number,
-  maxValue: number,
-  field: string,
-): number | RpcError {
-  if (value === undefined) return defaultValue;
-  if (!Number.isSafeInteger(value) || value <= 0) {
-    return { code: "invalid_params", message: `${field} must be a positive integer` };
-  }
-  return Math.min(value, maxValue);
 }

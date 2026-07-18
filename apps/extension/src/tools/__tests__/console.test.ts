@@ -72,7 +72,7 @@ describe("handleConsole", () => {
     expect(deps.consoleEntriesSince).toHaveBeenCalledWith(7, undefined, 50, 1000, false);
   });
 
-  it("reads an explicit tab and forwards bounded options", async () => {
+  it("reads an explicit tab and forwards cursor options", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const deps = makeDeps({
@@ -85,27 +85,15 @@ describe("handleConsole", () => {
         session_id: "aa11",
         tab_id: 9,
         since: 12,
-        limit: 500,
-        max_text_chars: 9999,
+        limit: 75,
+        max_text_chars: 1500,
         include_stack: true,
       },
       deps,
     );
 
     expect(deps.ensureConsoleCapture).toHaveBeenCalledWith(9);
-    expect(deps.consoleEntriesSince).toHaveBeenCalledWith(9, 12, 200, 4096, true);
-  });
-
-  it("rejects invalid bounds before touching CDP", async () => {
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    await sm.start("aa11");
-    const deps = makeDeps();
-
-    const res = await handleConsole(sm, { session_id: "aa11", limit: 0 }, deps);
-
-    expect(res).toMatchObject({ code: "invalid_params", message: /limit/ });
-    expect(deps.ensureConsoleCapture).not.toHaveBeenCalled();
-    expect(deps.consoleEntriesSince).not.toHaveBeenCalled();
+    expect(deps.consoleEntriesSince).toHaveBeenCalledWith(9, 12, 75, 1500, true);
   });
 
   it("hides other sessions' Agent Window tabs", async () => {

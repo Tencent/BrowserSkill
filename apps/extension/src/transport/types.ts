@@ -178,7 +178,7 @@ export interface NetworkEntry {
   sequence: number;
   kind: NetworkEntryKind;
   method?: string;
-  url: string;
+  url?: string;
   status?: number;
   status_text?: string;
   mime_type?: string;
