@@ -50,6 +50,7 @@ export class WSTransport implements Transport {
   private explicitlyClosed = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private socketGeneration = 0;
   private connectingPromise: Promise<void> | null = null;
   private resolveConnect: ((value: void) => void) | null = null;
   private rejectConnect: ((reason: Error) => void) | null = null;
@@ -69,16 +70,26 @@ export class WSTransport implements Transport {
   }
 
   connect(): Promise<void> {
-    if (this.connectingPromise) return this.connectingPromise;
     if (this.currentState === "connected") return Promise.resolve();
 
     this.explicitlyClosed = false;
-    this.openSocket();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.connectingPromise) {
+      // A previous physical attempt closed before reaching OPEN. Keep the
+      // original caller's promise, but start the next socket generation.
+      if (!this.socket) this.openSocket();
+      return this.connectingPromise;
+    }
 
     this.connectingPromise = new Promise<void>((resolve, reject) => {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
+    this.openSocket();
     return this.connectingPromise;
   }
 
@@ -88,9 +99,12 @@ export class WSTransport implements Transport {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.socket) {
+    const socket = this.socket;
+    this.socket = null;
+    this.socketGeneration += 1;
+    if (socket) {
       try {
-        this.socket.close();
+        socket.close();
       } catch {
         // ignore
       }
@@ -135,10 +149,12 @@ export class WSTransport implements Transport {
 
   private openSocket(): void {
     this.setState("connecting");
+    const generation = ++this.socketGeneration;
     const socket = this.factory(this.url);
     this.socket = socket;
 
     socket.addEventListener("open", () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       this.reconnectAttempt = 0;
       this.setState("connected");
       const resolve = this.resolveConnect;
@@ -149,11 +165,12 @@ export class WSTransport implements Transport {
     });
 
     socket.addEventListener("message", (ev: MessageEvent) => {
+      if (!this.isCurrentSocket(socket, generation)) return;
       this.handleInbound((ev as unknown as MessageLikeEvent).data);
     });
 
     socket.addEventListener("close", (ev: Event) => {
-      this.handleClose(ev as unknown as CloseLikeEvent);
+      this.handleClose(socket, generation, ev as unknown as CloseLikeEvent);
     });
 
     socket.addEventListener("error", () => {
@@ -179,7 +196,8 @@ export class WSTransport implements Transport {
     }
   }
 
-  private handleClose(_ev: CloseLikeEvent): void {
+  private handleClose(socket: WebSocket, generation: number, _ev: CloseLikeEvent): void {
+    if (!this.isCurrentSocket(socket, generation)) return;
     this.socket = null;
     if (this.explicitlyClosed) {
       this.setState("disconnected");
@@ -196,8 +214,14 @@ export class WSTransport implements Transport {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.explicitlyClosed) return;
-      this.openSocket();
+      void this.connect().catch((err) => {
+        console.debug("[WSTransport] reconnect attempt failed", err);
+      });
     }, delay);
+  }
+
+  private isCurrentSocket(socket: WebSocket, generation: number): boolean {
+    return this.socket === socket && this.socketGeneration === generation;
   }
 
   private setState(next: ConnectionState): void {

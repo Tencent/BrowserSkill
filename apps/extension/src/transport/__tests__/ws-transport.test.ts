@@ -49,6 +49,10 @@ class FakeSocket {
     this.emit("close", { code, reason: "server-gone" });
   }
 
+  emitClose(code = 1006): void {
+    this.emit("close", { code, reason: "delayed-close" });
+  }
+
   private emit(type: string, ev: unknown): void {
     for (const l of this.listeners[type] ?? []) {
       // biome-ignore lint/suspicious/noExplicitAny: minimal fake mirrors WebSocket Event shape
@@ -200,6 +204,34 @@ describe("WSTransport", () => {
     expect(FakeSocket.instances.length).toBe(beforeCount);
     await vi.advanceTimersByTimeAsync(1);
     expect(FakeSocket.instances.length).toBe(beforeCount + 1);
+  });
+
+  it("cancels pending backoff and ignores delayed events from a replaced socket", async () => {
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    const initial = t.connect();
+    const first = lastSocket();
+    first.open();
+    await initial;
+
+    first.serverClose();
+    const reconnect = t.connect();
+    expect(FakeSocket.instances).toHaveLength(2);
+    const second = lastSocket();
+    second.open();
+    await reconnect;
+
+    // A real browser can deliver the old close callback after the replacement
+    // socket is already open. It must not clear or disconnect the new socket.
+    first.emitClose();
+    t.send({ id: "current", method: "system.ping" });
+    expect(second.sent).toEqual([JSON.stringify({ id: "current", method: "system.ping" })]);
+    expect(t.state).toBe("connected");
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(FakeSocket.instances).toHaveLength(2);
   });
 
   it("ignores malformed inbound messages (non-JSON) without throwing", async () => {
