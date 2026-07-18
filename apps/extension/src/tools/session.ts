@@ -11,6 +11,10 @@ export interface SessionStartResult {
   agent_window_id?: number;
 }
 
+export interface SessionStartDeps {
+  signal?: AbortSignal;
+}
+
 export interface SessionStopParams {
   session_id: string;
 }
@@ -44,6 +48,7 @@ export interface SessionStopDeps {
 export async function handleSessionStart(
   manager: SessionManager,
   params: SessionStartParams,
+  deps: SessionStartDeps = {},
 ): Promise<SessionStartResult | RpcError> {
   if (!params?.session_id) {
     return {
@@ -52,9 +57,16 @@ export async function handleSessionStart(
     };
   }
   try {
-    const ctx = await manager.start(params.session_id);
+    const ctx = await manager.start(params.session_id, { signal: deps.signal });
     return { agent_window_id: ctx.agentWindowId };
   } catch (err) {
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      (err as { name?: string }).name === "AbortError"
+    ) {
+      return { code: "cancelled", message: "session_start aborted" };
+    }
     // chrome.windows.create / SessionManager failures are not CDP
     // failures (§4.5 reserves cdp_failed for raw CDP errors). Surface
     // them as protocol_error so the CLI maps to the right exit code

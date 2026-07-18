@@ -348,23 +348,31 @@ describe("ToolDispatcher", () => {
     await flushMicrotasks();
     expect(ac?.signal.aborted).toBe(true);
 
-    // Cancel ack arrived synchronously; the slow tool replies with
-    // `cancelled` once the dispatcher's race observes the abort.
+    // Cancel ack arrives synchronously, but the original RPC must not reply
+    // until the in-progress window creation has completed and been rolled back.
     const ack = sent.find(
       (m) =>
         typeof (m as { id?: string }).id === "string" && (m as { id: string }).id === "cancel-1",
     );
     expect(ack).toEqual({ id: "cancel-1", result: { cancelled: true } });
 
+    expect(
+      sent.find(
+        (m) => typeof (m as { id?: string }).id === "string" && (m as { id: string }).id === "r-1",
+      ),
+    ).toBeUndefined();
+    expect(dispatcher.inflightAbortControllers.has("r-1")).toBe(true);
+
+    resolveCreate(9999);
+    await flushMicrotasks();
+
     const slow = sent.find(
       (m) => typeof (m as { id?: string }).id === "string" && (m as { id: string }).id === "r-1",
     );
     expect(slow).toMatchObject({ id: "r-1", error: { code: "cancelled" } });
     expect(dispatcher.inflightAbortControllers.has("r-1")).toBe(false);
-
-    // Drain the dangling create promise so vitest does not warn.
-    resolveCreate(9999);
-    await flushMicrotasks();
+    expect(sessions.has("aa44")).toBe(false);
+    expect(sessions.list()).toEqual([]);
   });
 
   it("cancel for an unknown rpc_id replies with cancelled=false", async () => {

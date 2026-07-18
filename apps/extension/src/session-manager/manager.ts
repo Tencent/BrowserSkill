@@ -25,6 +25,16 @@ export interface SessionManagerOptions {
   now?: () => number;
 }
 
+export interface SessionStartOptions {
+  signal?: AbortSignal;
+}
+
+function sessionStartAbortError(): Error {
+  const err = new Error("session_start aborted");
+  err.name = "AbortError";
+  return err;
+}
+
 /**
  * Owner of all live agent sessions inside the extension.
  *
@@ -128,22 +138,38 @@ export class SessionManager {
    * Returns the created window id so callers can echo it back to the
    * daemon in the `tool.session_start` reply.
    */
-  async start(sessionId: string): Promise<SessionContext> {
+  async start(sessionId: string, options: SessionStartOptions = {}): Promise<SessionContext> {
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
-    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME);
-    await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
-    const ctx: SessionContext = {
-      sessionId,
-      agentWindowId: windowId,
-      refStore: new RefStore(),
-      borrowedTabs: new Map(),
-      createdAtMs: this.now(),
-    };
-    this.sessions.set(sessionId, ctx);
-    this.windowIndex.set(windowId, sessionId);
-    return ctx;
+    if (options.signal?.aborted) throw sessionStartAbortError();
+
+    let windowId: number | null = null;
+    try {
+      windowId = await this.agentWindow.create(AGENT_WINDOW_HOME);
+      if (options.signal?.aborted) throw sessionStartAbortError();
+      await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
+      if (options.signal?.aborted) throw sessionStartAbortError();
+      const ctx: SessionContext = {
+        sessionId,
+        agentWindowId: windowId,
+        refStore: new RefStore(),
+        borrowedTabs: new Map(),
+        createdAtMs: this.now(),
+      };
+      this.sessions.set(sessionId, ctx);
+      this.windowIndex.set(windowId, sessionId);
+      return ctx;
+    } catch (err) {
+      if (windowId !== null) {
+        try {
+          await this.agentWindow.remove(windowId);
+        } catch (cleanupErr) {
+          console.warn(`[bh] failed to remove incomplete Agent Window ${windowId}`, cleanupErr);
+        }
+      }
+      throw err;
+    }
   }
 
   /**

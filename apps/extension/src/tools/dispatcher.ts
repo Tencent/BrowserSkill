@@ -189,7 +189,10 @@ export class ToolDispatcher {
     let body: ResponseFrame;
     let startedSession: string | null = null;
     try {
-      const result = await Promise.race([this.invoke(req, ac.signal), abortPromise(ac.signal)]);
+      // Await the handler itself. A cancel trips its AbortSignal immediately,
+      // but the RPC response is not sent until the handler has stopped or
+      // completed any required compensation for an already-started side effect.
+      const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
         body = { id: req.id, error: result };
       } else {
@@ -254,7 +257,7 @@ export class ToolDispatcher {
   private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
     switch (req.method) {
       case "tool.session_start":
-        return handleSessionStart(this.sessions, req.params as SessionStartParams);
+        return handleSessionStart(this.sessions, req.params as SessionStartParams, { signal });
       case "tool.session_stop":
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
@@ -262,18 +265,18 @@ export class ToolDispatcher {
       case "tool.tab_list":
         return handleTabList(this.sessions, req.params as TabListParams);
       case "tool.tab_create":
-        return handleTabCreate(this.sessions, req.params as TabCreateParams);
+        return handleTabCreate(this.sessions, req.params as TabCreateParams, { signal });
       case "tool.tab_close":
-        return handleTabClose(this.sessions, req.params as TabCloseParams);
+        return handleTabClose(this.sessions, req.params as TabCloseParams, { signal });
       case "tool.tab_select":
-        return handleTabSelect(this.sessions, req.params as TabSelectParams);
+        return handleTabSelect(this.sessions, req.params as TabSelectParams, { signal });
       case "tool.tab_borrow":
         return handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
         });
       case "tool.tab_return":
-        return handleTabReturn(this.sessions, req.params as TabReturnParams);
+        return handleTabReturn(this.sessions, req.params as TabReturnParams, { signal });
       case "tool.screenshot":
         return handleScreenshot(
           this.sessions,
@@ -281,12 +284,14 @@ export class ToolDispatcher {
           this.cdp
             ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi, captureApi: chromeTabsCaptureApi }
             : undefined,
+          signal,
         );
       case "tool.console":
         return handleConsole(
           this.sessions,
           req.params as ConsoleParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+          signal,
         );
       case "tool.network":
         return handleNetwork(
@@ -299,12 +304,14 @@ export class ToolDispatcher {
           this.sessions,
           req.params as SnapshotParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+          signal,
         );
       case "tool.get_html":
         return handleGetHtml(
           this.sessions,
           req.params as GetHtmlParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+          signal,
         );
       case "tool.navigate":
         return handleNavigate(
@@ -415,41 +422,7 @@ function isRpcError(v: unknown): v is RpcError {
   );
 }
 
-/**
- * Resolves never; rejects with `AbortLikeError` as soon as the signal
- * fires (or immediately if it is already aborted). Used by the
- * dispatcher to race the tool invocation so handlers without explicit
- * signal plumbing still surface a `cancelled` reply promptly.
- */
-function abortPromise(signal: AbortSignal): Promise<never> {
-  return new Promise<never>((_, reject) => {
-    if (signal.aborted) {
-      reject(new AbortLikeError());
-      return;
-    }
-    signal.addEventListener(
-      "abort",
-      () => {
-        reject(new AbortLikeError());
-      },
-      { once: true },
-    );
-  });
-}
-
-/**
- * Sentinel error class so [`isAbortLikeError`] can recognise our own
- * race-rejection without confusing it with a real CDP failure.
- */
-class AbortLikeError extends Error {
-  constructor() {
-    super("rpc aborted by daemon cancel");
-    this.name = "BhAbortError";
-  }
-}
-
 function isAbortLikeError(err: unknown): boolean {
-  if (err instanceof AbortLikeError) return true;
   if (err instanceof DOMException && err.name === "AbortError") return true;
   if (typeof err === "object" && err !== null && (err as { name?: string }).name === "AbortError") {
     return true;
