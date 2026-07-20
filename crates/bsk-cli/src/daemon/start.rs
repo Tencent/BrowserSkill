@@ -105,7 +105,7 @@ pub fn run_start(args: StartArgs) -> Result<()> {
 
     // Parent: spawn ourselves detached and wait for ready.
     spawn_detached(&args)?;
-    wait_for_ready(Duration::from_secs(3), args.port.filter(|port| *port != 0))?;
+    wait_for_ready(Duration::from_secs(2), args.port.filter(|port| *port != 0))?; // Reduced from 3s to 2s
     Ok(())
 }
 
@@ -128,7 +128,7 @@ pub fn run_stop() -> Result<()> {
         return Ok(());
     }
 
-    match confirm_daemon(&info, Duration::from_secs(2)) {
+    match confirm_daemon(&info, Duration::from_millis(1000)) { // Reduced from 2s to 1s
         Ok(status) if status.pid == info.pid => {}
         Ok(status) => {
             warn!(
@@ -156,14 +156,15 @@ pub fn run_stop() -> Result<()> {
     }
 
     send_term(info.pid)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // Reduced from 5s to 3s for faster daemon restart
+    let deadline = Instant::now() + Duration::from_secs(3);
     while Instant::now() < deadline {
         if !lockfile::pid_alive(info.pid) {
             let _ = daemon_info::remove();
             info!(pid = info.pid, "daemon stopped");
             return Ok(());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(25)); // Reduced from 50ms to 25ms
     }
 
     warn!(

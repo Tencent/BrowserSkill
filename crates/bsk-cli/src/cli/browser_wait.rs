@@ -2,10 +2,11 @@
 
 use std::time::Duration;
 
-use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
+use crate::daemon::browsers::STATUS_BROWSER_CONNECT_WAIT;
 
 /// Default wait passed to daemon status/list RPCs when the registry is empty.
-pub const DEFAULT_BROWSER_CONNECT_WAIT: Duration = EXTENSION_CONNECT_WAIT;
+/// Uses the shorter STATUS_BROWSER_CONNECT_WAIT for faster status responses.
+pub const DEFAULT_BROWSER_CONNECT_WAIT: Duration = STATUS_BROWSER_CONNECT_WAIT;
 /// Keep CLI-side waits aligned with the daemon's IPC clamp so a bad env value
 /// cannot inflate read timeouts after the daemon has already returned.
 const MAX_BROWSER_CONNECT_WAIT: Duration = Duration::from_secs(60);

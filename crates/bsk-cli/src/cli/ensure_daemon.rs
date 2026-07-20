@@ -18,7 +18,8 @@ use bsk_protocol::{Method, StatusParams, StatusResult};
 use crate::daemon::info::{self, DaemonInfo};
 
 /// Maximum time to wait for an auto-spawned daemon to become ready.
-pub const SPAWN_DEADLINE: Duration = Duration::from_millis(3_000);
+/// Reduced from 3s to 2s for faster CLI response.
+pub const SPAWN_DEADLINE: Duration = Duration::from_millis(2_000);
 
 /// Read `daemon.json` if it's valid; spawn the daemon otherwise. Returns
 /// the connection handle the caller should use.
@@ -63,7 +64,7 @@ fn wait_for_ready(timeout: Duration) -> Result<DaemonInfo> {
                 "no valid daemon.json after {timeout:?}; check `bsk logs`"
             ));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(25)); // Reduced from 50ms to 25ms
     }
 }
 

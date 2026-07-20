@@ -22,9 +22,21 @@ use bsk_protocol::system::BrowserStatusEntry;
 /// seconds to wake, discover the WS port, and finish `system.handshake`.
 /// `session.start` polls the registry for up to this long before
 /// returning `no_browser_connected`.
+///
+/// For `bsk status` / `bsk browsers` commands, the wait is shorter by
+/// default because users expect immediate feedback. Override via
+/// `BSK_BROWSER_WAIT_MS` env var.
 pub const EXTENSION_CONNECT_WAIT: Duration = Duration::from_secs(5);
 
-const EXTENSION_CONNECT_POLL: Duration = Duration::from_millis(50);
+/// Shorter wait for status/browsers commands - return quickly when no
+/// browser is connected rather than blocking for the full timeout.
+/// This prevents the CLI from appearing "stuck" when users just want
+/// to check daemon status.
+pub const STATUS_BROWSER_CONNECT_WAIT: Duration = Duration::from_secs(2);
+
+/// Poll interval for checking browser connection status.
+/// Reduced from 50ms to 25ms for faster response.
+const EXTENSION_CONNECT_POLL: Duration = Duration::from_millis(25);
 
 /// Process-wide monotonic counter for [`BrowserClient::generation`]. Used
 /// by the reconnect-race guard: when an old WS task tears down it only

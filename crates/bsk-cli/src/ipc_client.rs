@@ -212,7 +212,7 @@ mod platform {
         /// short-lived burst of clients, short enough that a wedged or
         /// preempted pipe surfaces as a clear error rather than a
         /// silent hang.
-        const CONNECT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+        const CONNECT_BUSY_TIMEOUT: Duration = Duration::from_secs(2); // Reduced from 5s to 2s
 
         pub async fn connect_path(pipe_name: PathBuf) -> Result<Self> {
             let name = pipe_name.to_string_lossy().into_owned();
@@ -221,7 +221,7 @@ mod platform {
                     match ClientOptions::new().open(&name) {
                         Ok(client) => return Ok::<NamedPipeClient, anyhow::Error>(client),
                         Err(err) if err.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
-                            sleep(Duration::from_millis(50)).await;
+                            sleep(Duration::from_millis(25)).await; // Reduced from 50ms to 25ms
                         }
                         Err(err) => {
                             return Err(anyhow::Error::from(err)
