@@ -97,6 +97,14 @@ export interface ScreenshotDeps {
   cdp?: SharedCdpRunner;
   tabsApi: ChromeTabsApi;
   captureApi: ChromeTabsCaptureApi;
+  /**
+   * Optionally suppress the content-script control overlay (breathing border
+   * and "stop" pill) while the capture runs so it does not appear in the
+   * image. Resolves once the overlay has hidden and painted; the caller
+   * restores it with `hidden = false` afterwards. Best-effort: on a restricted
+   * page with no content script this rejects and the shot proceeds as-is.
+   */
+  hideControlOverlay?: (tabId: number, hidden: boolean) => Promise<void>;
 }
 
 function defaultScreenshotDeps(): ScreenshotDeps {
@@ -146,6 +154,12 @@ async function captureElementScreenshot(
   }
 }
 
+/**
+ * Capture a screenshot of a tab (`tool.screenshot`). With a `ref` it clips to
+ * that element via CDP; otherwise it captures the visible tab. In both cases
+ * the control overlay is hidden for the duration of the shot (when
+ * `deps.hideControlOverlay` is provided) so its chrome stays out of the image.
+ */
 export async function handleScreenshot(
   manager: SessionManager,
   params: ScreenshotParams,
@@ -156,53 +170,77 @@ export async function handleScreenshot(
   const ctx = ctxOrErr;
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
-  const dialogCursor = deps.cdp ? markDialogCursor(deps.cdp, target.tabId) : 0;
-  const withShotDialogs = <T extends object>(result: T) =>
-    deps.cdp ? attachDialogs(deps.cdp, target.tabId, dialogCursor, result) : result;
 
-  const ref = typeof params.ref === "string" && params.ref.length > 0 ? params.ref : null;
-  if (ref) {
-    if (!deps.cdp) {
-      return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
+  // Suppress the control overlay (breathing border / "stop" pill) for the
+  // duration of the capture so it does not appear in the image. Best-effort:
+  // a restricted page with no content script just captures as-is.
+  let controlOverlayHidden = false;
+  if (deps.hideControlOverlay) {
+    try {
+      await deps.hideControlOverlay(target.tabId, true);
+      controlOverlayHidden = true;
+    } catch (err) {
+      console.debug("[bsk screenshot] hide control overlay failed", err);
     }
-    const node = resolveSnapshotRef(ctx, ref, target.tabId);
-    if (isRpcError(node)) return node;
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    const captured = await captureElementScreenshot(deps.cdp, target.tabId, node.backendNodeId);
-    if (isRpcError(captured)) return captured;
-    return withShotDialogs({
-      image_base64: captured.image_base64,
-      width: captured.width,
-      height: captured.height,
-      format: "png",
-      tab_id: target.tabId,
-    });
-  }
-
-  if (!target.active) {
-    return rpcError(
-      "invalid_params",
-      "tab_not_active",
-      `tab ${target.tabId} is not active; screenshot can only capture the visible tab`,
-    );
   }
 
   try {
-    const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
-    const image_base64 = stripDataUrlPrefix(dataUrl);
-    const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
-    return withShotDialogs({
-      image_base64,
-      width: dims.width,
-      height: dims.height,
-      format: "png",
-      tab_id: target.tabId,
-    });
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    const dialogCursor = deps.cdp ? markDialogCursor(deps.cdp, target.tabId) : 0;
+    const withShotDialogs = <T extends object>(result: T) =>
+      deps.cdp ? attachDialogs(deps.cdp, target.tabId, dialogCursor, result) : result;
+
+    const ref = typeof params.ref === "string" && params.ref.length > 0 ? params.ref : null;
+    if (ref) {
+      if (!deps.cdp) {
+        return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
+      }
+      const node = resolveSnapshotRef(ctx, ref, target.tabId);
+      if (isRpcError(node)) return node;
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const captured = await captureElementScreenshot(deps.cdp, target.tabId, node.backendNodeId);
+      if (isRpcError(captured)) return captured;
+      return withShotDialogs({
+        image_base64: captured.image_base64,
+        width: captured.width,
+        height: captured.height,
+        format: "png",
+        tab_id: target.tabId,
+      });
+    }
+
+    if (!target.active) {
+      return rpcError(
+        "invalid_params",
+        "tab_not_active",
+        `tab ${target.tabId} is not active; screenshot can only capture the visible tab`,
+      );
+    }
+
+    try {
+      const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
+      const image_base64 = stripDataUrlPrefix(dataUrl);
+      const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
+      return withShotDialogs({
+        image_base64,
+        width: dims.width,
+        height: dims.height,
+        format: "png",
+        tab_id: target.tabId,
+      });
+    } catch (err) {
+      return {
+        code: "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  } finally {
+    if (controlOverlayHidden && deps.hideControlOverlay) {
+      try {
+        await deps.hideControlOverlay(target.tabId, false);
+      } catch (err) {
+        console.debug("[bsk screenshot] restore control overlay failed", err);
+      }
+    }
   }
 }
 

@@ -17,10 +17,13 @@ import {
 } from "@/lib/help-bridge";
 import {
   isOverlayAgentOverlayResetMessage,
+  isOverlayScreenshotHideMessage,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_WHO_AM_I,
+  OVERLAY_SCREENSHOT_HIDE,
   type OverlayAgentOverlayResetMessage,
   type OverlayAutomationBypassMessage,
+  type OverlayScreenshotHideMessage,
   type OverlayWhoAmIResponse,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
@@ -49,6 +52,9 @@ export default defineContentScript({
     let overlayHost: HTMLElement | null = null;
     let hostLossReported = false;
     let remountInProgress = false;
+    // Set while a screenshot capture asks us to suppress the control overlay
+    // so its breathing border / "stop" pill stay out of the image.
+    let screenshotHidden = false;
 
     const ui = await createShadowRootUi(ctx, {
       name: "browser-skill-overlay",
@@ -87,7 +93,10 @@ export default defineContentScript({
               requests: overlayState.borrowRequests,
             }),
             React.createElement(ControlOverlay, {
-              visible: overlayState.controlVisible && overlayState.activeHelp === null,
+              visible:
+                overlayState.controlVisible &&
+                overlayState.activeHelp === null &&
+                !screenshotHidden,
               interrupting: overlayState.interrupting,
               automationBypass: overlayState.automationBypassCount > 0,
               onInterrupt: handleInterrupt,
@@ -136,10 +145,27 @@ export default defineContentScript({
         | HelpRequestMessage
         | HelpCancelMessage
         | OverlayAgentOverlayResetMessage
-        | OverlayAutomationBypassMessage,
+        | OverlayAutomationBypassMessage
+        | OverlayScreenshotHideMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response: BorrowResponseMessage | HelpResponseMessage) => void,
+      sendResponse: (
+        response: BorrowResponseMessage | HelpResponseMessage | OverlayScreenshotHideMessage,
+      ) => void,
     ) => {
+      if (isOverlayScreenshotHideMessage(message)) {
+        screenshotHidden = message.hidden;
+        renderOverlay();
+        if (!message.hidden) return false;
+        // Ack only after the overlay removal has painted so the caller
+        // captures a frame that no longer contains the control chrome.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() =>
+            sendResponse({ type: OVERLAY_SCREENSHOT_HIDE, hidden: true }),
+          ),
+        );
+        return true;
+      }
+
       if (
         message &&
         typeof message === "object" &&

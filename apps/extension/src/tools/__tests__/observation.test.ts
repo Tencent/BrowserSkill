@@ -36,6 +36,7 @@ function makeScreenshotDeps(
     get?: ScreenshotDeps["tabsApi"]["get"];
     query?: ScreenshotDeps["tabsApi"]["query"];
     captureVisibleTab?: ScreenshotDeps["captureApi"]["captureVisibleTab"];
+    hideControlOverlay?: ScreenshotDeps["hideControlOverlay"];
   } = {},
 ): ScreenshotDeps {
   const get =
@@ -50,6 +51,7 @@ function makeScreenshotDeps(
     cdp: opts.cdp,
     tabsApi,
     captureApi: { ...tabsApi, captureVisibleTab },
+    hideControlOverlay: opts.hideControlOverlay,
   };
 }
 
@@ -190,6 +192,95 @@ describe("handleScreenshot", () => {
       }),
     );
     expect(res).toMatchObject({ code: "cdp_failed", message: /captureVisibleTab refused/ });
+  });
+
+  it("hides the control overlay before capturing and restores it after", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const calls: string[] = [];
+    const hideControlOverlay = vi.fn(async (_tabId: number, hidden: boolean) => {
+      calls.push(hidden ? "hide" : "restore");
+    });
+    const capture = vi.fn(async (_w: number) => {
+      calls.push("capture");
+      return `data:image/png;base64,${TINY_PNG}`;
+    });
+    const get = vi.fn(async () => ({ id: 9, windowId: 200, active: true }) as chrome.tabs.Tab);
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", tab_id: 9 },
+      makeScreenshotDeps({ captureVisibleTab: capture, get, query: vi.fn(), hideControlOverlay }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(calls).toEqual(["hide", "capture", "restore"]);
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(1, 9, true);
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(2, 9, false);
+  });
+
+  it("restores the control overlay even when the capture fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const hideControlOverlay = vi.fn(async () => {});
+    const capture = vi.fn(async () => {
+      throw new Error("captureVisibleTab refused");
+    });
+    const get = vi.fn(async () => ({ id: 9, windowId: 100, active: true }) as chrome.tabs.Tab);
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", tab_id: 9 },
+      makeScreenshotDeps({ captureVisibleTab: capture, get, query: vi.fn(), hideControlOverlay }),
+    );
+    expect(res).toMatchObject({ code: "cdp_failed" });
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(1, 9, true);
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(2, 9, false);
+  });
+
+  it("captures anyway when hiding the control overlay rejects", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const hideControlOverlay = vi.fn(async () => {
+      throw new Error("no content script");
+    });
+    const capture = vi.fn(async (_w: number) => `data:image/png;base64,${TINY_PNG}`);
+    const get = vi.fn(async () => ({ id: 9, windowId: 100, active: true }) as chrome.tabs.Tab);
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", tab_id: 9 },
+      makeScreenshotDeps({ captureVisibleTab: capture, get, query: vi.fn(), hideControlOverlay }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(capture).toHaveBeenCalledTimes(1);
+    // Hide failed, so we never mark it hidden and never issue a restore.
+    expect(hideControlOverlay).toHaveBeenCalledTimes(1);
+    expect(hideControlOverlay).toHaveBeenCalledWith(9, true);
+  });
+
+  it("hides and restores the control overlay around a ref capture", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 7 });
+    const { cdp } = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    const hideControlOverlay = vi.fn(async () => {});
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+        hideControlOverlay,
+      }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(1, 7, true);
+    expect(hideControlOverlay).toHaveBeenNthCalledWith(2, 7, false);
   });
 
   it("captures a clipped PNG when ref is given", async () => {

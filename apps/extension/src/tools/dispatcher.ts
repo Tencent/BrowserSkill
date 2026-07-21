@@ -1,4 +1,4 @@
-import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
+import { OVERLAY_AUTOMATION_BYPASS, OVERLAY_SCREENSHOT_HIDE } from "@/lib/overlay-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
 import type {
@@ -279,7 +279,21 @@ export class ToolDispatcher {
           this.sessions,
           req.params as ScreenshotParams,
           this.cdp
-            ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi, captureApi: chromeTabsCaptureApi }
+            ? {
+                cdp: this.cdp,
+                tabsApi: chromeTabsCaptureApi,
+                captureApi: chromeTabsCaptureApi,
+                hideControlOverlay: async (tabId, hidden) => {
+                  try {
+                    await chrome.tabs.sendMessage(tabId, {
+                      type: OVERLAY_SCREENSHOT_HIDE,
+                      hidden,
+                    });
+                  } catch {
+                    // Content script may be unavailable on restricted pages.
+                  }
+                },
+              }
             : undefined,
         );
       case "tool.console":
