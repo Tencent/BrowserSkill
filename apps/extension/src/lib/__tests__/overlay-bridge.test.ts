@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   isOverlayAgentOverlayResetMessage,
+  isOverlayScreenshotHideMessage,
   OVERLAY_AGENT_OVERLAY_RESET,
   OVERLAY_MSG_INTERRUPT,
+  OVERLAY_SCREENSHOT_HIDE,
   type OverlayInterruptRequest,
   type OverlayInterruptResponse,
 } from "@/lib/overlay-bridge";
@@ -43,5 +45,29 @@ describe("isOverlayAgentOverlayResetMessage", () => {
         type: OVERLAY_AGENT_OVERLAY_RESET,
       }),
     ).toBe(false);
+  });
+});
+
+describe("isOverlayScreenshotHideMessage", () => {
+  it("accepts hide/restore messages with a boolean flag", () => {
+    expect(isOverlayScreenshotHideMessage({ type: OVERLAY_SCREENSHOT_HIDE, hidden: true })).toBe(
+      true,
+    );
+    expect(isOverlayScreenshotHideMessage({ type: OVERLAY_SCREENSHOT_HIDE, hidden: false })).toBe(
+      true,
+    );
+  });
+
+  it("rejects messages with a missing or non-boolean flag", () => {
+    expect(isOverlayScreenshotHideMessage({ type: OVERLAY_SCREENSHOT_HIDE })).toBe(false);
+    expect(
+      isOverlayScreenshotHideMessage({ type: OVERLAY_SCREENSHOT_HIDE, hidden: "yes" }),
+    ).toBe(false);
+  });
+
+  it("rejects unrelated message types and non-objects", () => {
+    expect(isOverlayScreenshotHideMessage({ type: "something-else", hidden: true })).toBe(false);
+    expect(isOverlayScreenshotHideMessage(null)).toBe(false);
+    expect(isOverlayScreenshotHideMessage("nope")).toBe(false);
   });
 });

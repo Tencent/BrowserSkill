@@ -43,6 +43,28 @@ export interface OverlayAutomationBypassMessage {
   enabled: boolean;
 }
 
+/**
+ * Background → content: hide the control overlay for the duration of a
+ * screenshot so its breathing border and "stop" pill do not bleed into the
+ * captured image. The content script re-renders without the overlay and only
+ * acks the `hidden: true` request once the removal has painted, so the caller
+ * can capture a clean frame. The matching `hidden: false` restores it.
+ */
+export const OVERLAY_SCREENSHOT_HIDE = "bh-screenshot-hide";
+
+export interface OverlayScreenshotHideMessage {
+  type: typeof OVERLAY_SCREENSHOT_HIDE;
+  hidden: boolean;
+}
+
+export function isOverlayScreenshotHideMessage(
+  message: unknown,
+): message is OverlayScreenshotHideMessage {
+  if (!message || typeof message !== "object") return false;
+  const candidate = message as { type?: unknown; hidden?: unknown };
+  return candidate.type === OVERLAY_SCREENSHOT_HIDE && typeof candidate.hidden === "boolean";
+}
+
 /** Background → content: clear overlays that belong only inside an Agent tab. */
 export const OVERLAY_AGENT_OVERLAY_RESET = "bh-agent-overlay-reset";
 
