@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HarStatusResult",
+  "type": "object",
+  "required": [
+    "active"
+  ],
+  "properties": {
+    "active": {
+      "type": "boolean"
+    },
+    "body_bytes": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "entry_count": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "in_flight": {
+      "default": 0,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  }
+}

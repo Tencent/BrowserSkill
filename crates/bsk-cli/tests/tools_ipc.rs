@@ -11,7 +11,8 @@ use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
     ConsoleEntry, ConsoleEntryKind, ConsoleParams, ConsoleResult, GetHtmlParams, GetHtmlResult,
-    NetworkEntry, NetworkEntryKind, NetworkParams, NetworkResult, ObserveParams, ObserveResult,
+    HarStopParams, HarStopResult, NetworkEntry, NetworkEntryKind, NetworkParams, NetworkResult,
+    ObserveParams, ObserveResult,
     ScreenshotParams, ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams,
     SnapshotResult, TabInfo, TabListParams, TabListResult, TabScope,
 };
@@ -419,6 +420,50 @@ async fn network_returns_buffered_entries() {
     assert_eq!(result.tab_id, 7);
     assert_eq!(result.next_since, 4);
     assert_eq!(result.entries[0].status, Some(404));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn har_stop_forwards_archive_payload_without_losing_vendor_fields() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolHarStop);
+        let params: HarStopParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.settle_timeout_ms, Some(2000));
+        ResponseBody::Ok(
+            serde_json::to_value(HarStopResult {
+                tab_id: 7,
+                entry_count: 1,
+                body_bytes: 11,
+                truncated: false,
+                har: json!({
+                    "log": {
+                        "version": "1.2",
+                        "creator": { "name": "BrowserSkill", "version": "test" },
+                        "entries": [{ "_requestId": "req-1" }]
+                    }
+                }),
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: HarStopResult = ipc_tool_call(
+        &sock,
+        Method::ToolHarStop,
+        HarStopParams {
+            session_id,
+            settle_timeout_ms: Some(2000),
+        },
+    )
+    .await
+    .expect("har stop ok");
+    assert_eq!(result.har["log"]["version"], "1.2");
+    assert_eq!(result.har["log"]["entries"][0]["_requestId"], "req-1");
     handle.shutdown().await;
 }
 

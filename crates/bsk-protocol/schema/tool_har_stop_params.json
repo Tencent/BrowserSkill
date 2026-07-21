@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HarStopParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "settle_timeout_ms": {
+      "description": "Wait this long for in-flight requests and response-body reads to finish.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

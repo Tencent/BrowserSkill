@@ -25,6 +25,10 @@ import type {
   ConsoleEntryKind,
   ConsoleResult,
   ConsoleStackFrame,
+  HarStartParams,
+  HarStartResult,
+  HarStatusResult,
+  HarStopResult,
   JavaScriptDialogInfo,
   JavaScriptDialogType,
   NetworkEntry,
@@ -38,6 +42,7 @@ import {
   type CdpFrameTreeSource,
   type CdpTarget,
 } from "./frame-graph";
+import { HarRecorder } from "./har-recorder";
 
 export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
@@ -163,6 +168,7 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
  */
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
+  private readonly harRecorder: HarRecorder;
   private readonly attachedTabs = new Set<number>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly tabOwners = new Map<number, Set<string>>();
@@ -184,6 +190,7 @@ export class ChromiumCdp {
 
   constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
     this.api = api;
+    this.harRecorder = new HarRecorder(api);
     this.bindAutoDetach();
     this.bindDialogHandler();
     this.bindConsoleHandler();
@@ -400,6 +407,46 @@ export class ChromiumCdp {
     await this.enableNetworkDomain(tabId);
   }
 
+  async startHar(
+    sessionId: string,
+    tabId: number,
+    params: HarStartParams,
+  ): Promise<HarStartResult> {
+    await this.ensureNetworkCapture(tabId);
+    this.trackSessionTab(sessionId, tabId);
+    const result = this.harRecorder.start(sessionId, tabId, params);
+    if (!result.capture_content) return result;
+    const bufferOptions = {
+      maxTotalBufferSize: result.max_total_body_bytes,
+      maxResourceBufferSize: result.max_body_bytes,
+      maxPostDataSize: result.max_body_bytes,
+    };
+    try {
+      try {
+        await this.api.sendCommand({ tabId }, "Network.enable", {
+          ...bufferOptions,
+          enableDurableMessages: true,
+        });
+      } catch {
+        // Older Chromium builds do not know enableDurableMessages. The
+        // bounded buffers still make response-body capture reliable.
+        await this.api.sendCommand({ tabId }, "Network.enable", bufferOptions);
+      }
+      return result;
+    } catch (err) {
+      this.harRecorder.discardSession(sessionId);
+      throw normalizeError(err);
+    }
+  }
+
+  harStatus(sessionId: string): HarStatusResult {
+    return this.harRecorder.status(sessionId);
+  }
+
+  stopHar(sessionId: string, settleTimeoutMs?: number): Promise<HarStopResult> {
+    return this.harRecorder.stop(sessionId, settleTimeoutMs);
+  }
+
   /** Network entries observed on `tabId`, bounded for agent context safety. */
   networkEntriesSince(
     tabId: number,
@@ -432,6 +479,7 @@ export class ChromiumCdp {
     this.clearConsoleState(tabId);
     this.clearNetworkState(tabId);
     this.clearFrameState(tabId);
+    this.harRecorder.handleDetach(tabId);
     try {
       await this.api.detach({ tabId });
     } catch (err) {
@@ -682,6 +730,7 @@ export class ChromiumCdp {
     const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
+      this.harRecorder.handleEvent(tabId, method, params);
       switch (method) {
         case "Runtime.consoleAPICalled":
           this.appendConsole(tabId, parseConsoleApiCalled(params));
@@ -811,6 +860,7 @@ export class ChromiumCdp {
         this.clearConsoleState(source.tabId);
         this.clearNetworkState(source.tabId);
         this.clearFrameState(source.tabId);
+        this.harRecorder.handleDetach(source.tabId);
       }
     };
     this.api.onDetach.addListener(listener);
@@ -835,6 +885,7 @@ export class ChromiumCdp {
 
   /** Detach tabs only when no other live session has claimed them. */
   async detachSession(sessionId: string): Promise<void> {
+    this.harRecorder.discardSession(sessionId);
     const tabsToDetach: number[] = [];
     for (const [tabId, owners] of this.tabOwners) {
       owners.delete(sessionId);

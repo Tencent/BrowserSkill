@@ -206,6 +206,53 @@ export interface NetworkResult {
   truncated: boolean;
 }
 
+export interface HarStartParams {
+  session_id: string;
+  tab_id?: number;
+  capture_content?: boolean;
+  sanitize?: boolean;
+  max_body_bytes?: number;
+  max_total_body_bytes?: number;
+  max_entries?: number;
+}
+
+export interface HarStartResult {
+  tab_id: number;
+  started_at: string;
+  capture_content: boolean;
+  sanitize: boolean;
+  max_body_bytes: number;
+  max_total_body_bytes: number;
+  max_entries: number;
+}
+
+export interface HarStatusParams {
+  session_id: string;
+}
+
+export interface HarStatusResult {
+  active: boolean;
+  tab_id?: number;
+  started_at?: string;
+  entry_count: number;
+  in_flight: number;
+  body_bytes: number;
+  truncated: boolean;
+}
+
+export interface HarStopParams {
+  session_id: string;
+  settle_timeout_ms?: number;
+}
+
+export interface HarStopResult {
+  tab_id: number;
+  entry_count: number;
+  body_bytes: number;
+  truncated: boolean;
+  har: Record<string, unknown>;
+}
+
 export type TabScopeFilter = "user" | "agent" | "all";
 
 export interface TabInfo {

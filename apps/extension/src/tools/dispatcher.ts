@@ -8,6 +8,9 @@ import type {
   EvaluateParams,
   FillParams,
   GetHtmlParams,
+  HarStartParams,
+  HarStatusParams,
+  HarStopParams,
   HoverParams,
   HoverResult,
   NavigateBackParams,
@@ -34,6 +37,13 @@ import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
+import {
+  defaultHarTabsApi,
+  type HarCdpRunner,
+  handleHarStart,
+  handleHarStatus,
+  handleHarStop,
+} from "./har";
 import { handleRequestHelp } from "./human-loop";
 import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
 import {
@@ -84,7 +94,8 @@ import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
   NetworkCdpRunner &
-  EmulateCdpRunner & {
+  EmulateCdpRunner &
+  HarCdpRunner & {
     detachSession(sessionId: string): Promise<void>;
   };
 
@@ -356,6 +367,18 @@ export class ToolDispatcher {
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
           signal,
         );
+      case "tool.har_start":
+        if (!this.cdp) return { code: "unsupported", message: "HAR capture is unavailable" };
+        return handleHarStart(this.sessions, req.params as HarStartParams, {
+          cdp: this.cdp,
+          tabsApi: defaultHarTabsApi,
+        });
+      case "tool.har_status":
+        if (!this.cdp) return { code: "unsupported", message: "HAR capture is unavailable" };
+        return handleHarStatus(this.sessions, req.params as HarStatusParams, { cdp: this.cdp });
+      case "tool.har_stop":
+        if (!this.cdp) return { code: "unsupported", message: "HAR capture is unavailable" };
+        return handleHarStop(this.sessions, req.params as HarStopParams, { cdp: this.cdp });
       case "tool.snapshot":
         return this.withHoverReassert(
           req.params as SnapshotParams,

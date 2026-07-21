@@ -1,0 +1,34 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HarStopResult",
+  "type": "object",
+  "required": [
+    "body_bytes",
+    "entry_count",
+    "har",
+    "tab_id"
+  ],
+  "properties": {
+    "body_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "entry_count": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "har": {
+      "description": "A complete HAR 1.2 archive. Kept as JSON so vendor extension fields survive."
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  }
+}

@@ -24,6 +24,7 @@ Depending on the commands the user (via their AI agent) sends to the local daemo
 |---|---|---|
 | **Web page content** | The DOM, accessibility tree, HTML, and visible-tab screenshots of pages opened in the BrowserSkill-controlled "Agent Window," or in user tabs the user explicitly approves for borrowing. | Required so the AI agent can read pages, locate elements, and verify results. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
+| **Network activity during explicit HAR recording** | Request/response URLs, headers, timing, status, and optionally bodies for the one controlled tab selected by `bsk har start`. Credential-bearing headers and common sensitive query parameters are redacted by default. | Required to produce the HAR validation artifact requested by the user. |
 | **Tab and window metadata** | Tab IDs, URLs, titles, window IDs of the Agent Window and any tabs the user explicitly authorizes. | Required to target automation commands at the correct tab/window. |
 | **Local extension storage** | A randomly generated 8-character instance ID and an optional user-supplied label. | Used so the local daemon can recognize this browser instance across reconnects. No personal data is stored. |
 | **OS notifications** | Permission to display a system notification when the agent requests to "borrow" one of the user's existing tabs. | Required to obtain explicit, per-tab user consent before the agent touches any pre-existing tab. |
@@ -34,7 +35,7 @@ BrowserSkill does **not**:
 
 - Send any data to remote servers, the Extension's authors, or any third party.
 - Call any LLM, AI, or cloud API. The Extension contains no API keys, model identifiers, or remote endpoints.
-- Read or transmit cookies, browsing history, bookmarks, downloads, saved passwords, or autofill data.
+- Read browsing history, bookmarks, downloads, saved passwords, or autofill data. Cookie headers are accessed only while the user has explicitly started HAR recording on a controlled tab; they are redacted from the archive by default.
 - Use webcam, microphone, geolocation, or any device sensor.
 - Include analytics, telemetry, crash reporting, advertising SDKs, or fingerprinting code.
 - Track users across websites or across sessions.
@@ -61,6 +62,7 @@ All Extension activity stays on the user's local device. The only network traffi
 
 - The instance ID and optional label persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
 - Page content, screenshots, DOM snapshots, and other observed data are returned to the local daemon in response to commands and are **not retained by the Extension**. They live only as long as the agent's tool call.
+- An active HAR recording is held in extension memory from `bsk har start` until `bsk har stop` or session teardown. On stop it is returned to the local CLI, which writes the user-selected local file; the Extension does not persist a copy.
 
 ## 8. User Control
 

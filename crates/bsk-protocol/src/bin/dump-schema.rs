@@ -101,6 +101,12 @@ fn main() {
     dump!(NetworkParams, "tool_network_params");
     dump!(NetworkResult, "tool_network_result");
     dump!(NetworkEntry, "tool_network_entry");
+    dump!(HarStartParams, "tool_har_start_params");
+    dump!(HarStartResult, "tool_har_start_result");
+    dump!(HarStatusParams, "tool_har_status_params");
+    dump!(HarStatusResult, "tool_har_status_result");
+    dump!(HarStopParams, "tool_har_stop_params");
+    dump!(HarStopResult, "tool_har_stop_result");
 
     dump!(EvaluateParams, "tool_evaluate_params");
     dump!(EvaluateResult, "tool_evaluate_result");

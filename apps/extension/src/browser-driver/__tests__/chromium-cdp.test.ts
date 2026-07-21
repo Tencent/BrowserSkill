@@ -333,6 +333,70 @@ describe("ChromiumCdp", () => {
     expect(enableCalls).toHaveLength(2);
   });
 
+  it("configures bounded durable buffers before HAR body capture", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+
+    const result = await cdp.startHar("aa11", 14, {
+      session_id: "aa11",
+      max_body_bytes: 4096,
+      max_total_body_bytes: 8192,
+    });
+
+    expect(result).toMatchObject({ tab_id: 14, max_body_bytes: 4096, max_total_body_bytes: 8192 });
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 14 }, "Network.enable", {
+      maxTotalBufferSize: 8192,
+      maxResourceBufferSize: 4096,
+      maxPostDataSize: 4096,
+      enableDurableMessages: true,
+    });
+  });
+
+  it("forwards debugger network events to the active HAR recorder", async () => {
+    const { api, onEvent } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Network.getResponseBody")
+          return { body: '{"ok":true}', base64Encoded: false };
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await cdp.startHar("aa12", 15, { session_id: "aa12" });
+
+    onEvent.fire({ tabId: 15 }, "Network.requestWillBeSent", {
+      requestId: "request-1",
+      timestamp: 10,
+      wallTime: 1_700_000_000,
+      type: "Fetch",
+      request: { method: "GET", url: "https://example.com/api", headers: {} },
+    });
+    onEvent.fire({ tabId: 15 }, "Network.responseReceived", {
+      requestId: "request-1",
+      timestamp: 10.1,
+      response: {
+        status: 200,
+        statusText: "OK",
+        mimeType: "application/json",
+        headers: { "content-type": "application/json" },
+      },
+    });
+    onEvent.fire({ tabId: 15 }, "Network.loadingFinished", {
+      requestId: "request-1",
+      timestamp: 10.2,
+      encodedDataLength: 11,
+    });
+    await Promise.resolve();
+
+    const result = await cdp.stopHar("aa12", 100);
+    expect(result).toMatchObject({ entry_count: 1, truncated: false });
+    const log = result.har.log as { entries: Record<string, unknown>[] };
+    expect(log.entries[0]).toMatchObject({
+      request: { method: "GET", url: "https://example.com/api" },
+      response: { status: 200, content: { text: '{"ok":true}' } },
+    });
+  });
+
   it("records javascriptDialogOpening and auto-accepts", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);

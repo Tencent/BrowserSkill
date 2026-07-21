@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HarStartResult",
+  "type": "object",
+  "required": [
+    "capture_content",
+    "max_body_bytes",
+    "max_entries",
+    "max_total_body_bytes",
+    "sanitize",
+    "started_at",
+    "tab_id"
+  ],
+  "properties": {
+    "capture_content": {
+      "type": "boolean"
+    },
+    "max_body_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "max_entries": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_total_body_bytes": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "sanitize": {
+      "type": "boolean"
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

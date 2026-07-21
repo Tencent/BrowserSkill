@@ -14,6 +14,7 @@ pub mod ensure_daemon;
 pub mod error;
 pub mod evaluate;
 pub mod get_html;
+pub mod har;
 pub mod human_loop;
 pub mod install_skill;
 pub mod interaction;
@@ -41,6 +42,7 @@ use crate::cli::daemon::DaemonCmd;
 use crate::cli::emulate::EmulateArgs;
 use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
+use crate::cli::har::HarCmd;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
 use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs};
@@ -143,6 +145,9 @@ pub enum Command {
 
     /// Read buffered network responses / failures.
     Network(NetworkArgs),
+
+    /// Record and export HTTP Archive (HAR 1.2) files.
+    Har(HarCmd),
 
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]

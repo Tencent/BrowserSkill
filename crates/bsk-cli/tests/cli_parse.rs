@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use bsk::cli::daemon::{DaemonCmd, parse_duration};
+use bsk::cli::har::HarSub;
 use bsk::cli::navigate::NavigateCmd;
 use bsk::cli::record::{RecordCmd, RecordSub};
 use bsk::cli::session::{SessionCmd, SessionSub};
@@ -139,6 +140,76 @@ fn rejects_zero_network_bounds() {
         Cli::try_parse_from(["bsk", "network", "--session", "s1", "--max-text-chars", "0"])
             .is_err()
     );
+}
+
+#[test]
+fn parses_har_start_and_stop_commands() {
+    let cli = parse(&[
+        "bsk",
+        "har",
+        "start",
+        "--session",
+        "s1",
+        "--tab-id",
+        "9",
+        "--no-content",
+        "--include-sensitive",
+        "--max-body-bytes",
+        "4096",
+        "--max-total-body-bytes",
+        "8192",
+        "--max-entries",
+        "100",
+    ]);
+    let Command::Har(cmd) = cli.command else {
+        panic!("expected har command");
+    };
+    let HarSub::Start(args) = cmd.sub else {
+        panic!("expected har start");
+    };
+    assert_eq!(args.session, "s1");
+    assert_eq!(args.tab_id, Some(9));
+    assert!(args.no_content);
+    assert!(args.include_sensitive);
+    assert_eq!(args.max_body_bytes, 4096);
+    assert_eq!(args.max_total_body_bytes, 8192);
+    assert_eq!(args.max_entries, 100);
+
+    let cli = parse(&[
+        "bsk",
+        "har",
+        "stop",
+        "--session",
+        "s1",
+        "--out",
+        "capture.har",
+        "--settle-timeout-ms",
+        "0",
+    ]);
+    let Command::Har(cmd) = cli.command else {
+        panic!("expected har command");
+    };
+    let HarSub::Stop(args) = cmd.sub else {
+        panic!("expected har stop");
+    };
+    assert_eq!(
+        args.out.as_deref(),
+        Some(std::path::Path::new("capture.har"))
+    );
+    assert_eq!(args.settle_timeout_ms, 0);
+}
+
+#[test]
+fn rejects_zero_har_capture_bounds() {
+    for flag in [
+        "--max-body-bytes",
+        "--max-total-body-bytes",
+        "--max-entries",
+    ] {
+        assert!(
+            Cli::try_parse_from(["bsk", "har", "start", "--session", "s1", flag, "0"]).is_err()
+        );
+    }
 }
 
 #[test]

@@ -90,6 +90,12 @@ pub enum Method {
     ToolConsole,
     #[serde(rename = "tool.network")]
     ToolNetwork,
+    #[serde(rename = "tool.har_start")]
+    ToolHarStart,
+    #[serde(rename = "tool.har_status")]
+    ToolHarStatus,
+    #[serde(rename = "tool.har_stop")]
+    ToolHarStop,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
     #[serde(rename = "tool.wait_for_navigation")]
@@ -175,6 +181,9 @@ impl Method {
             | Method::ToolScreenshot
             | Method::ToolConsole
             | Method::ToolNetwork
+            | Method::ToolHarStart
+            | Method::ToolHarStatus
+            | Method::ToolHarStop
             | Method::ToolWaitForNavigation
             | Method::ToolWaitMs
             | Method::ToolRequestHelp
@@ -247,6 +256,19 @@ mod tests {
     }
 
     #[test]
+    fn har_methods_round_trip() {
+        for (wire, method) in [
+            ("tool.har_start", Method::ToolHarStart),
+            ("tool.har_status", Method::ToolHarStatus),
+            ("tool.har_stop", Method::ToolHarStop),
+        ] {
+            let parsed: Method = serde_json::from_value(json!(wire)).unwrap();
+            assert_eq!(parsed, method);
+            assert_eq!(serde_json::to_value(parsed).unwrap(), json!(wire));
+        }
+    }
+
+    #[test]
     fn cancel_params_and_result_round_trip() {
         let params: CancelParams = serde_json::from_value(json!({ "rpc_id": "wait-1" })).unwrap();
         assert_eq!(params.rpc_id, "wait-1");
@@ -267,6 +289,9 @@ mod tests {
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());
+        assert!(!Method::ToolHarStart.is_mutating());
+        assert!(!Method::ToolHarStatus.is_mutating());
+        assert!(!Method::ToolHarStop.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
     }

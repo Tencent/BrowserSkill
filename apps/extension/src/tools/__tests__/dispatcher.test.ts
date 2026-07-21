@@ -192,6 +192,15 @@ describe("ToolDispatcher", () => {
       detachSession: vi.fn(async () => {}),
       ensureConsoleCapture: vi.fn(async () => {}),
       ensureNetworkCapture: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
       networkEntriesSince: vi.fn(() => ({
         tab_id: 7,
         entries: [],
@@ -246,6 +255,15 @@ describe("ToolDispatcher", () => {
       send: vi.fn(),
       detachSession: vi.fn(async () => {}),
       ensureNetworkCapture: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
       networkEntriesSince: vi.fn(() => ({
         tab_id: 7,
         entries: [],

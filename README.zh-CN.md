@@ -169,6 +169,21 @@ flowchart TB
 
 Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
 
+## HAR 录制
+
+BrowserSkill 可以录制 Agent 控制标签页的网络活动，并导出 HAR 1.2 文件用于回归测试和请求级验证：
+
+```sh
+bsk session start
+bsk har start --session <session-id>
+bsk navigate https://example.com --session <session-id>
+# 由 Agent 完成页面操作流程
+bsk har stop --session <session-id> --out artifacts/validation.har
+bsk session stop <session-id>
+```
+
+录制应在首次导航前启动，以包含主文档请求。HAR 仅允许录制专用 Agent Window 标签页，不支持普通或借用的用户标签页。请求/响应正文默认在受控容量内保留；认证头、Cookie 和常见敏感查询参数默认脱敏，只有显式指定 `--include-sensitive` 才会保留。可以用 `bsk har status --session <session-id>` 查看录制进度，用 `bsk har start --help` 查看容量控制参数。
+
 ## 面向开发者
 
 本仓库是 Cargo + pnpm workspace：

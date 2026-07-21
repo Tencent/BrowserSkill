@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use bsk::daemon::{self, DaemonConfig};
+use bsk::daemon::{self, DaemonConfig, state::PROTOCOL_VERSION};
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::{BrowserPeerInfo, Method, RequestFrame, ResponseBody, ResponseFrame};
 use futures_util::{SinkExt, StreamExt};
@@ -91,7 +91,7 @@ async fn ws_handshake_registers_browser_in_state() {
     let mut ws = connect_ext(handle.ws_addr(), &origin).await;
     let result = send_handshake(&mut ws, TEST_EXT_ID).await;
     assert_eq!(result.server, "browser-skill-daemon");
-    assert_eq!(result.protocol_version, "1.1");
+    assert_eq!(result.protocol_version, PROTOCOL_VERSION);
 
     let state = handle.state();
     let browsers = state.browsers.snapshot();

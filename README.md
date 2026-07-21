@@ -199,6 +199,21 @@ extension runs it in an Agent Window. DeepSeek Harness takes the same path
 through the [plugin](#deepseek-harness-plugin): the agent calls injected
 `browser_*` tools, and the plugin invokes `bsk` on its behalf.
 
+## HAR Recording
+
+BrowserSkill can record an Agent-controlled tab and export a HAR 1.2 archive for regression tests and request-level validation:
+
+```sh
+bsk session start
+bsk har start --session <session-id>
+bsk navigate https://example.com --session <session-id>
+# Let the agent perform the browser flow.
+bsk har stop --session <session-id> --out artifacts/validation.har
+bsk session stop <session-id>
+```
+
+Capture starts before navigation so the initial document request is included. HAR capture is limited to dedicated Agent Window tabs. Response/request bodies are retained with bounded defaults; credentials in headers and common sensitive query parameters are redacted unless `--include-sensitive` is explicitly supplied. Run `bsk har status --session <session-id>` to inspect recording progress and `bsk har start --help` for size controls.
+
 ## For Developers
 
 The repository is a Cargo + pnpm workspace:
