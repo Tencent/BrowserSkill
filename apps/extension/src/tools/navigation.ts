@@ -325,14 +325,14 @@ function startLifecycleWait(
           if (source.tabId !== expectedTabId) return;
 
           if (targetName === "commit" && method === "Page.frameNavigated") {
-            const p = params as { frame?: { id?: string; parentId?: string } };
+            const p = params as { frame?: { id?: string; parentId?: string; loaderId?: string } };
             const expectedFrameId = currentFrameId();
             if (expectedFrameId.length > 0) {
               if (p.frame?.id !== expectedFrameId) return;
             } else if (p.frame?.parentId) {
               return;
             }
-            if (!acceptLifecycleEvent("commit", p.frame?.id)) return;
+            if (!acceptLifecycleEvent("commit", p.frame?.id, p.frame?.loaderId)) return;
             finish({ reached: "match", lastLifecycle: "commit" });
             return;
           }
