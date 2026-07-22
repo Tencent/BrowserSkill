@@ -95,6 +95,11 @@ pub fn sock_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("run").join("daemon.sock"))
 }
 
+/// Path to the in-progress recording session state (`record-session.json`).
+pub fn record_session_path() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("record-session.json"))
+}
+
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
 /// token so test homes and custom installs do not share a predictable
 /// per-username pipe.
@@ -163,6 +168,10 @@ mod tests {
             assert_eq!(log_path().unwrap(), home.join("daemon.log"));
             assert_eq!(update_check_path().unwrap(), home.join("update-check.json"));
             assert_eq!(sock_path().unwrap(), home.join("run").join("daemon.sock"));
+            assert_eq!(
+                record_session_path().unwrap(),
+                home.join("record-session.json")
+            );
         });
     }
 }

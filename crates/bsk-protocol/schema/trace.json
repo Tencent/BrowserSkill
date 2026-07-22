@@ -1,0 +1,406 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Trace",
+  "description": "Persisted user-action trace exported by `tool.record_stop` / `await`.",
+  "type": "object",
+  "required": [
+    "entry",
+    "pages",
+    "recorded_at",
+    "steps"
+  ],
+  "properties": {
+    "entry": {
+      "$ref": "#/definitions/TraceEntry"
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/PageRef"
+      }
+    },
+    "purpose": {
+      "description": "Optional user-provided goal from `--purpose` (metadata only).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recorded_at": {
+      "description": "RFC 3339 timestamp when recording stopped.",
+      "type": "string"
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Step"
+      }
+    }
+  },
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "PageRef": {
+      "description": "Page context dictionary entry — referenced by steps via `page` id.",
+      "type": "object",
+      "required": [
+        "id",
+        "url"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "SelectedOption": {
+      "description": "One selected option (`select` op).",
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "Step": {
+      "description": "One recorded user action — discriminated union by `op`.",
+      "oneOf": [
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
+            "to"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "navigate"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
+            "target"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "click"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptor"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
+            "target",
+            "value"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "fill"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "redacted": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptor"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
+            "selection",
+            "target"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "select"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "selection": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/SelectedOption"
+              }
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptor"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "key",
+            "op",
+            "page"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "key": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/KeyModifier"
+              }
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "press"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TargetDescriptor"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "StepEffect": {
+      "description": "Observed navigation after a step (objective fact only).",
+      "type": "object",
+      "required": [
+        "navigated_to"
+      ],
+      "properties": {
+        "navigated_to": {
+          "description": "Reference into `pages[]` for the destination page.",
+          "type": "string"
+        }
+      }
+    },
+    "TargetDescriptor": {
+      "description": "Stable semantic handle for an interacted element.\n\n`name` and `nearby_label` are **untrusted page text**.",
+      "type": "object",
+      "required": [
+        "tag"
+      ],
+      "properties": {
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name_attr": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nearby_label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "placeholder": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag": {
+          "type": "string"
+        }
+      }
+    },
+    "TraceEntry": {
+      "description": "Recording entry point — first URL the flow starts from.",
+      "type": "object",
+      "required": [
+        "start_url"
+      ],
+      "properties": {
+        "start_url": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

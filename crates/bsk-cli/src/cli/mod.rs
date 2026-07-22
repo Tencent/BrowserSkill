@@ -19,6 +19,8 @@ pub mod interaction;
 pub mod logs;
 pub mod navigate;
 pub mod network;
+pub mod record;
+pub mod record_state;
 pub mod render_error;
 pub mod screenshot;
 pub mod session;
@@ -39,6 +41,7 @@ use crate::cli::install_skill::InstallSkillArgs;
 use crate::cli::interaction::{ClickArgs, FillArgs, PressArgs, SelectArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
+use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
@@ -169,6 +172,9 @@ pub enum Command {
     /// Ask the human to complete an in-page step (captcha / login / confirm).
     #[command(name = "request-help")]
     RequestHelp(RequestHelpArgs),
+
+    /// Record user actions into a semantic `trace.json` textbook for LLMs.
+    Record(RecordCmd),
 }
 
 #[derive(Debug, Clone, Args, Default)]

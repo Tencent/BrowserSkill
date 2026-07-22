@@ -68,5 +68,9 @@
     "expand": "Expand",
     "dragHandle": "Drag to move",
     "notificationTitle": "BrowserSkill: Agent needs your help"
+  },
+  "recordOverlay": {
+    "recording": "Recording your actions",
+    "finish": "Finish"
   }
 }

@@ -68,5 +68,9 @@
     "expand": "展开",
     "dragHandle": "拖动以移动",
     "notificationTitle": "BrowserSkill：Agent 需要你的帮助"
+  },
+  "recordOverlay": {
+    "recording": "正在录制用户操作",
+    "finish": "结束"
   }
 }
