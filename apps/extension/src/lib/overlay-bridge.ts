@@ -16,6 +16,37 @@
 export const OVERLAY_MSG_WHO_AM_I = "overlay.who_am_i";
 export const OVERLAY_MSG_INTERRUPT = "overlay.interrupt";
 
+/**
+ * WXT shadow-host element name (`createShadowRootUi({ name })`) and the marker
+ * attribute set on the host for the agent's own overlay UI. The VOM capture
+ * adapter uses these to skip the overlay host and its shadow subtree.
+ */
+export const OVERLAY_HOST_NAME = "browser-skill-overlay";
+export const OVERLAY_HOST_MARKER_ATTR = "data-bsk-overlay";
+
+/** CSS selector for the WXT shadow host (tag + marker attribute). */
+export const OVERLAY_HOST_SELECTOR = `${OVERLAY_HOST_NAME}, [${OVERLAY_HOST_MARKER_ATTR}]`;
+
+export function isOverlayHostElementName(tagName: string): boolean {
+  return tagName.toLowerCase() === OVERLAY_HOST_NAME;
+}
+
+export function isOverlayHostMarkerAttribute(attrName: string): boolean {
+  return attrName.toLowerCase() === OVERLAY_HOST_MARKER_ATTR;
+}
+
+export function isOverlayHostNode(tagName: string, attributeNames?: Iterable<string>): boolean {
+  if (isOverlayHostElementName(tagName)) return true;
+  if (!attributeNames) return false;
+  for (const name of attributeNames) {
+    if (isOverlayHostMarkerAttribute(name)) return true;
+  }
+  return false;
+}
+
+/** Page-world `document.querySelector(...)` for the overlay shadow host. */
+export const OVERLAY_HOST_LOOKUP_EXPR = `document.querySelector(${JSON.stringify(OVERLAY_HOST_SELECTOR)})`;
+
 export interface OverlayWhoAmIRequest {
   kind: typeof OVERLAY_MSG_WHO_AM_I;
   tabId?: number;

@@ -8,6 +8,7 @@
     "ext:build:zip": "pnpm --filter @browser-skill/extension zip",
     "ext:dev": "pnpm --filter @browser-skill/extension dev",
     "ext:test": "pnpm --filter @browser-skill/extension test",
+    "vom:test": "pnpm --filter @browser-skill/vom test",
     "lint": "biome check . && stylelint \"**/*.css\"",
     "format": "biome format --write ."
   },
