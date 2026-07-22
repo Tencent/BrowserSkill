@@ -49,6 +49,8 @@ function makeFakeCdp(opts?: {
   beforeLoaderId?: string;
   readyState?: string;
   readyStateSequence?: string[];
+  /** Make the readyState probe's `Runtime.evaluate` throw (returns null). */
+  evaluateThrows?: boolean;
 }) {
   const readyStates = opts?.readyStateSequence ?? (opts?.readyState ? [opts.readyState] : []);
   let readyStateIdx = 0;
@@ -94,7 +96,10 @@ function makeFakeCdp(opts?: {
       return {};
     },
     "Runtime.enable": () => ({}),
-    "Runtime.evaluate": () => ({ result: { value: nextReadyState() } }),
+    "Runtime.evaluate": () => {
+      if (opts?.evaluateThrows) throw new Error("Cannot execute in a destroyed execution context");
+      return { result: { value: nextReadyState() } };
+    },
     "Page.getNavigationHistory": () => ({
       currentIndex: opts?.historyIndex ?? 1,
       entries: opts?.historyEntries ?? [
@@ -168,8 +173,13 @@ function makeFakeCdp(opts?: {
       const payload = { name, frameId, loaderId };
       for (const listener of [...events]) listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
     },
-    fireFrameNavigated(frameId = opts?.navigateFrameId ?? "frame-1") {
-      const payload = { frame: { id: frameId, url: opts?.finalUrl ?? "https://example.com/" } };
+    fireFrameNavigated(
+      frameId = opts?.navigateFrameId ?? "frame-1",
+      loaderId = opts?.navigateLoaderId ?? "loader-after",
+    ) {
+      const payload = {
+        frame: { id: frameId, loaderId, url: opts?.finalUrl ?? "https://example.com/" },
+      };
       for (const listener of [...events]) listener({ tabId: 4 }, "Page.frameNavigated", payload);
     },
     listeners: events,
@@ -452,6 +462,34 @@ describe("handleNavigate", () => {
 
     await new Promise((r) => setTimeout(r, 5));
     fake.fireFrameNavigated();
+    const res = await navP;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("commit");
+    expect(fake.listeners.length).toBe(0);
+  });
+
+  it("resolves wait_until=commit from Page.frameNavigated when the readyState probe fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    // Cross-origin-style navigation: the readyState probe can't read the
+    // (already destroyed) old execution context, so commit must come from
+    // the Page.frameNavigated event. Before the fix this timed out because
+    // the handler dropped the frame's loaderId and the loader guard then
+    // rejected the event.
+    const fake = makeFakeCdp({ evaluateThrows: true });
+    const navP = handleNavigate(
+      sm,
+      {
+        session_id: "aa11",
+        url: "https://example.com/",
+        wait_until: "commit",
+        timeout_ms: 1_000,
+      },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    await new Promise((r) => setTimeout(r, 5));
+    fake.fireFrameNavigated("frame-1", "loader-after");
     const res = await navP;
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.reached).toBe("commit");
