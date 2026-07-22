@@ -126,9 +126,16 @@ export function App() {
             <RiArrowLeftLine className="size-4" aria-hidden />
           </Button>
         ) : (
-          <img src={getLogoSrc()} alt="" className="size-7 rounded-lg" data-slot="popup-brand-logo" />
+          <img
+            src={getLogoSrc()}
+            alt=""
+            className="size-7 rounded-lg"
+            data-slot="popup-brand-logo"
+          />
         )}
-        <h1 className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight">{headerTitle}</h1>
+        <h1 className="min-w-0 flex-1 truncate text-sm font-semibold tracking-tight">
+          {headerTitle}
+        </h1>
         {view === "main" && (
           <Button
             type="button"
@@ -264,7 +271,9 @@ export function App() {
               >
                 <Icon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-xs font-medium text-foreground">{t(feature.titleKey)}</span>
+                  <span className="block text-xs font-medium text-foreground">
+                    {t(feature.titleKey)}
+                  </span>
                   <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
                     {t(feature.descKey)}
                   </span>
@@ -292,7 +301,9 @@ export function App() {
               id="bh-record-purpose"
               type="text"
               value={purposeDraft}
-              onChange={(event: ChangeEvent<HTMLInputElement>) => setPurposeDraft(event.target.value)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setPurposeDraft(event.target.value)
+              }
               placeholder={t("popup.record.topicPlaceholder")}
               className="mt-0 h-8 text-sm"
               data-slot="popup-record-purpose-input"
@@ -306,7 +317,9 @@ export function App() {
               id="bh-record-start-url"
               type="url"
               value={startUrlDraft}
-              onChange={(event: ChangeEvent<HTMLInputElement>) => setStartUrlDraft(event.target.value)}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setStartUrlDraft(event.target.value)
+              }
               placeholder={t("popup.record.startUrlPlaceholder")}
               className="mt-0 h-8 text-sm"
               data-slot="popup-record-start-url-input"

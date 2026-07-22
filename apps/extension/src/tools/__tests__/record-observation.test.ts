@@ -9,8 +9,8 @@ import {
 } from "../record";
 
 describe("record defaults", () => {
-  it("uses Baidu as the default injectable start URL", () => {
-    expect(RECORD_DEFAULT_START_URL).toBe("https://www.baidu.com/");
+  it("uses example.com as the default injectable start URL", () => {
+    expect(RECORD_DEFAULT_START_URL).toBe("https://example.com/");
   });
 });
 

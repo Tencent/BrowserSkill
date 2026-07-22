@@ -1,5 +1,5 @@
-import { RiRecordCircleLine } from "@remixicon/react";
 import type { RemixiconComponentType } from "@remixicon/react";
+import { RiRecordCircleLine } from "@remixicon/react";
 
 export type PopupFeatureId = "record";
 

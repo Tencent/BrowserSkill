@@ -81,7 +81,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
 
     expect(screen.getByText("操作录制")).toBeTruthy();
-    expect(screen.getByText("录制你的操作，供 Agent 复用")).toBeTruthy();
+    expect(screen.getByText("录制你的操作，供 Agent 参考")).toBeTruthy();
     expect(screen.queryByText("未连接")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: /操作录制/ }));
@@ -96,7 +96,7 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "返回" }));
 
     expect(screen.getByText("未连接")).toBeTruthy();
-    expect(screen.queryByText("录制你的操作，供 Agent 复用")).toBeNull();
+    expect(screen.queryByText("录制你的操作，供 Agent 参考")).toBeNull();
   });
 
   it("shows single-line compact metadata and copies the instance id", async () => {

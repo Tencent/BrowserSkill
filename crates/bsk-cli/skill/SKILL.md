@@ -212,7 +212,7 @@ Capture the user's own actions in the Agent Window to a `trace.json`, for later 
 
 ```bash
 bsk record start --browser <instance-id-or-label> [--url https://…] [--purpose "publish a wiki doc"] [--output trace.json]
-# `--url` is optional; default https://www.baidu.com/ when omitted (must be http(s)).
+# `--url` is optional; default https://example.com/ when omitted (must be http(s)).
 # Blocks until the user clicks Finish in the recording panel, then writes ./trace.json and closes the window.
 
 bsk record stop [--output trace.json]   # terminal fallback if the browser panel is unavailable

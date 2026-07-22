@@ -78,7 +78,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Injectable http(s) landing page when `tool.record_start` omits `url`. */
-export const RECORD_DEFAULT_START_URL = "https://www.baidu.com/";
+export const RECORD_DEFAULT_START_URL = "https://example.com/";
 
 /** Pages where MV3 content scripts cannot attach (Agent Window boots here). */
 function isContentScriptRestrictedUrl(url: string | undefined): boolean {

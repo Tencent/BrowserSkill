@@ -50,7 +50,7 @@ pub struct RecordStartArgs {
     pub tab_id: Option<i64>,
 
     /// Navigate to this http(s) URL before recording. When omitted, defaults
-    /// to `https://www.baidu.com/`.
+    /// to `https://example.com/`.
     #[arg(long)]
     pub url: Option<String>,
 
