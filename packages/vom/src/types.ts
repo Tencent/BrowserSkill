@@ -26,15 +26,25 @@ export interface VomNode {
   name?: string;
   value?: string;
   href?: string; // hostname of external link target; omitted for same-origin links
+  text?: string;
+  nearbyText?: string;
 
   tag: string;
   rect: Rect | null;
   paintOrder: number;
   position: string;
   pointerEvents: string;
+  cursor?: string;
+  attrs?: Record<string, string>;
+  domParentId?: number | null;
+  domAncestorIds?: number[];
 
   modal?: boolean;
   sensitive?: boolean;
+  disabled?: boolean;
+  inert?: boolean;
+  hasNativeDescendant?: boolean;
+  insideNative?: boolean;
 }
 
 export interface VomScene {

@@ -190,6 +190,94 @@ describe("renderVom single-layer page", () => {
     const renderedRefs = new Set(Array.from(out.text.matchAll(/@(e\d+)/g), (m) => m[1]));
     expect(out.refs.every((r) => renderedRefs.has(r.ref))).toBe(true);
   });
+
+  it("recovers custom clickable controls from DOM-only signals", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          text: "Open settings",
+          cursor: "pointer",
+          attrs: { onclick: "handleOpen()" },
+          rect: { x: 20, y: 20, w: 160, h: 40 },
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "Open settings"');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("keeps the deepest custom control when wrapper and child both look clickable", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          text: "Card",
+          cursor: "pointer",
+          attrs: { onclick: "handleCard()" },
+          rect: { x: 20, y: 20, w: 280, h: 120 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "generic",
+          text: "Details",
+          cursor: "pointer",
+          attrs: { onclick: "handleDetails()" },
+          rect: { x: 40, y: 70, w: 90, h: 32 },
+        }),
+      ]),
+    );
+
+    expect(out.text).not.toContain('@e1 button "Card"');
+    expect(out.text).toContain('@e1 button "Details"');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 3 }]);
+  });
+
+  it("does not recover clickable wrappers around native controls", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          text: "Checkout",
+          cursor: "pointer",
+          attrs: { onclick: "handleCheckout()" },
+          hasNativeDescendant: true,
+          rect: { x: 20, y: 20, w: 280, h: 120 },
+        }),
+        node({ id: 3, parentId: 2, role: "button", name: "Pay", tag: "button" }),
+      ]),
+    );
+
+    expect(out.text).not.toContain('@e1 button "Checkout"');
+    expect(out.text).toContain('@e1 button "Pay"');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 3 }]);
+  });
+
+  it("adds context to duplicate weak action labels", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Admin" }),
+        node({ id: 2, parentId: 1, role: "section", name: "Project Alpha" }),
+        node({ id: 3, parentId: 2, role: "button", name: "View", tag: "button" }),
+        node({ id: 4, parentId: 1, role: "section", name: "Project Beta" }),
+        node({ id: 5, parentId: 4, role: "button", name: "View", tag: "button" }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "View" [ctx: Project Alpha]');
+    expect(out.text).toContain('@e2 button "View" [ctx: Project Beta]');
+  });
 });
 
 describe("renderVom double-layer page", () => {

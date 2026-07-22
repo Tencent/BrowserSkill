@@ -394,37 +394,33 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured)).toEqual({
-      viewport: { width: 1000, height: 800 },
-      nodes: [
-        {
-          id: 100,
-          parentId: null,
-          role: "RootWebArea",
-          name: "Example",
-          tag: "body",
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-          modal: false,
-          sensitive: false,
-        },
-        {
-          id: 200,
-          parentId: 100,
-          role: "button",
-          name: "Submit",
-          tag: "button",
-          rect: { x: 20, y: 20, w: 120, h: 40 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-          modal: false,
-          sensitive: false,
-        },
-      ],
-    });
+    const scene = buildVomScene(axNodes, captured);
+    expect(scene.viewport).toEqual({ width: 1000, height: 800 });
+    expect(scene.nodes[0]).toEqual(
+      expect.objectContaining({
+        id: 100,
+        parentId: null,
+        role: "RootWebArea",
+        name: "Example",
+        tag: "body",
+        rect: { x: 0, y: 0, w: 1000, h: 800 },
+        domParentId: null,
+        domAncestorIds: [],
+      }),
+    );
+    expect(scene.nodes[1]).toEqual(
+      expect.objectContaining({
+        id: 200,
+        parentId: 100,
+        role: "button",
+        name: "Submit",
+        tag: "button",
+        rect: { x: 20, y: 20, w: 120, h: 40 },
+        domParentId: 100,
+        domAncestorIds: [100],
+        attrs: {},
+      }),
+    );
   });
 
   it("uses the nearest backend AX ancestor as parentId", () => {
@@ -916,8 +912,13 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const node = buildVomScene(axNodes, captured).nodes.find((n) => n.id === 20);
-    expect(node).toEqual(expect.objectContaining({ id: 20, role: "button", name: "close" }));
+    const scene = buildVomScene(axNodes, captured);
+    expect(scene.nodes.find((n) => n.id === 20)).toEqual(
+      expect.objectContaining({ id: 20, role: "generic", cursor: "pointer" }),
+    );
+    const rendered = renderVom(scene);
+    expect(rendered.text).toContain('@e1 button "close"');
+    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
   });
 
   it("does not promote a clickable container that wraps a real interactive control", () => {
@@ -1056,10 +1057,12 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "button", name: "收藏" }),
+      expect.objectContaining({ id: 20, role: "generic", attrs: { "aria-label": "收藏" } }),
     );
-    // Inner clickable must NOT also become a button.
-    expect(scene.nodes.find((n) => n.id === 30)?.role).not.toBe("button");
+    expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
+    const rendered = renderVom(scene);
+    expect(rendered.text).toContain('@e1 button "收藏"');
+    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
   });
 
   it("marks captured dialog elements as modal without AX role or aria-modal", () => {

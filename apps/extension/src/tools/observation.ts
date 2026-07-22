@@ -342,41 +342,120 @@ function capturedIframeNameFor(node: CapturedNode): string | undefined {
   return id ? id : undefined;
 }
 
-const FORM_CONTROL_TAGS = new Set(["input", "textarea", "select"]);
-
-/** AX roles we treat as non-semantic wrappers eligible for clickable promotion. */
-const PROMOTABLE_ROLES = new Set(["", "generic", "none", "presentation"]);
-
-/**
- * Interactive AX roles. Mirrors `packages/vom`'s INTERACTIVE_ROLES — kept
- * local so the package stays a pure projection (design §2). Used to tell an
- * atomic custom control (icon button / toggle) apart from a clickable
- * *container* (card/row) that wraps real controls we must not collapse.
- */
-const INTERACTIVE_ROLES_LC = new Set([
-  "button",
-  "checkbox",
-  "combobox",
-  "listbox",
-  "link",
-  "menuitem",
-  "menuitemcheckbox",
-  "menuitemradio",
-  "option",
-  "radio",
-  "scrollbar",
-  "searchbox",
-  "slider",
-  "spinbutton",
-  "switch",
-  "tab",
-  "textbox",
-  "treeitem",
-]);
-
 function cleanAttr(value: string | undefined): string | undefined {
   const trimmed = value?.replace(/\s+/g, " ").trim();
   return trimmed ? trimmed : undefined;
+}
+
+const FORM_CONTROL_TAGS = new Set(["input", "textarea", "select"]);
+
+const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
+
+function buildCapturedChildren(capturedNodes: CapturedNode[]): Map<number, CapturedNode[]> {
+  const children = new Map<number, CapturedNode[]>();
+  for (const node of capturedNodes) {
+    if (node.parentBackendNodeId === null) continue;
+    const siblings = children.get(node.parentBackendNodeId);
+    if (siblings) siblings.push(node);
+    else children.set(node.parentBackendNodeId, [node]);
+  }
+  return children;
+}
+
+function capturedDomAncestorIds(
+  node: CapturedNode,
+  capturedByBackendId: Map<number, CapturedNode>,
+): number[] {
+  const ancestors: number[] = [];
+  let parentId = node.parentBackendNodeId;
+  let guard = 0;
+  while (parentId !== null && guard < capturedByBackendId.size) {
+    ancestors.push(parentId);
+    parentId = capturedByBackendId.get(parentId)?.parentBackendNodeId ?? null;
+    guard += 1;
+  }
+  return ancestors;
+}
+
+function capturedHasNativeDescendant(
+  node: CapturedNode,
+  childrenByParentId: Map<number, CapturedNode[]>,
+): boolean {
+  const stack = [...(childrenByParentId.get(node.backendNodeId) ?? [])];
+  while (stack.length > 0) {
+    const child = stack.pop() as CapturedNode;
+    if (NATIVE_CONTROL_TAGS.has(normalizeTag(child.tag))) return true;
+    stack.push(...(childrenByParentId.get(child.backendNodeId) ?? []));
+  }
+  return false;
+}
+
+function capturedInsideNative(
+  node: CapturedNode,
+  capturedByBackendId: Map<number, CapturedNode>,
+): boolean {
+  let parentId = node.parentBackendNodeId;
+  let guard = 0;
+  while (parentId !== null && guard < capturedByBackendId.size) {
+    const parent = capturedByBackendId.get(parentId);
+    if (!parent) break;
+    if (NATIVE_CONTROL_TAGS.has(normalizeTag(parent.tag))) return true;
+    parentId = parent.parentBackendNodeId;
+    guard += 1;
+  }
+  return false;
+}
+
+function nearbyTextFor(
+  node: CapturedNode,
+  childrenByParentId: Map<number, CapturedNode[]>,
+): string | undefined {
+  if (node.parentBackendNodeId === null) return undefined;
+  const siblings = childrenByParentId.get(node.parentBackendNodeId) ?? [];
+  const index = siblings.findIndex((sibling) => sibling.backendNodeId === node.backendNodeId);
+  if (index < 0) return undefined;
+
+  const labels: string[] = [];
+  for (const sibling of siblings.slice(Math.max(0, index - 3), index)) {
+    const text = cleanAttr(sibling.textContent);
+    if (text) labels.push(text);
+  }
+  for (const sibling of siblings.slice(index + 1, index + 4)) {
+    const text = cleanAttr(sibling.textContent);
+    if (text) labels.push(text);
+  }
+  return labels.length > 0 ? labels.join(" ") : undefined;
+}
+
+interface VomNodeDomSignals {
+  capturedByBackendId: Map<number, CapturedNode>;
+  childrenByParentId: Map<number, CapturedNode[]>;
+}
+
+function applyCapturedSignals(
+  node: VomNode,
+  capturedNode: CapturedNode | undefined,
+  signals: VomNodeDomSignals,
+): VomNode {
+  if (!capturedNode) return node;
+  const attrs = capturedNode.attrs;
+  const text = cleanAttr(capturedNode.textContent);
+  const nearbyText = nearbyTextFor(capturedNode, signals.childrenByParentId);
+  return {
+    ...node,
+    domParentId: capturedNode.parentBackendNodeId,
+    domAncestorIds: capturedDomAncestorIds(capturedNode, signals.capturedByBackendId),
+    cursor: capturedNode.cursor,
+    attrs,
+    ...(text ? { text } : {}),
+    ...(nearbyText ? { nearbyText } : {}),
+    disabled:
+      Object.prototype.hasOwnProperty.call(attrs, "disabled") ||
+      (attrs["aria-disabled"] ?? "").toLowerCase() === "true",
+    inert: Object.prototype.hasOwnProperty.call(attrs, "inert"),
+    hasNativeDescendant: capturedHasNativeDescendant(capturedNode, signals.childrenByParentId),
+    insideNative: capturedInsideNative(capturedNode, signals.capturedByBackendId),
+  };
 }
 
 /**
@@ -400,180 +479,86 @@ function formControlName(
   return axName ?? ariaLabel ?? placeholder ?? title;
 }
 
-/** Strip a sprite/file reference like `#close` or `icon-close.svg` to `close`. */
-function iconKeyword(href: string | undefined): string | undefined {
-  if (!href) return undefined;
-  let s = href.trim();
-  const hash = s.lastIndexOf("#");
-  if (hash >= 0) s = s.slice(hash + 1);
-  s = s.split("/").pop() ?? s;
-  s = s.replace(/\.(svg|png|webp|gif|jpe?g)$/i, "");
-  s = s.replace(/^(icons?[-_]?|ic[-_]|svg[-_])/i, "");
-  s = s.replace(/[-_]+/g, " ").trim();
-  return s ? s : undefined;
-}
-
-/** First icon-derived label found in a clickable element's captured subtree. */
-function iconHint(
-  root: CapturedNode,
-  capChildren: Map<number, CapturedNode[]>,
-): string | undefined {
-  const queue: Array<{ node: CapturedNode; depth: number }> = (
-    capChildren.get(root.backendNodeId) ?? []
-  ).map((node) => ({ node, depth: 1 }));
-  while (queue.length > 0) {
-    const { node, depth } = queue.shift() as { node: CapturedNode; depth: number };
-    const labelled =
-      cleanAttr(node.attrs["aria-label"]) ??
-      cleanAttr(node.attrs.title) ??
-      cleanAttr(node.attrs.alt);
-    if (labelled) return labelled;
-    if (node.tag === "use") {
-      const kw = iconKeyword(node.attrs["xlink:href"] ?? node.attrs.href);
-      if (kw) return kw;
-    }
-    if (depth < 4) {
-      for (const child of capChildren.get(node.backendNodeId) ?? []) {
-        queue.push({ node: child, depth: depth + 1 });
-      }
-    }
-  }
-  return undefined;
-}
-
-/** Best-effort name for a promoted clickable: own labels → text → icon. */
-function clickableName(
-  captured: CapturedNode,
-  capChildren: Map<number, CapturedNode[]>,
-): string | undefined {
-  return (
-    cleanAttr(captured.attrs["aria-label"]) ??
-    cleanAttr(captured.attrs.title) ??
-    cleanAttr(captured.textContent) ??
-    iconHint(captured, capChildren)
-  );
-}
-
-function rectCoverage(
-  rect: { x: number; y: number; w: number; h: number } | null,
-  vw: number,
-  vh: number,
-): number {
-  if (!rect || vw <= 0 || vh <= 0) return 0;
-  const ix = Math.max(0, Math.min(rect.x + rect.w, vw) - Math.max(rect.x, 0));
-  const iy = Math.max(0, Math.min(rect.y + rect.h, vh) - Math.max(rect.y, 0));
-  const overlap = ix * iy;
-  return overlap <= 0 ? 0 : Math.min(1, overlap / (vw * vh));
-}
-
-/**
- * Promote custom clickable controls the AX tree drops as `generic`/unnamed
- * (icon buttons, CSS checkboxes, "send code" spans …) to a referenceable
- * `button` so the snapshot can act on them. Guards keep noise out: must be
- * `cursor: pointer`, have a box, not be a viewport-scale overlay, and not
- * wrap any real interactive descendant (so clickable cards or rows stay
- * containers and their inner controls keep their own refs).
- */
-function promoteClickableControls(
-  nodes: VomNode[],
-  capturedById: Map<number, CapturedNode>,
-  capturedNodes: CapturedNode[],
-  vw: number,
-  vh: number,
-): void {
-  // Snapshot original roles + parent/child links before any mutation so the
-  // guards below are immune to roles we flip to "button" mid-pass.
-  const originalRoleLc = new Map<number, string>(
-    nodes.map((node) => [node.id, (node.role ?? "").toLowerCase()]),
-  );
-  const parentOf = new Map<number, number | null>(nodes.map((node) => [node.id, node.parentId]));
-  const semChildren = new Map<number, VomNode[]>();
-  for (const node of nodes) {
-    if (node.parentId === null) continue;
-    const siblings = semChildren.get(node.parentId);
-    if (siblings) siblings.push(node);
-    else semChildren.set(node.parentId, [node]);
-  }
-
-  const capChildren = new Map<number, CapturedNode[]>();
-  for (const cap of capturedNodes) {
-    if (cap.parentBackendNodeId === null) continue;
-    const siblings = capChildren.get(cap.parentBackendNodeId);
-    if (siblings) siblings.push(cap);
-    else capChildren.set(cap.parentBackendNodeId, [cap]);
-  }
-
-  // A custom clickable: a non-semantic, pointer-cursor box small enough to be
-  // a control rather than a viewport-scale overlay.
-  const candidates = new Set<number>();
-  for (const node of nodes) {
-    if (!PROMOTABLE_ROLES.has(originalRoleLc.get(node.id) ?? "")) continue;
-    const cap = capturedById.get(node.id);
-    if (!cap || cap.cursor !== "pointer" || !node.rect) continue;
-    if (rectCoverage(node.rect, vw, vh) > 0.5) continue;
-    candidates.add(node.id);
-  }
-
-  // wraps a *real* interactive control → it's a clickable container, leave it
-  // (and its inner refs) alone.
-  const wrapsInteractive = (id: number): boolean => {
-    const stack = [...(semChildren.get(id) ?? [])];
-    while (stack.length > 0) {
-      const node = stack.pop() as VomNode;
-      if (INTERACTIVE_ROLES_LC.has(originalRoleLc.get(node.id) ?? "")) return true;
-      const kids = semChildren.get(node.id);
-      if (kids) stack.push(...kids);
-    }
-    return false;
-  };
-
-  // only the outermost clickable in a nested chain becomes the control, so an
-  // icon inside a custom button doesn't render as a button-in-a-button.
-  const hasCandidateAncestor = (id: number): boolean => {
-    let parent = parentOf.get(id) ?? null;
-    while (parent !== null) {
-      if (candidates.has(parent)) return true;
-      parent = parentOf.get(parent) ?? null;
-    }
-    return false;
-  };
-
-  for (const node of nodes) {
-    if (!candidates.has(node.id)) continue;
-    if (wrapsInteractive(node.id) || hasCandidateAncestor(node.id)) continue;
-    const cap = capturedById.get(node.id);
-    if (!cap) continue;
-
-    node.role = "button";
-    if (!cleanAttr(node.name)) {
-      const derived = clickableName(cap, capChildren);
-      if (derived) node.name = derived;
-    }
-  }
-}
-
-function vomNodeFromCaptured(capturedNode: CapturedNode, parentId: number | null): VomNode {
+function vomNodeFromCaptured(
+  capturedNode: CapturedNode,
+  parentId: number | null,
+  signals: VomNodeDomSignals,
+): VomNode {
   const sensitive = isSensitive(capturedNode);
   const value = sensitive ? (capturedNode.attrs.value ?? "") : undefined;
   const tag = normalizeTag(capturedNode.tag);
-  const node: VomNode = {
-    id: capturedNode.backendNodeId,
-    parentId,
-    tag,
-    rect: capturedNode.rect,
-    paintOrder: capturedNode.paintOrder,
-    position: capturedNode.position || "static",
-    pointerEvents: capturedNode.pointerEvents || "auto",
-    modal: isModalSignal(undefined, capturedNode),
-    sensitive,
-    ...(value !== undefined ? { value } : {}),
-  };
+  const node = applyCapturedSignals(
+    {
+      id: capturedNode.backendNodeId,
+      parentId,
+      tag,
+      rect: capturedNode.rect,
+      paintOrder: capturedNode.paintOrder,
+      position: capturedNode.position || "static",
+      pointerEvents: capturedNode.pointerEvents || "auto",
+      modal: isModalSignal(undefined, capturedNode),
+      sensitive,
+      ...(value !== undefined ? { value } : {}),
+    },
+    capturedNode,
+    signals,
+  );
   if (tag === "iframe") {
     node.role = "Iframe";
     const name = capturedIframeNameFor(capturedNode);
     if (name) node.name = name;
   }
   return node;
+}
+
+function axVomNode(
+  axNode: CdpAxNode,
+  capturedNode: CapturedNode | undefined,
+  axById: Map<string, CdpAxNode>,
+  signals: VomNodeDomSignals,
+): VomNode {
+  const role = axString(axNode.role);
+  const value = axValue(axNode.value);
+  const name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
+    ? formControlName(capturedNode, axString(axNode.name), value)
+    : axString(axNode.name);
+  const node: VomNode = {
+    id: axNode.backendDOMNodeId as number,
+    parentId: nearestBackendParent(axNode, axById),
+    tag: normalizeTag(capturedNode?.tag),
+    rect: capturedNode?.rect ?? null,
+    paintOrder: capturedNode?.paintOrder ?? 0,
+    position: capturedNode?.position || "static",
+    pointerEvents: capturedNode?.pointerEvents || "auto",
+    modal: isModalSignal(axNode, capturedNode),
+    sensitive: isSensitive(capturedNode),
+  };
+  if (role) node.role = role;
+  if (name) node.name = name;
+  if (value !== undefined) node.value = value;
+  return applyCapturedSignals(node, capturedNode, signals);
+}
+
+function iframeSignals(iframeNodes: CapturedNode[]): VomNodeDomSignals {
+  const capturedByBackendId = new Map<number, CapturedNode>();
+  for (const node of iframeNodes) {
+    capturedByBackendId.set(node.backendNodeId, node);
+  }
+  return {
+    capturedByBackendId,
+    childrenByParentId: buildCapturedChildren(iframeNodes),
+  };
+}
+
+function capturedOnlySignals(capturedNodes: CapturedNode[]): VomNodeDomSignals {
+  const capturedByBackendId = new Map<number, CapturedNode>();
+  for (const node of capturedNodes) {
+    capturedByBackendId.set(node.backendNodeId, node);
+  }
+  return {
+    capturedByBackendId,
+    childrenByParentId: buildCapturedChildren(capturedNodes),
+  };
 }
 
 function axNodeInOverlaySubtree(
@@ -598,10 +583,8 @@ function axNodeInOverlaySubtree(
 }
 
 export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel): VomScene {
-  const capturedByBackendId = new Map<number, CapturedNode>();
-  for (const node of captured.nodes) {
-    capturedByBackendId.set(node.backendNodeId, node);
-  }
+  const signals = capturedOnlySignals(captured.nodes);
+  const { capturedByBackendId } = signals;
 
   const axById = new Map<string, CdpAxNode>();
   for (const node of axNodes) {
@@ -618,24 +601,7 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
 
     const capturedNode = capturedByBackendId.get(axNode.backendDOMNodeId);
     const role = axString(axNode.role);
-    const value = axValue(axNode.value);
-    const name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
-      ? formControlName(capturedNode, axString(axNode.name), value)
-      : axString(axNode.name);
-    const vomNode: VomNode = {
-      id: axNode.backendDOMNodeId,
-      parentId: nearestBackendParent(axNode, axById),
-      tag: normalizeTag(capturedNode?.tag),
-      rect: capturedNode?.rect ?? null,
-      paintOrder: capturedNode?.paintOrder ?? 0,
-      position: capturedNode?.position || "static",
-      pointerEvents: capturedNode?.pointerEvents || "auto",
-      modal: isModalSignal(axNode, capturedNode),
-      sensitive: isSensitive(capturedNode),
-    };
-    if (role) vomNode.role = role;
-    if (name) vomNode.name = name;
-    if (value !== undefined) vomNode.value = value;
+    const vomNode = axVomNode(axNode, capturedNode, axById, signals);
 
     // For link nodes, attach external hostname so the renderer can annotate it.
     // Relative hrefs and same-origin hrefs are omitted to avoid noise.
@@ -658,10 +624,11 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
     if (seenBackendIds.has(capturedNode.backendNodeId)) continue;
     if (excludedBackendNodeIds.has(capturedNode.backendNodeId)) continue;
     seenBackendIds.add(capturedNode.backendNodeId);
-    nodes.push(vomNodeFromCaptured(capturedNode, capturedNode.parentBackendNodeId));
+    nodes.push(vomNodeFromCaptured(capturedNode, capturedNode.parentBackendNodeId, signals));
   }
 
   for (const [iframeBackendId, iframeNodes] of captured.iframeNodes) {
+    const signals = iframeSignals(iframeNodes);
     for (const iframeNode of iframeNodes) {
       if (
         seenBackendIds.has(iframeNode.backendNodeId) ||
@@ -676,21 +643,13 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
 
       seenBackendIds.add(iframeNode.backendNodeId);
       const vomNode: VomNode = {
-        ...vomNodeFromCaptured(iframeNode, iframeBackendId),
+        ...vomNodeFromCaptured(iframeNode, iframeBackendId, signals),
         role,
       };
       if (name) vomNode.name = name;
       nodes.push(vomNode);
     }
   }
-
-  promoteClickableControls(
-    nodes,
-    capturedByBackendId,
-    captured.nodes,
-    captured.viewport.width,
-    captured.viewport.height,
-  );
 
   return { viewport: captured.viewport, nodes };
 }
