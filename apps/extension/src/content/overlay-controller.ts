@@ -1,13 +1,21 @@
 import type { BorrowRequestData } from "./BorrowConfirmationOverlay";
 import type { HelpRequestData } from "./HelpRequestOverlay";
+import type { RecordRequestData } from "./RecordOverlay";
 
 export interface OverlayState {
   borrowRequests: BorrowRequestData[];
   activeHelp: HelpRequestData | null;
+  activeRecord: RecordRequestData | null;
   controlVisible: boolean;
   interrupting: boolean;
   activeSessionId: string | null;
   automationBypassCount: number;
+  /**
+   * After record Finish/Stop clears `activeRecord`, the session is still
+   * alive until CLI `session.stop`. Suppress the control mask for that gap
+   * so 「Agent 正在控制」does not flash between RecordOverlay and teardown.
+   */
+  suppressControlAfterRecord: boolean;
 }
 
 type MutableOverlayState = Omit<OverlayState, "controlVisible">;
@@ -20,9 +28,11 @@ export class OverlayController {
   private state: MutableOverlayState = {
     borrowRequests: [],
     activeHelp: null,
+    activeRecord: null,
     interrupting: false,
     activeSessionId: null,
     automationBypassCount: 0,
+    suppressControlAfterRecord: false,
   };
 
   snapshot(): OverlayState {
@@ -70,6 +80,25 @@ export class OverlayController {
     this.state.activeHelp = null;
   }
 
+  setAgentRecordRequest(request: RecordRequestData): RecordRequestData | null {
+    const previous = this.state.activeRecord;
+    this.state.activeRecord = request;
+    this.state.suppressControlAfterRecord = false;
+    return previous;
+  }
+
+  clearAgentRecordRequest(requestId?: string): void {
+    if (!this.state.activeRecord) return;
+    if (requestId && this.state.activeRecord.id !== requestId) return;
+    this.state.activeRecord = null;
+    // Hide control until session teardown — see OverlayState.suppressControlAfterRecord.
+    this.state.suppressControlAfterRecord = true;
+    // Record start/rearm may have stacked automation-bypass refs; drop them so a
+    // stray ControlOverlay cannot sit with pointer-events:none (page usable,
+    // Interrupt unclickable).
+    this.state.automationBypassCount = 0;
+  }
+
   setAutomationBypass(enabled: boolean): void {
     if (enabled) {
       this.state.automationBypassCount += 1;
@@ -86,10 +115,22 @@ export class OverlayController {
     this.state = {
       ...this.state,
       activeHelp: null,
+      activeRecord: null,
       interrupting: false,
       activeSessionId: null,
       automationBypassCount: 0,
+      suppressControlAfterRecord: false,
     };
     return previousHelp;
   }
+}
+
+/** Control mask ("Agent 正在控制") must hide while help/record overlays own the chrome. */
+export function shouldShowAgentControlOverlay(state: OverlayState): boolean {
+  return (
+    state.controlVisible &&
+    !state.suppressControlAfterRecord &&
+    state.activeHelp === null &&
+    state.activeRecord === null
+  );
 }

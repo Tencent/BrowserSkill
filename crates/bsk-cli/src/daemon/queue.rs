@@ -221,6 +221,13 @@ impl ToolQueueRegistry {
         guard.get(sid).is_some_and(|entry| entry.accepting)
     }
 
+    #[cfg(test)]
+    fn force_busy_for_tests(&self, sid: &SessionId, busy: bool) {
+        let guard = self.queues.lock().expect("tool queue registry poisoned");
+        let entry = guard.get(sid).expect("queue must exist");
+        entry.state.lock().expect("queue state poisoned").busy = busy;
+    }
+
     /// Spawn the worker task for a session id. Idempotent: spawning the
     /// same id twice replaces the previous queue (the previous worker
     /// closes when its sender drops).
@@ -318,6 +325,42 @@ impl ToolQueueRegistry {
         // on a later sweep rather than interrupting the tool.
         self.sessions.touch(sid);
         outcome
+    }
+
+    /// Forward a tool RPC to the extension without taking the
+    /// per-session busy lock. Used by `tool.record_stop` so a second
+    /// CLI can finish an in-flight `tool.record_await` (extension
+    /// dispatch already runs concurrent `void dispatch(msg)` handlers).
+    pub async fn dispatch_unlocked(
+        &self,
+        sid: &SessionId,
+        method: Method,
+        params: Value,
+        timeout: Duration,
+        inflight: Option<Arc<ToolInflightEntry>>,
+    ) -> Result<Value, DispatchError> {
+        {
+            let guard = self.queues.lock().expect("tool queue registry poisoned");
+            let Some(entry) = guard.get(sid) else {
+                return Err(DispatchError::SessionNotFound);
+            };
+            if !entry.accepting {
+                return Err(DispatchError::SessionStopping);
+            }
+        }
+        let (respond_tx, _respond_rx) = oneshot::channel();
+        let job = ToolJob {
+            method,
+            params,
+            timeout,
+            respond: respond_tx,
+            inflight,
+            session_id: sid.clone(),
+        };
+        match forward_one(sid, &self.browsers, &self.sessions, &job).await {
+            Ok(v) => Ok(v),
+            Err(err) => Err(DispatchError::Rpc(err)),
+        }
     }
 
     /// Stop accepting new jobs for `sid`, enqueue one final control RPC,
@@ -787,5 +830,52 @@ mod tool_job_session_id_tests {
             session_id: SessionId("sess-A".into()),
         };
         assert_eq!(job.session_id.0, "sess-A");
+    }
+}
+
+#[cfg(test)]
+mod dispatch_unlocked_tests {
+    use super::*;
+    use crate::daemon::browsers::BrowserRegistry;
+    use crate::daemon::sessions::{SessionId, SessionRegistry};
+    use bsk_protocol::Method;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn unlocked_dispatch_skips_session_busy_gate() {
+        let browsers = Arc::new(BrowserRegistry::new());
+        let sessions = Arc::new(SessionRegistry::new());
+        let queues = ToolQueueRegistry::new(browsers, sessions);
+        let sid = SessionId("s-record".into());
+        queues.spawn(sid.clone());
+        queues.force_busy_for_tests(&sid, true);
+
+        let busy = queues
+            .dispatch(
+                &sid,
+                Method::ToolTabList,
+                json!({ "session_id": "s-record" }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await;
+        assert!(matches!(busy, Err(DispatchError::SessionBusy)));
+
+        let unlocked = queues
+            .dispatch_unlocked(
+                &sid,
+                Method::ToolRecordStop,
+                json!({ "session_id": "s-record" }),
+                Duration::from_secs(1),
+                None,
+            )
+            .await;
+        assert!(
+            !matches!(unlocked, Err(DispatchError::SessionBusy)),
+            "record_stop must not be rejected as SessionBusy; got {unlocked:?}"
+        );
+        // No session row → forward_one returns NotFound as Rpc.
+        assert!(matches!(unlocked, Err(DispatchError::Rpc(_))));
     }
 }

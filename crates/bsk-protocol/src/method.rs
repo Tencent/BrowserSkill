@@ -74,6 +74,12 @@ pub enum Method {
     ToolWaitMs,
     #[serde(rename = "tool.request_help")]
     ToolRequestHelp,
+    #[serde(rename = "tool.record_start")]
+    ToolRecordStart,
+    #[serde(rename = "tool.record_stop")]
+    ToolRecordStop,
+    #[serde(rename = "tool.record_await")]
+    ToolRecordAwait,
 
     #[serde(rename = "cancel")]
     Cancel,
@@ -121,9 +127,16 @@ impl Method {
             | Method::ToolFill
             | Method::ToolPress
             | Method::ToolSelect
-            | Method::ToolEvaluate => true,
+            | Method::ToolEvaluate
+            // May navigate via optional `url` and changes Agent Window
+            // chrome; gate behind pending-interrupt like other writes.
+            | Method::ToolRecordStart => true,
 
             // Read-only tool calls — transparent.
+            //
+            // `record_stop` / `record_await` observe / finish a recording
+            // without driving new automation gestures, so they stay
+            // ungated (teardown after interrupt must still work).
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
@@ -132,7 +145,9 @@ impl Method {
             | Method::ToolNetwork
             | Method::ToolWaitForNavigation
             | Method::ToolWaitMs
-            | Method::ToolRequestHelp => false,
+            | Method::ToolRequestHelp
+            | Method::ToolRecordStop
+            | Method::ToolRecordAwait => false,
 
             // Session lifecycle — not gated.
             Method::SessionStart
@@ -218,6 +233,13 @@ mod tests {
         assert!(Method::ToolPress.is_mutating());
         assert!(Method::ToolSelect.is_mutating());
         assert!(Method::ToolEvaluate.is_mutating());
+        assert!(Method::ToolRecordStart.is_mutating());
+    }
+
+    #[test]
+    fn is_mutating_classifies_record_stop_await_as_non_mutating() {
+        assert!(!Method::ToolRecordStop.is_mutating());
+        assert!(!Method::ToolRecordAwait.is_mutating());
     }
 
     #[test]
