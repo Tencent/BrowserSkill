@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -149,6 +150,13 @@ pub struct BrowserClient {
     /// Bumped by [`BrowserClient::touch`] from the WS read loop and read
     /// by the liveness reaper to detect a silently-dead connection.
     pub last_seen: Mutex<Instant>,
+    /// `true` once this browser has sent at least one `system.heartbeat`.
+    /// The liveness reaper only acts on heartbeat-capable browsers: a
+    /// pre-heartbeat extension never sets this, so it is never reaped on
+    /// silence and instead relies on socket-close detection exactly as
+    /// before — otherwise a new daemon paired with an old extension would
+    /// wrongly drop a live-but-idle connection.
+    pub heartbeat_seen: AtomicBool,
 }
 
 impl BrowserClient {
@@ -157,6 +165,17 @@ impl BrowserClient {
         if let Ok(mut last) = self.last_seen.lock() {
             *last = Instant::now();
         }
+    }
+
+    /// Note that a `system.heartbeat` arrived, opting this browser in to
+    /// liveness reaping.
+    pub fn mark_heartbeat_seen(&self) {
+        self.heartbeat_seen.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether this browser has ever sent a heartbeat.
+    pub fn has_heartbeat(&self) -> bool {
+        self.heartbeat_seen.load(Ordering::Relaxed)
     }
 
     /// How long since the last inbound frame from this browser.
@@ -245,16 +264,19 @@ impl BrowserRegistry {
         guard.values().cloned().collect()
     }
 
-    /// Return every currently-registered browser whose last inbound
-    /// frame is older than `threshold`. The caller is responsible for
-    /// dropping them (via [`Self::remove_if_generation_matches`]) and
-    /// purging their sessions — done outside the lock so session
-    /// teardown never blocks the registry.
+    /// Return every heartbeat-capable browser whose last inbound frame is
+    /// older than `threshold`. Browsers that have never sent a heartbeat
+    /// (legacy extensions) are excluded so the reaper never drops a
+    /// live-but-idle connection it cannot probe. The caller is
+    /// responsible for dropping the returned entries (via
+    /// [`Self::remove_if_generation_matches`]) and purging their sessions
+    /// — done outside the lock so session teardown never blocks the
+    /// registry.
     pub fn stale_browsers(&self, threshold: Duration) -> Vec<std::sync::Arc<BrowserClient>> {
         let guard = self.inner.lock().expect("browser registry poisoned");
         guard
             .values()
-            .filter(|c| c.idle_for() >= threshold)
+            .filter(|c| c.has_heartbeat() && c.idle_for() >= threshold)
             .cloned()
             .collect()
     }
@@ -402,6 +424,7 @@ mod tests {
             connected_at_ms: 0,
             version_skew: false,
             last_seen: Mutex::new(Instant::now()),
+            heartbeat_seen: AtomicBool::new(false),
         })
     }
 
@@ -608,10 +631,12 @@ mod tests {
     }
 
     #[test]
-    fn stale_browsers_reports_only_silent_connections() {
+    fn stale_browsers_reports_only_silent_heartbeat_capable_connections() {
         let reg = BrowserRegistry::new();
         let fresh = fake_client("fresh", "");
+        fresh.mark_heartbeat_seen();
         let stale = fake_client("stale", "");
+        stale.mark_heartbeat_seen();
         *stale.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(90);
         reg.insert(fresh);
         reg.insert(stale);
@@ -622,6 +647,22 @@ mod tests {
             .map(|c| c.id.0.clone())
             .collect();
         assert_eq!(stale_ids, vec!["stale".to_string()]);
+    }
+
+    #[test]
+    fn stale_browsers_never_reaps_a_browser_that_never_sent_a_heartbeat() {
+        // A legacy extension that predates the heartbeat must fall back
+        // to socket-close detection, never liveness reaping — even when
+        // it has been silent well past the threshold.
+        let reg = BrowserRegistry::new();
+        let legacy = fake_client("legacy", "");
+        *legacy.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(600);
+        reg.insert(legacy);
+
+        assert!(
+            reg.stale_browsers(Duration::from_secs(60)).is_empty(),
+            "a browser that never heartbeated must not be reaped"
+        );
     }
 
     #[tokio::test]
