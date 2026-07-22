@@ -82,6 +82,7 @@ pub struct DaemonHandle {
     ws: WsHandle,
     ipc: Option<IpcHandle>,
     session_idle_task: JoinHandle<()>,
+    browser_liveness_task: JoinHandle<()>,
 }
 
 impl DaemonHandle {
@@ -90,12 +91,14 @@ impl DaemonHandle {
         ws: WsHandle,
         ipc: Option<IpcHandle>,
         session_idle_task: JoinHandle<()>,
+        browser_liveness_task: JoinHandle<()>,
     ) -> Self {
         Self {
             state,
             ws,
             ipc,
             session_idle_task,
+            browser_liveness_task,
         }
     }
 
@@ -116,6 +119,8 @@ impl DaemonHandle {
     pub async fn shutdown(self) {
         self.session_idle_task.abort();
         let _ = await_join(self.session_idle_task).await;
+        self.browser_liveness_task.abort();
+        let _ = await_join(self.browser_liveness_task).await;
         self.ws.shutdown.notify_waiters();
         let _ = await_join(self.ws.task).await;
         if let Some(ipc) = self.ipc {

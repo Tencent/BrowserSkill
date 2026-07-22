@@ -51,6 +51,7 @@ fn fake_client(id: &str, label: &str, connected_at_ms: i64) -> Arc<BrowserClient
         generation: next_browser_generation(),
         connected_at_ms,
         version_skew: false,
+        last_seen: Mutex::new(std::time::Instant::now()),
     })
 }
 

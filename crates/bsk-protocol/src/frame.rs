@@ -40,6 +40,14 @@ pub struct EventFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
+    /// Application-level keepalive emitted by the extension roughly
+    /// every 20s while the WS link is up. Two purposes: (1) the
+    /// send/receive activity resets the MV3 service-worker idle timer
+    /// (Chrome 116+), keeping the worker — and therefore the socket —
+    /// alive during use; (2) the daemon treats it as a liveness signal
+    /// so a silently-dead browser can be reaped. Carries no payload.
+    #[serde(rename = "system.heartbeat")]
+    SystemHeartbeat,
     #[serde(rename = "session.activity")]
     SessionActivity,
     #[serde(rename = "session.window_closed")]

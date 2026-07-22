@@ -200,6 +200,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 
         let state = Arc::new(DaemonState::new(cfg.clone()));
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
+        let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
         let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
@@ -361,6 +362,8 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let _ = ipc_task.await;
         session_idle_task.abort();
         let _ = session_idle_task.await;
+        browser_liveness_task.abort();
+        let _ = browser_liveness_task.await;
         ws_handle.shutdown.notify_waiters();
         let _ = ws_handle.task.await;
 
@@ -371,6 +374,52 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 
     drop(lock);
     Ok(())
+}
+
+/// Spawn the browser-liveness reaper shared by the production foreground
+/// daemon and the test/embed entry point.
+///
+/// A normal disconnect closes the WebSocket, which the per-connection
+/// read loop observes and cleans up. But if the OS resumed from sleep
+/// and killed the MV3 service worker, the socket can be left half-open
+/// with no close frame ever delivered. Without the ~20s `system.heartbeat`
+/// arriving, such a connection would otherwise sit in the registry
+/// forever — pinning a phantom "connected" browser and preventing the
+/// daemon from ever idle-exiting. This reaper drops any browser that has
+/// gone silent past [`BROWSER_LIVENESS_TIMEOUT`] and purges its sessions,
+/// mirroring the WS disconnect cleanup.
+pub(crate) fn spawn_browser_liveness_reaper(
+    state: Arc<DaemonState>,
+) -> tokio::task::JoinHandle<()> {
+    use crate::daemon::browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT};
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(BROWSER_LIVENESS_TICK);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The first tick is immediate; skip it so a freshly connected
+        // browser always gets at least one full window before a scan.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            for client in state.browsers.stale_browsers(BROWSER_LIVENESS_TIMEOUT) {
+                if state
+                    .browsers
+                    .remove_if_generation_matches(&client.id, client.generation)
+                    .is_some()
+                {
+                    warn!(
+                        id = %client.id,
+                        idle_secs = client.idle_for().as_secs(),
+                        "reaping unresponsive browser (no heartbeat within liveness window)"
+                    );
+                    for s in state.sessions.purge_browser(&client.id) {
+                        state.tool_queues.remove(&s.id);
+                        state.session_interrupts.drop_session(&s.id);
+                        debug!(session = %s.id, "purged session on browser liveness timeout");
+                    }
+                }
+            }
+        }
+    })
 }
 
 /// Spawn the cooperative session-idle reaper shared by the production

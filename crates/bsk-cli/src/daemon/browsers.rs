@@ -22,9 +22,28 @@ use bsk_protocol::system::BrowserStatusEntry;
 /// seconds to wake, discover the WS port, and finish `system.handshake`.
 /// `session.start` polls the registry for up to this long before
 /// returning `no_browser_connected`.
-pub const EXTENSION_CONNECT_WAIT: Duration = Duration::from_secs(5);
+///
+/// Sized to comfortably cover one MV3 keepalive-alarm period (30s, the
+/// smallest Chrome allows) plus handshake slack: after a long idle the
+/// service worker is only revived on its next alarm tick, so a shorter
+/// window would make the first command after idle fail with
+/// `no_browser_connected` even though the extension is about to
+/// reconnect. Callers that want a snapshot (`bsk status`/`browsers`)
+/// pass their own, shorter wait instead of this constant.
+pub const EXTENSION_CONNECT_WAIT: Duration = Duration::from_secs(35);
 
 const EXTENSION_CONNECT_POLL: Duration = Duration::from_millis(50);
+
+/// A connected browser is considered dead if no frame (including the
+/// ~20s `system.heartbeat`) has arrived within this window. Set to three
+/// missed heartbeats so a briefly-busy service worker (GC, heavy CDP) is
+/// not reaped on a single late beat. Used by the liveness reaper to drop
+/// half-open connections that never delivered a socket close — e.g. after
+/// the OS resumed from sleep and killed the worker.
+pub const BROWSER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How often the liveness reaper scans the registry for stale browsers.
+pub const BROWSER_LIVENESS_TICK: Duration = Duration::from_secs(15);
 
 /// Process-wide monotonic counter for [`BrowserClient::generation`]. Used
 /// by the reconnect-race guard: when an old WS task tears down it only
@@ -125,9 +144,29 @@ pub struct BrowserClient {
     /// `true` when the peer's `protocol_version` differs from ours
     /// (same major, minor drift). Set during WS handshake (M10.4).
     pub version_skew: bool,
+    /// Monotonic timestamp of the most recent inbound frame from this
+    /// browser (any response/event, including `system.heartbeat`).
+    /// Bumped by [`BrowserClient::touch`] from the WS read loop and read
+    /// by the liveness reaper to detect a silently-dead connection.
+    pub last_seen: Mutex<Instant>,
 }
 
 impl BrowserClient {
+    /// Record that a frame just arrived from this browser.
+    pub fn touch(&self) {
+        if let Ok(mut last) = self.last_seen.lock() {
+            *last = Instant::now();
+        }
+    }
+
+    /// How long since the last inbound frame from this browser.
+    pub fn idle_for(&self) -> Duration {
+        match self.last_seen.lock() {
+            Ok(last) => last.elapsed(),
+            Err(poisoned) => poisoned.into_inner().elapsed(),
+        }
+    }
+
     pub fn status_entry(&self, session_count: u32) -> BrowserStatusEntry {
         BrowserStatusEntry {
             instance_id: self.id.0.clone(),
@@ -204,6 +243,20 @@ impl BrowserRegistry {
     pub fn snapshot(&self) -> Vec<std::sync::Arc<BrowserClient>> {
         let guard = self.inner.lock().expect("browser registry poisoned");
         guard.values().cloned().collect()
+    }
+
+    /// Return every currently-registered browser whose last inbound
+    /// frame is older than `threshold`. The caller is responsible for
+    /// dropping them (via [`Self::remove_if_generation_matches`]) and
+    /// purging their sessions — done outside the lock so session
+    /// teardown never blocks the registry.
+    pub fn stale_browsers(&self, threshold: Duration) -> Vec<std::sync::Arc<BrowserClient>> {
+        let guard = self.inner.lock().expect("browser registry poisoned");
+        guard
+            .values()
+            .filter(|c| c.idle_for() >= threshold)
+            .cloned()
+            .collect()
     }
 
     pub fn len(&self) -> usize {
@@ -348,6 +401,7 @@ mod tests {
             generation: next_browser_generation(),
             connected_at_ms: 0,
             version_skew: false,
+            last_seen: Mutex::new(Instant::now()),
         })
     }
 
@@ -541,6 +595,33 @@ mod tests {
         reg.insert(fake_client("late", ""));
         waiter.await.expect("join");
         assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn touch_resets_idle_for() {
+        let client = fake_client("a", "");
+        // Force the last_seen well into the past, then touch.
+        *client.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(120);
+        assert!(client.idle_for() >= Duration::from_secs(120));
+        client.touch();
+        assert!(client.idle_for() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn stale_browsers_reports_only_silent_connections() {
+        let reg = BrowserRegistry::new();
+        let fresh = fake_client("fresh", "");
+        let stale = fake_client("stale", "");
+        *stale.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(90);
+        reg.insert(fresh);
+        reg.insert(stale);
+
+        let stale_ids: Vec<String> = reg
+            .stale_browsers(Duration::from_secs(60))
+            .into_iter()
+            .map(|c| c.id.0.clone())
+            .collect();
+        assert_eq!(stale_ids, vec!["stale".to_string()]);
     }
 
     #[tokio::test]
