@@ -199,7 +199,9 @@ describe("App", () => {
     expect(copied).toContain("--browser 03c3e47f");
     expect(copied).toContain('--purpose "发布 wiki 文档"');
     expect(copied).not.toMatch(/bsk record start[^\n]*--url/);
-    await waitFor(() => expect(copyButton.textContent).toContain("已复制"));
+    // Button label stays static; a transient toast confirms the copy.
+    expect(copyButton.textContent).toContain("复制录制指令");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已复制"));
   });
 
   it("includes --url in record prompt when a start URL is provided", async () => {

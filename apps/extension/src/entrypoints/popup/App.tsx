@@ -41,7 +41,10 @@ export function App() {
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
   const [startUrlDraft, setStartUrlDraft] = useState("");
-  const [copiedPrompt, setCopiedPrompt] = useState(false);
+  // Bumped on every successful copy so the "copied" toast re-shows (and its
+  // auto-hide timer restarts) even when the copied content is unchanged.
+  const [copiedTick, setCopiedTick] = useState(0);
+  const showCopiedToast = copiedTick > 0;
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-color-scheme: dark)");
@@ -56,8 +59,20 @@ export function App() {
 
   useEffect(() => {
     setCopiedInstanceId(false);
-    setCopiedPrompt(false);
+    setCopiedTick(0);
   }, [snapshot.instanceId]);
+
+  // Hide the copied toast when the command changes (topic / start URL edits).
+  useEffect(() => {
+    setCopiedTick(0);
+  }, [purposeDraft, startUrlDraft]);
+
+  // Auto-hide the copied toast shortly after it appears.
+  useEffect(() => {
+    if (copiedTick === 0) return;
+    const timer = window.setTimeout(() => setCopiedTick(0), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copiedTick]);
 
   const isSkewed = statusState === "version_skew";
   const daemonVersion = snapshot.handshake?.version ?? "—";
@@ -92,7 +107,7 @@ export function App() {
   const copyRecordPrompt = async () => {
     if (!recordReady || !navigator.clipboard?.writeText) return;
     await navigator.clipboard.writeText(recordPrompt);
-    setCopiedPrompt(true);
+    setCopiedTick((tick) => tick + 1);
   };
 
   const headerTitle =
@@ -338,29 +353,32 @@ export function App() {
                 {t("popup.record.hintDisconnected")}
               </p>
             )}
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              className="ml-auto h-7 shrink-0 px-2.5 text-xs"
-              disabled={!recordReady}
-              onClick={() => {
-                void copyRecordPrompt();
-              }}
-              data-slot="popup-record-copy"
-            >
-              {copiedPrompt ? (
-                <>
-                  <RiCheckLine className="size-3.5" aria-hidden />
+            <div className="relative ml-auto shrink-0">
+              {showCopiedToast && (
+                <div
+                  role="status"
+                  className="absolute bottom-full right-0 mb-1.5 flex items-center gap-1 whitespace-nowrap rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium text-background shadow-md backdrop-blur-sm"
+                  data-slot="popup-record-copied-toast"
+                >
+                  <RiCheckLine className="size-3" aria-hidden />
                   {t("popup.record.copied")}
-                </>
-              ) : (
-                <>
-                  <RiFileCopyLine className="size-3.5" aria-hidden />
-                  {t("popup.record.copyButton")}
-                </>
+                </div>
               )}
-            </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="h-7 px-2.5 text-xs"
+                disabled={!recordReady}
+                onClick={() => {
+                  void copyRecordPrompt();
+                }}
+                data-slot="popup-record-copy"
+              >
+                <RiFileCopyLine className="size-3.5" aria-hidden />
+                {t("popup.record.copyButton")}
+              </Button>
+            </div>
           </div>
         </section>
       )}
