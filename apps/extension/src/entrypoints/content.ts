@@ -6,7 +6,13 @@ import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import overlayCss from "@/content/overlay.css?inline";
-import { OverlayController } from "@/content/overlay-controller";
+import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
+import { RecordOverlay } from "@/content/RecordOverlay";
+import {
+  handleRecordContentMessage,
+  isRecordContentMessage,
+  type RecordCaptureController,
+} from "@/content/record-capture";
 import {
   HELP_RESPONSE,
   type HelpCancelMessage,
@@ -24,6 +30,12 @@ import {
   type OverlayWhoAmIResponse,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
+import {
+  RECORD_FINISH,
+  RECORD_QUERY,
+  type RecordStartAck,
+  type RecordStopAck,
+} from "@/lib/record-bridge";
 import { SESSIONS_LIVE_FLAG_KEY } from "@/lib/sessions-live-flag";
 import type {
   BorrowCancelMessage,
@@ -45,6 +57,8 @@ export default defineContentScript({
     const overlays = new OverlayController();
     let activeHelpRespond: ((outcome: "continued" | "cancelled", note?: string) => void) | null =
       null;
+    let recordCapture: RecordCaptureController | null = null;
+    let activeRecordRequestId: string | null = null;
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let hostLossReported = false;
@@ -87,12 +101,13 @@ export default defineContentScript({
               requests: overlayState.borrowRequests,
             }),
             React.createElement(ControlOverlay, {
-              visible: overlayState.controlVisible && overlayState.activeHelp === null,
+              visible: shouldShowAgentControlOverlay(overlayState),
               interrupting: overlayState.interrupting,
               automationBypass: overlayState.automationBypassCount > 0,
               onInterrupt: handleInterrupt,
             }),
             React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
+            React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
           ),
         ),
       );
@@ -104,6 +119,9 @@ export default defineContentScript({
         activeHelpRespond?.("cancelled");
         activeHelpRespond = null;
       }
+      recordCapture?.dispose();
+      recordCapture = null;
+      activeRecordRequestId = null;
       renderOverlay();
     }
 
@@ -140,6 +158,42 @@ export default defineContentScript({
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response: BorrowResponseMessage | HelpResponseMessage) => void,
     ) => {
+      if (isRecordContentMessage(message)) {
+        const needsAsync = handleRecordContentMessage(
+          message,
+          {
+            activeRequestId: activeRecordRequestId,
+            capture: recordCapture,
+            setActiveRequestId: (id) => {
+              activeRecordRequestId = id;
+            },
+            setCapture: (capture) => {
+              recordCapture = capture;
+            },
+            onStart: (requestId) => {
+              overlays.setAgentRecordRequest({
+                id: requestId,
+                onFinish: () => {
+                  void chrome.runtime.sendMessage({
+                    type: RECORD_FINISH,
+                    requestId,
+                  });
+                },
+              });
+              renderOverlay();
+            },
+            onStop: () => {
+              overlays.clearAgentRecordRequest(activeRecordRequestId ?? undefined);
+              renderOverlay();
+            },
+          },
+          sendResponse as unknown as
+            | ((response: RecordStartAck | RecordStopAck) => void)
+            | undefined,
+        );
+        return needsAsync;
+      }
+
       if (
         message &&
         typeof message === "object" &&
@@ -228,23 +282,59 @@ export default defineContentScript({
       return false;
     };
 
-    async function mountOverlayIfAgent(): Promise<void> {
+    async function syncAgentOverlay(): Promise<void> {
       if (!(await anySessionLive())) return;
       try {
         const reply = (await chrome.runtime.sendMessage({
           kind: OVERLAY_MSG_WHO_AM_I,
         })) as OverlayWhoAmIResponse | undefined;
         if (!reply?.sessionId) return;
+
+        // Query / re-arm recording *before* activating the control overlay so
+        // record start (navigate → content load) does not flash
+        // 「Agent 正在控制」before RecordOverlay mounts.
+        let recordQuery: { active?: boolean; requestId?: string } | undefined;
+        try {
+          recordQuery = (await chrome.runtime.sendMessage({
+            type: RECORD_QUERY,
+          })) as { active?: boolean; requestId?: string } | undefined;
+        } catch (err) {
+          console.debug("[bsk overlay] record query failed", err);
+        }
+
+        if (
+          recordQuery?.active &&
+          typeof recordQuery.requestId === "string" &&
+          overlays.snapshot().activeRecord === null
+        ) {
+          const requestId = recordQuery.requestId;
+          overlays.setAgentRecordRequest({
+            id: requestId,
+            onFinish: () => {
+              void chrome.runtime.sendMessage({
+                type: RECORD_FINISH,
+                requestId,
+              });
+            },
+          });
+        }
+
         overlays.activateAgentSession(reply.sessionId);
         renderOverlay();
       } catch (err) {
-        console.debug("[bsk overlay] who_am_i failed", err);
+        console.debug("[bsk overlay] syncAgentOverlay failed", err);
       }
     }
 
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) void syncAgentOverlay();
+    };
+
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
-    void mountOverlayIfAgent();
+    void syncAgentOverlay();
+
+    window.addEventListener("pageshow", onPageShow);
 
     const hostObserver = new MutationObserver(() => {
       const connected = overlayHost?.isConnected ?? false;
@@ -254,6 +344,7 @@ export default defineContentScript({
           remountInProgress = true;
           try {
             ui.mount();
+            void syncAgentOverlay();
           } finally {
             remountInProgress = false;
           }
@@ -268,6 +359,11 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
+      window.removeEventListener("pageshow", onPageShow);
+      // Restore history hooks / remove capture listeners before the CS unloads.
+      recordCapture?.dispose();
+      recordCapture = null;
+      activeRecordRequestId = null;
     });
   },
 });

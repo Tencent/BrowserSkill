@@ -1,5 +1,6 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
+import { clearRecordingForSession } from "./record";
 import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
 
 export interface SessionStartParams {
@@ -155,6 +156,8 @@ export async function handleSessionStop(
 
   // Step 2: clear the per-session RefStore (review M6/M7 parity).
   ctx.refStore.clear();
+
+  clearRecordingForSession(params.session_id);
 
   // Step 3: detach CDP sessions this session opened (no-op if none).
   await deps.cdp?.detachSession(params.session_id);

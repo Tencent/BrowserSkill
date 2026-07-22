@@ -29,7 +29,16 @@ export default defineConfig({
     // service-worker idle timer, which the 20s heartbeat relies on to
     // keep the daemon link alive.
     minimum_chrome_version: "116",
-    permissions: ["alarms", "debugger", "idle", "notifications", "tabs", "storage", "windows"],
+    permissions: [
+      "alarms",
+      "debugger",
+      "idle",
+      "notifications",
+      "tabs",
+      "storage",
+      "webNavigation",
+      "windows",
+    ],
     host_permissions: ["<all_urls>"],
     icons: {
       16: "icon/logo.png",

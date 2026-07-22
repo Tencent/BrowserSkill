@@ -58,6 +58,7 @@ export function ControlOverlay({
       />
 
       <div
+        data-slot="control-overlay-blocker"
         onPointerDown={(event) => {
           if (automationBypass) return;
           event.preventDefault();
@@ -80,13 +81,16 @@ export function ControlOverlay({
       />
 
       <div
+        data-slot="control-overlay-pill"
         style={{
           position: "fixed",
           bottom: 32,
           left: "50%",
           transform: "translateX(-50%)",
           zIndex: 2147483647,
-          pointerEvents,
+          // Always receive clicks so Interrupt works even while the page
+          // blocker is in automation-bypass mode (CDP pass-through).
+          pointerEvents: "auto",
           display: "flex",
           alignItems: "center",
           gap: 12,
@@ -122,7 +126,7 @@ export function ControlOverlay({
           disabled={interrupting}
           onClick={onInterrupt}
           style={{
-            pointerEvents,
+            pointerEvents: "auto",
             display: "flex",
             alignItems: "center",
             gap: 6,

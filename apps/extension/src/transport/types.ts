@@ -537,3 +537,135 @@ export interface RequestHelpResult {
   tab_id: number;
   resolved_targets?: ResolvedTarget[];
 }
+
+// --------------------------------------------------------------------------
+// Semantic record payloads — mirror bsk-protocol record.rs (Trace v2)
+// --------------------------------------------------------------------------
+
+export interface TargetDescriptor {
+  role?: string;
+  name?: string;
+  tag: string;
+  name_attr?: string;
+  placeholder?: string;
+  nearby_label?: string;
+}
+
+export interface TraceEntry {
+  start_url: string;
+}
+
+export interface PageRef {
+  id: string;
+  url: string;
+  title?: string;
+}
+
+export interface SelectedOption {
+  value: string;
+  label?: string;
+}
+
+export interface StepEffect {
+  navigated_to: string;
+}
+
+export interface StepCommon {
+  id: number;
+  page: string;
+  effect?: StepEffect;
+}
+
+/** Capture/buffer draft before v2 reduction. */
+export type DraftTraceStep =
+  | {
+      op: "click";
+      target: TargetDescriptor;
+      navigated_to?: string;
+      page_url?: string;
+    }
+  | {
+      op: "fill";
+      target: TargetDescriptor;
+      value: string;
+      redacted?: boolean;
+      page_url?: string;
+    }
+  | {
+      op: "press";
+      key: string;
+      target?: TargetDescriptor;
+      modifiers?: KeyModifier[];
+      navigated_to?: string;
+      page_url?: string;
+    }
+  | {
+      op: "select";
+      target: TargetDescriptor;
+      values: string[];
+      labels?: string[];
+      navigated_to?: string;
+      page_url?: string;
+    }
+  | {
+      op: "navigate";
+      url: string;
+      page_url?: string;
+    };
+
+/** Exported record-only step (trace v2). */
+export type Step =
+  | ({ op: "navigate" } & StepCommon & { to: string })
+  | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
+  | ({ op: "fill" } & StepCommon & {
+        target: TargetDescriptor;
+        value: string;
+        redacted?: boolean;
+      })
+  | ({ op: "select" } & StepCommon & {
+        target: TargetDescriptor;
+        selection: SelectedOption[];
+      })
+  | ({ op: "press" } & StepCommon & {
+        key: string;
+        modifiers?: KeyModifier[];
+        target?: TargetDescriptor;
+      });
+
+export interface Trace {
+  recorded_at: string;
+  started_at?: string;
+  purpose?: string;
+  entry: TraceEntry;
+  pages: PageRef[];
+  steps: Step[];
+}
+
+export interface RecordStartParams {
+  session_id: string;
+  tab_id?: number;
+  url?: string;
+  purpose?: string;
+}
+
+export interface RecordStartResult {
+  tab_id: number;
+  recording: boolean;
+}
+
+export interface RecordStopParams {
+  session_id: string;
+}
+
+export interface RecordStopResult {
+  trace: Trace;
+}
+
+export interface RecordAwaitParams {
+  session_id: string;
+  timeout_ms?: number;
+}
+
+export interface RecordAwaitResult {
+  trace: Trace;
+}
