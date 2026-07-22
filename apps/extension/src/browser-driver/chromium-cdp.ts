@@ -155,10 +155,26 @@ export class ChromiumCdp {
     }
     const attach = (async () => {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
-      await this.enablePageDomain(tabId);
-      await this.enableConsoleDomains(tabId);
-      await this.enableNetworkDomainBestEffort(tabId);
-      this.attachedTabs.add(tabId);
+      try {
+        await this.enablePageDomain(tabId);
+        await this.enableConsoleDomains(tabId);
+        await this.enableNetworkDomainBestEffort(tabId);
+        this.attachedTabs.add(tabId);
+      } catch (err) {
+        // A CDP domain enable failed after the raw attach succeeded
+        // (e.g. `Page.enable` rejects because the tab just navigated to
+        // a chrome:// URL or the Web Store). `attachedTabs` does not yet
+        // hold `tabId`, so without rolling back the debugger would stay
+        // attached and the next `ensureAttached` would re-attach and hit
+        // "Another debugger is already attached" forever — the tab is
+        // unusable until the extension is reloaded. Detach directly
+        // (`this.detach()` is a no-op here because `attachedTabs` lacks
+        // the id) so the next attempt starts from a clean slate.
+        await this.api.detach({ tabId }).catch((detachErr) => {
+          console.debug("[bsk cdp] rollback detach failed", { tabId, detachErr });
+        });
+        throw err;
+      }
     })()
       .catch((err) => {
         // Chrome surfaces "Another debugger is already attached" when
