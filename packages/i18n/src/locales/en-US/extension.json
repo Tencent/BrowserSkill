@@ -25,9 +25,10 @@
     "connectionToggleTitle": "BrowserSkill connection",
     "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, daemon v{{daemonProtocol}}.",
     "upgradeAvailable": "Upgradable",
-    "labelTitle": "Browser alias",
-    "labelDescription": "Distinguish multiple browser instances.",
-    "labelPlaceholder": "e.g. Personal Chrome",
+    "launcher": {
+      "title": "Quick actions"
+    },
+    "back": "Back",
     "runtimeTitle": "Runtime",
     "daemonVersion": "daemon v{{version}}",
     "extensionVersion": "extension v{{version}}",
@@ -40,7 +41,20 @@
     "instanceDescription": "Unique connection identifier for this browser",
     "copy": "Copy",
     "copied": "Copied",
-    "copyInstanceId": "Copy instance ID"
+    "copyInstanceId": "Copy instance ID",
+    "record": {
+      "sectionTitle": "Action recording",
+      "cardDesc": "Record your actions for Agent reference",
+      "sectionHint": "Generates a recording instruction — send it to your Agent to start recording your actions; the Agent can then use the recording to automate similar tasks.",
+      "topicLabel": "Topic (optional)",
+      "topicPlaceholder": "e.g. Publish an article",
+      "startUrlLabel": "Starting URL (optional)",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "Copy recording instructions",
+      "copied": "Copied",
+      "hintDisconnected": "Available when connected",
+      "promptTemplate": "Use BrowserSkill's `bsk` CLI to record the browser actions I'm about to demonstrate.\n\nSteps:\n1. Run: {{command}}\n2. Once you confirm it's started, I'll operate in the opened window myself.\n3. After I click Finish, read the returned trace.json and summarize the actions (pages + steps); don't re-run or \"verify\"."
+    }
   },
   "controlOverlay": {
     "status": "Agent controlling",

@@ -1,9 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import {
-  describeEventTarget,
-  describeTarget,
-  isMeaningfulClickTarget,
-} from "../describe-target";
+import { describeEventTarget, describeTarget, isMeaningfulClickTarget } from "../describe-target";
 
 describe("describeTarget", () => {
   beforeEach(() => {

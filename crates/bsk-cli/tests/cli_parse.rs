@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use bsk::cli::daemon::{DaemonCmd, parse_duration};
 use bsk::cli::navigate::NavigateCmd;
+use bsk::cli::record::{RecordCmd, RecordSub};
 use bsk::{Cli, Command};
 use clap::Parser;
 
@@ -191,4 +192,38 @@ fn rejects_zero_click_count() {
     assert!(
         Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s1", "--count", "0"]).is_err()
     );
+}
+
+#[test]
+fn parses_record_start_with_browser_and_url() {
+    let cli = parse(&[
+        "bsk",
+        "record",
+        "start",
+        "--browser",
+        "022ca8ac",
+        "--url",
+        "https://x",
+    ]);
+    let Command::Record(RecordCmd {
+        sub: RecordSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected record start subcommand");
+    };
+    assert_eq!(args.browser.as_deref(), Some("022ca8ac"));
+    assert_eq!(args.url.as_deref(), Some("https://x"));
+}
+
+#[test]
+fn parses_record_start_without_url() {
+    let cli = parse(&["bsk", "record", "start", "--browser", "022ca8ac"]);
+    let Command::Record(RecordCmd {
+        sub: RecordSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected record start subcommand");
+    };
+    assert_eq!(args.browser.as_deref(), Some("022ca8ac"));
+    assert!(args.url.is_none());
 }

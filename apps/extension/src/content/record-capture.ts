@@ -1,8 +1,4 @@
-import {
-  describeEventTarget,
-  describeTarget,
-  type TargetDescriptor,
-} from "@/lib/describe-target";
+import { describeEventTarget, describeTarget, type TargetDescriptor } from "@/lib/describe-target";
 import {
   isRecordCancelMessage,
   isRecordStartMessage,

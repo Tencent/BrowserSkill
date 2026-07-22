@@ -25,9 +25,10 @@
     "connectionToggleTitle": "BrowserSkill 连接",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
     "upgradeAvailable": "可升级",
-    "labelTitle": "浏览器别名",
-    "labelDescription": "用于区分多个浏览器实例。",
-    "labelPlaceholder": "例如：个人 Chrome",
+    "launcher": {
+      "title": "快捷功能"
+    },
+    "back": "返回",
     "runtimeTitle": "运行版本",
     "daemonVersion": "daemon v{{version}}",
     "extensionVersion": "扩展 v{{version}}",
@@ -40,7 +41,20 @@
     "instanceDescription": "本浏览器的唯一连接标识",
     "copy": "复制",
     "copied": "已复制",
-    "copyInstanceId": "复制实例 ID"
+    "copyInstanceId": "复制实例 ID",
+    "record": {
+      "sectionTitle": "操作录制",
+      "cardDesc": "录制你的操作，供 Agent 参考",
+      "sectionHint": "生成一段录制指令，发给 Agent 后可以启动插件录制用户操作，之后 Agent 可以参考录制结果自动完成同类任务。",
+      "topicLabel": "操作主题（可选）",
+      "topicPlaceholder": "例如：发布一篇文章",
+      "startUrlLabel": "起始网址（可选）",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "复制录制指令",
+      "copied": "已复制",
+      "hintDisconnected": "连接后可用",
+      "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取返回的 trace.json 并总结操作（pages + steps），不要重跑或“验证”。"
+    }
   },
   "controlOverlay": {
     "status": "Agent 正在控制",

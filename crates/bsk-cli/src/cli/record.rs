@@ -41,12 +41,16 @@ pub enum RecordSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct RecordStartArgs {
+    /// Target browser instance id or label. Required when multiple browsers
+    /// are connected; omit when only one is online.
+    #[arg(long)]
+    pub browser: Option<String>,
+
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
 
-    /// Navigate to this http(s) URL before recording (required for a fresh
-    /// session — Agent Window starts on about:blank, which cannot host the
-    /// content script).
+    /// Navigate to this http(s) URL before recording. When omitted, defaults
+    /// to `https://www.baidu.com/`.
     #[arg(long)]
     pub url: Option<String>,
 
@@ -81,7 +85,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     }
 
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let session = start_session(info.sock_path.clone(), None)?;
+    let session = start_session(info.sock_path.clone(), args.browser)?;
 
     let start_params = RecordStartParams {
         session_id: session.session_id.clone(),
@@ -240,6 +244,7 @@ mod tests {
     #[test]
     fn start_args_default_output_is_trace_json() {
         let args = RecordStartArgs {
+            browser: None,
             tab_id: None,
             url: None,
             purpose: None,

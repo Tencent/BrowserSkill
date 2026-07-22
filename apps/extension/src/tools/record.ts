@@ -77,6 +77,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Injectable http(s) landing page when `tool.record_start` omits `url`. */
+export const RECORD_DEFAULT_START_URL = "https://www.baidu.com/";
+
 /** Pages where MV3 content scripts cannot attach (Agent Window boots here). */
 function isContentScriptRestrictedUrl(url: string | undefined): boolean {
   if (!url) return true;
@@ -568,12 +571,12 @@ export async function handleRecordStart(
     resolveFinish = resolve;
     rejectFinish = reject;
   });
-  const provisionalUrl = params.url;
+  const navigateUrl = params.url ?? RECORD_DEFAULT_START_URL;
   recordings.set(params.session_id, {
     requestId,
     tabId: target.tabId,
     agentWindowId: ctx.agentWindowId,
-    startUrl: provisionalUrl,
+    startUrl: navigateUrl,
     ...(params.purpose ? { purpose: params.purpose } : {}),
     steps: [],
     startedAt: new Date().toISOString(),
@@ -582,7 +585,7 @@ export async function handleRecordStart(
     rejectFinish,
     settled: false,
     finishing: false,
-    currentUrl: provisionalUrl,
+    currentUrl: navigateUrl,
     pendingNavigation: false,
     pendingNavigationDeadline: undefined,
   });
@@ -629,12 +632,12 @@ export async function handleRecordStart(
     if (cancelled) return cancelled;
   }
 
-  if (params.url && deps.cdp) {
+  if (deps.cdp) {
     const nav = await handleNavigate(
       manager,
       {
         session_id: params.session_id,
-        url: params.url,
+        url: navigateUrl,
         tab_id: target.tabId,
       },
       { cdp: deps.cdp, tabsApi: deps.tabsApi, signal: deps.signal },
@@ -663,7 +666,7 @@ export async function handleRecordStart(
     const tab = await deps.tabsApi.get(target.tabId);
     startUrl = tab.url;
   } catch {
-    startUrl = params.url;
+    startUrl = navigateUrl;
   }
 
   const active = recordings.get(params.session_id);
@@ -680,7 +683,7 @@ export async function handleRecordStart(
       code: "invalid_params",
       message: params.url
         ? `cannot record on restricted URL (${startUrl}); use an http(s) page`
-        : "Agent Window starts on about:blank where the content script cannot inject — pass --url https://… before recording",
+        : `cannot record on restricted URL (${startUrl}); default start page must be injectable http(s)`,
     };
   }
 
@@ -713,7 +716,7 @@ export async function handleRecordStart(
     return {
       code: "protocol_error",
       message:
-        "failed to start recording in content script — reload the BrowserSkill extension, then retry with --url https://…",
+        "failed to start recording in content script — reload the BrowserSkill extension, then retry",
     };
   }
 

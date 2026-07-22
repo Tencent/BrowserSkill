@@ -1,3 +1,13 @@
 @import "@browser-skill/ui/styles";
 @source "../../";
 @source "../../../../../packages/ui/src";
+
+/* The shared base sets html/body/#root to height:100%, which is meant for
+   full-page surfaces. In a popup that pins the window to the tallest content
+   it ever showed, so collapsing the record section leaves blank space. Size
+   to content instead so Chrome can grow and shrink the popup to fit. */
+html,
+body,
+#root {
+  height: auto;
+}

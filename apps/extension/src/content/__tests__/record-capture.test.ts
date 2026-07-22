@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { handleRecordContentMessage, startRecordCapture } from "../record-capture";
 import { RECORD_STOP, type RecordStepPayload } from "@/lib/record-bridge";
+import { handleRecordContentMessage, startRecordCapture } from "../record-capture";
 
 vi.stubGlobal("chrome", {
   runtime: {
@@ -128,12 +128,8 @@ describe("record-capture semantic", () => {
     const capture = startRecordCapture("rec-press", (step) => steps.push(step));
     const input = document.querySelector("input")!;
     input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "a", bubbles: true }),
-    );
-    input.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     capture.dispose();
     expect(steps.filter((s) => s.op === "press")).toEqual([
       expect.objectContaining({ op: "press", key: "Enter" }),

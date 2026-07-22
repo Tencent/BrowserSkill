@@ -140,7 +140,10 @@ export function accessibleName(el: Element): string | undefined {
 
   if (el instanceof HTMLInputElement || el instanceof HTMLButtonElement) {
     const value = normalizeWhitespace(el.value);
-    if (value && (el instanceof HTMLButtonElement || el.type === "submit" || el.type === "button")) {
+    if (
+      value &&
+      (el instanceof HTMLButtonElement || el.type === "submit" || el.type === "button")
+    ) {
       return truncate(value);
     }
   }

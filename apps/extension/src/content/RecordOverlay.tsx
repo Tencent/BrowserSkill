@@ -1,5 +1,5 @@
 import { useTranslation } from "@browser-skill/i18n/react";
-import { RiCheckboxCircleLine } from "@remixicon/react";
+import { RiStopCircleLine } from "@remixicon/react";
 import { useEffect, useState } from "react";
 
 export interface RecordRequestData {
@@ -105,7 +105,7 @@ export function RecordOverlay({ request }: Props) {
             flexShrink: 0,
           }}
         >
-          <RiCheckboxCircleLine size={18} color="#fff" />
+          <RiStopCircleLine size={18} color="#fff" />
           {t("recordOverlay.finish")}
         </button>
       </div>

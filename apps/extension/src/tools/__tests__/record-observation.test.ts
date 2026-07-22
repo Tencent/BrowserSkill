@@ -2,10 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ensureBrowserObservationListeners,
   isBrowserObservationAttachedForTests,
+  RECORD_DEFAULT_START_URL,
   releaseBrowserObservationListenersIfIdle,
   resetBrowserObservationForTests,
   setBrowserObservationAttachForTests,
 } from "../record";
+
+describe("record defaults", () => {
+  it("uses Baidu as the default injectable start URL", () => {
+    expect(RECORD_DEFAULT_START_URL).toBe("https://www.baidu.com/");
+  });
+});
 
 describe("browser observation lifecycle", () => {
   afterEach(() => {

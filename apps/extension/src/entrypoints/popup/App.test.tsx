@@ -24,6 +24,11 @@ const baseSnapshot: SnapshotInfo = {
   connectionEnabled: true,
 };
 
+function openRecordView() {
+  fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+  fireEvent.click(screen.getByRole("button", { name: /操作录制/ }));
+}
+
 describe("App", () => {
   const setLabel = vi.fn();
   const setConnectionEnabled = vi.fn();
@@ -63,13 +68,35 @@ describe("App", () => {
     expect(screen.queryByText("请先打开 BrowserSkill。")).toBeNull();
   });
 
-  it("uses flex gap for label field spacing", () => {
-    const { container } = render(<App />);
+  it("does not render record UI on the main view", () => {
+    render(<App />);
 
-    const labelField = container.querySelector("[data-slot='popup-label-field']");
-    expect(labelField?.className).toContain("flex");
-    expect(labelField?.className).toContain("flex-col");
-    expect(labelField?.className).toContain("gap-3");
+    expect(screen.queryByRole("button", { name: "复制录制指令" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "操作录制" })).toBeNull();
+  });
+
+  it("opens the feature list from the launcher and navigates to record", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+
+    expect(screen.getByText("操作录制")).toBeTruthy();
+    expect(screen.getByText("录制你的操作，供 Agent 复用")).toBeTruthy();
+    expect(screen.queryByText("未连接")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /操作录制/ }));
+
+    expect(screen.getByRole("button", { name: "复制录制指令" })).toBeTruthy();
+  });
+
+  it("returns from the feature list to the main view", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(screen.getByText("未连接")).toBeTruthy();
+    expect(screen.queryByText("录制你的操作，供 Agent 复用")).toBeNull();
   });
 
   it("shows single-line compact metadata and copies the instance id", async () => {
@@ -135,5 +162,83 @@ describe("App", () => {
     expect(
       screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked"),
     ).toBe("false");
+  });
+
+  it("copies the record prompt with instance id and --browser when connected", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+    openRecordView();
+
+    fireEvent.change(screen.getByPlaceholderText("例如：发布一篇文章"), {
+      target: { value: "发布 wiki 文档" },
+    });
+
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+
+    fireEvent.click(copyButton);
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain("03c3e47f");
+    expect(copied).toContain("--browser 03c3e47f");
+    expect(copied).toContain('--purpose "发布 wiki 文档"');
+    expect(copied).not.toMatch(/bsk record start[^\n]*--url/);
+    await waitFor(() => expect(copyButton.textContent).toContain("已复制"));
+  });
+
+  it("includes --url in record prompt when a start URL is provided", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+    openRecordView();
+
+    fireEvent.change(screen.getByPlaceholderText("https://…"), {
+      target: { value: "https://example.com/" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "复制录制指令" }));
+
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain("--url https://example.com/");
+    expect(copied).not.toContain("--purpose");
+  });
+
+  it("disables record copy when disconnected", () => {
+    render(<App />);
+    openRecordView();
+
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).not.toBeNull();
+    expect(screen.getByText("连接后可用")).toBeTruthy();
   });
 });
