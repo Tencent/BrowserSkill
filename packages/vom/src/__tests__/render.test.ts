@@ -450,65 +450,90 @@ describe("renderVom single-layer page", () => {
     expect(out.text).not.toContain('StaticText "13311030827"');
   });
 
-  it("adds semantic collection summaries for repeated item containers", () => {
+  it("renders placeholder separately from input value and state", () => {
     const out = renderVom(
       scene([
-        node({ id: 1, role: "RootWebArea", name: "Forum" }),
-        node({ id: 2, parentId: 1, role: "main", name: "Posts" }),
-        node({ id: 3, parentId: 2, role: "searchbox", name: "Search posts", tag: "input" }),
-        node({ id: 10, parentId: 2, role: "article" }),
-        node({ id: 11, parentId: 10, role: "heading", name: "First post" }),
-        node({ id: 12, parentId: 10, role: "link", name: "First post", tag: "a" }),
-        node({ id: 13, parentId: 10, role: "button", name: "Upvote", tag: "button" }),
-        node({ id: 20, parentId: 2, role: "article" }),
-        node({ id: 21, parentId: 20, role: "heading", name: "Second post" }),
-        node({ id: 22, parentId: 20, role: "link", name: "Second post", tag: "a" }),
-        node({ id: 23, parentId: 20, role: "button", name: "Upvote", tag: "button" }),
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "textbox",
+          name: "手机号",
+          value: "没有手机号的用编码代替",
+          placeholder: "手机号",
+          inputState: "default",
+          tag: "input",
+        }),
       ]),
-      { semanticCollections: true },
     );
 
-    expect(out.text).toContain("@collections");
     expect(out.text).toContain(
-      'collection c1 role=main item_role=article label="First post" items=2',
+      '@e1 textbox "手机号" [default] placeholder="手机号" ="没有手机号的用编码代替"',
     );
-    expect(out.text).toContain('controls: search=@e1 "Search posts"');
-    expect(out.text).toContain('title="First post" title_handle=@e2');
-    expect(out.text).toContain('actions=[@e3 "Upvote"]');
   });
 
-  it("does not summarize login forms as semantic collections", () => {
+  it("keeps only local context for duplicate labels", () => {
     const out = renderVom(
       scene([
         node({ id: 1, role: "RootWebArea", name: "北京市小客车指标调控管理信息系统" }),
-        node({ id: 2, parentId: 1, role: "list" }),
-        node({ id: 3, parentId: 2, role: "listitem", name: "用户登录" }),
-        node({ id: 4, parentId: 2, role: "listitem", name: "手机号：" }),
-        node({
-          id: 5,
-          parentId: 4,
-          role: "textbox",
-          value: "13311030827",
-          tag: "input",
-        }),
-        node({ id: 6, parentId: 2, role: "listitem", name: "密 码：" }),
-        node({
-          id: 7,
-          parentId: 6,
-          role: "textbox",
-          value: "secret",
-          tag: "input",
-          sensitive: true,
-        }),
-        node({ id: 8, parentId: 2, role: "listitem", name: "验证码：" }),
-        node({ id: 9, parentId: 8, role: "textbox", value: "h8Mh", tag: "input" }),
-        node({ id: 10, parentId: 2, role: "listitem" }),
-        node({ id: 11, parentId: 10, role: "button", name: "登录", tag: "button" }),
+        node({ id: 2, parentId: 1, role: "section" }),
+        node({ id: 3, parentId: 2, role: "StaticText", name: "账号" }),
+        node({ id: 4, parentId: 2, role: "link", name: "操作说明", tag: "a" }),
+        node({ id: 5, parentId: 1, role: "section" }),
+        node({ id: 6, parentId: 5, role: "StaticText", name: "配置指标" }),
+        node({ id: 7, parentId: 5, role: "link", name: "操作说明", tag: "a" }),
       ]),
     );
 
-    expect(out.text).not.toContain("@collections");
-    expect(out.text).toContain('@e2 textbox [filled] ="•••"');
+    expect(out.text).toContain('@e1 link "操作说明" [ctx: 账号]');
+    expect(out.text).toContain('@e2 link "操作说明" [ctx: 配置指标]');
+    expect(out.text).not.toContain("北京市小客车指标调控管理信息系统]");
+  });
+
+  it("does not add low-value root context to duplicated brand links", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "北京市小客车指标调控管理信息系统" }),
+        node({ id: 2, parentId: 1, role: "link", name: "北京市交通委员会", tag: "a" }),
+        node({ id: 3, parentId: 1, role: "link", name: "北京市交通委员会", tag: "a" }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 link "北京市交通委员会"');
+    expect(out.text).toContain('@e2 link "北京市交通委员会"');
+    expect(out.text).not.toContain("[ctx:");
+  });
+
+  it("does not render redundant table cell descendants when the cell name covers them", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "table" }),
+        node({ id: 3, parentId: 2, role: "row" }),
+        node({ id: 4, parentId: 3, role: "cell", name: "申请人姓名：刘珺瑶" }),
+        node({ id: 5, parentId: 4, role: "StaticText", name: "申请人姓名：" }),
+        node({ id: 6, parentId: 4, role: "StaticText", name: "刘珺瑶" }),
+      ]),
+    );
+
+    expect(out.text).toContain('cell "申请人姓名：刘珺瑶"');
+    expect(out.text).not.toContain('StaticText "申请人姓名："');
+    expect(out.text).not.toContain('StaticText "刘珺瑶"');
+  });
+
+  it("keeps interactive descendants inside table cells", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "table" }),
+        node({ id: 3, parentId: 2, role: "row" }),
+        node({ id: 4, parentId: 3, role: "cell", name: "操作：下载" }),
+        node({ id: 5, parentId: 4, role: "link", name: "下载", tag: "a" }),
+      ]),
+    );
+
+    expect(out.text).toContain('cell "操作：下载"');
+    expect(out.text).toContain('@e1 link "下载"');
   });
 });
 

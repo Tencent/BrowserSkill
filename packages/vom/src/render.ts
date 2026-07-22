@@ -83,12 +83,6 @@ const MAX_RECOVERABLE_SINGLE_INTENT_AREA = 360_000;
 const MAX_HANDLE_CONTEXT_ITEMS = 3;
 const MAX_SURFACE_ITEMS = 12;
 const MAX_SCOPE_LINES = 40;
-const MAX_SEMANTIC_COLLECTIONS = 3;
-const MAX_SEMANTIC_ITEMS = 20;
-const MAX_SEMANTIC_CONTROLS = 8;
-const MAX_SEMANTIC_ACTIONS = 6;
-const MAX_SEMANTIC_FIELD_CHARS = 120;
-
 const RECOVERY_HANDLER_ATTRS = ["onclick", "onmousedown", "onkeydown", "onkeyup", "onkeypress"];
 const NATIVE_TAGS = new Set(["button", "input", "select", "textarea"]);
 const GRAPHIC_ONLY_TAGS = new Set(["svg", "use", "path", "g", "symbol"]);
@@ -155,6 +149,17 @@ function cleanSemanticText(value: string | undefined): string | undefined {
   const clean = cleaned(value);
   if (!clean || isNoisyText(clean)) return undefined;
   return clean;
+}
+
+function isLowValueContext(value: string): boolean {
+  const clean = value.trim();
+  const key = clean.toLowerCase();
+  if (clean === "欢迎") return true;
+  if (key.includes("icp") || key.includes("备案")) return true;
+  if (clean.includes("联系方式") || clean.includes("政府网站标识")) return true;
+  if (/^\d{5,}$/.test(clean)) return true;
+  if (/北京市小客车指标调控管理信息系统|beijing municipal commission/i.test(clean)) return true;
+  return false;
 }
 
 function normalizedRole(node: VomNode): string {
@@ -431,6 +436,7 @@ function weakContextText(label: string | undefined, targetName: string): string 
   const key = normalizeContextKey(clean);
   if (
     !key ||
+    isLowValueContext(clean) ||
     key === normalizeContextKey(targetName) ||
     key.startsWith("ctx_") ||
     key === "section" ||
@@ -450,7 +456,7 @@ interface ContextCandidate {
 }
 
 function contextSourceRank(source: ContextSource): number {
-  return source === "owned" ? 0 : source === "same" ? 1 : 2;
+  return source === "same" ? 0 : source === "owned" ? 1 : 2;
 }
 
 function contextCategory(key: string): string {
@@ -482,7 +488,7 @@ function dedupeContexts(contexts: ContextCandidate[]): string[] {
     seen.add(key);
     seenCategories.add(category);
     unique.push(clean);
-    if (unique.length >= MAX_HANDLE_CONTEXT_ITEMS) break;
+    if (unique.length >= 1) break;
   }
   return unique;
 }
@@ -611,9 +617,12 @@ function renderNodeLine(
 
   const rawValue = cleaned(node.value);
   const role = normalizedRole(node);
-  if (["textbox", "searchbox"].includes(role)) {
-    line += rawValue === undefined ? " [empty]" : " [filled]";
+  const fillable = ["textbox", "searchbox"].includes(role);
+  if (fillable) {
+    line += ` [${node.inputState ?? (rawValue === undefined ? "empty" : "filled")}]`;
   }
+  const placeholder = cleaned(node.placeholder);
+  if (placeholder) line += ` placeholder=${JSON.stringify(placeholder)}`;
   const value = node.sensitive
     ? rawValue !== undefined
       ? SENSITIVE_MASK
@@ -642,6 +651,29 @@ function shouldSkipRedundantRefChildren(node: VomNode): boolean {
   return ["button", "link", "menuitem", "tab", "switch", "checkbox", "radio", "combobox"].includes(
     role,
   );
+}
+
+function descendantTextCoveredByName(node: VomNode, state: RenderState): boolean {
+  const name = cleaned(node.name);
+  if (!name) return false;
+  const stack = [...(state.children.get(node.id) ?? [])];
+  const texts: string[] = [];
+  while (stack.length > 0) {
+    const child = stack.pop() as VomNode;
+    if (shouldReference(child)) return false;
+    const text = cleaned(child.name) ?? cleaned(child.text) ?? cleaned(child.value);
+    if (text) texts.push(text);
+    stack.push(...(state.children.get(child.id) ?? []));
+  }
+  return texts.length > 0 && texts.every((text) => name.includes(text));
+}
+
+function shouldSkipRedundantChildren(node: VomNode, state: RenderState): boolean {
+  const role = normalizedRole(node);
+  if (["cell", "gridcell", "columnheader", "rowheader"].includes(role)) {
+    return descendantTextCoveredByName(node, state);
+  }
+  return false;
 }
 
 interface RenderState {
@@ -733,7 +765,9 @@ function renderTree(
     const scope = state.scopeMap.get(node.id);
     if (scope) emitActiveScopeBlock(scope, depth + 1, state);
 
-    if (ref && shouldSkipRedundantRefChildren(node)) continue;
+    if ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state)) {
+      continue;
+    }
     renderTree(children, node.id, depth + 1, state);
   }
 }
@@ -910,386 +944,6 @@ function countRenderable(nodes: VomNode[]): number {
   return nodes.filter(shouldRender).length;
 }
 
-interface SemanticControl {
-  kind: string;
-  handle?: string;
-  label: string;
-}
-
-interface SemanticAction {
-  handle: string;
-  label: string;
-}
-
-interface SemanticItem {
-  title?: string;
-  titleHandle?: string;
-  author?: string;
-  time?: string;
-  score?: string;
-  comments?: string;
-  commentsHandle?: string;
-  actions: SemanticAction[];
-}
-
-interface SemanticCollection {
-  role: string;
-  itemRole: string;
-  label?: string;
-  controls: SemanticControl[];
-  items: SemanticItem[];
-}
-
-function truncateField(value: string): string {
-  if ([...value].length <= MAX_SEMANTIC_FIELD_CHARS) return value;
-  return `${[...value].slice(0, MAX_SEMANTIC_FIELD_CHARS - 1).join("")}…`;
-}
-
-function quoteField(value: string): string {
-  return JSON.stringify(truncateField(value));
-}
-
-function roleIsCollectionItem(role: string): boolean {
-  return role === "article" || role === "row" || role === "listitem";
-}
-
-function roleIsCollectionContainer(role: string): boolean {
-  return ["main", "feed", "list", "table", "grid", "rowgroup", "region", "section"].includes(role);
-}
-
-function textForSemantics(node: VomNode): string | undefined {
-  return (
-    cleanSemanticText(node.name) ??
-    cleanSemanticText(node.value) ??
-    cleanSemanticText(node.text) ??
-    cleanSemanticText(node.nearbyText)
-  );
-}
-
-function buildRefLookup(refs: Array<{ ref: string; backendNodeId: number }>): Map<number, string> {
-  return new Map(
-    refs.map((entry) => [
-      entry.backendNodeId,
-      entry.ref.startsWith("@") ? entry.ref : `@${entry.ref}`,
-    ]),
-  );
-}
-
-function collectDescendantNodes(
-  children: Map<number | null, VomNode[]>,
-  rootId: number,
-  nodesById: Map<number, VomNode>,
-): VomNode[] {
-  const out: VomNode[] = [];
-  const stack = [rootId];
-  const seen = new Set<number>();
-  while (stack.length > 0) {
-    const id = stack.pop() as number;
-    if (!seen.add(id)) continue;
-    const node = nodesById.get(id);
-    if (node) out.push(node);
-    for (const child of [...(children.get(id) ?? [])].reverse()) {
-      stack.push(child.id);
-    }
-  }
-  return out;
-}
-
-function collectDescendantIdSet(
-  children: Map<number | null, VomNode[]>,
-  rootId: number,
-): Set<number> {
-  const out = new Set<number>();
-  const stack = [rootId];
-  while (stack.length > 0) {
-    const id = stack.pop() as number;
-    if (!out.add(id)) continue;
-    for (const child of [...(children.get(id) ?? [])].reverse()) stack.push(child.id);
-  }
-  return out;
-}
-
-function collectionLabel(
-  node: VomNode,
-  children: Map<number | null, VomNode[]>,
-  nodesById: Map<number, VomNode>,
-): string | undefined {
-  return (
-    contextLabel(node, "") ??
-    collectDescendantNodes(children, node.id, nodesById).find(
-      (candidate) => normalizedRole(candidate) === "heading" && textForSemantics(candidate),
-    )?.name
-  );
-}
-
-function classifyControl(label: string, role: string): string | undefined {
-  const key = label.toLowerCase();
-  if (role === "searchbox" || key.includes("search")) return "search";
-  if (key.includes("sort") || key.includes("order")) return "sort";
-  if (key.includes("filter")) return "filter";
-  if (role === "tab") return "tab";
-  if (key === "next" || key.includes("next page")) return "pagination";
-  if (key === "previous" || key.includes("previous page")) return "pagination";
-  return undefined;
-}
-
-function collectCollectionControls(
-  container: VomNode,
-  items: VomNode[],
-  children: Map<number | null, VomNode[]>,
-  nodesById: Map<number, VomNode>,
-  refLookup: Map<number, string>,
-): SemanticControl[] {
-  const itemIds = new Set(items.flatMap((item) => [...collectDescendantIdSet(children, item.id)]));
-  const controls: SemanticControl[] = [];
-  for (const node of collectDescendantNodes(children, container.id, nodesById)) {
-    if (itemIds.has(node.id)) continue;
-    const role = normalizedRole(node);
-    if (!["button", "combobox", "searchbox", "tab", "link"].includes(role)) continue;
-    const label = textForSemantics(node);
-    if (!label) continue;
-    const kind = classifyControl(label, role);
-    if (!kind) continue;
-    controls.push({ kind, handle: refLookup.get(node.id), label });
-    if (controls.length >= MAX_SEMANTIC_CONTROLS) break;
-  }
-  return controls;
-}
-
-function isFormLikeCollection(
-  container: VomNode,
-  items: VomNode[],
-  children: Map<number | null, VomNode[]>,
-  nodesById: Map<number, VomNode>,
-): boolean {
-  const descendants = collectDescendantNodes(children, container.id, nodesById);
-  const interactive = descendants.filter((node) => shouldReference(node));
-  const textboxCount = interactive.filter((node) =>
-    ["textbox", "searchbox"].includes(normalizedRole(node)),
-  ).length;
-  const sensitiveCount = descendants.filter((node) => node.sensitive).length;
-  const labels = descendants
-    .map((node) => textForSemantics(node))
-    .filter((label): label is string => label !== undefined)
-    .join(" ")
-    .toLowerCase();
-  const hasLoginSignals =
-    /(用户登录|登录|验证码|密码|忘记密码|手机号|证书口令|captcha|password|sign in|log in)/i.test(
-      labels,
-    );
-
-  return (
-    (textboxCount >= 2 && hasLoginSignals) ||
-    (sensitiveCount > 0 && hasLoginSignals) ||
-    (items.length <= 8 && textboxCount > 0 && interactive.length >= 3 && hasLoginSignals)
-  );
-}
-
-function isCommentLabel(label: string): boolean {
-  const key = label.toLowerCase();
-  return key.includes("comment") || key === "no comments";
-}
-
-function parseScoreBetweenVoteButtons(
-  item: VomNode,
-  children: Map<number | null, VomNode[]>,
-): string | undefined {
-  for (const descendantId of collectDescendantIdSet(children, item.id)) {
-    const siblings = children.get(descendantId) ?? [];
-    for (let index = 0; index + 2 < siblings.length; index += 1) {
-      const prev = textForSemantics(siblings[index])?.toLowerCase() ?? "";
-      const score = textForSemantics(siblings[index + 1]);
-      const next = textForSemantics(siblings[index + 2])?.toLowerCase() ?? "";
-      if (
-        prev.includes("upvote") &&
-        next.includes("downvote") &&
-        score !== undefined &&
-        /^-?\d+$/.test(score.replaceAll(",", ""))
-      ) {
-        return score;
-      }
-    }
-  }
-  return undefined;
-}
-
-function extractAuthor(descendants: VomNode[]): string | undefined {
-  for (let index = 0; index < descendants.length; index += 1) {
-    const label = textForSemantics(descendants[index]);
-    if (!label) continue;
-    const key = label.toLowerCase();
-    if (key === "submitted by" || key === "by" || key.endsWith(" by")) {
-      for (const candidate of descendants.slice(index + 1, index + 9)) {
-        if (normalizedRole(candidate) === "link") return textForSemantics(candidate);
-      }
-    }
-  }
-  return undefined;
-}
-
-function extractSemanticItem(
-  item: VomNode,
-  children: Map<number | null, VomNode[]>,
-  nodesById: Map<number, VomNode>,
-  refLookup: Map<number, string>,
-): SemanticItem {
-  const descendants = collectDescendantNodes(children, item.id, nodesById);
-  let title: string | undefined;
-  let titleHandle: string | undefined;
-  for (const role of ["heading", "link"]) {
-    const node = descendants.find(
-      (candidate) => normalizedRole(candidate) === role && textForSemantics(candidate),
-    );
-    if (!node) continue;
-    title = textForSemantics(node);
-    titleHandle = refLookup.get(node.id);
-    if (!titleHandle && title) {
-      const matchingLink = descendants.find(
-        (candidate) =>
-          normalizedRole(candidate) === "link" && textForSemantics(candidate) === title,
-      );
-      if (matchingLink) titleHandle = refLookup.get(matchingLink.id);
-    }
-    break;
-  }
-  if (!title) {
-    title = textForSemantics(item);
-    titleHandle = refLookup.get(item.id);
-  }
-
-  let time: string | undefined;
-  let comments: string | undefined;
-  let commentsHandle: string | undefined;
-  const actions: SemanticAction[] = [];
-  for (const node of descendants) {
-    const role = normalizedRole(node);
-    const label = textForSemantics(node);
-    if (!time && role === "time") time = label;
-    if (!comments && label && isCommentLabel(label)) {
-      comments = label;
-      commentsHandle = refLookup.get(node.id);
-    }
-    if (
-      actions.length < MAX_SEMANTIC_ACTIONS &&
-      shouldReference(node) &&
-      !["link", "textbox", "searchbox"].includes(role)
-    ) {
-      const handle = refLookup.get(node.id);
-      if (handle && label) actions.push({ handle, label });
-    }
-  }
-
-  return {
-    title,
-    titleHandle,
-    author: extractAuthor(descendants),
-    time,
-    score: parseScoreBetweenVoteButtons(item, children),
-    comments,
-    commentsHandle,
-    actions,
-  };
-}
-
-function detectSemanticCollections(
-  nodes: VomNode[],
-  refs: Array<{ ref: string; backendNodeId: number }>,
-): SemanticCollection[] {
-  const children = buildChildren(nodes);
-  const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const refLookup = buildRefLookup(refs);
-  const collections: SemanticCollection[] = [];
-  const coveredItems = new Set<number>();
-
-  for (const container of nodes) {
-    if (collections.length >= MAX_SEMANTIC_COLLECTIONS) break;
-    const role = normalizedRole(container);
-    if (!roleIsCollectionContainer(role)) continue;
-    const childList = children.get(container.id) ?? [];
-    const counts = new Map<string, number>();
-    for (const child of childList) {
-      const childRole = normalizedRole(child);
-      if (roleIsCollectionItem(childRole)) counts.set(childRole, (counts.get(childRole) ?? 0) + 1);
-    }
-    const best = [...counts].filter(([, count]) => count >= 2).sort((a, b) => b[1] - a[1])[0];
-    if (!best) continue;
-    const [itemRole] = best;
-    const items = childList.filter(
-      (child) => normalizedRole(child) === itemRole && !coveredItems.has(child.id),
-    );
-    if (items.length < 2) continue;
-    if (isFormLikeCollection(container, items, children, nodesById)) continue;
-    for (const item of items) coveredItems.add(item.id);
-    collections.push({
-      role,
-      itemRole,
-      label: collectionLabel(container, children, nodesById),
-      controls: collectCollectionControls(container, items, children, nodesById, refLookup),
-      items: items
-        .slice(0, MAX_SEMANTIC_ITEMS)
-        .map((item) => extractSemanticItem(item, children, nodesById, refLookup)),
-    });
-  }
-  return collections;
-}
-
-function renderSemanticCollections(collections: SemanticCollection[]): string[] {
-  if (collections.length === 0) return [];
-  const lines = ["@collections"];
-  for (const [index, collection] of collections.entries()) {
-    const label = collection.label ? ` label=${quoteField(collection.label)}` : "";
-    lines.push(
-      `collection c${index + 1} role=${collection.role} item_role=${collection.itemRole}${label} items=${collection.items.length}`,
-    );
-    if (collection.controls.length > 0) {
-      const rendered = collection.controls
-        .map(
-          (control) =>
-            `${control.kind}=${control.handle ? `${control.handle} ` : ""}${quoteField(control.label)}`,
-        )
-        .join("; ");
-      lines.push(`  controls: ${rendered}`);
-    }
-    lines.push(
-      "  columns: index title title_handle author time score comments comments_handle actions",
-    );
-    collection.items.forEach((item, itemIndex) => {
-      const parts = [`${itemIndex + 1}. `];
-      if (item.title) parts.push(`title=${quoteField(item.title)}`);
-      if (item.titleHandle) parts.push(`title_handle=${item.titleHandle}`);
-      if (item.author) parts.push(`author=${quoteField(item.author)}`);
-      if (item.time) parts.push(`time=${quoteField(item.time)}`);
-      if (item.score) parts.push(`score=${quoteField(item.score)}`);
-      if (item.comments) parts.push(`comments=${quoteField(item.comments)}`);
-      if (item.commentsHandle) parts.push(`comments_handle=${item.commentsHandle}`);
-      if (item.actions.length > 0) {
-        parts.push(
-          `actions=[${item.actions.map((action) => `${action.handle} ${quoteField(action.label)}`).join(", ")}]`,
-        );
-      }
-      lines.push(`  ${parts.join(" ")}`);
-    });
-  }
-  return lines;
-}
-
-function insertAfterHeader(text: string, insertLines: string[]): string {
-  if (insertLines.length === 0) return text;
-  const lines = text.split("\n");
-  const l1Index = lines.findIndex((line) => line.startsWith("L1 "));
-  const insertAt = l1Index >= 0 ? l1Index + 1 : Math.min(lines.length, 3);
-  lines.splice(insertAt, 0, ...insertLines);
-  return lines.join("\n");
-}
-
-function augmentVomResult(result: VomResult, nodes: VomNode[], options: VomOptions): VomResult {
-  if (!options.semanticCollections) return result;
-  const semanticLines = renderSemanticCollections(detectSemanticCollections(nodes, result.refs));
-  return semanticLines.length === 0
-    ? result
-    : { ...result, text: insertAfterHeader(result.text, semanticLines) };
-}
-
 function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOptions): VomResult {
   const included = collectDescendantsOfMembers(scene.nodes, layer.members);
   const visibleNodes = scene.nodes.filter((node) => included.has(node.id));
@@ -1303,15 +957,11 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
   const state = renderNodes(visibleNodes, options, header, scene.surfaces, scene.activeScopeBlocks);
   state.lines.push(renderPageOcclusionLine(hiddenCount));
 
-  return augmentVomResult(
-    {
-      text: state.lines.join("\n"),
-      refs: state.refs,
-      truncated: state.truncated,
-    },
-    visibleNodes,
-    options,
-  );
+  return {
+    text: state.lines.join("\n"),
+    refs: state.refs,
+    truncated: state.truncated,
+  };
 }
 
 export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult {
@@ -1334,13 +984,9 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     scene.activeScopeBlocks,
   );
 
-  return augmentVomResult(
-    {
-      text: state.lines.join("\n"),
-      refs: state.refs,
-      truncated: state.truncated,
-    },
-    visibleNodes,
-    options,
-  );
+  return {
+    text: state.lines.join("\n"),
+    refs: state.refs,
+    truncated: state.truncated,
+  };
 }

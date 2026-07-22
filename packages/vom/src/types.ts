@@ -25,6 +25,8 @@ export interface VomNode {
   role?: string;
   name?: string;
   value?: string;
+  placeholder?: string;
+  inputState?: "empty" | "filled" | "default" | "unknown";
   href?: string; // hostname of external link target; omitted for same-origin links
   text?: string;
   nearbyText?: string;
@@ -63,12 +65,6 @@ export interface VomOptions {
    * public layer header format.
    */
   activeRegionPolicy?: boolean;
-  /**
-   * Experimental: emit semantic summaries for repeated collection-like
-   * containers. Disabled by default because false positives in menus/forms are
-   * still noisy.
-   */
-  semanticCollections?: boolean;
 }
 
 export interface CondSurface {

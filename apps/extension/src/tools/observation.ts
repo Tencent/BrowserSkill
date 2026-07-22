@@ -329,6 +329,27 @@ function axPropertyString(axNode: CdpAxNode, name: string): string | undefined {
   return axString(prop?.value);
 }
 
+function axSiblingLabel(axNode: CdpAxNode, axById: Map<string, CdpAxNode>): string | undefined {
+  const parent = axNode.parentId ? axById.get(axNode.parentId) : undefined;
+  const siblings = parent?.childIds ?? [];
+  const index = siblings.indexOf(axNode.nodeId);
+  if (index <= 0) return undefined;
+
+  for (let i = index - 1; i >= Math.max(0, index - 4); i -= 1) {
+    const sibling = axById.get(siblings[i]);
+    if (!sibling) continue;
+    const role = axString(sibling.role)?.toLowerCase() ?? "";
+    if (AX_TEXT_STOP_ROLES.has(role)) break;
+    if (!["statictext", "labeltext", "text", "generic"].includes(role)) continue;
+    const label = cleanAttr(axString(sibling.name) ?? axString(sibling.value))?.replace(
+      /[：:]\s*$/,
+      "",
+    );
+    if (label && label.length <= 40) return label;
+  }
+  return undefined;
+}
+
 function buildAxSignals(axNodes: CdpAxNode[]): Map<string, AxNodeSignals> {
   const axByNodeId = new Map(axNodes.map((node) => [node.nodeId, node]));
   const virtualText = new Map<string, string>();
@@ -619,6 +640,7 @@ function applyCapturedSignals(
   const attrs = capturedNode.attrs;
   const text = cleanAttr(capturedNode.textContent);
   const nearbyText = nearbyTextFor(capturedNode, signals.childrenByParentId);
+  const placeholder = cleanAttr(capturedNode.formPlaceholder) ?? cleanAttr(attrs.placeholder);
   return {
     ...node,
     domParentId: capturedNode.parentBackendNodeId,
@@ -627,6 +649,7 @@ function applyCapturedSignals(
     attrs,
     ...(text ? { text } : {}),
     ...(nearbyText ? { nearbyText } : {}),
+    ...(placeholder ? { placeholder } : {}),
     disabled:
       Object.prototype.hasOwnProperty.call(attrs, "disabled") ||
       (attrs["aria-disabled"] ?? "").toLowerCase() === "true",
@@ -634,6 +657,20 @@ function applyCapturedSignals(
     hasNativeDescendant: capturedHasNativeDescendant(capturedNode, signals.childrenByParentId),
     insideNative: capturedInsideNative(capturedNode, signals.capturedByBackendId),
   };
+}
+
+function inputStateFor(
+  capturedNode: CapturedNode | undefined,
+  value: string | undefined,
+): VomNode["inputState"] {
+  if (!capturedNode || !FORM_CONTROL_TAGS.has(normalizeTag(capturedNode.tag))) return undefined;
+  const formValue = capturedNode.formValue;
+  if (formValue !== undefined) {
+    if (formValue === "") return "empty";
+    if (formValue === (capturedNode.formDefaultValue ?? "")) return "default";
+    return "filled";
+  }
+  return value === undefined || value === "" ? "empty" : "filled";
 }
 
 /**
@@ -647,19 +684,17 @@ function applyCapturedSignals(
 function formControlName(
   captured: CapturedNode | undefined,
   axName: string | undefined,
-  axValue: string | undefined,
+  axSiblingName: string | undefined,
   signals: VomNodeDomSignals,
 ): string | undefined {
-  const placeholder = cleanAttr(captured?.attrs.placeholder);
   const ariaLabel = cleanAttr(captured?.attrs["aria-label"]);
   const title = cleanAttr(captured?.attrs.title);
+  const placeholder =
+    cleanAttr(captured?.formPlaceholder) ?? cleanAttr(captured?.attrs.placeholder);
   const nearbyLabel = captured
     ? previousSiblingTextFor(captured, signals.childrenByParentId)
     : undefined;
-  const hasValue = axValue !== undefined && axValue !== "";
-  if (nearbyLabel) return nearbyLabel;
-  if (!hasValue && placeholder) return placeholder;
-  return axName ?? ariaLabel ?? placeholder ?? title ?? nearbyLabel;
+  return ariaLabel ?? title ?? axName ?? axSiblingName ?? nearbyLabel ?? placeholder;
 }
 
 function vomNodeFromCaptured(
@@ -668,7 +703,8 @@ function vomNodeFromCaptured(
   signals: VomNodeDomSignals,
 ): VomNode {
   const sensitive = isSensitive(capturedNode);
-  const value = sensitive ? (capturedNode.attrs.value ?? "") : undefined;
+  const value =
+    capturedNode.formValue ?? (sensitive ? (capturedNode.attrs.value ?? "") : undefined);
   const tag = normalizeTag(capturedNode.tag);
   const node = applyCapturedSignals(
     {
@@ -681,6 +717,7 @@ function vomNodeFromCaptured(
       pointerEvents: capturedNode.pointerEvents || "auto",
       modal: isModalSignal(undefined, capturedNode),
       sensitive,
+      inputState: inputStateFor(capturedNode, value),
       ...(value !== undefined ? { value } : {}),
     },
     capturedNode,
@@ -702,10 +739,11 @@ function axVomNode(
   axSignals: Map<string, AxNodeSignals>,
 ): VomNode {
   const role = axString(axNode.role);
-  const value = axValue(axNode.value);
+  const capturedValue = capturedNode?.formValue;
+  const value = capturedValue ?? axValue(axNode.value);
   const signalsForNode = axSignals.get(axNode.nodeId);
   let name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
-    ? formControlName(capturedNode, axString(axNode.name), value, signals)
+    ? formControlName(capturedNode, axString(axNode.name), axSiblingLabel(axNode, axById), signals)
     : (axString(axNode.name) ?? signalsForNode?.aggregatedText);
   if (name && signalsForNode?.hasPopup) {
     name = signalsForNode.expanded ? `${name} [expanded]` : `${name} [has-submenu]`;
@@ -720,6 +758,7 @@ function axVomNode(
     pointerEvents: capturedNode?.pointerEvents || "auto",
     modal: isModalSignal(axNode, capturedNode),
     sensitive: isSensitive(capturedNode) || signalsForNode?.sensitive === true,
+    inputState: inputStateFor(capturedNode, value),
   };
   if (role) node.role = role;
   if (name) node.name = name;

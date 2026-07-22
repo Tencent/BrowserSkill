@@ -31,6 +31,9 @@ export interface CapturedNode {
    */
   cursor?: string;
   textContent?: string;
+  formValue?: string;
+  formDefaultValue?: string;
+  formPlaceholder?: string;
 }
 
 export type CapturedIframeNodes = Map<number, CapturedNode[]>;
@@ -93,6 +96,52 @@ interface LayoutMetricsReply {
     pageY?: number;
   };
   layoutViewport?: { clientWidth?: number; clientHeight?: number; pageX?: number; pageY?: number };
+}
+
+function isFormControlTag(tag: string): boolean {
+  return tag === "input" || tag === "textarea" || tag === "select";
+}
+
+async function enrichFormControlState(cdp: CdpRunner, tabId: number, nodes: CapturedNode[]) {
+  for (const node of nodes) {
+    if (!isFormControlTag(node.tag)) continue;
+    let objectId: string | undefined;
+    try {
+      const resolved = await cdp.send<{ object?: { objectId?: string } }>(
+        tabId,
+        "DOM.resolveNode",
+        {
+          backendNodeId: node.backendNodeId,
+        },
+      );
+      objectId = resolved.object?.objectId;
+      if (!objectId) continue;
+      const result = await cdp.send<{
+        result?: { value?: { value?: string; defaultValue?: string; placeholder?: string } };
+      }>(tabId, "Runtime.callFunctionOn", {
+        objectId,
+        returnByValue: true,
+        functionDeclaration: `function(){
+          return {
+            value: typeof this.value === "string" ? this.value : "",
+            defaultValue: typeof this.defaultValue === "string" ? this.defaultValue : "",
+            placeholder: typeof this.placeholder === "string" ? this.placeholder : ""
+          };
+        }`,
+      });
+      const value = result.result?.value;
+      if (!value) continue;
+      node.formValue = value.value ?? "";
+      node.formDefaultValue = value.defaultValue ?? "";
+      node.formPlaceholder = value.placeholder ?? "";
+    } catch {
+      // Best-effort enrichment. DOMSnapshot/AX data still carries the node.
+    } finally {
+      if (objectId) {
+        await cdp.send(tabId, "Runtime.releaseObject", { objectId }).catch(() => {});
+      }
+    }
+  }
 }
 
 interface RuntimeEvaluateReply {
@@ -531,6 +580,11 @@ export async function captureViewModel(cdp: CdpRunner, tabId: number): Promise<C
         }
       }
     }
+  }
+
+  await enrichFormControlState(cdp, tabId, nodes);
+  for (const subNodes of iframeNodes.values()) {
+    await enrichFormControlState(cdp, tabId, subNodes);
   }
 
   const surfaceProbes = await probeHoverSurfaces(cdp, tabId);

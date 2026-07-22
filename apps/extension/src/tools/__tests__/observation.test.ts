@@ -848,11 +848,7 @@ describe("buildVomScene", () => {
     );
   });
 
-  it("prefers an empty field's placeholder over a label-polluted AX name", () => {
-    // Mirrors xiaohongshu: the <input> is wrapped in a <label> that also holds
-    // a "+86" prefix, so the AX accessible name becomes "+86" and the real
-    // placeholder ("输入手机号") is lost. VOM models perceived state — the empty
-    // field shows its placeholder — so the placeholder wins.
+  it("keeps placeholder separate from the accessible name", () => {
     const axNodes: CdpAxNode[] = [
       {
         nodeId: "1",
@@ -881,7 +877,12 @@ describe("buildVomScene", () => {
     };
 
     expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
-      expect.objectContaining({ id: 10, role: "textbox", name: "输入手机号" }),
+      expect.objectContaining({
+        id: 10,
+        role: "textbox",
+        name: "+86",
+        placeholder: "输入手机号",
+      }),
     );
   });
 
@@ -976,6 +977,89 @@ describe("buildVomScene", () => {
 
     expect(buildVomScene(axNodes, captured).nodes.find((node) => node.id === 20)).toEqual(
       expect.objectContaining({ role: "textbox", name: "验证码" }),
+    );
+  });
+
+  it("uses preceding AX static text as a form control label", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 1,
+        childIds: ["2", "3"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "StaticText" },
+        name: { type: "computedString", value: "验证码:" },
+      },
+      {
+        nodeId: "3",
+        parentId: "1",
+        role: { type: "role", value: "textbox" },
+        backendDOMNodeId: 20,
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: null,
+          tag: "input",
+          attrs: { type: "text" },
+          rect: { x: 90, y: 0, w: 120, h: 30 },
+          paintOrder: 2,
+          position: "static",
+          pointerEvents: "auto",
+          cursor: "text",
+        },
+      ],
+    };
+
+    expect(buildVomScene(axNodes, captured).nodes.find((node) => node.id === 20)).toEqual(
+      expect.objectContaining({ role: "textbox", name: "验证码", inputState: "empty" }),
+    );
+  });
+
+  it("marks runtime default input values without treating them as ordinary filled input", () => {
+    const scene = buildVomScene(
+      [
+        {
+          nodeId: "1",
+          role: { type: "role", value: "textbox" },
+          backendDOMNodeId: 10,
+        },
+      ],
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "input",
+            attrs: { type: "text" },
+            formValue: "没有手机号的用编码代替",
+            formDefaultValue: "没有手机号的用编码代替",
+            rect: { x: 0, y: 0, w: 240, h: 48 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+    );
+
+    expect(scene.nodes[0]).toEqual(
+      expect.objectContaining({
+        inputState: "default",
+        value: "没有手机号的用编码代替",
+      }),
     );
   });
 
