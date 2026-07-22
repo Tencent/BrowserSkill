@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 
 use crate::cli::daemon::StartArgs;
 use crate::daemon::{
-    browsers::EXTENSION_CONNECT_WAIT,
+    browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
     sessions::{StopSessionError, forget_session, stop_session},
     state::DaemonState,
@@ -45,6 +45,12 @@ pub struct DaemonConfig {
     /// How long `session.start` polls for an extension handshake before
     /// returning `no_browser_connected`.
     pub extension_connect_wait: Duration,
+    /// A heartbeat-capable browser silent for at least this long is
+    /// reaped by the liveness task. Defaults to [`BROWSER_LIVENESS_TIMEOUT`].
+    pub browser_liveness_timeout: Duration,
+    /// How often the liveness task scans the registry. Defaults to
+    /// [`BROWSER_LIVENESS_TICK`].
+    pub browser_liveness_tick: Duration,
 }
 
 impl DaemonConfig {
@@ -58,11 +64,22 @@ impl DaemonConfig {
             daemon_idle: Duration::from_secs(60 * 30),
             allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
+            browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
+            browser_liveness_tick: BROWSER_LIVENESS_TICK,
         }
     }
 
     pub fn with_extension_connect_wait(mut self, wait: Duration) -> Self {
         self.extension_connect_wait = wait;
+        self
+    }
+
+    /// Override the liveness reaper's silence threshold and scan cadence.
+    /// Primarily for tests that need the reaper to act within
+    /// sub-second windows instead of the production 60s/15s defaults.
+    pub fn with_browser_liveness(mut self, timeout: Duration, tick: Duration) -> Self {
+        self.browser_liveness_timeout = timeout;
+        self.browser_liveness_tick = tick;
         self
     }
 }
@@ -75,6 +92,8 @@ impl From<&StartArgs> for DaemonConfig {
             daemon_idle: args.resolved_daemon_idle(),
             allow_any_origin: false,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
+            browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
+            browser_liveness_tick: BROWSER_LIVENESS_TICK,
         }
     }
 }
@@ -391,16 +410,17 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 pub(crate) fn spawn_browser_liveness_reaper(
     state: Arc<DaemonState>,
 ) -> tokio::task::JoinHandle<()> {
-    use crate::daemon::browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT};
+    let timeout = state.config.browser_liveness_timeout;
+    let tick = state.config.browser_liveness_tick;
     tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(BROWSER_LIVENESS_TICK);
+        let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The first tick is immediate; skip it so a freshly connected
         // browser always gets at least one full window before a scan.
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            for client in state.browsers.stale_browsers(BROWSER_LIVENESS_TIMEOUT) {
+            for client in state.browsers.stale_browsers(timeout) {
                 if state
                     .browsers
                     .remove_if_generation_matches(&client.id, client.generation)
