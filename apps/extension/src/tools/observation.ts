@@ -3,7 +3,13 @@
 // tab (defaulting to the Agent Window's active tab when omitted) and
 // returns a payload that mirrors the bsk-protocol Rust structs.
 
-import { renderVom, type VomNode, type VomScene } from "@browser-skill/vom";
+import {
+  type ActiveScopeBlock,
+  type CondSurface,
+  renderVom,
+  type VomNode,
+  type VomScene,
+} from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionManager } from "@/session-manager/manager";
 import type {
@@ -234,6 +240,7 @@ export interface CdpAxNode {
   name?: { type: string; value?: string };
   description?: { value?: string };
   value?: { value?: string | number | boolean };
+  properties?: Array<{ name?: string; value?: { value?: string | number | boolean } }>;
   childIds?: string[];
 }
 
@@ -266,6 +273,120 @@ function isModalSignal(
 function isSensitive(capturedNode: CapturedNode | undefined): boolean {
   const attrs = capturedNode?.attrs ?? {};
   return (attrs.type ?? "").toLowerCase() === "password";
+}
+
+interface AxNodeSignals {
+  hasPopup: boolean;
+  expanded: boolean;
+  selected: boolean;
+  controls: string;
+  sensitive: boolean;
+  aggregatedText?: string;
+}
+
+const AX_TEXT_AGGREGATE_ROLES = new Set([
+  "paragraph",
+  "listitem",
+  "term",
+  "definition",
+  "cell",
+  "gridcell",
+  "caption",
+  "figcaption",
+  "blockquote",
+  "note",
+  "status",
+  "log",
+  "generic",
+  "section",
+]);
+const AX_TEXT_LEAF_ROLES = new Set(["inlinetextbox", "statictext", "text"]);
+const AX_TEXT_STOP_ROLES = new Set([
+  "button",
+  "link",
+  "combobox",
+  "listbox",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "option",
+  "radio",
+  "checkbox",
+  "textbox",
+  "searchbox",
+  "spinbutton",
+  "slider",
+  "switch",
+  "tab",
+  "treeitem",
+  "columnheader",
+  "rowheader",
+]);
+const SENSITIVE_AX_INPUT_TYPES = new Set(["password", "credit-card"]);
+
+function axPropertyString(axNode: CdpAxNode, name: string): string | undefined {
+  const prop = axNode.properties?.find((item) => item.name === name);
+  return axString(prop?.value);
+}
+
+function buildAxSignals(axNodes: CdpAxNode[]): Map<string, AxNodeSignals> {
+  const axByNodeId = new Map(axNodes.map((node) => [node.nodeId, node]));
+  const virtualText = new Map<string, string>();
+  for (const node of axNodes) {
+    if (typeof node.backendDOMNodeId === "number") continue;
+    const role = axString(node.role)?.toLowerCase() ?? "";
+    const name = axString(node.name);
+    if (name && AX_TEXT_LEAF_ROLES.has(role)) virtualText.set(node.nodeId, name);
+  }
+
+  const collectLeafText = (nodeId: string, depth: number): string[] => {
+    if (depth > 8) return [];
+    const node = axByNodeId.get(nodeId);
+    if (!node) return [];
+    const parts: string[] = [];
+    for (const childId of node.childIds ?? []) {
+      const vtext = virtualText.get(childId);
+      if (vtext) {
+        parts.push(vtext);
+        continue;
+      }
+      const child = axByNodeId.get(childId);
+      if (!child) continue;
+      const childRole = axString(child.role)?.toLowerCase() ?? "";
+      if (AX_TEXT_LEAF_ROLES.has(childRole)) continue;
+      if (AX_TEXT_STOP_ROLES.has(childRole)) continue;
+      const childName = axString(child.name);
+      if (childName && !AX_TEXT_AGGREGATE_ROLES.has(childRole)) {
+        parts.push(childName);
+      } else {
+        parts.push(...collectLeafText(childId, depth + 1));
+      }
+    }
+    return parts;
+  };
+
+  const signals = new Map<string, AxNodeSignals>();
+  for (const node of axNodes) {
+    const role = axString(node.role)?.toLowerCase() ?? "";
+    const expanded = axPropertyString(node, "expanded") === "true";
+    const selected = axPropertyString(node, "selected") === "true";
+    const controls = axPropertyString(node, "controls") ?? "";
+    const hasPopupValue = axPropertyString(node, "hasPopup") ?? "";
+    const inputType = axPropertyString(node, "inputType") ?? "";
+    let aggregatedText: string | undefined;
+    if (AX_TEXT_AGGREGATE_ROLES.has(role) && !axString(node.name)) {
+      aggregatedText = cleanAttr(collectLeafText(node.nodeId, 0).join(" "));
+    }
+    signals.set(node.nodeId, {
+      hasPopup: hasPopupValue !== "" && hasPopupValue !== "false",
+      expanded,
+      selected,
+      controls,
+      sensitive: SENSITIVE_AX_INPUT_TYPES.has(inputType),
+      aggregatedText,
+    });
+  }
+  return signals;
 }
 
 function findAxAncestor<T>(
@@ -331,6 +452,40 @@ function isRenderableIframeControl(node: CapturedNode): boolean {
   return tag !== "a" || name !== undefined;
 }
 
+function normalizedControlType(node: VomNode | CapturedNode): string {
+  const attrs = node.attrs ?? {};
+  const tag = normalizeTag(node.tag);
+  if (tag === "input") return (attrs.type ?? "text").toLowerCase();
+  if ("sensitive" in node && node.sensitive) return "password";
+  return tag;
+}
+
+function sameLogicalIframeControl(existing: VomNode, candidate: CapturedNode, iframeId: number) {
+  const role = iframeRoleFor(candidate);
+  const name = cleanAttr(iframeNameFor(candidate));
+  if (!role || !name) return false;
+  if ((existing.role ?? "").toLowerCase() !== role) return false;
+  if (cleanAttr(existing.name) !== name) return false;
+
+  const candidateType = normalizedControlType(candidate);
+  const existingType = normalizedControlType(existing);
+  if (candidateType !== existingType) return false;
+
+  return (
+    existing.parentId === iframeId ||
+    existing.domParentId === iframeId ||
+    existing.domAncestorIds?.includes(iframeId) === true
+  );
+}
+
+function hasEquivalentIframeControl(
+  nodes: VomNode[],
+  candidate: CapturedNode,
+  iframeId: number,
+): boolean {
+  return nodes.some((node) => sameLogicalIframeControl(node, candidate, iframeId));
+}
+
 function capturedIframeNameFor(node: CapturedNode): string | undefined {
   const ariaLabel = node.attrs["aria-label"]?.replace(/\s+/g, " ").trim();
   if (ariaLabel) return ariaLabel;
@@ -350,6 +505,11 @@ function cleanAttr(value: string | undefined): string | undefined {
 const FORM_CONTROL_TAGS = new Set(["input", "textarea", "select"]);
 
 const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
+const ACTIVE_SCOPE_MAX_BLOCKS = 8;
+const ACTIVE_SCOPE_MAX_LINES = 40;
+const ACTIVE_SCOPE_MAX_LINE_LENGTH = 160;
+const ACTIVE_SCOPE_MAX_TOTAL_CHARS = 8_000;
+const ACTIVE_SCOPE_SKIP_TAGS = new Set(["script", "style", "noscript", "template"]);
 
 function buildCapturedChildren(capturedNodes: CapturedNode[]): Map<number, CapturedNode[]> {
   const children = new Map<number, CapturedNode[]>();
@@ -427,6 +587,24 @@ function nearbyTextFor(
   return labels.length > 0 ? labels.join(" ") : undefined;
 }
 
+function previousSiblingTextFor(
+  node: CapturedNode,
+  childrenByParentId: Map<number, CapturedNode[]>,
+): string | undefined {
+  if (node.parentBackendNodeId === null) return undefined;
+  const siblings = childrenByParentId.get(node.parentBackendNodeId) ?? [];
+  const index = siblings.findIndex((sibling) => sibling.backendNodeId === node.backendNodeId);
+  if (index <= 0) return undefined;
+
+  for (let i = index - 1; i >= Math.max(0, index - 4); i -= 1) {
+    const sibling = siblings[i];
+    if (["input", "textarea", "select", "button", "a"].includes(normalizeTag(sibling.tag))) break;
+    const text = cleanAttr(sibling.textContent)?.replace(/[：:]\s*$/, "");
+    if (text && text.length <= 40) return text;
+  }
+  return undefined;
+}
+
 interface VomNodeDomSignals {
   capturedByBackendId: Map<number, CapturedNode>;
   childrenByParentId: Map<number, CapturedNode[]>;
@@ -470,13 +648,18 @@ function formControlName(
   captured: CapturedNode | undefined,
   axName: string | undefined,
   axValue: string | undefined,
+  signals: VomNodeDomSignals,
 ): string | undefined {
   const placeholder = cleanAttr(captured?.attrs.placeholder);
   const ariaLabel = cleanAttr(captured?.attrs["aria-label"]);
   const title = cleanAttr(captured?.attrs.title);
+  const nearbyLabel = captured
+    ? previousSiblingTextFor(captured, signals.childrenByParentId)
+    : undefined;
   const hasValue = axValue !== undefined && axValue !== "";
+  if (nearbyLabel) return nearbyLabel;
   if (!hasValue && placeholder) return placeholder;
-  return axName ?? ariaLabel ?? placeholder ?? title;
+  return axName ?? ariaLabel ?? placeholder ?? title ?? nearbyLabel;
 }
 
 function vomNodeFromCaptured(
@@ -516,12 +699,17 @@ function axVomNode(
   capturedNode: CapturedNode | undefined,
   axById: Map<string, CdpAxNode>,
   signals: VomNodeDomSignals,
+  axSignals: Map<string, AxNodeSignals>,
 ): VomNode {
   const role = axString(axNode.role);
   const value = axValue(axNode.value);
-  const name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
-    ? formControlName(capturedNode, axString(axNode.name), value)
-    : axString(axNode.name);
+  const signalsForNode = axSignals.get(axNode.nodeId);
+  let name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
+    ? formControlName(capturedNode, axString(axNode.name), value, signals)
+    : (axString(axNode.name) ?? signalsForNode?.aggregatedText);
+  if (name && signalsForNode?.hasPopup) {
+    name = signalsForNode.expanded ? `${name} [expanded]` : `${name} [has-submenu]`;
+  }
   const node: VomNode = {
     id: axNode.backendDOMNodeId as number,
     parentId: nearestBackendParent(axNode, axById),
@@ -531,12 +719,22 @@ function axVomNode(
     position: capturedNode?.position || "static",
     pointerEvents: capturedNode?.pointerEvents || "auto",
     modal: isModalSignal(axNode, capturedNode),
-    sensitive: isSensitive(capturedNode),
+    sensitive: isSensitive(capturedNode) || signalsForNode?.sensitive === true,
   };
   if (role) node.role = role;
   if (name) node.name = name;
   if (value !== undefined) node.value = value;
-  return applyCapturedSignals(node, capturedNode, signals);
+  const enriched = applyCapturedSignals(node, capturedNode, signals);
+  if (signalsForNode?.selected && !enriched.attrs?.["aria-selected"]) {
+    enriched.attrs = { ...(enriched.attrs ?? {}), "aria-selected": "true" };
+  }
+  if (signalsForNode?.expanded && !enriched.attrs?.["aria-expanded"]) {
+    enriched.attrs = { ...(enriched.attrs ?? {}), "aria-expanded": "true" };
+  }
+  if (signalsForNode?.controls && !enriched.attrs?.["aria-controls"]) {
+    enriched.attrs = { ...(enriched.attrs ?? {}), "aria-controls": signalsForNode.controls };
+  }
+  return enriched;
 }
 
 function iframeSignals(iframeNodes: CapturedNode[]): VomNodeDomSignals {
@@ -559,6 +757,144 @@ function capturedOnlySignals(capturedNodes: CapturedNode[]): VomNodeDomSignals {
     capturedByBackendId,
     childrenByParentId: buildCapturedChildren(capturedNodes),
   };
+}
+
+function normalizeProbeKey(value: string | undefined): string {
+  return cleanAttr(value)?.toLowerCase() ?? "";
+}
+
+function controlledIds(attrs: Record<string, string>): string[] {
+  return (attrs["aria-controls"] ?? "").split(/\s+/).filter(Boolean);
+}
+
+function isActiveScopeTrigger(node: VomNode): boolean {
+  const attrs = node.attrs ?? {};
+  if (controlledIds(attrs).length === 0) return false;
+  const role = normalizeTag(attrs.role) || normalizedVomRole(node);
+  return (
+    (role === "tab" && (attrs["aria-selected"] ?? "").toLowerCase() === "true") ||
+    (attrs["aria-expanded"] ?? "").toLowerCase() === "true"
+  );
+}
+
+function normalizedVomRole(node: VomNode): string {
+  return node.role?.toLowerCase() ?? "";
+}
+
+function collectScopeLines(
+  root: CapturedNode,
+  triggerLabel: string,
+  childrenByParentId: Map<number, CapturedNode[]>,
+): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const triggerKey = normalizeProbeKey(triggerLabel);
+  const stack = [root];
+  while (stack.length > 0 && lines.length < ACTIVE_SCOPE_MAX_LINES) {
+    const node = stack.shift() as CapturedNode;
+    const tag = normalizeTag(node.tag);
+    if (ACTIVE_SCOPE_SKIP_TAGS.has(tag)) continue;
+    if ((node.attrs.type ?? "").toLowerCase() === "password") continue;
+
+    const text = cleanAttr(node.textContent);
+    const key = normalizeProbeKey(text);
+    if (text && key !== triggerKey && !seen.has(key)) {
+      seen.add(key);
+      lines.push(
+        text.length > ACTIVE_SCOPE_MAX_LINE_LENGTH
+          ? text.slice(0, ACTIVE_SCOPE_MAX_LINE_LENGTH)
+          : text,
+      );
+    }
+    stack.push(...(childrenByParentId.get(node.backendNodeId) ?? []));
+  }
+  return lines;
+}
+
+function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): ActiveScopeBlock[] {
+  const panelByDomId = new Map<string, CapturedNode>();
+  for (const capturedNode of signals.capturedByBackendId.values()) {
+    const domId = capturedNode.attrs.id;
+    if (domId) panelByDomId.set(domId, capturedNode);
+  }
+
+  const blocks: ActiveScopeBlock[] = [];
+  let totalChars = 0;
+  for (const node of nodes) {
+    if (blocks.length >= ACTIVE_SCOPE_MAX_BLOCKS) break;
+    if (!isActiveScopeTrigger(node)) continue;
+    const label =
+      cleanAttr(node.name) ?? cleanAttr(node.text) ?? cleanAttr(node.attrs?.["aria-label"]);
+    if (!label) continue;
+
+    const lines: string[] = [];
+    for (const controlId of controlledIds(node.attrs ?? {})) {
+      const panel = panelByDomId.get(controlId);
+      if (!panel) continue;
+      lines.push(...collectScopeLines(panel, label, signals.childrenByParentId));
+      if (lines.length >= ACTIVE_SCOPE_MAX_LINES) break;
+    }
+
+    const uniqueLines: string[] = [];
+    const seen = new Set<string>();
+    for (const line of lines) {
+      const key = normalizeProbeKey(line);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      uniqueLines.push(line);
+      totalChars += line.length;
+      if (
+        uniqueLines.length >= ACTIVE_SCOPE_MAX_LINES ||
+        totalChars >= ACTIVE_SCOPE_MAX_TOTAL_CHARS
+      ) {
+        break;
+      }
+    }
+    if (uniqueLines.length === 0) continue;
+    blocks.push({ triggerId: node.id, label, lines: uniqueLines });
+    if (totalChars >= ACTIVE_SCOPE_MAX_TOTAL_CHARS) break;
+  }
+  return blocks;
+}
+
+function labelForSurfaceMatch(node: VomNode): string {
+  return (
+    cleanAttr(node.name) ??
+    cleanAttr(node.text) ??
+    cleanAttr(node.attrs?.["aria-label"]) ??
+    cleanAttr(node.attrs?.title) ??
+    ""
+  );
+}
+
+function buildConditionalSurfaces(nodes: VomNode[], captured: CapturedViewModel): CondSurface[] {
+  const probes = captured.surfaceProbes ?? [];
+  if (probes.length === 0) return [];
+
+  const surfaces: CondSurface[] = [];
+  const nodesWithLabels = nodes
+    .map((node) => ({ node, key: normalizeProbeKey(labelForSurfaceMatch(node)) }))
+    .filter((entry) => entry.key.length > 0);
+  const used = new Set<number>();
+  for (const probe of probes) {
+    const probeKey = normalizeProbeKey(probe.triggerLabel);
+    if (!probeKey || probe.subItems.length === 0) continue;
+    const match =
+      nodesWithLabels.find((entry) => entry.key === probeKey && !used.has(entry.node.id)) ??
+      nodesWithLabels.find(
+        (entry) =>
+          !used.has(entry.node.id) &&
+          (probeKey.startsWith(entry.key) || entry.key.startsWith(probeKey)),
+      );
+    if (!match) continue;
+    used.add(match.node.id);
+    surfaces.push({
+      triggerId: match.node.id,
+      triggerAction: probe.triggerAction,
+      subItems: probe.subItems,
+    });
+  }
+  return surfaces;
 }
 
 function axNodeInOverlaySubtree(
@@ -585,6 +921,7 @@ function axNodeInOverlaySubtree(
 export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel): VomScene {
   const signals = capturedOnlySignals(captured.nodes);
   const { capturedByBackendId } = signals;
+  const axSignals = buildAxSignals(axNodes);
 
   const axById = new Map<string, CdpAxNode>();
   for (const node of axNodes) {
@@ -601,7 +938,7 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
 
     const capturedNode = capturedByBackendId.get(axNode.backendDOMNodeId);
     const role = axString(axNode.role);
-    const vomNode = axVomNode(axNode, capturedNode, axById, signals);
+    const vomNode = axVomNode(axNode, capturedNode, axById, signals, axSignals);
 
     // For link nodes, attach external hostname so the renderer can annotate it.
     // Relative hrefs and same-origin hrefs are omitted to avoid noise.
@@ -633,7 +970,8 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
       if (
         seenBackendIds.has(iframeNode.backendNodeId) ||
         excludedBackendNodeIds.has(iframeNode.backendNodeId) ||
-        !isRenderableIframeControl(iframeNode)
+        !isRenderableIframeControl(iframeNode) ||
+        hasEquivalentIframeControl(nodes, iframeNode, iframeBackendId)
       ) {
         continue;
       }
@@ -651,7 +989,14 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
     }
   }
 
-  return { viewport: captured.viewport, nodes };
+  const activeScopeBlocks = buildActiveScopeBlocks(nodes, signals);
+  const surfaces = buildConditionalSurfaces(nodes, captured);
+  return {
+    viewport: captured.viewport,
+    nodes,
+    ...(surfaces.length > 0 ? { surfaces } : {}),
+    ...(activeScopeBlocks.length > 0 ? { activeScopeBlocks } : {}),
+  };
 }
 
 export interface SnapshotDeps {
@@ -825,7 +1170,11 @@ export async function handleSnapshot(
     const axNodes = result.nodes ?? [];
     const captured = await captureForVom(deps.cdp, target.tabId);
     const scene = buildVomScene(axNodes, captured);
-    const rendered = renderVom(scene, { maxDepth: params.max_depth, maxTokens: params.max_tokens });
+    const rendered = renderVom(scene, {
+      maxDepth: params.max_depth,
+      maxTokens: params.max_tokens,
+      activeRegionPolicy: true,
+    });
     ctx.refStore.replace(
       rendered.refs.map(
         (r) => [r.ref, { backendNodeId: r.backendNodeId, tabId: target.tabId }] as const,

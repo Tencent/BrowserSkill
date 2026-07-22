@@ -570,6 +570,82 @@ describe("buildVomScene", () => {
     ]);
   });
 
+  it("dedupes iframe fallback controls already exposed through AX", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["2"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "Iframe" },
+        backendDOMNodeId: 20,
+        childIds: ["3"],
+      },
+      {
+        nodeId: "3",
+        parentId: "2",
+        role: { type: "role", value: "textbox" },
+        name: { type: "x", value: "输入密码" },
+        backendDOMNodeId: 202,
+        properties: [{ name: "inputType", value: { value: "password" } }],
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1000, height: 800 },
+      nodes: [
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 10,
+          tag: "iframe",
+          attrs: {},
+          rect: { x: 100, y: 100, w: 400, h: 300 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+      ],
+      iframeNodes: new Map([
+        [
+          20,
+          [
+            {
+              backendNodeId: 102,
+              parentBackendNodeId: null,
+              tag: "input",
+              attrs: { type: "password", placeholder: "输入密码" },
+              rect: { x: 0, y: 50, w: 300, h: 40 },
+              paintOrder: 1,
+              position: "static",
+              pointerEvents: "auto",
+            },
+          ],
+        ],
+      ]),
+      excludedBackendNodeIds: new Set(),
+    };
+
+    const passwordNodes = buildVomScene(axNodes, captured).nodes.filter(
+      (node) => node.role === "textbox" && node.name === "输入密码",
+    );
+
+    expect(passwordNodes).toHaveLength(1);
+    expect(passwordNodes[0]).toEqual(expect.objectContaining({ id: 202, sensitive: true }));
+  });
+
   it("keeps unnamed iframe controls but skips unnamed iframe links", () => {
     const scene = buildVomScene(
       [
@@ -843,6 +919,66 @@ describe("buildVomScene", () => {
     );
   });
 
+  it("uses nearby preceding text as a form control label", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 1,
+        childIds: ["2"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "textbox" },
+        backendDOMNodeId: 20,
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        {
+          backendNodeId: 1,
+          parentBackendNodeId: null,
+          tag: "div",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 500, h: 80 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: 1,
+          tag: "span",
+          attrs: {},
+          textContent: "验证码:",
+          rect: { x: 0, y: 0, w: 80, h: 30 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 1,
+          tag: "input",
+          attrs: { type: "text" },
+          rect: { x: 90, y: 0, w: 120, h: 30 },
+          paintOrder: 2,
+          position: "static",
+          pointerEvents: "auto",
+          cursor: "text",
+        },
+      ],
+    };
+
+    expect(buildVomScene(axNodes, captured).nodes.find((node) => node.id === 20)).toEqual(
+      expect.objectContaining({ role: "textbox", name: "验证码" }),
+    );
+  });
+
   it("promotes a cursor:pointer icon control to a button named from its <use> sprite", () => {
     // A close button built as <div class=close-button><svg><use href="#close"/></svg></div>
     // — the AX tree exposes it as `generic` with no name, so it would be dropped.
@@ -1063,6 +1199,284 @@ describe("buildVomScene", () => {
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
     expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
+  });
+
+  it("builds active scope blocks from active aria-controls relationships", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["2"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Reviews (12)" },
+        backendDOMNodeId: 20,
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 10,
+          tag: "button",
+          attrs: { role: "tab", "aria-selected": "true", "aria-controls": "reviews-panel" },
+          rect: { x: 20, y: 20, w: 120, h: 40 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 30,
+          parentBackendNodeId: 10,
+          tag: "div",
+          attrs: { id: "reviews-panel" },
+          rect: null,
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+          textContent: "Jane - ear cups are small",
+        },
+        {
+          backendNodeId: 31,
+          parentBackendNodeId: 30,
+          tag: "p",
+          attrs: {},
+          rect: null,
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+          textContent: "Bob - great sound",
+        },
+      ],
+    };
+
+    const scene = buildVomScene(axNodes, captured);
+    expect(scene.activeScopeBlocks).toEqual([
+      {
+        triggerId: 20,
+        label: "Reviews (12)",
+        lines: ["Jane - ear cups are small", "Bob - great sound"],
+      },
+    ]);
+    expect(renderVom(scene).text).toContain("[§ active: Reviews (12)]");
+  });
+
+  it("maps hover surface probes to matching node labels", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["2"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "Products" },
+        backendDOMNodeId: 20,
+      },
+    ];
+    const scene = buildVomScene(axNodes, {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      surfaceProbes: [
+        { triggerLabel: "Products", triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+      ],
+      nodes: [
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 10,
+          tag: "button",
+          attrs: {},
+          rect: { x: 20, y: 20, w: 120, h: 40 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+      ],
+    });
+
+    expect(scene.surfaces).toEqual([
+      { triggerId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+    ]);
+    expect(renderVom(scene).text).toContain('@e1 button "Products" [→ Shoes | Bags]');
+  });
+
+  it("enriches names and active scope signals from AX properties", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["2", "3"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "Products" },
+        backendDOMNodeId: 20,
+        properties: [
+          { name: "hasPopup", value: { value: "menu" } },
+          { name: "expanded", value: { value: "true" } },
+          { name: "controls", value: { value: "products-panel" } },
+        ],
+      },
+      {
+        nodeId: "3",
+        parentId: "1",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Card number" },
+        backendDOMNodeId: 30,
+        properties: [{ name: "inputType", value: { value: "credit-card" } }],
+      },
+    ];
+    const scene = buildVomScene(axNodes, {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 10,
+          tag: "button",
+          attrs: {},
+          rect: { x: 20, y: 20, w: 120, h: 40 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 25,
+          parentBackendNodeId: 10,
+          tag: "div",
+          attrs: { id: "products-panel" },
+          rect: null,
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+          textContent: "Shoes Bags",
+        },
+        {
+          backendNodeId: 30,
+          parentBackendNodeId: 10,
+          tag: "input",
+          attrs: {},
+          rect: { x: 20, y: 80, w: 200, h: 40 },
+          paintOrder: 2,
+          position: "static",
+          pointerEvents: "auto",
+        },
+      ],
+    });
+
+    expect(scene.nodes.find((node) => node.id === 20)).toEqual(
+      expect.objectContaining({
+        name: "Products [expanded]",
+        attrs: expect.objectContaining({
+          "aria-expanded": "true",
+          "aria-controls": "products-panel",
+        }),
+      }),
+    );
+    expect(scene.activeScopeBlocks).toEqual([
+      { triggerId: 20, label: "Products [expanded]", lines: ["Shoes Bags"] },
+    ]);
+    expect(scene.nodes.find((node) => node.id === 30)?.sensitive).toBe(true);
+  });
+
+  it("aggregates AX virtual text into unnamed structural nodes", () => {
+    const scene = buildVomScene(
+      [
+        {
+          nodeId: "1",
+          role: { type: "role", value: "RootWebArea" },
+          backendDOMNodeId: 10,
+          childIds: ["2"],
+        },
+        {
+          nodeId: "2",
+          parentId: "1",
+          role: { type: "role", value: "paragraph" },
+          backendDOMNodeId: 20,
+          childIds: ["3"],
+        },
+        {
+          nodeId: "3",
+          parentId: "2",
+          role: { type: "role", value: "InlineTextBox" },
+          name: { type: "computedString", value: "Inline only text" },
+        },
+      ],
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "p",
+            attrs: {},
+            rect: { x: 20, y: 20, w: 400, h: 40 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+    );
+
+    expect(scene.nodes.find((node) => node.id === 20)?.name).toBe("Inline only text");
   });
 
   it("marks captured dialog elements as modal without AX role or aria-modal", () => {
@@ -1533,7 +1947,8 @@ describe("handleSnapshot", () => {
     expect(res.text).toContain("L1 modal cover=100%");
     // Iframe content must appear in L1 — both inputs rendered
     expect(res.text).toMatch(/textbox "请输入手机号"/);
-    expect(res.text).toMatch(/textbox "密码" ="•••"/);
+    expect(res.text).toMatch(/textbox "密码"/);
+    expect(res.text).not.toMatch(/textbox "密码" ="•••"/);
     // Ref-store must include the iframe's input backendNodeIds
     const ctx = sm["sessions"].get("aa11")!;
     const phoneRef = res.text.match(/@(e\d+) textbox "请输入手机号"/)?.[1];

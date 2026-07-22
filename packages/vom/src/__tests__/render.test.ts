@@ -135,11 +135,11 @@ describe("renderVom single-layer page", () => {
       ]),
     );
 
-    expect(out.text).toContain('@e1 textbox "密码" ="•••"');
+    expect(out.text).toContain('@e1 textbox "密码" [filled] ="•••"');
     expect(out.text).not.toContain("hunter2");
   });
 
-  it("masks sensitive textboxes even when the value is missing", () => {
+  it("does not imply a sensitive textbox has a value when the value is missing", () => {
     const out = renderVom(
       scene([
         node({ id: 1, role: "RootWebArea", name: "Login" }),
@@ -154,7 +154,8 @@ describe("renderVom single-layer page", () => {
       ]),
     );
 
-    expect(out.text).toContain('@e1 textbox "密码" ="•••"');
+    expect(out.text).toContain('@e1 textbox "密码" [empty]');
+    expect(out.text).not.toContain('="•••"');
   });
 
   it("continues rendering later siblings after a branch exceeds maxDepth", () => {
@@ -278,6 +279,237 @@ describe("renderVom single-layer page", () => {
     expect(out.text).toContain('@e1 button "View" [ctx: Project Alpha]');
     expect(out.text).toContain('@e2 button "View" [ctx: Project Beta]');
   });
+
+  it("filters noisy template/layout text from weak label context", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "section",
+          name: "top 开始 top 结束 bigpic、登录 开始 <![endif]",
+        }),
+        node({ id: 3, parentId: 2, role: "button", name: "更多", tag: "button" }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "更多"');
+    expect(out.text).not.toContain("[ctx:");
+  });
+
+  it("keeps active-region filtering disabled by default", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "button",
+          name: "Background",
+          tag: "button",
+          rect: { x: 120, y: 120, w: 120, h: 40 },
+          paintOrder: 1,
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          role: "generic",
+          tag: "div",
+          rect: { x: 100, y: 100, w: 180, h: 120 },
+          paintOrder: 10,
+          position: "fixed",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain("@layers 1 focus=L1");
+    expect(out.text).toContain('@e1 button "Background"');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("can filter refs blocked by active positioned regions without changing layer output", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "button",
+          name: "Background",
+          tag: "button",
+          rect: { x: 120, y: 120, w: 120, h: 40 },
+          paintOrder: 1,
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          role: "generic",
+          tag: "div",
+          rect: { x: 100, y: 100, w: 180, h: 120 },
+          paintOrder: 10,
+          position: "fixed",
+        }),
+        node({
+          id: 4,
+          parentId: 1,
+          role: "button",
+          name: "Foreground",
+          tag: "button",
+          rect: { x: 320, y: 120, w: 120, h: 40 },
+          paintOrder: 11,
+        }),
+      ]),
+      { activeRegionPolicy: true },
+    );
+
+    expect(out.text).toContain("@layers 1 focus=L1");
+    expect(out.text).toContain("L1 page");
+    expect(out.text).not.toContain("active-region");
+    expect(out.text).not.toContain("Background");
+    expect(out.text).toContain('@e1 button "Foreground"');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 4 }]);
+  });
+
+  it("renders conditional surface items inline on the trigger", () => {
+    const out = renderVom({
+      ...scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "button", name: "Products", tag: "button" }),
+      ]),
+      surfaces: [
+        {
+          triggerId: 2,
+          triggerAction: "hover",
+          subItems: ["Shoes", "Bags", "Accessories"],
+        },
+      ],
+    });
+
+    expect(out.text).toContain('@e1 button "Products" [→ Shoes | Bags | Accessories]');
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("injects active scope blocks immediately after their trigger without refs", () => {
+    const out = renderVom({
+      ...scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "tab", name: "Reviews (12)", tag: "button" }),
+      ]),
+      activeScopeBlocks: [
+        {
+          triggerId: 2,
+          label: "Reviews (12)",
+          lines: ["Jane - ear cups are small", "Bob - great sound"],
+        },
+      ],
+    });
+
+    expect(out.text).toContain(
+      [
+        '    @e1 tab "Reviews (12)"',
+        "      [§ active: Reviews (12)]",
+        "        Jane - ear cups are small",
+        "        Bob - great sound",
+      ].join("\n"),
+    );
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("does not render redundant children inside named ref controls", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({ id: 2, parentId: 1, role: "button", name: "Save", tag: "button" }),
+        node({ id: 3, parentId: 2, role: "img", name: "disk icon", tag: "svg" }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "Save"');
+    expect(out.text).not.toContain("disk icon");
+    expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("does not render redundant children inside native text inputs", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "textbox",
+          name: "手机号",
+          value: "13311030827",
+          tag: "input",
+        }),
+        node({ id: 3, parentId: 2, role: "StaticText", name: "13311030827" }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 textbox "手机号" [filled] ="13311030827"');
+    expect(out.text).not.toContain('StaticText "13311030827"');
+  });
+
+  it("adds semantic collection summaries for repeated item containers", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Forum" }),
+        node({ id: 2, parentId: 1, role: "main", name: "Posts" }),
+        node({ id: 3, parentId: 2, role: "searchbox", name: "Search posts", tag: "input" }),
+        node({ id: 10, parentId: 2, role: "article" }),
+        node({ id: 11, parentId: 10, role: "heading", name: "First post" }),
+        node({ id: 12, parentId: 10, role: "link", name: "First post", tag: "a" }),
+        node({ id: 13, parentId: 10, role: "button", name: "Upvote", tag: "button" }),
+        node({ id: 20, parentId: 2, role: "article" }),
+        node({ id: 21, parentId: 20, role: "heading", name: "Second post" }),
+        node({ id: 22, parentId: 20, role: "link", name: "Second post", tag: "a" }),
+        node({ id: 23, parentId: 20, role: "button", name: "Upvote", tag: "button" }),
+      ]),
+      { semanticCollections: true },
+    );
+
+    expect(out.text).toContain("@collections");
+    expect(out.text).toContain(
+      'collection c1 role=main item_role=article label="First post" items=2',
+    );
+    expect(out.text).toContain('controls: search=@e1 "Search posts"');
+    expect(out.text).toContain('title="First post" title_handle=@e2');
+    expect(out.text).toContain('actions=[@e3 "Upvote"]');
+  });
+
+  it("does not summarize login forms as semantic collections", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "北京市小客车指标调控管理信息系统" }),
+        node({ id: 2, parentId: 1, role: "list" }),
+        node({ id: 3, parentId: 2, role: "listitem", name: "用户登录" }),
+        node({ id: 4, parentId: 2, role: "listitem", name: "手机号：" }),
+        node({
+          id: 5,
+          parentId: 4,
+          role: "textbox",
+          value: "13311030827",
+          tag: "input",
+        }),
+        node({ id: 6, parentId: 2, role: "listitem", name: "密 码：" }),
+        node({
+          id: 7,
+          parentId: 6,
+          role: "textbox",
+          value: "secret",
+          tag: "input",
+          sensitive: true,
+        }),
+        node({ id: 8, parentId: 2, role: "listitem", name: "验证码：" }),
+        node({ id: 9, parentId: 8, role: "textbox", value: "h8Mh", tag: "input" }),
+        node({ id: 10, parentId: 2, role: "listitem" }),
+        node({ id: 11, parentId: 10, role: "button", name: "登录", tag: "button" }),
+      ]),
+    );
+
+    expect(out.text).not.toContain("@collections");
+    expect(out.text).toContain('@e2 textbox [filled] ="•••"');
+  });
 });
 
 describe("renderVom double-layer page", () => {
@@ -331,7 +563,7 @@ describe("renderVom double-layer page", () => {
         "@layers 2 focus=L1",
         "L1 modal cover=100%",
         '  dialog "提示"',
-        '    @e1 textbox "密码" ="•••"',
+        '    @e1 textbox "密码" [filled] ="•••"',
         '    @e2 button "确认"',
         "L2 page … occluded by L1 (~2 nodes, not actionable)",
       ].join("\n"),
@@ -385,8 +617,8 @@ describe("renderVom double-layer page", () => {
 
     expect(out.text).toContain("L1 modal cover=100%");
     expect(out.text).toContain('  Iframe "登录框"');
-    expect(out.text).toContain('    @e1 textbox "请输入手机号"');
-    expect(out.text).toContain('    @e2 textbox "密码" ="•••"');
+    expect(out.text).toContain('    @e1 textbox "请输入手机号" [empty]');
+    expect(out.text).toContain('    @e2 textbox "密码" [filled] ="•••"');
     expect(out.refs.map((r) => r.backendNodeId)).toEqual([101, 102]);
   });
 });

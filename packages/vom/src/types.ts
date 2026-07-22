@@ -50,11 +50,37 @@ export interface VomNode {
 export interface VomScene {
   viewport: Viewport;
   nodes: VomNode[];
+  surfaces?: CondSurface[];
+  activeScopeBlocks?: ActiveScopeBlock[];
 }
 
 export interface VomOptions {
   maxDepth?: number;
   maxTokens?: number;
+  /**
+   * Experimental: filter refs that are geometrically blocked by foreground
+   * fixed/absolute/sticky regions. Disabled by default and does not alter the
+   * public layer header format.
+   */
+  activeRegionPolicy?: boolean;
+  /**
+   * Experimental: emit semantic summaries for repeated collection-like
+   * containers. Disabled by default because false positives in menus/forms are
+   * still noisy.
+   */
+  semanticCollections?: boolean;
+}
+
+export interface CondSurface {
+  triggerId: number;
+  triggerAction: "hover" | "focus" | string;
+  subItems: string[];
+}
+
+export interface ActiveScopeBlock {
+  triggerId: number;
+  label: string;
+  lines: string[];
 }
 
 export interface VomResult {
