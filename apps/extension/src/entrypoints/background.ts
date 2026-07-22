@@ -1,6 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ConnectionController } from "@/lib/connection-controller";
+import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
   setConnectionEnabled as persistConnectionEnabled,
@@ -111,6 +112,45 @@ export default defineBackground(() => {
     transport,
     shouldConnect: () => controller.isConnectionEnabled,
   });
+
+  // Application-level heartbeat (Chrome 116+): while the post-handshake
+  // link is live, beat every 20s so WebSocket activity keeps the service
+  // worker — and thus the daemon connection — alive during use, rather
+  // than depending on the boundary-hugging 30s keepalive alarm. The
+  // daemon also uses these beats to reap a silently-dead browser.
+  startHeartbeat({
+    send: (frame) => transport.send(frame),
+    onActiveChange: (cb) =>
+      controller.subscribe((snap) =>
+        cb(snap.state === "connected" || snap.state === "version_skew"),
+      ),
+  });
+
+  // Wake-driven reconnect (best effort). An MV3 service worker is killed
+  // across OS sleep regardless of any keepalive, and the setTimeout-based
+  // transport backoff dies with it. These Chrome lifecycle events revive
+  // the worker and let us reconnect immediately instead of waiting for
+  // the next 30s alarm tick. They only help when the daemon is actually
+  // running; a cold daemon is (re)spawned by the next `bsk` command.
+  const reconnectIfNeeded = () => {
+    if (!controller.isConnectionEnabled) return;
+    if (transport.state === "connected") return;
+    void transport.connect().catch((err) => {
+      console.debug("[browser-skill] wake reconnect attempt failed", err);
+    });
+  };
+  if (typeof chrome.runtime?.onStartup?.addListener === "function") {
+    chrome.runtime.onStartup.addListener(reconnectIfNeeded);
+  }
+  if (typeof chrome.idle?.onStateChanged?.addListener === "function") {
+    chrome.idle.onStateChanged.addListener((state) => {
+      // "active" fires when the user returns from idle/locked — the most
+      // reliable "machine just woke" signal we get.
+      if (state === "active") reconnectIfNeeded();
+    });
+    // Treat >60s of no input as idle so the active transition is timely.
+    chrome.idle.setDetectionInterval?.(60);
+  }
 
   void (async () => {
     const connectionEnabled = await getConnectionEnabled();
