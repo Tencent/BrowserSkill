@@ -67,6 +67,30 @@ describe("ChromiumCdp", () => {
     expect(cdp.isAttached(5)).toBe(false);
   });
 
+  it("rolls back the raw attach when a domain enable fails so the tab is not left stuck", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Page.enable") throw new Error("Page.enable rejected");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    // Raw attach succeeds, but Page.enable fails. Without the rollback
+    // the debugger would stay attached while `attachedTabs` omits the id,
+    // leaving the tab stuck on "Another debugger is already attached" for
+    // every later call until the extension is reloaded.
+    await expect(cdp.ensureAttached(42)).rejects.toThrow(/Page\.enable rejected/);
+    expect(cdp.isAttached(42)).toBe(false);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 42 });
+
+    // The rollback detached, so a fresh attach can succeed afterwards.
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    await expect(cdp.ensureAttached(42)).resolves.toBeUndefined();
+    expect(cdp.isAttached(42)).toBe(true);
+  });
+
   it("send() rejects on chrome.runtime.lastError-style failures", async () => {
     const { api } = fakeApi();
     (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
