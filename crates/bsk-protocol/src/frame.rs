@@ -40,6 +40,14 @@ pub struct EventFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
+    /// Application-level keepalive emitted by the extension roughly
+    /// every 20s while the WS link is up. Two purposes: (1) the
+    /// send/receive activity resets the MV3 service-worker idle timer
+    /// (Chrome 116+), keeping the worker — and therefore the socket —
+    /// alive during use; (2) the daemon treats it as a liveness signal
+    /// so a silently-dead browser can be reaped. Carries no payload.
+    #[serde(rename = "system.heartbeat")]
+    SystemHeartbeat,
     #[serde(rename = "session.activity")]
     SessionActivity,
     #[serde(rename = "session.window_closed")]
@@ -229,6 +237,24 @@ impl<'de> Visitor<'de> for FrameVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_heartbeat_serialises_as_dotted_name() {
+        // The extension hardcodes the literal string "system.heartbeat"
+        // when it emits the keepalive event; this locks the daemon-side
+        // serde name to the same wire value so a rename cannot silently
+        // break liveness/keepalive.
+        let v = serde_json::to_value(EventKind::SystemHeartbeat).unwrap();
+        assert_eq!(v, serde_json::json!("system.heartbeat"));
+    }
+
+    #[test]
+    fn system_heartbeat_event_frame_round_trips_from_extension_shape() {
+        // Mirrors exactly what the extension sends: { event, payload: {} }.
+        let wire = serde_json::json!({ "event": "system.heartbeat", "payload": {} });
+        let frame: EventFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(frame.event, EventKind::SystemHeartbeat);
+    }
 
     #[test]
     fn session_user_interrupt_serialises_as_snake_case() {

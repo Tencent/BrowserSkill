@@ -45,6 +45,7 @@ pub async fn run(
         None => None,
     };
     let session_idle_task = start::spawn_session_idle_reaper(Arc::clone(&state));
+    let browser_liveness_task = start::spawn_browser_liveness_reaper(Arc::clone(&state));
     // Ensure WS/IPC accept loops have polled `shutdown.notified()` before any
     // caller can invoke `DaemonHandle::shutdown()` — `Notify::notify_waiters()`
     // drops wakeups when nothing is registered yet, which otherwise hangs
@@ -55,5 +56,6 @@ pub async fn run(
         ws_handle,
         ipc_handle,
         session_idle_task,
+        browser_liveness_task,
     ))
 }

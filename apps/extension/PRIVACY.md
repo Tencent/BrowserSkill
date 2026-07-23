@@ -48,6 +48,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
 - **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
 - **`alarms`** — Periodically wake the service worker to keep the local WebSocket connection alive.
+- **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the local WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
 - **`storage`** — Persist a random instance ID and optional label in `chrome.storage.local`.
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. The Extension does **not** read or transmit page content from sites the agent is not actively driving.

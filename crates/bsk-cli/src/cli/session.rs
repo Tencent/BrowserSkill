@@ -6,6 +6,8 @@
 //! structured JSON instead.
 
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -17,8 +19,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
+use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 
 const SESSION_STOP_IPC_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+/// IPC read budget for `session.start`. The daemon holds this RPC open
+/// while it polls for the extension to (re)connect for up to
+/// [`EXTENSION_CONNECT_WAIT`], so the CLI-side timeout must exceed that
+/// window plus scheduling slack — otherwise the CLI would give up and
+/// surface a spurious timeout before the daemon ever answers.
+const SESSION_START_IPC_TIMEOUT: Duration =
+    EXTENSION_CONNECT_WAIT.saturating_add(Duration::from_secs(10));
 
 /// `bsk session …` subcommand tree.
 #[derive(Debug, Clone, Args)]
@@ -113,7 +124,24 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
+    // The daemon may hold `session.start` open for up to
+    // `EXTENSION_CONNECT_WAIT` while a just-woken service worker
+    // reconnects. Let the user know we are waiting rather than hung —
+    // but only if it actually takes a moment, so the common (already
+    // connected) fast path stays silent. Human output only; the hint
+    // goes to stderr so it never contaminates the session id on stdout.
+    let waited = Arc::new(AtomicBool::new(false));
+    if matches!(format, Format::Human) {
+        let waited = Arc::clone(&waited);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(750));
+            if !waited.swap(true, Ordering::SeqCst) {
+                eprintln!("waiting for browser extension to connect…");
+            }
+        });
+    }
     let result = start_session(sock, args.browser);
+    waited.store(true, Ordering::SeqCst);
     match result {
         Ok(reply) => match format {
             Format::Json => {
@@ -144,7 +172,7 @@ pub fn start_session(sock: PathBuf, browser: Option<String>) -> Result<StartRepl
         Some(StartParams {
             browser_instance_id: browser,
         }),
-        Duration::from_secs(30),
+        SESSION_START_IPC_TIMEOUT,
     )
 }
 

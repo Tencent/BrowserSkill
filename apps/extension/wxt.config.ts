@@ -25,9 +25,14 @@ export default defineConfig({
     name: "BrowserSkill",
     description:
       "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
+    // Chrome 116 is the first version where WebSocket activity resets the
+    // service-worker idle timer, which the 20s heartbeat relies on to
+    // keep the daemon link alive.
+    minimum_chrome_version: "116",
     permissions: [
       "alarms",
       "debugger",
+      "idle",
       "notifications",
       "tabs",
       "storage",

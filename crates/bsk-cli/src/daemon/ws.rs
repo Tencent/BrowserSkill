@@ -304,6 +304,8 @@ async fn drive_connection(
         generation,
         connected_at_ms,
         version_skew,
+        last_seen: std::sync::Mutex::new(std::time::Instant::now()),
+        heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
     });
     state.browsers.insert(Arc::clone(&client));
     info!(
@@ -352,15 +354,21 @@ async fn drive_connection(
                 msg = reader.next() => {
                     match msg {
                         Some(Ok(Message::Text(t))) => {
+                            // Any inbound frame — tool response, event, or the
+                            // ~20s heartbeat — counts as proof of life.
+                            pump_browser.touch();
                             handle_inbound_text(&pump_state, &pump_browser, &t).await;
                         }
                         Some(Ok(Message::Binary(_))) => {
                             warn!("ignoring binary message");
                         }
                         Some(Ok(Message::Ping(p))) => {
+                            pump_browser.touch();
                             let _ = writer.send(Message::Pong(p)).await;
                         }
-                        Some(Ok(Message::Pong(_))) => {}
+                        Some(Ok(Message::Pong(_))) => {
+                            pump_browser.touch();
+                        }
                         Some(Ok(Message::Frame(_))) => {}
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(err)) => {
@@ -416,6 +424,13 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
         }
         Frame::Event(ev) => match ev.event {
+            bsk_protocol::EventKind::SystemHeartbeat => {
+                // `touch()` already ran for this frame in the read loop;
+                // additionally opt this browser in to liveness reaping now
+                // that we know it speaks the heartbeat.
+                client.mark_heartbeat_seen();
+                debug!(id = %client.id, "heartbeat");
+            }
             bsk_protocol::EventKind::SessionWindowClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);
             }
