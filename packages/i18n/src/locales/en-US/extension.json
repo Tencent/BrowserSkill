@@ -74,7 +74,7 @@
   },
   "helpRequest": {
     "title": "Agent needs your help",
-    "compactStatus": "Agent is still waiting for you to finish logging in",
+    "compactStatus": "Agent is still waiting for you to finish this step",
     "noteLabel": "Optional note back to the agent",
     "notePlaceholder": "Add a note for the agent (optional)",
     "continue": "Done, return control",

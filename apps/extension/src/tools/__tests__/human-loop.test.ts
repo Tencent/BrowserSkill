@@ -197,7 +197,7 @@ describe("handleRequestHelp", () => {
     expect(res).toMatchObject({ outcome: "completed", completed_by: "system", tab_id: 5 });
   });
 
-  it("keeps user control active on new tabs opened in the agent window", async () => {
+  it("keeps user control active on new tabs without moving completion off the primary tab", async () => {
     vi.useFakeTimers();
     const chromeEvents = installHelpLifecycleChrome();
     const sendToTab = vi.fn(async () => ({ type: "bsk-help-ack", ok: true }));
@@ -246,9 +246,8 @@ describe("handleRequestHelp", () => {
 
       await vi.advanceTimersByTimeAsync(1_000);
       await expect(pending).resolves.toMatchObject({
-        outcome: "completed",
-        completed_by: "system",
-        tab_id: 6,
+        outcome: "timed_out",
+        tab_id: 5,
       });
       expect(sendToTab).toHaveBeenCalledWith(
         6,
@@ -262,12 +261,13 @@ describe("handleRequestHelp", () => {
   it("lets same-window tabs query active help after content-script load", async () => {
     const chromeEvents = installHelpLifecycleChrome();
     const ac = new AbortController();
+    const cdpSend = vi.fn(async () => ({ root: { nodeId: 1 }, nodeIds: [] }));
     const deps = baseDeps({
       autoAttachLifecycle: undefined,
       signal: ac.signal,
       sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
       cdp: {
-        send: vi.fn(async () => ({ root: { nodeId: 1 }, nodeIds: [] })),
+        send: cdpSend,
       } as unknown as RequestHelpDeps["cdp"],
     });
 
@@ -315,6 +315,16 @@ describe("handleRequestHelp", () => {
 
     ac.abort();
     await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    expect(cdpSend).toHaveBeenCalledWith(
+      5,
+      "DOM.querySelectorAll",
+      expect.objectContaining({ selector: "[data-bsk-help]" }),
+    );
+    expect(cdpSend).toHaveBeenCalledWith(
+      6,
+      "DOM.querySelectorAll",
+      expect.objectContaining({ selector: "[data-bsk-help]" }),
+    );
   });
 
   it("tags ref targets via CDP and reports them matched", async () => {

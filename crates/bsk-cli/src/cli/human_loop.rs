@@ -77,7 +77,7 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
     let completion_criteria = args
         .completion_criteria
         .as_deref()
-        .map(|raw| serde_json::from_str::<HelpCompletionCriteria>(raw))
+        .map(serde_json::from_str::<HelpCompletionCriteria>)
         .transpose()
         .context("parse --completion-criteria JSON")?;
     let params = RequestHelpParams {
