@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::Method;
-use bsk_protocol::tools::{HelpTarget, RequestHelpParams, RequestHelpResult};
+use bsk_protocol::tools::{
+    HelpCompletionCriteria, HelpTarget, RequestHelpParams, RequestHelpResult,
+};
 use clap::Args;
 
 use crate::cli::ensure_daemon::ensure_daemon;
@@ -41,6 +43,10 @@ pub struct RequestHelpArgs {
     /// Hard timeout (default 5m). Accepts `5m`, `300s`, `300000ms`.
     #[arg(long, default_value = "5m", value_parser = parse_timeout_ms)]
     pub timeout: u32,
+
+    /// JSON success detector, e.g. '{"any":[{"url_contains":"/dashboard"}],"stable_for_ms":1000}'.
+    #[arg(long = "completion-criteria")]
+    pub completion_criteria: Option<String>,
 }
 
 /// Classify a `--target` value as a ref or a selector. Refs are `@eN`
@@ -68,6 +74,12 @@ pub fn parse_target(raw: &str) -> HelpTarget {
 pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     let targets: Vec<HelpTarget> = args.target.iter().map(|t| parse_target(t)).collect();
+    let completion_criteria = args
+        .completion_criteria
+        .as_deref()
+        .map(|raw| serde_json::from_str::<HelpCompletionCriteria>(raw))
+        .transpose()
+        .context("parse --completion-criteria JSON")?;
     let params = RequestHelpParams {
         session_id: args.session,
         tab_id: args.tab_id,
@@ -78,6 +90,7 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
         } else {
             Some(targets)
         },
+        completion_criteria,
         timeout_ms: Some(args.timeout),
     };
     let reply = call(info.sock_path, params, args.timeout)?;

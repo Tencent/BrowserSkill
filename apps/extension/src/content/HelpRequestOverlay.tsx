@@ -342,6 +342,8 @@ export function HelpRequestOverlay({ request }: Props) {
           z-index: 2147483647;
           display: flex;
           flex-direction: column;
+          justify-content: flex-start;
+          min-height: 0;
           gap: 10px;
           width: var(--bsk-help-banner-width);
           max-width: calc(100vw - ${VIEWPORT_MARGIN * 2}px);
@@ -359,16 +361,18 @@ export function HelpRequestOverlay({ request }: Props) {
         .bsk-help-banner[data-collapsed="true"] {
           gap: 0;
           width: var(--bsk-help-banner-width);
-          padding: 10px 12px;
+          padding: 12px;
         }
 
         .bsk-help-drag-strip {
-          flex-shrink: 0;
+          position: absolute;
+          top: 6px;
+          left: 0;
+          right: 0;
           display: flex;
           align-items: center;
           justify-content: center;
           height: 12px;
-          margin: -8px 0 -10px;
           cursor: grab;
           user-select: none;
           touch-action: none;
@@ -395,10 +399,11 @@ export function HelpRequestOverlay({ request }: Props) {
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-drag-strip {
-          margin: -6px 0 -8px;
+          top: 4px;
         }
 
         .bsk-help-header {
+          flex-shrink: 0;
           display: flex;
           align-items: center;
           gap: 10px;
@@ -420,25 +425,17 @@ export function HelpRequestOverlay({ request }: Props) {
 
         .bsk-help-header-actions {
           flex-shrink: 0;
-          display: flex;
+          display: none;
           align-items: center;
           gap: 10px;
           margin-left: auto;
           overflow: hidden;
-          max-width: 0;
-          opacity: 0;
-          transform: translateX(8px);
-          pointer-events: none;
-          transition:
-            max-width var(--bsk-help-duration) var(--bsk-help-ease),
-            opacity 220ms var(--bsk-help-ease),
-            transform var(--bsk-help-duration) var(--bsk-help-ease);
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-header-actions {
+          display: flex;
           max-width: 280px;
           opacity: 1;
-          transform: translateX(0);
           pointer-events: auto;
         }
 
@@ -471,15 +468,13 @@ export function HelpRequestOverlay({ request }: Props) {
         }
 
         .bsk-help-body {
-          display: grid;
-          grid-template-rows: 1fr;
+          display: block;
+          flex-shrink: 0;
           min-width: 0;
-          transition: grid-template-rows var(--bsk-help-duration) var(--bsk-help-ease);
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-body {
           position: absolute;
-          grid-template-rows: 0fr;
           width: 0;
           height: 0;
           overflow: hidden;
@@ -528,6 +523,7 @@ export function HelpRequestOverlay({ request }: Props) {
         .bsk-help-footer-actions {
           display: flex;
           justify-content: flex-end;
+          flex-wrap: wrap;
           gap: 10px;
         }
 
@@ -539,7 +535,8 @@ export function HelpRequestOverlay({ request }: Props) {
           font-size: 13px;
           font-weight: 500;
           color: #4b5563;
-          flex-shrink: 0;
+          min-width: 0;
+          white-space: normal;
         }
 
         .bsk-help-btn-continue {
@@ -550,16 +547,19 @@ export function HelpRequestOverlay({ request }: Props) {
           font-size: 13px;
           font-weight: 600;
           color: #fff;
-          flex-shrink: 0;
+          min-width: 0;
+          white-space: normal;
         }
 
         .bsk-help-header-actions .bsk-help-btn-cancel,
         .bsk-help-header-actions .bsk-help-btn-continue {
           padding: 6px 12px;
+          white-space: nowrap;
         }
 
         .bsk-help-header-actions .bsk-help-btn-continue {
           padding: 6px 14px;
+          max-width: 180px;
         }
 
         .bsk-help-footer-actions .bsk-help-btn-cancel {

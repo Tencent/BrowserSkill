@@ -29,7 +29,7 @@ import type {
 import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
 import { handleEvaluate } from "./evaluate";
-import { defaultWatchTabNavigation, handleRequestHelp } from "./human-loop";
+import { handleRequestHelp } from "./human-loop";
 import { handleClick, handleFill, handlePress, handleSelect } from "./interaction";
 import {
   handleNavigate,
@@ -394,7 +394,6 @@ export class ToolDispatcher {
             await chrome.tabs.update(tabId, { active: true });
           },
           sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
-          watchTabNavigation: defaultWatchTabNavigation,
           ...(this.cdp ? { cdp: this.cdp } : {}),
           notifications: makeHelpNotifications(),
           notificationCopy: this.helpNotificationCopy?.(),

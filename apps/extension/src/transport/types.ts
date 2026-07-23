@@ -514,7 +514,22 @@ export interface HelpTarget {
   selector?: string;
 }
 
-export type HelpOutcome = "continued" | "cancelled" | "timed_out" | "navigated";
+export type HelpOutcome = "continued" | "cancelled" | "timed_out" | "completed" | "navigated";
+
+export interface HelpCompletionCondition {
+  url_contains?: string;
+  url_matches?: string;
+  selector_exists?: string;
+  selector_missing?: string;
+  text_exists?: string;
+  text_missing?: string;
+}
+
+export interface HelpCompletionCriteria {
+  any?: HelpCompletionCondition[];
+  all?: HelpCompletionCondition[];
+  stable_for_ms?: number;
+}
 
 export interface ResolvedTarget {
   matched: boolean;
@@ -528,11 +543,13 @@ export interface RequestHelpParams {
   prompt: string;
   title?: string;
   targets?: HelpTarget[];
+  completion_criteria?: HelpCompletionCriteria;
   timeout_ms?: number;
 }
 
 export interface RequestHelpResult {
   outcome: HelpOutcome;
+  completed_by?: "system";
   note?: string;
   tab_id: number;
   resolved_targets?: ResolvedTarget[];

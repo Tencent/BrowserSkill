@@ -204,6 +204,15 @@ describe("HelpRequestOverlay", () => {
     expect(styles).toContain("width: 0");
   });
 
+  it("uses natural body height in the expanded layout", () => {
+    const { container } = renderOverlay(baseRequest());
+    const styles = overlayStyles(container);
+
+    expect(styles).toMatch(/\.bsk-help-body\s*\{[^}]*display:\s*block;/s);
+    expect(styles).not.toMatch(/\.bsk-help-body\s*\{[^}]*grid-template-rows/s);
+    expect(styles).toMatch(/\.bsk-help-banner\s*\{[^}]*justify-content:\s*flex-start;/s);
+  });
+
   it("keeps the same banner width when collapsed", () => {
     const { container } = renderOverlay(baseRequest());
     const styles = overlayStyles(container);

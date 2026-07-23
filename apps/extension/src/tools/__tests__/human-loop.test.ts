@@ -27,9 +27,9 @@ function baseDeps(over: Partial<RequestHelpDeps> = {}): RequestHelpDeps {
     windows: { update: vi.fn(async () => ({}) as never) },
     activateTab: vi.fn(async () => {}),
     sendToTab: vi.fn(async () => ({ type: "bsk-help-response", outcome: "continued", note: "ok" })),
-    watchTabNavigation: () => () => {},
     cdp: { send: vi.fn(async () => ({})) } as unknown as RequestHelpDeps["cdp"],
     notifications: null,
+    autoAttachLifecycle: false,
     ...over,
   };
 }
@@ -78,22 +78,29 @@ describe("handleRequestHelp", () => {
     expect(sentMsg.title).toBeUndefined();
   });
 
-  it("returns navigated when the tab navigates during the wait", async () => {
-    const unwatch = vi.fn();
+  it("does not complete merely because the tab navigates during the wait", async () => {
+    vi.useFakeTimers();
     const deps = baseDeps({
       sendToTab: vi.fn(() => new Promise(() => {})),
-      watchTabNavigation: vi.fn((_tabId, cb) => {
-        queueMicrotask(() => cb());
-        return unwatch;
-      }),
     });
-    const res = await handleRequestHelp(
-      fakeManager("abcd", 99, 5),
-      baseParams({ tab_id: 5 }),
-      deps,
-    );
-    expect(res).toMatchObject({ outcome: "navigated", tab_id: 5 });
-    expect(unwatch).toHaveBeenCalled();
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 10 }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(5);
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(10);
+      await expect(pending).resolves.toMatchObject({ outcome: "timed_out", tab_id: 5 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("returns timed_out when the wait expires", async () => {
@@ -113,6 +120,30 @@ describe("handleRequestHelp", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("returns completed when explicit completion criteria match", async () => {
+    const deps = baseDeps({
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      cdp: {
+        send: vi.fn(async (_tabId: number, method: string) => {
+          if (method === "Runtime.evaluate") return { result: { value: true } };
+          return {};
+        }),
+      } as unknown as RequestHelpDeps["cdp"],
+    });
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        tab_id: 5,
+        completion_criteria: {
+          any: [{ selector_exists: "#account-menu" }],
+          stable_for_ms: 0,
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ outcome: "completed", completed_by: "system", tab_id: 5 });
   });
 
   it("tags ref targets via CDP and reports them matched", async () => {
@@ -190,38 +221,40 @@ describe("handleRequestHelp", () => {
     expect("code" in res).toBe(false);
   });
 
-  it("returns protocol_error when sendToTab rejects", async () => {
+  it("keeps waiting when the initial overlay delivery rejects", async () => {
+    vi.useFakeTimers();
     const deps = baseDeps({
       sendToTab: vi.fn(async () => {
         throw new Error("no receiver");
       }),
     });
-    const res = await handleRequestHelp(
-      fakeManager("abcd", 99, 5),
-      baseParams({ tab_id: 5 }),
-      deps,
-    );
-    expect("code" in res && res.code).toBe("protocol_error");
+    try {
+      const res = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 10 }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(res).resolves.toMatchObject({ outcome: "timed_out" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("returns protocol_error for a malformed help response", async () => {
-    const undefinedReply = baseDeps({ sendToTab: vi.fn(async () => undefined) });
-    const res1 = await handleRequestHelp(
-      fakeManager("abcd", 99, 5),
-      baseParams({ tab_id: 5 }),
-      undefinedReply,
-    );
-    expect("code" in res1 && res1.code).toBe("protocol_error");
-
-    const badOutcome = baseDeps({
-      sendToTab: vi.fn(async () => ({ type: "bsk-help-response", outcome: "weird" })),
-    });
-    const res2 = await handleRequestHelp(
-      fakeManager("abcd", 99, 5),
-      baseParams({ tab_id: 5 }),
-      badOutcome,
-    );
-    expect("code" in res2 && res2.code).toBe("protocol_error");
+  it("keeps waiting for explicit completion after a malformed help response", async () => {
+    vi.useFakeTimers();
+    const deps = baseDeps({ sendToTab: vi.fn(async () => undefined) });
+    try {
+      const res = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 10 }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(res).resolves.toMatchObject({ outcome: "timed_out" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports selector match status from CDP", async () => {

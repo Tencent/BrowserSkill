@@ -178,7 +178,7 @@ Details and flags: **`bsk <cmd> --help`**
 When a step needs a human (captcha, login, OTP) or you want the user to
 confirm an important action, pause and ask:
 
-    bsk request-help --session <id> --prompt "Solve the captcha, then click Continue" \
+    bsk request-help --session <id> --prompt "Solve the captcha, then click Done only after the site accepts it" \
       --title "Captcha required" --target @e7 --target "#submit" --timeout 5m
 
 - `--prompt` (required): what the user should do.
@@ -193,15 +193,21 @@ confirm an important action, pause and ask:
   prompt with no `--target` for cases where there is genuinely no specific
   element to point at (e.g. "wait for the page to finish loading").
 - `--timeout` (default `5m`): how long to wait.
+- `--completion-criteria` (optional): JSON success detector. Use it only
+  when there is a concrete post-help success signal, e.g.
+  `{"any":[{"url_contains":"/dashboard"},{"selector_exists":"[data-testid='account-menu']"}],"stable_for_ms":1000}`.
 
 The target tab is brought to the foreground; the page stays interactive
 while the agent control mask is hidden. The call blocks until the user
-acts. The result `outcome` is one of:
+explicitly acts, the timeout expires, cancellation arrives, or explicit
+completion criteria match. Page reloads, SPA route changes, and captcha
+refreshes do not return control by themselves. The result `outcome` is one of:
 
-- `continued` — the user finished and clicked Continue (treat as confirm).
+- `continued` — the user finished and clicked Done / return control (treat as confirm).
 - `cancelled` — the user clicked Cancel (treat as reject/abort).
 - `timed_out` — nobody acted within the timeout.
-- `navigated` — the page navigated while waiting (full reload or SPA URL change). Snapshot refs are stale; run `bsk snapshot` on the new page, then decide whether to call `bsk request-help` again.
+- `completed` — the explicit `--completion-criteria` matched while the user had control.
+- `navigated` — deprecated legacy outcome. Do not rely on navigation as a completion signal.
 
 `note` carries any text the user typed back. `resolved_targets` reports
 which refs/selectors matched a live element.

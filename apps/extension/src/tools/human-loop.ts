@@ -1,21 +1,24 @@
-// `tool.request_help` — pause and ask the human to act on a tab.
-//
-// Brings the target tab to the foreground, resolves `ref` targets to a
-// temporary attribute selector via CDP, asks the content script to enter
-// help mode (HelpRequestOverlay + hidden ControlOverlay), and blocks
-// until the user clicks Continue / Cancel, the wait times out, or the
-// daemon cancels the RPC.
+// `tool.request_help` — pause automation and let the human control a tab.
 
 import {
+  HELP_ACK,
   HELP_CANCEL,
+  HELP_FINISH,
+  HELP_QUERY,
   HELP_REQUEST,
-  HELP_RESPONSE,
   type HelpCancelMessage,
+  type HelpFinishMessage,
+  type HelpQueryResponse,
   type HelpRequestMessage,
-  type HelpResponseMessage,
+  isHelpAckMessage,
+  isHelpFinishMessage,
+  isHelpQueryMessage,
+  isHelpResponseMessage,
 } from "@/lib/help-bridge";
-import type { SessionManager } from "@/session-manager/manager";
+import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
+  HelpCompletionCondition,
+  HelpCompletionCriteria,
   HelpTarget,
   RequestHelpParams,
   RequestHelpResult,
@@ -34,52 +37,59 @@ import {
 import { lookupSnapshotRef } from "./snapshot-ref";
 
 const DEFAULT_HELP_TIMEOUT_MS = 300_000;
-/** Attribute the overlay highlights for resolved `ref` targets. */
 const HELP_ATTR = "data-bsk-help";
+const HELP_SEND_RETRIES = 3;
+const HELP_SEND_RETRY_DELAY_MS = 350;
+const HELP_REARM_DEBOUNCE_MS = 150;
+const HELP_REARM_MAX_ATTEMPTS = 12;
+const HELP_REARM_RETRY_DELAY_MS = 400;
+const DEFAULT_COMPLETION_STABLE_MS = 1_000;
+const COMPLETION_POLL_MS = 500;
 
 export interface RequestHelpNotifications {
   create(id: string, options: chrome.notifications.NotificationOptions<true>): Promise<string>;
   clear(id: string): Promise<boolean>;
 }
 
-export type TabNavigationUnsubscribe = () => void;
-
 export interface RequestHelpDeps {
   tabsApi: ChromeTabsApi;
   windows: {
     update(windowId: number, info: { focused?: boolean }): Promise<chrome.windows.Window>;
   };
-  /** Activate a tab inside its window. */
   activateTab(tabId: number): Promise<void>;
-  /** Send the help-request to the tab's content script and await reply. */
   sendToTab(tabId: number, msg: HelpRequestMessage | HelpCancelMessage): Promise<unknown>;
-  /**
-   * Watch for navigation on `tabId` (full page load or SPA URL change).
-   * Invokes `onNavigated` once; returns unsubscribe.
-   */
-  watchTabNavigation: (tabId: number, onNavigated: () => void) => TabNavigationUnsubscribe;
   cdp?: CdpRunner;
-  /** Pass `null` to skip OS notifications (tests). */
   notifications: RequestHelpNotifications | null;
   notificationCopy?: { title: string; body: string };
   signal?: AbortSignal;
+  autoAttachLifecycle?: boolean;
 }
 
-/** Default navigation watcher: full reload (`loading`) and SPA (`url`). */
-export function defaultWatchTabNavigation(
-  tabId: number,
-  onNavigated: () => void,
-): TabNavigationUnsubscribe {
-  const listener = (updatedTabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
-    if (updatedTabId !== tabId) return;
-    if (changeInfo.url !== undefined || changeInfo.status === "loading") {
-      chrome.tabs.onUpdated.removeListener(listener);
-      onNavigated();
-    }
-  };
-  chrome.tabs.onUpdated.addListener(listener);
-  return () => chrome.tabs.onUpdated.removeListener(listener);
+interface ActiveHelpRequest {
+  sessionId: string;
+  ctx: SessionContext;
+  requestId: string;
+  tabId: number;
+  agentWindowId: number;
+  prompt: string;
+  title?: string;
+  targets: HelpTarget[];
+  selectors: string[];
+  timeoutMs: number;
+  notificationId: string;
+  resolvedTargets?: ResolvedTarget[];
+  completionCriteria?: HelpCompletionCriteria;
+  deps: RequestHelpDeps;
+  settled: boolean;
+  resolve: (value: RequestHelpResult | RpcError) => void;
+  timeoutTimer: ReturnType<typeof setTimeout>;
+  completionTimer: ReturnType<typeof setInterval> | null;
+  completionMatchedSince: number | null;
+  abortHandler: (() => void) | null;
 }
+
+const activeHelpRequests = new Map<string, ActiveHelpRequest>();
+const helpRearmTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
 let defaultDeps: RequestHelpDeps | null = null;
 function getDefaultDeps(): RequestHelpDeps {
@@ -91,7 +101,6 @@ function getDefaultDeps(): RequestHelpDeps {
         await chrome.tabs.update(tabId, { active: true });
       },
       sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
-      watchTabNavigation: defaultWatchTabNavigation,
       notifications: {
         create: (id, opts) =>
           new Promise((resolve, reject) =>
@@ -113,11 +122,48 @@ function makeRequestId(tabId: number): string {
   return `${tabId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/**
- * Tag a `ref` target's DOM node with `data-bsk-help="<i>"` via CDP so the
- * content overlay can highlight it with a plain attribute selector.
- * Returns the selector on success, or null when the ref can't resolve.
- */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function helpRequestMessage(help: ActiveHelpRequest): HelpRequestMessage {
+  return {
+    type: HELP_REQUEST,
+    requestId: help.requestId,
+    prompt: help.prompt,
+    ...(help.title ? { title: help.title } : {}),
+    selectors: help.selectors,
+    timeoutMs: help.timeoutMs,
+  };
+}
+
+async function sendHelpRequestWithAck(
+  tabId: number,
+  msg: HelpRequestMessage,
+  deps: RequestHelpDeps,
+): Promise<HelpFinishMessage | null> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < HELP_SEND_RETRIES; attempt += 1) {
+    try {
+      const response = await deps.sendToTab(tabId, msg);
+      if (isHelpAckMessage(response)) return null;
+      if (isHelpResponseMessage(response)) {
+        return {
+          type: HELP_FINISH,
+          requestId: msg.requestId,
+          outcome: response.outcome,
+          ...(response.note ? { note: response.note } : {}),
+        };
+      }
+      lastError = new Error("content script did not ack HELP_REQUEST");
+    } catch (err) {
+      lastError = err;
+    }
+    if (attempt + 1 < HELP_SEND_RETRIES) await sleep(HELP_SEND_RETRY_DELAY_MS);
+  }
+  throw lastError ?? new Error("failed to show help overlay");
+}
+
 async function tagRefTarget(
   cdp: CdpRunner,
   tabId: number,
@@ -145,7 +191,6 @@ async function tagRefTarget(
   }
 }
 
-/** Returns true when `selector` matches a live element in the page. */
 async function selectorExists(
   cdp: CdpRunner,
   tabId: number,
@@ -163,7 +208,6 @@ async function selectorExists(
   }
 }
 
-/** Remove every help attribute we added (best-effort cleanup). */
 async function clearRefTags(cdp: CdpRunner | undefined, tabId: number): Promise<void> {
   if (!cdp) return;
   try {
@@ -180,34 +224,16 @@ async function clearRefTags(cdp: CdpRunner | undefined, tabId: number): Promise<
       await cdp.send(tabId, "DOM.removeAttribute", { nodeId, name: HELP_ATTR }).catch(() => {});
     }
   } catch {
-    // best-effort
+    // Best-effort cleanup.
   }
 }
 
-export async function handleRequestHelp(
-  manager: SessionManager,
-  params: RequestHelpParams,
-  deps: RequestHelpDeps = getDefaultDeps(),
-): Promise<RequestHelpResult | RpcError> {
-  const ctxOrErr = lookupSession(manager, params, "request_help");
-  if (isRpcError(ctxOrErr)) return ctxOrErr;
-  const ctx = ctxOrErr;
-  if (!params.prompt || typeof params.prompt !== "string") {
-    return { code: "invalid_params", message: "request_help requires a prompt" };
-  }
-  if (deps.signal?.aborted) {
-    return { code: "cancelled", message: "request_help aborted" };
-  }
-
-  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
-  if (isRpcError(target)) return target;
-  const denied = enforceAgentWindow(ctx, target, "request_help");
-  if (denied) return denied;
-  const tabId = target.tabId;
-
-  // Resolve targets → selectors. `selector` passes through; `ref` is
-  // tagged with an attribute via CDP and reported as its attr selector.
-  const targets = params.targets ?? [];
+async function resolveHelpTargets(
+  ctx: ReturnType<SessionManager["get"]>,
+  tabId: number,
+  targets: HelpTarget[],
+  deps: RequestHelpDeps,
+): Promise<{ selectors: string[]; resolvedTargets?: ResolvedTarget[] }> {
   const selectors: string[] = [];
   const resolved: ResolvedTarget[] = [];
   let rootNodeId: number | undefined;
@@ -221,22 +247,20 @@ export async function handleRequestHelp(
       rootNodeId = undefined;
     }
   }
-  for (let i = 0; i < targets.length; i++) {
-    const tgt = targets[i] as HelpTarget;
+
+  for (let i = 0; i < targets.length; i += 1) {
+    const tgt = targets[i];
     if (tgt.selector) {
       selectors.push(tgt.selector);
-      let matched: boolean;
-      if (deps.cdp) {
-        matched =
-          rootNodeId !== undefined
-            ? await selectorExists(deps.cdp, tabId, rootNodeId, tgt.selector)
-            : false;
-      } else {
-        matched = true;
-      }
+      const matched =
+        deps.cdp && rootNodeId !== undefined
+          ? await selectorExists(deps.cdp, tabId, rootNodeId, tgt.selector)
+          : deps.cdp
+            ? false
+            : true;
       resolved.push({ matched, selector: tgt.selector });
     } else if (tgt.ref) {
-      const looked = lookupSnapshotRef(ctx, tgt.ref, tabId);
+      const looked = ctx ? lookupSnapshotRef(ctx, tgt.ref, tabId) : null;
       const backendNodeId = looked?.backendNodeId ?? null;
       let sel: string | null = null;
       if (backendNodeId !== null && deps.cdp) {
@@ -247,7 +271,385 @@ export async function handleRequestHelp(
     }
   }
 
-  // Bring the tab to the foreground.
+  return { selectors, resolvedTargets: resolved.length > 0 ? resolved : undefined };
+}
+
+async function refreshHelpTargets(help: ActiveHelpRequest): Promise<void> {
+  await clearRefTags(help.deps.cdp, help.tabId);
+  const { selectors, resolvedTargets } = await resolveHelpTargets(
+    help.ctx,
+    help.tabId,
+    help.targets,
+    help.deps,
+  );
+  help.selectors = selectors;
+  help.resolvedTargets = resolvedTargets;
+}
+
+async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
+  await clearRefTags(help.deps.cdp, help.tabId);
+  if (help.deps.notifications) {
+    await help.deps.notifications.clear(help.notificationId).catch(() => {});
+  }
+  await help.deps
+    .sendToTab(help.tabId, { type: HELP_CANCEL, requestId: help.requestId })
+    .catch(() => {});
+}
+
+function finishHelp(
+  help: ActiveHelpRequest,
+  value: RequestHelpResult | RpcError,
+  notifyContent = true,
+): void {
+  if (help.settled) return;
+  help.settled = true;
+  activeHelpRequests.delete(help.requestId);
+  clearTimeout(help.timeoutTimer);
+  if (help.completionTimer) clearInterval(help.completionTimer);
+  if (help.abortHandler) help.deps.signal?.removeEventListener("abort", help.abortHandler);
+  clearRearmTimer(help.tabId);
+  if (notifyContent) void cleanupHelp(help);
+  help.resolve(value);
+}
+
+function findHelpByTabId(tabId: number): ActiveHelpRequest | null {
+  for (const help of activeHelpRequests.values()) {
+    if (!help.settled && help.tabId === tabId) return help;
+  }
+  return null;
+}
+
+async function findHelpForTab(
+  tabId: number,
+  deps: RequestHelpDeps,
+): Promise<ActiveHelpRequest | null> {
+  const direct = findHelpByTabId(tabId);
+  if (direct) return direct;
+
+  try {
+    const tab = await deps.tabsApi.get(tabId);
+    const windowId = tab.windowId;
+    if (typeof windowId !== "number") return null;
+    for (const help of activeHelpRequests.values()) {
+      if (!help.settled && help.agentWindowId === windowId) return help;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function clearRearmTimer(tabId: number): void {
+  const timer = helpRearmTimers.get(tabId);
+  if (!timer) return;
+  clearTimeout(timer);
+  helpRearmTimers.delete(tabId);
+}
+
+async function rearmHelp(help: ActiveHelpRequest, targetTabId: number): Promise<boolean> {
+  for (let attempt = 0; attempt < HELP_REARM_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      help.tabId = targetTabId;
+      await refreshHelpTargets(help);
+      const msg = helpRequestMessage(help);
+      const legacyFinish = await sendHelpRequestWithAck(targetTabId, msg, help.deps);
+      if (legacyFinish && !help.settled) {
+        finishHelp(help, {
+          outcome: legacyFinish.outcome,
+          ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
+          tab_id: help.tabId,
+          resolved_targets: help.resolvedTargets,
+        });
+      }
+      return true;
+    } catch {
+      if (attempt + 1 < HELP_REARM_MAX_ATTEMPTS) await sleep(HELP_REARM_RETRY_DELAY_MS);
+    }
+  }
+  return false;
+}
+
+function scheduleRearmForTab(tabId: number, deps: RequestHelpDeps): void {
+  const existing = helpRearmTimers.get(tabId);
+  if (existing) clearTimeout(existing);
+  helpRearmTimers.set(
+    tabId,
+    setTimeout(() => {
+      helpRearmTimers.delete(tabId);
+      void (async () => {
+        const help = await findHelpForTab(tabId, deps);
+        if (help) await rearmHelp(help, tabId);
+      })();
+    }, HELP_REARM_DEBOUNCE_MS),
+  );
+}
+
+let detachHelpObservation: (() => void) | null = null;
+
+export function ensureHelpLifecycleListeners(deps: RequestHelpDeps = getDefaultDeps()): void {
+  if (detachHelpObservation) return;
+  const detachRuntime = attachHelpRuntimeListener(deps);
+  const detachTabs = attachHelpTabListener(deps);
+  const detachNav = attachHelpNavigationListener(deps);
+  detachHelpObservation = () => {
+    detachRuntime();
+    detachTabs();
+    detachNav();
+  };
+}
+
+export function resetHelpLifecycleForTests(): void {
+  detachHelpObservation?.();
+  detachHelpObservation = null;
+  for (const timer of helpRearmTimers.values()) clearTimeout(timer);
+  helpRearmTimers.clear();
+  for (const help of activeHelpRequests.values()) {
+    clearTimeout(help.timeoutTimer);
+    if (help.completionTimer) clearInterval(help.completionTimer);
+  }
+  activeHelpRequests.clear();
+}
+
+function attachHelpRuntimeListener(deps: RequestHelpDeps): () => void {
+  const listener = (
+    message: unknown,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: HelpQueryResponse) => void,
+  ) => {
+    if (isHelpFinishMessage(message)) {
+      void finishHelpFromContent(message, sender, deps);
+      return false;
+    }
+
+    if (isHelpQueryMessage(message)) {
+      const tabId = sender.tab?.id;
+      if (tabId === undefined) {
+        sendResponse({ active: false });
+        return false;
+      }
+      void (async () => {
+        const help = await findHelpForTab(tabId, deps);
+        if (!help) {
+          sendResponse({ active: false });
+          return;
+        }
+        help.tabId = tabId;
+        await refreshHelpTargets(help);
+        sendResponse({
+          active: true,
+          request: {
+            requestId: help.requestId,
+            prompt: help.prompt,
+            ...(help.title ? { title: help.title } : {}),
+            selectors: help.selectors,
+            timeoutMs: help.timeoutMs,
+          },
+        });
+      })();
+      return true;
+    }
+
+    return false;
+  };
+  chrome.runtime.onMessage.addListener(listener);
+  return () => chrome.runtime.onMessage.removeListener(listener);
+}
+
+async function finishHelpFromContent(
+  message: HelpFinishMessage,
+  sender: chrome.runtime.MessageSender,
+  deps: RequestHelpDeps,
+): Promise<void> {
+  const help = activeHelpRequests.get(message.requestId);
+  if (!help || help.settled) return;
+  const tabId = sender.tab?.id;
+  if (tabId !== undefined) {
+    const match = await findHelpForTab(tabId, deps);
+    if (match !== help) return;
+  }
+  finishHelp(
+    help,
+    {
+      outcome: message.outcome,
+      ...(message.note ? { note: message.note } : {}),
+      tab_id: help.tabId,
+      resolved_targets: help.resolvedTargets,
+    },
+    false,
+  );
+}
+
+function attachHelpTabListener(deps: RequestHelpDeps): () => void {
+  const onCreated = (tab: chrome.tabs.Tab) => {
+    const tabId = tab.id;
+    const windowId = tab.windowId;
+    if (tabId === undefined || windowId === undefined) return;
+    for (const help of activeHelpRequests.values()) {
+      if (!help.settled && help.agentWindowId === windowId) {
+        scheduleRearmForTab(tabId, deps);
+        return;
+      }
+    }
+  };
+  const onActivated = (activeInfo: chrome.tabs.TabActiveInfo) => {
+    scheduleRearmForTab(activeInfo.tabId, deps);
+  };
+  chrome.tabs.onCreated?.addListener(onCreated);
+  chrome.tabs.onActivated?.addListener(onActivated);
+  return () => {
+    chrome.tabs.onCreated?.removeListener(onCreated);
+    chrome.tabs.onActivated?.removeListener(onActivated);
+  };
+}
+
+function attachHelpNavigationListener(deps: RequestHelpDeps): () => void {
+  const onMainFrameComplete = (tabId: number) => scheduleRearmForTab(tabId, deps);
+
+  if (chrome.webNavigation?.onCompleted) {
+    const completedListener = (
+      details: chrome.webNavigation.WebNavigationFramedCallbackDetails,
+    ) => {
+      if (details.frameId !== 0) return;
+      onMainFrameComplete(details.tabId);
+    };
+    chrome.webNavigation.onCompleted.addListener(completedListener);
+    return () => chrome.webNavigation.onCompleted.removeListener(completedListener);
+  }
+
+  const listener = (tabId: number, info: chrome.tabs.TabChangeInfo) => {
+    if (info.status !== "complete") return;
+    onMainFrameComplete(tabId);
+  };
+  chrome.tabs.onUpdated?.addListener(listener);
+  return () => chrome.tabs.onUpdated?.removeListener(listener);
+}
+
+async function evaluateCompletionCondition(
+  condition: HelpCompletionCondition,
+  help: ActiveHelpRequest,
+): Promise<boolean> {
+  if (condition.url_contains || condition.url_matches) {
+    let url = "";
+    try {
+      const tab = await help.deps.tabsApi.get(help.tabId);
+      url = tab.url ?? "";
+    } catch {
+      return false;
+    }
+    if (condition.url_contains && !url.includes(condition.url_contains)) return false;
+    if (condition.url_matches) {
+      try {
+        if (!new RegExp(condition.url_matches).test(url)) return false;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  if (
+    condition.selector_exists ||
+    condition.selector_missing ||
+    condition.text_exists ||
+    condition.text_missing
+  ) {
+    if (!help.deps.cdp) return false;
+    const expression = `(() => {
+      const selectorExists = ${JSON.stringify(condition.selector_exists ?? null)};
+      const selectorMissing = ${JSON.stringify(condition.selector_missing ?? null)};
+      const textExists = ${JSON.stringify(condition.text_exists ?? null)};
+      const textMissing = ${JSON.stringify(condition.text_missing ?? null)};
+      if (selectorExists && !document.querySelector(selectorExists)) return false;
+      if (selectorMissing && document.querySelector(selectorMissing)) return false;
+      const text = document.body ? document.body.innerText || "" : "";
+      if (textExists && !text.includes(textExists)) return false;
+      if (textMissing && text.includes(textMissing)) return false;
+      return true;
+    })()`;
+    try {
+      const result = await help.deps.cdp.send<{ result?: { value?: boolean } }>(
+        help.tabId,
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+      );
+      if (result.result?.value !== true) return false;
+    } catch {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function completionCriteriaMatches(help: ActiveHelpRequest): Promise<boolean> {
+  const criteria = help.completionCriteria;
+  if (!criteria) return false;
+  const any = criteria.any ?? [];
+  const all = criteria.all ?? [];
+  const hasAny = any.length > 0;
+  const hasAll = all.length > 0;
+  if (!hasAny && !hasAll) return false;
+
+  if (hasAll) {
+    for (const condition of all) {
+      if (!(await evaluateCompletionCondition(condition, help))) return false;
+    }
+  }
+  if (hasAny) {
+    for (const condition of any) {
+      if (await evaluateCompletionCondition(condition, help)) return true;
+    }
+    return false;
+  }
+  return true;
+}
+
+function startCompletionPolling(help: ActiveHelpRequest): void {
+  if (!help.completionCriteria) return;
+  const stableMs = help.completionCriteria.stable_for_ms ?? DEFAULT_COMPLETION_STABLE_MS;
+  const check = async () => {
+    if (help.settled) return;
+    const matched = await completionCriteriaMatches(help);
+    const now = Date.now();
+    if (!matched) {
+      help.completionMatchedSince = null;
+      return;
+    }
+    help.completionMatchedSince ??= now;
+    if (now - help.completionMatchedSince < stableMs) return;
+    finishHelp(help, {
+      outcome: "completed",
+      completed_by: "system",
+      tab_id: help.tabId,
+      resolved_targets: help.resolvedTargets,
+    });
+  };
+  help.completionTimer = setInterval(() => void check(), COMPLETION_POLL_MS);
+  void check();
+}
+
+export async function handleRequestHelp(
+  manager: SessionManager,
+  params: RequestHelpParams,
+  deps: RequestHelpDeps = getDefaultDeps(),
+): Promise<RequestHelpResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "request_help");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  if (!params.prompt || typeof params.prompt !== "string") {
+    return { code: "invalid_params", message: "request_help requires a prompt" };
+  }
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
+
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "request_help");
+  if (denied) return denied;
+
+  if (deps.autoAttachLifecycle !== false) ensureHelpLifecycleListeners(deps);
+  const tabId = target.tabId;
+  const initialTargets = params.targets ?? [];
+  const { selectors, resolvedTargets } = await resolveHelpTargets(ctx, tabId, initialTargets, deps);
+
   await deps.windows.update(target.windowId, { focused: true }).catch(() => {});
   await deps.activateTab(tabId).catch(() => {});
 
@@ -255,7 +657,6 @@ export async function handleRequestHelp(
   const notificationId = `bsk-help:${requestId}`;
   const timeoutMs = params.timeout_ms ?? DEFAULT_HELP_TIMEOUT_MS;
 
-  // OS notification (best-effort).
   if (deps.notifications) {
     const copy = deps.notificationCopy ?? {
       title: "BrowserSkill: Agent needs your help",
@@ -272,85 +673,60 @@ export async function handleRequestHelp(
       .catch(() => {});
   }
 
-  const cleanup = async () => {
-    await clearRefTags(deps.cdp, tabId);
-    if (deps.notifications) await deps.notifications.clear(notificationId).catch(() => {});
-    // Retract the overlay in case we resolved via timeout / abort.
-    await deps
-      .sendToTab(tabId, { type: HELP_CANCEL, requestId } satisfies HelpCancelMessage)
-      .catch(() => {});
-  };
+  return new Promise<RequestHelpResult | RpcError>((resolve) => {
+    const timeoutTimer = setTimeout(() => {
+      finishHelp(help, {
+        outcome: "timed_out",
+        tab_id: help.tabId,
+        resolved_targets: help.resolvedTargets,
+      });
+    }, timeoutMs);
 
-  const request: HelpRequestMessage = {
-    type: HELP_REQUEST,
-    requestId,
-    prompt: params.prompt,
-    ...(params.title ? { title: params.title } : {}),
-    selectors,
-    timeoutMs,
-  };
-
-  const resolvedTargets = resolved.length > 0 ? resolved : undefined;
-
-  return new Promise<RequestHelpResult | RpcError>((resolveOuter) => {
-    let settled = false;
-    const unwatchNav = deps.watchTabNavigation(tabId, () => {
-      finish({ outcome: "navigated", tab_id: tabId, resolved_targets: resolvedTargets });
-    });
-
-    const finish = (value: RequestHelpResult | RpcError) => {
-      if (settled) return;
-      settled = true;
-      if (timer !== null) clearTimeout(timer);
-      unwatchNav();
-      deps.signal?.removeEventListener("abort", onAbort);
-      void cleanup();
-      resolveOuter(value);
+    const help: ActiveHelpRequest = {
+      sessionId: params.session_id,
+      ctx,
+      requestId,
+      tabId,
+      agentWindowId: ctx.agentWindowId,
+      prompt: params.prompt,
+      ...(params.title ? { title: params.title } : {}),
+      targets: initialTargets,
+      selectors,
+      timeoutMs,
+      notificationId,
+      resolvedTargets,
+      completionCriteria: params.completion_criteria,
+      deps,
+      settled: false,
+      resolve,
+      timeoutTimer,
+      completionTimer: null,
+      completionMatchedSince: null,
+      abortHandler: null,
     };
 
-    const onAbort = () => finish({ code: "cancelled", message: "request_help aborted" });
-
-    const timer = setTimeout(() => {
-      finish({ outcome: "timed_out", tab_id: tabId, resolved_targets: resolvedTargets });
-    }, timeoutMs) as unknown as number;
-
-    if (deps.signal) {
-      if (deps.signal.aborted) {
-        onAbort();
-        return;
-      }
-      deps.signal.addEventListener("abort", onAbort, { once: true });
+    const onAbort = () => finishHelp(help, { code: "cancelled", message: "request_help aborted" });
+    help.abortHandler = onAbort;
+    activeHelpRequests.set(requestId, help);
+    if (deps.signal?.aborted) {
+      onAbort();
+      return;
     }
+    deps.signal?.addEventListener("abort", onAbort, { once: true });
+    startCompletionPolling(help);
 
-    deps
-      .sendToTab(tabId, request)
-      .then((reply) => {
-        const res = reply as HelpResponseMessage | undefined;
-        if (
-          !res ||
-          res.type !== HELP_RESPONSE ||
-          (res.outcome !== "continued" && res.outcome !== "cancelled")
-        ) {
-          finish({
-            code: "protocol_error",
-            message: `invalid help response from tab ${tabId}`,
-          });
-          return;
-        }
-        finish({
-          outcome: res.outcome,
-          ...(res.note ? { note: res.note } : {}),
-          tab_id: tabId,
-          resolved_targets: resolvedTargets,
+    void sendHelpRequestWithAck(tabId, helpRequestMessage(help), deps)
+      .then((legacyFinish) => {
+        if (!legacyFinish || help.settled) return;
+        finishHelp(help, {
+          outcome: legacyFinish.outcome,
+          ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
+          tab_id: help.tabId,
+          resolved_targets: help.resolvedTargets,
         });
       })
-      .catch((err) => {
-        finish({
-          code: "protocol_error",
-          message: `failed to show help overlay on tab ${tabId}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        });
+      .catch(() => {
+        scheduleRearmForTab(tabId, deps);
       });
   });
 }
