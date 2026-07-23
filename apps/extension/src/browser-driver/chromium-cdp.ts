@@ -127,7 +127,7 @@ export class ChromiumCdp {
   private readonly dialogSequences = new Map<number, number>();
   private readonly consoleBuffers = new Map<number, ConsoleEntry[]>();
   private readonly consoleSequences = new Map<number, number>();
-  private readonly consoleDomainsAttemptedTabs = new Set<number>();
+  private readonly consoleDomainsEnabledTabs = new Set<number>();
   private readonly networkBuffers = new Map<number, NetworkEntry[]>();
   private readonly networkSequences = new Map<number, number>();
   private readonly networkDomainsEnabledTabs = new Set<number>();
@@ -313,7 +313,7 @@ export class ChromiumCdp {
     this.dialogSequences.clear();
     this.consoleBuffers.clear();
     this.consoleSequences.clear();
-    this.consoleDomainsAttemptedTabs.clear();
+    this.consoleDomainsEnabledTabs.clear();
     this.networkBuffers.clear();
     this.networkSequences.clear();
     this.networkDomainsEnabledTabs.clear();
@@ -334,14 +334,23 @@ export class ChromiumCdp {
   }
 
   private async enableConsoleDomains(tabId: number): Promise<void> {
-    if (this.consoleDomainsAttemptedTabs.has(tabId)) return;
-    this.consoleDomainsAttemptedTabs.add(tabId);
+    if (this.consoleDomainsEnabledTabs.has(tabId)) return;
+    // Mark the tab only after both domains enable successfully — a
+    // transient failure (e.g. restricted page during attach) must leave
+    // the tab unmarked so a later `ensureConsoleCapture` can retry,
+    // instead of silently returning no console output forever. Mirrors
+    // `enableNetworkDomain`, which records the tab after success only.
+    let failed = false;
     for (const method of ["Runtime.enable", "Log.enable"]) {
       try {
         await this.api.sendCommand({ tabId }, method, {});
       } catch (err) {
+        failed = true;
         console.debug("[bsk cdp] console domain enable failed", { tabId, method, err });
       }
+    }
+    if (!failed) {
+      this.consoleDomainsEnabledTabs.add(tabId);
     }
   }
 
@@ -445,7 +454,7 @@ export class ChromiumCdp {
   private clearConsoleState(tabId: number): void {
     this.consoleBuffers.delete(tabId);
     this.consoleSequences.delete(tabId);
-    this.consoleDomainsAttemptedTabs.delete(tabId);
+    this.consoleDomainsEnabledTabs.delete(tabId);
   }
 
   private bindNetworkHandler(): void {
