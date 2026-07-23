@@ -1,14 +1,9 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Badge, Button, cn, Input, Label } from "@browser-skill/ui";
-import {
-  RiApps2Line,
-  RiArrowLeftLine,
-  RiArrowRightSLine,
-  RiCheckLine,
-  RiFileCopyLine,
-} from "@remixicon/react";
+import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
+import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
@@ -156,12 +151,17 @@ export function App() {
             type="button"
             variant="ghost"
             size="icon"
-            className="size-7 shrink-0 rounded-md"
+            className="group size-8 shrink-0 rounded-md"
             aria-label={t("popup.launcher.title")}
             onClick={() => setView("features")}
             data-slot="popup-launcher"
           >
-            <RiApps2Line className="size-4" aria-hidden />
+            <img
+              src={functionIconUrl}
+              alt=""
+              className="size-6 opacity-35 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+              data-slot="popup-launcher-icon"
+            />
           </Button>
         )}
       </header>
