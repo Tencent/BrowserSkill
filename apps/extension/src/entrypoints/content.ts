@@ -233,6 +233,7 @@ export default defineContentScript({
           id: helpMsg.requestId,
           prompt: helpMsg.prompt,
           ...(helpMsg.title ? { title: helpMsg.title } : {}),
+          ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
           selectors: helpMsg.selectors,
           onContinue: (note: string) =>
             void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
@@ -294,6 +295,7 @@ export default defineContentScript({
         id: helpMsg.requestId,
         prompt: helpMsg.prompt,
         ...(helpMsg.title ? { title: helpMsg.title } : {}),
+        ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
         selectors: helpMsg.selectors,
         onContinue: (note: string) =>
           void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),

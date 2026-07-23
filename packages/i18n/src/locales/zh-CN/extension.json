@@ -74,6 +74,7 @@
   },
   "helpRequest": {
     "title": "Agent 需要你的帮助",
+    "compactStatus": "当前 Agent 仍在等待你完成登录",
     "noteLabel": "给 Agent 的备注（可选）",
     "notePlaceholder": "给 Agent 留言（可选）",
     "continue": "完成并交还控制权",

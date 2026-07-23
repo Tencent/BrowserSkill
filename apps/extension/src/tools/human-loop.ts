@@ -66,11 +66,11 @@ export interface RequestHelpDeps {
 }
 
 interface ActiveHelpRequest {
-  sessionId: string;
   ctx: SessionContext;
   requestId: string;
-  tabId: number;
-  agentWindowId: number;
+  subjectTabId: number;
+  primaryTabId: number;
+  overlayTabIds: Set<number>;
   prompt: string;
   title?: string;
   targets: HelpTarget[];
@@ -127,12 +127,14 @@ function sleep(ms: number): Promise<void> {
 }
 
 function helpRequestMessage(help: ActiveHelpRequest): HelpRequestMessage {
+  const isPrimaryTab = help.subjectTabId === help.primaryTabId;
   return {
     type: HELP_REQUEST,
     requestId: help.requestId,
     prompt: help.prompt,
     ...(help.title ? { title: help.title } : {}),
-    selectors: help.selectors,
+    displayMode: isPrimaryTab ? "full" : "compact",
+    selectors: isPrimaryTab ? help.selectors : [],
     timeoutMs: help.timeoutMs,
   };
 }
@@ -275,10 +277,10 @@ async function resolveHelpTargets(
 }
 
 async function refreshHelpTargets(help: ActiveHelpRequest): Promise<void> {
-  await clearRefTags(help.deps.cdp, help.tabId);
+  await clearRefTags(help.deps.cdp, help.subjectTabId);
   const { selectors, resolvedTargets } = await resolveHelpTargets(
     help.ctx,
-    help.tabId,
+    help.subjectTabId,
     help.targets,
     help.deps,
   );
@@ -287,13 +289,16 @@ async function refreshHelpTargets(help: ActiveHelpRequest): Promise<void> {
 }
 
 async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
-  await clearRefTags(help.deps.cdp, help.tabId);
+  await clearRefTags(help.deps.cdp, help.subjectTabId);
   if (help.deps.notifications) {
     await help.deps.notifications.clear(help.notificationId).catch(() => {});
   }
-  await help.deps
-    .sendToTab(help.tabId, { type: HELP_CANCEL, requestId: help.requestId })
-    .catch(() => {});
+  const tabsToCancel = new Set([help.subjectTabId, ...help.overlayTabIds]);
+  await Promise.all(
+    [...tabsToCancel].map((tabId) =>
+      help.deps.sendToTab(tabId, { type: HELP_CANCEL, requestId: help.requestId }).catch(() => {}),
+    ),
+  );
 }
 
 function finishHelp(
@@ -307,14 +312,17 @@ function finishHelp(
   clearTimeout(help.timeoutTimer);
   if (help.completionTimer) clearInterval(help.completionTimer);
   if (help.abortHandler) help.deps.signal?.removeEventListener("abort", help.abortHandler);
-  clearRearmTimer(help.tabId);
+  clearRearmTimer(help.subjectTabId);
+  for (const tabId of help.overlayTabIds) clearRearmTimer(tabId);
   if (notifyContent) void cleanupHelp(help);
   help.resolve(value);
 }
 
-function findHelpByTabId(tabId: number): ActiveHelpRequest | null {
+function findHelpBySubjectTabId(tabId: number): ActiveHelpRequest | null {
   for (const help of activeHelpRequests.values()) {
-    if (!help.settled && help.tabId === tabId) return help;
+    if (!help.settled && (help.subjectTabId === tabId || help.overlayTabIds.has(tabId))) {
+      return help;
+    }
   }
   return null;
 }
@@ -323,7 +331,7 @@ async function findHelpForTab(
   tabId: number,
   deps: RequestHelpDeps,
 ): Promise<ActiveHelpRequest | null> {
-  const direct = findHelpByTabId(tabId);
+  const direct = findHelpBySubjectTabId(tabId);
   if (direct) return direct;
 
   try {
@@ -331,7 +339,7 @@ async function findHelpForTab(
     const windowId = tab.windowId;
     if (typeof windowId !== "number") return null;
     for (const help of activeHelpRequests.values()) {
-      if (!help.settled && help.agentWindowId === windowId) return help;
+      if (!help.settled && help.ctx.agentWindowId === windowId) return help;
     }
   } catch {
     return null;
@@ -346,18 +354,32 @@ function clearRearmTimer(tabId: number): void {
   helpRearmTimers.delete(tabId);
 }
 
-async function rearmHelp(help: ActiveHelpRequest, targetTabId: number): Promise<boolean> {
+async function sendCurrentHelpOverlay(help: ActiveHelpRequest): Promise<HelpFinishMessage | null> {
+  const legacyFinish = await sendHelpRequestWithAck(
+    help.subjectTabId,
+    helpRequestMessage(help),
+    help.deps,
+  );
+  help.overlayTabIds.add(help.subjectTabId);
+  return legacyFinish;
+}
+
+async function refreshAndSendHelpOverlay(
+  help: ActiveHelpRequest,
+): Promise<HelpFinishMessage | null> {
+  await refreshHelpTargets(help);
+  return sendCurrentHelpOverlay(help);
+}
+
+async function rearmHelp(help: ActiveHelpRequest): Promise<boolean> {
   for (let attempt = 0; attempt < HELP_REARM_MAX_ATTEMPTS; attempt += 1) {
     try {
-      help.tabId = targetTabId;
-      await refreshHelpTargets(help);
-      const msg = helpRequestMessage(help);
-      const legacyFinish = await sendHelpRequestWithAck(targetTabId, msg, help.deps);
+      const legacyFinish = await refreshAndSendHelpOverlay(help);
       if (legacyFinish && !help.settled) {
         finishHelp(help, {
           outcome: legacyFinish.outcome,
           ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
-          tab_id: help.tabId,
+          tab_id: help.subjectTabId,
           resolved_targets: help.resolvedTargets,
         });
       }
@@ -378,7 +400,9 @@ function scheduleRearmForTab(tabId: number, deps: RequestHelpDeps): void {
       helpRearmTimers.delete(tabId);
       void (async () => {
         const help = await findHelpForTab(tabId, deps);
-        if (help) await rearmHelp(help, tabId);
+        if (!help) return;
+        help.subjectTabId = tabId;
+        await rearmHelp(help);
       })();
     }, HELP_REARM_DEBOUNCE_MS),
   );
@@ -433,15 +457,17 @@ function attachHelpRuntimeListener(deps: RequestHelpDeps): () => void {
           sendResponse({ active: false });
           return;
         }
-        help.tabId = tabId;
+        help.subjectTabId = tabId;
         await refreshHelpTargets(help);
+        help.overlayTabIds.add(tabId);
         sendResponse({
           active: true,
           request: {
             requestId: help.requestId,
             prompt: help.prompt,
             ...(help.title ? { title: help.title } : {}),
-            selectors: help.selectors,
+            displayMode: tabId === help.primaryTabId ? "full" : "compact",
+            selectors: tabId === help.primaryTabId ? help.selectors : [],
             timeoutMs: help.timeoutMs,
           },
         });
@@ -466,13 +492,14 @@ async function finishHelpFromContent(
   if (tabId !== undefined) {
     const match = await findHelpForTab(tabId, deps);
     if (match !== help) return;
+    help.subjectTabId = tabId;
   }
   finishHelp(
     help,
     {
       outcome: message.outcome,
       ...(message.note ? { note: message.note } : {}),
-      tab_id: help.tabId,
+      tab_id: help.subjectTabId,
       resolved_targets: help.resolvedTargets,
     },
     false,
@@ -481,15 +508,8 @@ async function finishHelpFromContent(
 
 function attachHelpTabListener(deps: RequestHelpDeps): () => void {
   const onCreated = (tab: chrome.tabs.Tab) => {
-    const tabId = tab.id;
-    const windowId = tab.windowId;
-    if (tabId === undefined || windowId === undefined) return;
-    for (const help of activeHelpRequests.values()) {
-      if (!help.settled && help.agentWindowId === windowId) {
-        scheduleRearmForTab(tabId, deps);
-        return;
-      }
-    }
+    if (typeof tab.id !== "number") return;
+    scheduleRearmForTab(tab.id, deps);
   };
   const onActivated = (activeInfo: chrome.tabs.TabActiveInfo) => {
     scheduleRearmForTab(activeInfo.tabId, deps);
@@ -531,7 +551,7 @@ async function evaluateCompletionCondition(
   if (condition.url_contains || condition.url_matches) {
     let url = "";
     try {
-      const tab = await help.deps.tabsApi.get(help.tabId);
+      const tab = await help.deps.tabsApi.get(help.subjectTabId);
       url = tab.url ?? "";
     } catch {
       return false;
@@ -567,7 +587,7 @@ async function evaluateCompletionCondition(
     })()`;
     try {
       const result = await help.deps.cdp.send<{ result?: { value?: boolean } }>(
-        help.tabId,
+        help.subjectTabId,
         "Runtime.evaluate",
         { expression, returnByValue: true },
       );
@@ -619,7 +639,7 @@ function startCompletionPolling(help: ActiveHelpRequest): void {
     finishHelp(help, {
       outcome: "completed",
       completed_by: "system",
-      tab_id: help.tabId,
+      tab_id: help.subjectTabId,
       resolved_targets: help.resolvedTargets,
     });
   };
@@ -677,17 +697,17 @@ export async function handleRequestHelp(
     const timeoutTimer = setTimeout(() => {
       finishHelp(help, {
         outcome: "timed_out",
-        tab_id: help.tabId,
+        tab_id: help.subjectTabId,
         resolved_targets: help.resolvedTargets,
       });
     }, timeoutMs);
 
     const help: ActiveHelpRequest = {
-      sessionId: params.session_id,
       ctx,
       requestId,
-      tabId,
-      agentWindowId: ctx.agentWindowId,
+      subjectTabId: tabId,
+      primaryTabId: tabId,
+      overlayTabIds: new Set(),
       prompt: params.prompt,
       ...(params.title ? { title: params.title } : {}),
       targets: initialTargets,
@@ -715,13 +735,13 @@ export async function handleRequestHelp(
     deps.signal?.addEventListener("abort", onAbort, { once: true });
     startCompletionPolling(help);
 
-    void sendHelpRequestWithAck(tabId, helpRequestMessage(help), deps)
+    void sendCurrentHelpOverlay(help)
       .then((legacyFinish) => {
         if (!legacyFinish || help.settled) return;
         finishHelp(help, {
           outcome: legacyFinish.outcome,
           ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
-          tab_id: help.tabId,
+          tab_id: help.subjectTabId,
           resolved_targets: help.resolvedTargets,
         });
       })

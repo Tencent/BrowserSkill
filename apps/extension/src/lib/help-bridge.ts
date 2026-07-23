@@ -22,6 +22,8 @@ export interface HelpRequestMessage {
   prompt: string;
   /** Custom overlay title; omitted when the extension should use its default. */
   title?: string;
+  /** Full task UI on the subject tab; compact status UI on related tabs. */
+  displayMode?: "full" | "compact";
   /** CSS selectors to scroll to + flash-highlight (may be empty). */
   selectors: string[];
   timeoutMs: number;
@@ -69,6 +71,7 @@ export function isHelpRequestMessage(msg: unknown): msg is HelpRequestMessage {
     typeof m.requestId === "string" &&
     typeof m.prompt === "string" &&
     (m.title === undefined || typeof m.title === "string") &&
+    (m.displayMode === undefined || m.displayMode === "full" || m.displayMode === "compact") &&
     Array.isArray(m.selectors) &&
     m.selectors.every((selector) => typeof selector === "string") &&
     typeof m.timeoutMs === "number"

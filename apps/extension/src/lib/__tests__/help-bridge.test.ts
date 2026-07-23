@@ -30,6 +30,7 @@ describe("help-bridge", () => {
         type: HELP_REQUEST,
         requestId: "r1",
         prompt: "log in",
+        displayMode: "compact",
         selectors: ["#login"],
         timeoutMs: 1000,
       }),

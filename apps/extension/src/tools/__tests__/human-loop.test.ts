@@ -1,7 +1,53 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { RequestHelpParams } from "@/transport/types";
-import { handleRequestHelp, type RequestHelpDeps } from "../human-loop";
+import { handleRequestHelp, type RequestHelpDeps, resetHelpLifecycleForTests } from "../human-loop";
+
+function chromeEvent<T extends (...args: never[]) => unknown>() {
+  const listeners = new Set<T>();
+  return {
+    addListener: vi.fn((listener: T) => {
+      listeners.add(listener);
+    }),
+    removeListener: vi.fn((listener: T) => {
+      listeners.delete(listener);
+    }),
+    emit: (...args: Parameters<T>) => {
+      for (const listener of [...listeners]) listener(...args);
+    },
+  };
+}
+
+function installHelpLifecycleChrome() {
+  const runtimeOnMessage =
+    chromeEvent<
+      (
+        message: unknown,
+        sender: chrome.runtime.MessageSender,
+        sendResponse: (response: unknown) => void,
+      ) => unknown
+    >();
+  const tabsOnActivated = chromeEvent<(activeInfo: chrome.tabs.TabActiveInfo) => unknown>();
+  const tabsOnCreated = chromeEvent<(tab: chrome.tabs.Tab) => unknown>();
+  const tabsOnUpdated =
+    chromeEvent<(tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => unknown>();
+  const webNavigationOnCompleted =
+    chromeEvent<(details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => unknown>();
+
+  vi.stubGlobal("chrome", {
+    runtime: { onMessage: runtimeOnMessage },
+    tabs: { onActivated: tabsOnActivated, onCreated: tabsOnCreated, onUpdated: tabsOnUpdated },
+    webNavigation: { onCompleted: webNavigationOnCompleted },
+  });
+
+  return {
+    runtimeOnMessage,
+    tabsOnActivated,
+    tabsOnCreated,
+    tabsOnUpdated,
+    webNavigationOnCompleted,
+  };
+}
 
 function fakeManager(sessionId: string, agentWindowId: number, tabId: number) {
   const mgr = {
@@ -35,6 +81,11 @@ function baseDeps(over: Partial<RequestHelpDeps> = {}): RequestHelpDeps {
 }
 
 describe("handleRequestHelp", () => {
+  afterEach(() => {
+    resetHelpLifecycleForTests();
+    vi.unstubAllGlobals();
+  });
+
   it("rejects unknown session", async () => {
     const res = await handleRequestHelp(
       fakeManager("abcd", 99, 5),
@@ -144,6 +195,126 @@ describe("handleRequestHelp", () => {
       deps,
     );
     expect(res).toMatchObject({ outcome: "completed", completed_by: "system", tab_id: 5 });
+  });
+
+  it("keeps user control active on new tabs opened in the agent window", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const sendToTab = vi.fn(async () => ({ type: "bsk-help-ack", ok: true }));
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      sendToTab,
+      tabsApi: {
+        get: vi.fn(async (tabId: number) => ({
+          id: tabId,
+          windowId: 99,
+          active: tabId === 6,
+          url: tabId === 6 ? "https://app.example/reset/success" : "https://app.example/login",
+        })) as never,
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({
+          tab_id: 5,
+          timeout_ms: 1_000,
+          completion_criteria: {
+            any: [{ url_contains: "/reset/success" }],
+            stable_for_ms: 0,
+          },
+        }),
+        deps,
+      );
+      await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledWith(5, expect.anything()));
+
+      chromeEvents.tabsOnActivated.emit({ tabId: 6, windowId: 99 });
+      await vi.advanceTimersByTimeAsync(200);
+
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          6,
+          expect.objectContaining({
+            type: "bsk-help-request",
+            displayMode: "compact",
+            selectors: [],
+          }),
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toMatchObject({
+        outcome: "completed",
+        completed_by: "system",
+        tab_id: 6,
+      });
+      expect(sendToTab).toHaveBeenCalledWith(
+        6,
+        expect.objectContaining({ type: "bsk-help-cancel" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets same-window tabs query active help after content-script load", async () => {
+    const chromeEvents = installHelpLifecycleChrome();
+    const ac = new AbortController();
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      signal: ac.signal,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      cdp: {
+        send: vi.fn(async () => ({ root: { nodeId: 1 }, nodeIds: [] })),
+      } as unknown as RequestHelpDeps["cdp"],
+    });
+
+    const pending = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+      deps,
+    );
+    await vi.waitFor(() => expect(deps.sendToTab).toHaveBeenCalledWith(5, expect.anything()));
+
+    const sameWindowResponse = vi.fn();
+    chromeEvents.runtimeOnMessage.emit(
+      { type: "bsk-help-query" },
+      { tab: { id: 6 } as chrome.tabs.Tab },
+      sameWindowResponse,
+    );
+    await vi.waitFor(() =>
+      expect(sameWindowResponse).toHaveBeenCalledWith({
+        active: true,
+        request: expect.objectContaining({
+          requestId: expect.any(String),
+          prompt: "log in",
+          displayMode: "compact",
+          selectors: [],
+        }),
+      }),
+    );
+
+    const subjectResponse = vi.fn();
+    chromeEvents.runtimeOnMessage.emit(
+      { type: "bsk-help-query" },
+      { tab: { id: 5 } as chrome.tabs.Tab },
+      subjectResponse,
+    );
+    await vi.waitFor(() =>
+      expect(subjectResponse).toHaveBeenCalledWith({
+        active: true,
+        request: expect.objectContaining({
+          requestId: expect.any(String),
+          prompt: "log in",
+          displayMode: "full",
+        }),
+      }),
+    );
+
+    ac.abort();
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
   });
 
   it("tags ref targets via CDP and reports them matched", async () => {

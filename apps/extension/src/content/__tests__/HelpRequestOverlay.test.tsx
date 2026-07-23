@@ -38,6 +38,31 @@ describe("HelpRequestOverlay", () => {
     expect(screen.getByText("Please complete the captcha")).toBeTruthy();
   });
 
+  it("renders a compact status without full request controls", () => {
+    const el = document.createElement("div");
+    el.id = "login";
+    el.getBoundingClientRect = () =>
+      ({ top: 10, left: 10, width: 100, height: 40, right: 110, bottom: 50 }) as DOMRect;
+    document.body.append(el);
+
+    const { container } = renderOverlay(
+      baseRequest({
+        displayMode: "compact",
+        selectors: ["#login"],
+      }),
+    );
+
+    expect(screen.getByText(i18n.t("helpRequest.compactStatus", { ns: "extension" }))).toBeTruthy();
+    expect(screen.queryByText("Please complete the captcha")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByLabelText(i18n.t("helpRequest.collapse", { ns: "extension" }))).toBeNull();
+    expect(container.querySelector("[data-slot='help-continue-button']")).toBeNull();
+    expect(container.querySelector("[data-slot='help-cancel-button']")).toBeNull();
+    expect(document.querySelectorAll("[data-slot='help-highlight']").length).toBe(0);
+
+    el.remove();
+  });
+
   it("renders a custom title when provided", () => {
     renderOverlay(baseRequest({ title: "Verify your identity" }));
     expect(screen.getByText("Verify your identity")).toBeTruthy();
