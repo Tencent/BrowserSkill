@@ -156,7 +156,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::NoBrowserConnected => RenderInfo {
             summary: "no browser is connected to the daemon",
             hint: Some(
-                "open the browser-skill extension in your browser and wait for the popup to show \"connected\"",
+                "if your browser is open, check that the browser-skill extension is installed and enabled and wait for the popup to show \"connected\"; if it is not installed, add it from the Chrome Web Store (or your browser's extension store) and open it once",
             ),
             exit_code: 1,
         },

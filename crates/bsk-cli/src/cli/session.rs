@@ -5,11 +5,11 @@
 //! human-readable by default; pass the global `--json` flag to get
 //! structured JSON instead.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
+use bsk_protocol::system::{BrowserListParams, BrowserStatusEntry, SessionStatusEntry};
 use bsk_protocol::tools::ReturnFailure;
 use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
+use crate::cli::launch_browser;
 
 const SESSION_STOP_IPC_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
@@ -113,34 +114,100 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
-    let result: Result<StartReply, CliError> = call(
-        sock,
+    let first: Result<StartReply, CliError> = call(
+        sock.clone(),
         Method::SessionStart,
         Some(StartParams {
-            browser_instance_id: args.browser,
+            browser_instance_id: args.browser.clone(),
         }),
         Duration::from_secs(30),
     );
-    match result {
-        Ok(reply) => match format {
-            Format::Json => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "session_id": reply.session_id,
-                        "browser_instance_id": reply.browser_instance_id,
-                        "agent_window_id": reply.agent_window_id,
-                    }))
-                    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+    let reply = match first {
+        Ok(reply) => reply,
+        Err(err) => {
+            if err.code() == Some(ErrorCode::NoBrowserConnected) {
+                // The daemon sees no connected browser. Most often the
+                // browser process simply isn't running, so the extension
+                // never had a chance to connect. Try to bring it up, wait
+                // for the extension to reconnect, then retry once.
+                eprintln!(
+                    "BrowserSkill: no browser is connected — launching your browser so the extension can connect …"
                 );
+                match retry_after_launch(sock, &args) {
+                    Some(reply) => reply,
+                    None => return Err(handle_start_error(err, format)),
+                }
+            } else {
+                return Err(handle_start_error(err, format));
             }
-            Format::Human => {
-                println!("{}", reply.session_id);
-            }
-        },
-        Err(err) => return Err(handle_start_error(err, format)),
+        }
+    };
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "session_id": reply.session_id,
+                    "browser_instance_id": reply.browser_instance_id,
+                    "agent_window_id": reply.agent_window_id,
+                }))
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            println!("{}", reply.session_id);
+        }
     }
     Ok(())
+}
+
+/// On `no_browser_connected`, try to bring the browser process up (so an
+/// installed extension can connect), wait for it to appear, then retry
+/// `session.start` once. Returns the reply on success, or `None` if the
+/// browser could not be launched or the retry still failed — in which case
+/// the caller surfaces the usual install hint.
+fn retry_after_launch(sock: PathBuf, args: &SessionStartArgs) -> Option<StartReply> {
+    if launch_browser::attempt_launch_browser().is_err() {
+        return None;
+    }
+    if !wait_for_browser_connection(&sock) {
+        return None;
+    }
+    call::<_, StartReply>(
+        sock,
+        Method::SessionStart,
+        Some(StartParams {
+            browser_instance_id: args.browser.clone(),
+        }),
+        Duration::from_secs(30),
+    )
+    .ok()
+}
+
+/// Reply shape for `browser.list` (mirrors the daemon's private
+/// `BrowserListResult`); only the `browsers` field is needed here.
+#[derive(Debug, Deserialize)]
+struct BrowserListReply {
+    browsers: Vec<BrowserStatusEntry>,
+}
+
+/// Block (via the daemon's browser-list wait) until a browser connects, or
+/// the launch wait window elapses.
+fn wait_for_browser_connection(sock: &Path) -> bool {
+    let wait = launch_browser::POST_LAUNCH_CONNECT_WAIT;
+    let params = BrowserListParams {
+        wait_for_browser_ms: Some(wait.as_millis() as u64),
+    };
+    let timeout = wait + Duration::from_secs(5);
+    match call::<_, BrowserListReply>(
+        sock.to_path_buf(),
+        Method::BrowserList,
+        Some(params),
+        timeout,
+    ) {
+        Ok(result) => !result.browsers.is_empty(),
+        Err(_) => false,
+    }
 }
 
 /// Render a `session.start` failure (review I3).
