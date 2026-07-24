@@ -25,6 +25,7 @@ import {
   isHelpCancelMessage,
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
+import { getControlOverlayVisible, STORAGE_KEYS } from "@/lib/instance-id";
 import {
   isOverlayAgentOverlayResetMessage,
   OVERLAY_AUTOMATION_BYPASS,
@@ -41,7 +42,6 @@ import {
   type RecordStopAck,
 } from "@/lib/record-bridge";
 import { SESSIONS_LIVE_FLAG_KEY } from "@/lib/sessions-live-flag";
-import { getControlOverlayVisible, STORAGE_KEYS } from "@/lib/instance-id";
 import type {
   BorrowCancelMessage,
   BorrowRequestMessage,

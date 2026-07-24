@@ -8,14 +8,11 @@ import {
   RiFileCopyLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { getControlOverlayVisible, setControlOverlayVisible } from "@/lib/instance-id";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
-import {
-  getControlOverlayVisible,
-  setControlOverlayVisible,
-} from "@/lib/instance-id";
 
 const STATE_LABEL_KEYS = {
   disconnected: "popup.stateLabel.disconnected",
