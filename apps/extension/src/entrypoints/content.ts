@@ -28,6 +28,8 @@ import {
 import {
   isOverlayAgentOverlayResetMessage,
   OVERLAY_AUTOMATION_BYPASS,
+  OVERLAY_HOST_MARKER_ATTR,
+  OVERLAY_HOST_NAME,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentOverlayResetMessage,
   type OverlayAutomationBypassMessage,
@@ -67,13 +69,13 @@ export default defineContentScript({
     let remountInProgress = false;
 
     const ui = await createShadowRootUi(ctx, {
-      name: "browser-skill-overlay",
+      name: OVERLAY_HOST_NAME,
       position: "inline",
       anchor: "html",
       css: overlayCss,
       onMount(container, _shadow, shadowHost) {
         shadowHost.setAttribute("aria-hidden", "true");
-        shadowHost.setAttribute("data-bsk-overlay", "");
+        shadowHost.setAttribute(OVERLAY_HOST_MARKER_ATTR, "");
         overlayHost = shadowHost;
         hostLossReported = false;
         const app = document.createElement("div");
