@@ -1,6 +1,7 @@
 const STORAGE_KEY = "bsk_instance_id";
 const LABEL_STORAGE_KEY = "bh_label";
 const CONNECTION_ENABLED_KEY = "bh_connection_enabled";
+const CONTROL_OVERLAY_VISIBLE_KEY = "bh_control_overlay_visible";
 
 export interface StorageBackend {
   get(keys: string | string[]): Promise<Record<string, unknown>>;
@@ -105,8 +106,25 @@ export async function setConnectionEnabled(
   await storage.set({ [CONNECTION_ENABLED_KEY]: enabled });
 }
 
+/** Defaults to visible when unset or non-boolean. */
+export async function getControlOverlayVisible(
+  storage: StorageBackend = defaultStorage(),
+): Promise<boolean> {
+  const items = await storage.get(CONTROL_OVERLAY_VISIBLE_KEY);
+  const raw = items[CONTROL_OVERLAY_VISIBLE_KEY];
+  return typeof raw === "boolean" ? raw : true;
+}
+
+export async function setControlOverlayVisible(
+  visible: boolean,
+  storage: StorageBackend = defaultStorage(),
+): Promise<void> {
+  await storage.set({ [CONTROL_OVERLAY_VISIBLE_KEY]: visible });
+}
+
 export const STORAGE_KEYS = {
   INSTANCE_ID: STORAGE_KEY,
   LABEL: LABEL_STORAGE_KEY,
   CONNECTION_ENABLED: CONNECTION_ENABLED_KEY,
+  CONTROL_OVERLAY_VISIBLE: CONTROL_OVERLAY_VISIBLE_KEY,
 } as const;
