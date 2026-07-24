@@ -8,6 +8,7 @@ import {
   RiFileCopyLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { getControlOverlayVisible, setControlOverlayVisible } from "@/lib/instance-id";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
@@ -45,6 +46,13 @@ export function App() {
   // auto-hide timer restarts) even when the copied content is unchanged.
   const [copiedTick, setCopiedTick] = useState(0);
   const showCopiedToast = copiedTick > 0;
+  const [controlOverlayVisible, setControlOverlayVisibleState] = useState(true);
+
+  useEffect(() => {
+    getControlOverlayVisible()
+      .then(setControlOverlayVisibleState)
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     const query = window.matchMedia("(prefers-color-scheme: dark)");
@@ -208,6 +216,35 @@ export function App() {
                   />
                 </button>
               </div>
+            </div>
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">
+                {t("popup.controlOverlayToggleTitle")}
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={controlOverlayVisible}
+                aria-label={t("popup.controlOverlayToggleTitle")}
+                data-slot="popup-control-overlay-toggle"
+                className={cn(
+                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                  controlOverlayVisible ? "bg-primary" : "bg-muted",
+                )}
+                onClick={() => {
+                  const next = !controlOverlayVisible;
+                  setControlOverlayVisibleState(next);
+                  void setControlOverlayVisible(next);
+                }}
+              >
+                <span
+                  className={cn(
+                    "pointer-events-none block size-4 rounded-full bg-background shadow-sm transition-transform",
+                    controlOverlayVisible ? "translate-x-4" : "translate-x-0.5",
+                  )}
+                  aria-hidden
+                />
+              </button>
             </div>
             {isSkewed && (
               <p

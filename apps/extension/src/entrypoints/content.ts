@@ -25,6 +25,7 @@ import {
   isHelpCancelMessage,
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
+import { getControlOverlayVisible, STORAGE_KEYS } from "@/lib/instance-id";
 import {
   isOverlayAgentOverlayResetMessage,
   OVERLAY_AUTOMATION_BYPASS,
@@ -65,6 +66,7 @@ export default defineContentScript({
     let overlayHost: HTMLElement | null = null;
     let hostLossReported = false;
     let remountInProgress = false;
+    let controlOverlayVisible = true;
 
     const ui = await createShadowRootUi(ctx, {
       name: "browser-skill-overlay",
@@ -90,6 +92,12 @@ export default defineContentScript({
       },
     });
 
+    try {
+      controlOverlayVisible = await getControlOverlayVisible();
+    } catch {
+      // default to visible
+    }
+
     function renderOverlay() {
       const overlayState = overlays.snapshot();
       reactRoot?.render(
@@ -103,7 +111,7 @@ export default defineContentScript({
               requests: overlayState.borrowRequests,
             }),
             React.createElement(ControlOverlay, {
-              visible: shouldShowAgentControlOverlay(overlayState),
+              visible: shouldShowAgentControlOverlay(overlayState) && controlOverlayVisible,
               interrupting: overlayState.interrupting,
               automationBypass: overlayState.automationBypassCount > 0,
               onInterrupt: handleInterrupt,
@@ -375,8 +383,19 @@ export default defineContentScript({
       if (event.persisted) void syncAgentOverlay();
     };
 
+    const onStorageChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string,
+    ) => {
+      if (area === "local" && changes[STORAGE_KEYS.CONTROL_OVERLAY_VISIBLE]) {
+        controlOverlayVisible = changes[STORAGE_KEYS.CONTROL_OVERLAY_VISIBLE].newValue ?? true;
+        renderOverlay();
+      }
+    };
+
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
+    chrome.storage.onChanged.addListener(onStorageChanged);
     void syncAgentOverlay();
 
     window.addEventListener("pageshow", onPageShow);
@@ -404,6 +423,7 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
+      chrome.storage.onChanged.removeListener(onStorageChanged);
       window.removeEventListener("pageshow", onPageShow);
       // Restore history hooks / remove capture listeners before the CS unloads.
       recordCapture?.dispose();

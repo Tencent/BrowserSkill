@@ -23,6 +23,7 @@
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill 连接",
+    "controlOverlayToggleTitle": "显示 Agent 控制状态",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
     "upgradeAvailable": "可升级",
     "launcher": {
