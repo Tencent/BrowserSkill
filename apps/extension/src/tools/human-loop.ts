@@ -501,16 +501,12 @@ async function finishHelpFromContent(
     const match = await findHelpForTab(tabId, deps);
     if (match !== help) return;
   }
-  finishHelp(
-    help,
-    {
-      outcome: message.outcome,
-      ...(message.note ? { note: message.note } : {}),
-      tab_id: help.primaryTabId,
-      resolved_targets: help.resolvedTargets,
-    },
-    false,
-  );
+  finishHelp(help, {
+    outcome: message.outcome,
+    ...(message.note ? { note: message.note } : {}),
+    tab_id: help.primaryTabId,
+    resolved_targets: help.resolvedTargets,
+  });
 }
 
 function attachHelpTabListener(deps: RequestHelpDeps): () => void {
