@@ -92,7 +92,11 @@ export default defineContentScript({
       },
     });
 
-    controlOverlayVisible = await getControlOverlayVisible();
+    try {
+      controlOverlayVisible = await getControlOverlayVisible();
+    } catch {
+      // default to visible
+    }
 
     function renderOverlay() {
       const overlayState = overlays.snapshot();
