@@ -49,7 +49,7 @@ export function App() {
   const [controlOverlayVisible, setControlOverlayVisibleState] = useState(true);
 
   useEffect(() => {
-    void getControlOverlayVisible().then(setControlOverlayVisibleState);
+    getControlOverlayVisible().then(setControlOverlayVisibleState).catch(() => {});
   }, []);
 
   useEffect(() => {

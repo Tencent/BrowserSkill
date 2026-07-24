@@ -243,4 +243,11 @@ describe("App", () => {
     expect(copyButton.getAttribute("disabled")).not.toBeNull();
     expect(screen.getByText("连接后可用")).toBeTruthy();
   });
+
+  it("renders the control overlay toggle with switch semantics", () => {
+    render(<App />);
+
+    const toggle = screen.getByRole("switch", { name: "显示 Agent 控制状态" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
 });
