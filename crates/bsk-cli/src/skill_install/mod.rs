@@ -15,6 +15,9 @@ pub use harness::{HarnessId, HarnessReport, all_harness_reports, parse_harness_i
 
 pub const SKILL_DIR_NAME: &str = "browser-skill";
 pub const DEFAULT_SKILL_MD: &str = include_str!("../../skill/SKILL.md");
+pub const SOURCE_MARKER_FILE: &str = ".bsk-source";
+pub const SOURCE_BUNDLED: &str = "bundled\n";
+pub const SOURCE_CUSTOM: &str = "custom\n";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallResult {
@@ -135,6 +138,13 @@ fn install_one_at_home(
     let existed = dest_file.exists();
     fs::create_dir_all(&dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
     fs::write(&dest_file, source).with_context(|| format!("write {}", dest_file.display()))?;
+    let source_kind = if source == DEFAULT_SKILL_MD {
+        SOURCE_BUNDLED
+    } else {
+        SOURCE_CUSTOM
+    };
+    let marker = dest_dir.join(SOURCE_MARKER_FILE);
+    fs::write(&marker, source_kind).with_context(|| format!("write {}", marker.display()))?;
 
     let status = if existed {
         InstallStatus::Updated
@@ -317,6 +327,10 @@ mod tests {
         assert!(out.errors.is_empty());
         assert_eq!(out.results.len(), 1);
         assert!(skills.join(SKILL_DIR_NAME).join("SKILL.md").is_file());
+        assert_eq!(
+            fs::read_to_string(skills.join(SKILL_DIR_NAME).join(SOURCE_MARKER_FILE)).unwrap(),
+            SOURCE_CUSTOM
+        );
     }
 
     #[test]
@@ -367,6 +381,57 @@ mod tests {
         );
         assert_eq!(out.results[0].status, InstallStatus::Updated);
         assert_eq!(fs::read_to_string(&dest).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(dest.parent().unwrap().join(SOURCE_MARKER_FILE)).unwrap(),
+            SOURCE_CUSTOM
+        );
+    }
+
+    #[test]
+    fn bundled_install_is_marked_as_managed() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let harness = HarnessId::Cursor;
+
+        let out = install_to_harnesses_at_home(
+            &home,
+            &InstallOptions {
+                harnesses: &[harness],
+                source: DEFAULT_SKILL_MD,
+                force: false,
+                home: Some(&home),
+            },
+        );
+
+        assert!(out.errors.is_empty());
+        let marker = harness
+            .skill_dest_dir_for_home(&home)
+            .join(SOURCE_MARKER_FILE);
+        assert_eq!(fs::read_to_string(marker).unwrap(), SOURCE_BUNDLED);
+    }
+
+    #[test]
+    fn custom_install_survives_automatic_bundled_sync() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let harness = HarnessId::Cursor;
+        let dest = harness.skill_dest_dir_for_home(&home).join("SKILL.md");
+
+        let out = install_to_harnesses_at_home(
+            &home,
+            &InstallOptions {
+                harnesses: &[harness],
+                source: "custom instructions",
+                force: false,
+                home: Some(&home),
+            },
+        );
+        assert!(out.errors.is_empty());
+
+        let report = sync::sync_with_source(&home, "new bundled instructions");
+
+        assert_eq!(report.protected, vec![HarnessId::Cursor]);
+        assert_eq!(fs::read_to_string(dest).unwrap(), "custom instructions");
     }
 
     #[test]
