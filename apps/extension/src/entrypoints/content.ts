@@ -14,10 +14,14 @@ import {
   type RecordCaptureController,
 } from "@/content/record-capture";
 import {
-  HELP_RESPONSE,
+  HELP_ACK,
+  HELP_FINISH,
+  HELP_QUERY,
+  type HelpAckMessage,
   type HelpCancelMessage,
+  type HelpFinishMessage,
+  type HelpQueryResponse,
   type HelpRequestMessage,
-  type HelpResponseMessage,
   isHelpCancelMessage,
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
@@ -55,8 +59,6 @@ export default defineContentScript({
     if (window.top !== window) return;
 
     const overlays = new OverlayController();
-    let activeHelpRespond: ((outcome: "continued" | "cancelled", note?: string) => void) | null =
-      null;
     let recordCapture: RecordCaptureController | null = null;
     let activeRecordRequestId: string | null = null;
     let reactRoot: ReactDOM.Root | null = null;
@@ -116,8 +118,7 @@ export default defineContentScript({
     function resetAgentOverlayState(sessionId: string) {
       const previousHelp = overlays.resetAgentOverlays(sessionId);
       if (previousHelp) {
-        activeHelpRespond?.("cancelled");
-        activeHelpRespond = null;
+        void sendHelpFinish(previousHelp.id, "cancelled");
       }
       recordCapture?.dispose();
       recordCapture = null;
@@ -156,7 +157,7 @@ export default defineContentScript({
         | OverlayAgentOverlayResetMessage
         | OverlayAutomationBypassMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response: BorrowResponseMessage | HelpResponseMessage) => void,
+      sendResponse: (response: BorrowResponseMessage | HelpAckMessage) => void,
     ) => {
       if (isRecordContentMessage(message)) {
         const needsAsync = handleRecordContentMessage(
@@ -220,41 +221,30 @@ export default defineContentScript({
       if (isHelpCancelMessage(message)) {
         const state = overlays.snapshot();
         if (state.activeHelp && state.activeHelp.id === message.requestId) {
-          activeHelpRespond?.("cancelled");
+          overlays.clearAgentHelpRequest(message.requestId);
+          renderOverlay();
         }
         return false;
       }
 
       if (isHelpRequestMessage(message)) {
         const helpMsg = message as HelpRequestMessage;
-        let responded = false;
-        const respond = (outcome: "continued" | "cancelled", note?: string) => {
-          if (responded) return;
-          responded = true;
-          const reply: HelpResponseMessage = {
-            type: HELP_RESPONSE,
-            outcome,
-            ...(note ? { note } : {}),
-          };
-          sendResponse(reply);
-          activeHelpRespond = null;
-          overlays.clearAgentHelpRequest(helpMsg.requestId);
-          renderOverlay();
-        };
         const previousHelp = overlays.setAgentHelpRequest({
           id: helpMsg.requestId,
           prompt: helpMsg.prompt,
           ...(helpMsg.title ? { title: helpMsg.title } : {}),
+          ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
           selectors: helpMsg.selectors,
-          onContinue: (note: string) => respond("continued", note.trim() ? note : undefined),
-          onCancel: () => respond("cancelled"),
+          onContinue: (note: string) =>
+            void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
+          onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),
         });
-        if (previousHelp) {
-          activeHelpRespond?.("cancelled");
+        if (previousHelp && previousHelp.id !== helpMsg.requestId) {
+          void sendHelpFinish(previousHelp.id, "cancelled");
         }
-        activeHelpRespond = respond;
         renderOverlay();
-        return true; // async sendResponse
+        sendResponse({ type: HELP_ACK, ok: true });
+        return false;
       }
 
       if (message.type === "borrow-request") {
@@ -282,9 +272,60 @@ export default defineContentScript({
       return false;
     };
 
+    async function sendHelpFinish(
+      requestId: string,
+      outcome: "continued" | "cancelled",
+      note?: string,
+    ): Promise<void> {
+      const msg: HelpFinishMessage = {
+        type: HELP_FINISH,
+        requestId,
+        outcome,
+        ...(note ? { note } : {}),
+      };
+      overlays.clearAgentHelpRequest(requestId);
+      renderOverlay();
+      await chrome.runtime.sendMessage(msg).catch((err) => {
+        console.debug("[bsk overlay] help finish failed", err);
+      });
+    }
+
+    function mountHelpRequest(helpMsg: Omit<HelpRequestMessage, "type">): void {
+      overlays.setAgentHelpRequest({
+        id: helpMsg.requestId,
+        prompt: helpMsg.prompt,
+        ...(helpMsg.title ? { title: helpMsg.title } : {}),
+        ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
+        selectors: helpMsg.selectors,
+        onContinue: (note: string) =>
+          void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
+        onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),
+      });
+    }
+
+    async function queryActiveHelpWithRetry(): Promise<boolean> {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        try {
+          const helpQuery = (await chrome.runtime.sendMessage({
+            type: HELP_QUERY,
+          })) as HelpQueryResponse | undefined;
+          if (helpQuery?.active && helpQuery.request) {
+            mountHelpRequest(helpQuery.request);
+            renderOverlay();
+            return true;
+          }
+        } catch (err) {
+          console.debug("[bsk overlay] help query failed", err);
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 150));
+      }
+      return false;
+    }
+
     async function syncAgentOverlay(): Promise<void> {
       if (!(await anySessionLive())) return;
       try {
+        const helpActive = await queryActiveHelpWithRetry();
         const reply = (await chrome.runtime.sendMessage({
           kind: OVERLAY_MSG_WHO_AM_I,
         })) as OverlayWhoAmIResponse | undefined;
@@ -317,6 +358,10 @@ export default defineContentScript({
               });
             },
           });
+        }
+
+        if (!helpActive && overlays.snapshot().activeHelp === null) {
+          void queryActiveHelpWithRetry();
         }
 
         overlays.activateAgentSession(reply.sessionId);

@@ -15,6 +15,8 @@ export interface HelpRequestData {
   prompt: string;
   /** Custom overlay title; falls back to i18n when omitted. */
   title?: string;
+  /** Full task UI on the subject tab; compact status UI on related tabs. */
+  displayMode?: "full" | "compact";
   /** CSS selectors to scroll to + flash-highlight. */
   selectors: string[];
   onContinue: (note: string) => void;
@@ -174,6 +176,8 @@ function measure(selectors: string[]): Box[] {
 
 export function HelpRequestOverlay({ request }: Props) {
   const { t } = useTranslation("extension");
+  const isCompact = request?.displayMode === "compact";
+  const effectiveSelectors = isCompact ? [] : (request?.selectors ?? []);
   const [note, setNote] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -207,8 +211,9 @@ export function HelpRequestOverlay({ request }: Props) {
   // Scroll the first matched target into view once per distinct request id.
   useLayoutEffect(() => {
     if (!request) return;
+    if (isCompact) return;
     if (lastScrolledIdRef.current === request.id) return;
-    for (const sel of request.selectors) {
+    for (const sel of effectiveSelectors) {
       const el = querySelectorSafe(sel);
       if (el) {
         lastScrolledIdRef.current = request.id;
@@ -216,7 +221,7 @@ export function HelpRequestOverlay({ request }: Props) {
         break;
       }
     }
-  }, [request]);
+  }, [request, isCompact, effectiveSelectors]);
 
   // Keep highlight boxes aligned with the page as it scrolls / resizes.
   useEffect(() => {
@@ -225,7 +230,7 @@ export function HelpRequestOverlay({ request }: Props) {
       return;
     }
     const update = () => {
-      const nextBoxes = measure(request.selectors);
+      const nextBoxes = measure(effectiveSelectors);
       setBoxes((prev) => (boxesEqual(prev, nextBoxes) ? prev : nextBoxes));
     };
     update();
@@ -237,7 +242,7 @@ export function HelpRequestOverlay({ request }: Props) {
       window.removeEventListener("resize", update);
       window.clearInterval(interval);
     };
-  }, [request]);
+  }, [request, effectiveSelectors]);
 
   const onHeaderPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -294,8 +299,12 @@ export function HelpRequestOverlay({ request }: Props) {
       setPanelPos(null);
       return;
     }
+    if (isCompact) {
+      setPanelPos(null);
+      return;
+    }
     if (userMovedRef.current) return;
-    const measured = boxes.length > 0 ? boxes : measure(request.selectors);
+    const measured = boxes.length > 0 ? boxes : measure(effectiveSelectors);
     const anchor = unionBox(measured);
     const banner = bannerRef.current;
     if (!anchor || !banner) {
@@ -319,7 +328,7 @@ export function HelpRequestOverlay({ request }: Props) {
     }
     const nextPos = placePanel(anchor, panelW, panelH, placementRef.current.placement);
     setPanelPos((prev) => (panelPosEqual(prev, nextPos) ? prev : nextPos));
-  }, [request, boxes, collapsed]);
+  }, [request, boxes, collapsed, isCompact, effectiveSelectors]);
 
   if (!request) return null;
 
@@ -342,6 +351,8 @@ export function HelpRequestOverlay({ request }: Props) {
           z-index: 2147483647;
           display: flex;
           flex-direction: column;
+          justify-content: flex-start;
+          min-height: 0;
           gap: 10px;
           width: var(--bsk-help-banner-width);
           max-width: calc(100vw - ${VIEWPORT_MARGIN * 2}px);
@@ -359,16 +370,25 @@ export function HelpRequestOverlay({ request }: Props) {
         .bsk-help-banner[data-collapsed="true"] {
           gap: 0;
           width: var(--bsk-help-banner-width);
-          padding: 10px 12px;
+          padding: 12px;
+        }
+
+        .bsk-help-banner[data-display-mode="compact"] {
+          width: min(360px, calc(100vw - ${VIEWPORT_MARGIN * 2}px));
+          padding: 12px 14px;
+          gap: 0;
+          border-radius: 12px;
         }
 
         .bsk-help-drag-strip {
-          flex-shrink: 0;
+          position: absolute;
+          top: 6px;
+          left: 0;
+          right: 0;
           display: flex;
           align-items: center;
           justify-content: center;
           height: 12px;
-          margin: -8px 0 -10px;
           cursor: grab;
           user-select: none;
           touch-action: none;
@@ -395,13 +415,18 @@ export function HelpRequestOverlay({ request }: Props) {
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-drag-strip {
-          margin: -6px 0 -8px;
+          top: 4px;
         }
 
         .bsk-help-header {
+          flex-shrink: 0;
           display: flex;
           align-items: center;
           gap: 10px;
+        }
+
+        .bsk-help-banner[data-display-mode="compact"] .bsk-help-header {
+          gap: 8px;
         }
 
         .bsk-help-title {
@@ -414,31 +439,34 @@ export function HelpRequestOverlay({ request }: Props) {
           color: #111;
         }
 
+        .bsk-help-compact-title {
+          flex: 1 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+          font-weight: 500;
+          color: #374151;
+        }
+
         .bsk-help-banner[data-collapsed="true"] .bsk-help-title {
           white-space: nowrap;
         }
 
         .bsk-help-header-actions {
           flex-shrink: 0;
-          display: flex;
+          display: none;
           align-items: center;
           gap: 10px;
           margin-left: auto;
           overflow: hidden;
-          max-width: 0;
-          opacity: 0;
-          transform: translateX(8px);
-          pointer-events: none;
-          transition:
-            max-width var(--bsk-help-duration) var(--bsk-help-ease),
-            opacity 220ms var(--bsk-help-ease),
-            transform var(--bsk-help-duration) var(--bsk-help-ease);
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-header-actions {
+          display: flex;
           max-width: 280px;
           opacity: 1;
-          transform: translateX(0);
           pointer-events: auto;
         }
 
@@ -471,15 +499,13 @@ export function HelpRequestOverlay({ request }: Props) {
         }
 
         .bsk-help-body {
-          display: grid;
-          grid-template-rows: 1fr;
+          display: block;
+          flex-shrink: 0;
           min-width: 0;
-          transition: grid-template-rows var(--bsk-help-duration) var(--bsk-help-ease);
         }
 
         .bsk-help-banner[data-collapsed="true"] .bsk-help-body {
           position: absolute;
-          grid-template-rows: 0fr;
           width: 0;
           height: 0;
           overflow: hidden;
@@ -528,6 +554,7 @@ export function HelpRequestOverlay({ request }: Props) {
         .bsk-help-footer-actions {
           display: flex;
           justify-content: flex-end;
+          flex-wrap: wrap;
           gap: 10px;
         }
 
@@ -539,7 +566,8 @@ export function HelpRequestOverlay({ request }: Props) {
           font-size: 13px;
           font-weight: 500;
           color: #4b5563;
-          flex-shrink: 0;
+          min-width: 0;
+          white-space: normal;
         }
 
         .bsk-help-btn-continue {
@@ -550,16 +578,30 @@ export function HelpRequestOverlay({ request }: Props) {
           font-size: 13px;
           font-weight: 600;
           color: #fff;
-          flex-shrink: 0;
+          min-width: 0;
+          white-space: normal;
         }
 
         .bsk-help-header-actions .bsk-help-btn-cancel,
         .bsk-help-header-actions .bsk-help-btn-continue {
           padding: 6px 12px;
+          white-space: nowrap;
         }
 
         .bsk-help-header-actions .bsk-help-btn-continue {
           padding: 6px 14px;
+          max-width: 180px;
+        }
+
+        .bsk-help-banner[data-display-mode="compact"] .bsk-help-header-actions {
+          display: flex;
+          max-width: none;
+        }
+
+        .bsk-help-banner[data-display-mode="compact"] .bsk-help-header-actions .bsk-help-btn-cancel,
+        .bsk-help-banner[data-display-mode="compact"] .bsk-help-header-actions .bsk-help-btn-continue {
+          padding: 6px 10px;
+          font-size: 12px;
         }
 
         .bsk-help-footer-actions .bsk-help-btn-cancel {
@@ -584,29 +626,31 @@ export function HelpRequestOverlay({ request }: Props) {
         }
       `}</style>
 
-      {boxes.map((b, i) => (
-        <div
-          // biome-ignore lint/suspicious/noArrayIndexKey: boxes are positional
-          key={i}
-          data-slot="help-highlight"
-          style={{
-            position: "fixed",
-            top: b.top,
-            left: b.left,
-            width: b.width,
-            height: b.height,
-            borderRadius: 6,
-            zIndex: 2147483646,
-            pointerEvents: "none",
-            animation: "bsk-help-flash 1.2s ease-in-out infinite",
-          }}
-        />
-      ))}
+      {!isCompact &&
+        boxes.map((b, i) => (
+          <div
+            // biome-ignore lint/suspicious/noArrayIndexKey: boxes are positional
+            key={i}
+            data-slot="help-highlight"
+            style={{
+              position: "fixed",
+              top: b.top,
+              left: b.left,
+              width: b.width,
+              height: b.height,
+              borderRadius: 6,
+              zIndex: 2147483646,
+              pointerEvents: "none",
+              animation: "bsk-help-flash 1.2s ease-in-out infinite",
+            }}
+          />
+        ))}
 
       <div
         ref={bannerRef}
         data-slot="help-request-banner"
         data-collapsed={collapsed ? "true" : "false"}
+        data-display-mode={isCompact ? "compact" : "full"}
         data-anchored={panelPos ? "true" : "false"}
         data-dragging={dragging ? "true" : "false"}
         data-placement={panelPos?.placement}
@@ -629,15 +673,17 @@ export function HelpRequestOverlay({ request }: Props) {
               : undefined
         }
       >
-        <div
-          data-slot="help-drag-handle"
-          className="bsk-help-drag-strip"
-          role="img"
-          aria-label={t("helpRequest.dragHandle")}
-          onPointerDown={onHeaderPointerDown}
-        >
-          <span className="bsk-help-drag-pill" aria-hidden />
-        </div>
+        {!isCompact && (
+          <div
+            data-slot="help-drag-handle"
+            className="bsk-help-drag-strip"
+            role="img"
+            aria-label={t("helpRequest.dragHandle")}
+            onPointerDown={onHeaderPointerDown}
+          >
+            <span className="bsk-help-drag-pill" aria-hidden />
+          </div>
+        )}
 
         <div className="bsk-help-header">
           <img
@@ -645,77 +691,87 @@ export function HelpRequestOverlay({ request }: Props) {
             alt="browser-skill"
             style={{ width: 22, height: 22, borderRadius: 4 }}
           />
-          <span className="bsk-help-title">{request.title ?? t("helpRequest.title")}</span>
-          <div className="bsk-help-header-actions" aria-hidden={!collapsed}>
+          {isCompact ? (
+            <span className="bsk-help-compact-title">{t("helpRequest.compactStatus")}</span>
+          ) : (
+            <span className="bsk-help-title">{request.title ?? t("helpRequest.title")}</span>
+          )}
+          {!isCompact && (
+            <div className="bsk-help-header-actions" aria-hidden={!collapsed}>
+              <button
+                type="button"
+                data-slot={collapsed ? "help-cancel-button" : undefined}
+                className="bsk-help-btn-cancel"
+                tabIndex={collapsed ? 0 : -1}
+                onClick={() => request.onCancel()}
+              >
+                {t("helpRequest.cancel")}
+              </button>
+              <button
+                type="button"
+                data-slot={collapsed ? "help-continue-button" : undefined}
+                className="bsk-help-btn-continue"
+                tabIndex={collapsed ? 0 : -1}
+                onClick={() => request.onContinue(note)}
+              >
+                {t("helpRequest.continue")}
+              </button>
+            </div>
+          )}
+          {!isCompact && (
             <button
               type="button"
-              data-slot={collapsed ? "help-cancel-button" : undefined}
-              className="bsk-help-btn-cancel"
-              tabIndex={collapsed ? 0 : -1}
-              onClick={() => request.onCancel()}
+              data-slot="help-collapse-toggle"
+              className="bsk-help-collapse-toggle"
+              aria-label={collapsed ? t("helpRequest.expand") : t("helpRequest.collapse")}
+              aria-expanded={!collapsed}
+              onClick={() => setCollapsed((c) => !c)}
             >
-              {t("helpRequest.cancel")}
+              <span className="bsk-help-collapse-icon">
+                <RiArrowDownSLine size={20} aria-hidden />
+              </span>
             </button>
-            <button
-              type="button"
-              data-slot={collapsed ? "help-continue-button" : undefined}
-              className="bsk-help-btn-continue"
-              tabIndex={collapsed ? 0 : -1}
-              onClick={() => request.onContinue(note)}
-            >
-              {t("helpRequest.continue")}
-            </button>
-          </div>
-          <button
-            type="button"
-            data-slot="help-collapse-toggle"
-            className="bsk-help-collapse-toggle"
-            aria-label={collapsed ? t("helpRequest.expand") : t("helpRequest.collapse")}
-            aria-expanded={!collapsed}
-            onClick={() => setCollapsed((c) => !c)}
-          >
-            <span className="bsk-help-collapse-icon">
-              <RiArrowDownSLine size={20} aria-hidden />
-            </span>
-          </button>
+          )}
         </div>
 
-        <div className="bsk-help-body" aria-hidden={collapsed}>
-          <div className="bsk-help-body-inner">
-            <div className="bsk-help-body-content">
-              <p className="bsk-help-prompt">{request.prompt}</p>
-              <input
-                type="text"
-                className="bsk-help-note-input"
-                aria-label={t("helpRequest.noteLabel")}
-                placeholder={t("helpRequest.notePlaceholder")}
-                value={note}
-                tabIndex={collapsed ? -1 : 0}
-                onChange={(e) => setNote(e.target.value)}
-              />
-              <div className="bsk-help-footer-actions">
-                <button
-                  type="button"
-                  data-slot={collapsed ? undefined : "help-cancel-button"}
-                  className="bsk-help-btn-cancel"
+        {!isCompact && (
+          <div className="bsk-help-body" aria-hidden={collapsed}>
+            <div className="bsk-help-body-inner">
+              <div className="bsk-help-body-content">
+                <p className="bsk-help-prompt">{request.prompt}</p>
+                <input
+                  type="text"
+                  className="bsk-help-note-input"
+                  aria-label={t("helpRequest.noteLabel")}
+                  placeholder={t("helpRequest.notePlaceholder")}
+                  value={note}
                   tabIndex={collapsed ? -1 : 0}
-                  onClick={() => request.onCancel()}
-                >
-                  {t("helpRequest.cancel")}
-                </button>
-                <button
-                  type="button"
-                  data-slot={collapsed ? undefined : "help-continue-button"}
-                  className="bsk-help-btn-continue"
-                  tabIndex={collapsed ? -1 : 0}
-                  onClick={() => request.onContinue(note)}
-                >
-                  {t("helpRequest.continue")}
-                </button>
+                  onChange={(e) => setNote(e.target.value)}
+                />
+                <div className="bsk-help-footer-actions">
+                  <button
+                    type="button"
+                    data-slot={collapsed ? undefined : "help-cancel-button"}
+                    className="bsk-help-btn-cancel"
+                    tabIndex={collapsed ? -1 : 0}
+                    onClick={() => request.onCancel()}
+                  >
+                    {t("helpRequest.cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    data-slot={collapsed ? undefined : "help-continue-button"}
+                    className="bsk-help-btn-continue"
+                    tabIndex={collapsed ? -1 : 0}
+                    onClick={() => request.onContinue(note)}
+                  >
+                    {t("helpRequest.continue")}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     </>
   );

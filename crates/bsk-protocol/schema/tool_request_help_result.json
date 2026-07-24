@@ -7,6 +7,16 @@
     "tab_id"
   ],
   "properties": {
+    "completed_by": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HelpCompletedBy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "note": {
       "type": [
         "string",
@@ -31,10 +41,16 @@
     }
   },
   "definitions": {
+    "HelpCompletedBy": {
+      "type": "string",
+      "enum": [
+        "system"
+      ]
+    },
     "HelpOutcome": {
       "oneOf": [
         {
-          "description": "User completed the step and clicked Continue.",
+          "description": "User completed the step and clicked Done / return control.",
           "type": "string",
           "enum": [
             "continued"
@@ -55,7 +71,14 @@
           ]
         },
         {
-          "description": "The page navigated while waiting (full reload or SPA URL change).",
+          "description": "Explicit success criteria matched while the user had control.",
+          "type": "string",
+          "enum": [
+            "completed"
+          ]
+        },
+        {
+          "description": "The page navigated while waiting (full reload or SPA URL change). Deprecated: navigation alone should not end a help request.",
           "type": "string",
           "enum": [
             "navigated"
