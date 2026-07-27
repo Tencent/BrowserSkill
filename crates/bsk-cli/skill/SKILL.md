@@ -68,6 +68,7 @@ Write operations only affect tabs in the **Agent Window** (or tabs you **borrowe
 ```
 bsk navigate <url> --session <id>
 bsk snapshot --session <id>          → aria tree with @e1, @e2, … refs
+bsk observe --session <id>           → semantic VOM view; may reveal hover/focus surfaces
 bsk click @e3 --session <id>          → or bsk fill, bsk select, bsk press
 bsk snapshot --session <id>            → again after navigation / DOM change
 ```
@@ -78,11 +79,12 @@ Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` /
 
 ## Observation priority
 
-Start with `bsk snapshot` to understand page structure, text, controls, and element refs. Only escalate when the latest snapshot cannot answer the question:
+Start with `bsk snapshot` to understand page structure, text, controls, and element refs. Use `bsk observe` when semantic VOM output or conditional hover/focus surfaces would materially help. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
 
-1. `bsk snapshot` — default for page understanding and interaction planning
-2. `bsk get-html` — when hidden DOM, metadata, or markup details are required
-3. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the snapshot. Use `--ref @eN` (from the latest snapshot) to crop to one element; omit `--ref` for the full visible tab.
+1. `bsk snapshot` — strict static page understanding and interaction planning
+2. `bsk observe` — semantic VOM observation; may run bounded perception probes such as hover-surface discovery
+3. `bsk get-html` — when hidden DOM, metadata, or markup details are required
+4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
 
 Do **not** call `bsk get-html` or `bsk screenshot` first just to inspect a page.
 
@@ -141,7 +143,8 @@ Details and flags: **`bsk <cmd> --help`**
 
 | Command | Summary |
 |---------|---------|
-| `bsk snapshot` | First-choice page understanding: accessibility tree with `@eN` element refs |
+| `bsk snapshot` | First-choice static page understanding: accessibility tree with `@eN` element refs |
+| `bsk observe` | Semantic VOM observation with bounded perception probes for conditional surfaces |
 | `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
 | `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
 
@@ -260,7 +263,7 @@ Always **`bsk session stop <id>`** in a `finally`-style path so the Agent Window
 2. **No long borrow** — do not leave a user's personal tab in the Agent Window across unrelated tasks.
 3. **No skip stop** — always `bsk session stop <id>`; never assume idle timeout will clean up.
 4. **No post-success control** — once the user’s goal (or last trace step) is met, do not keep operating the page; stop the session unless they asked to keep it open.
-5. **No observe escalation before snapshot** — use `bsk snapshot` first; only use `bsk get-html` or `bsk screenshot` when the snapshot is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot ref — never skip snapshot just to grab a visual.
+5. **No raw observe escalation before snapshot/observe** — use `bsk snapshot` first; use `bsk observe` when VOM semantics or conditional surfaces help. Only use `bsk get-html` or `bsk screenshot` when snapshot/observe is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot/observe ref — never skip observation just to grab a visual.
 6. **`evaluate` is powerful and risky** — use only when snapshot + click/fill/select cannot suffice; never on credential surfaces.
 
 ---

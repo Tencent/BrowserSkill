@@ -2,13 +2,13 @@
 //!
 //! Holds a single-use marker per `SessionId` indicating that the
 //! user has clicked the agent-window mask's stop button. The next
-//! mutating `tool.*` call for that session is rejected with
-//! `ErrorCode::UserAborted`; read-only tools and session-lifecycle
+//! browser-input-dispatching `tool.*` call for that session is rejected
+//! with `ErrorCode::UserAborted`; passive reads and session-lifecycle
 //! RPCs pass through transparently and do not consume the marker.
 //!
 //! The marker is single-use and has no expiry: it sits in the
-//! registry until consumed by a mutating call or until the session
-//! is torn down. This lets the user's interrupt survive an LLM
+//! registry until consumed by an input-dispatching call or until the
+//! session is torn down. This lets the user's interrupt survive an LLM
 //! thinking phase of arbitrary length — the v1 time-window
 //! mechanism dropped interrupts whenever the LLM took longer to
 //! respond than the window allowed.

@@ -231,6 +231,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolConsole
                 | Method::ToolNetwork
                 | Method::ToolSnapshot
+                | Method::ToolObserve
                 | Method::ToolGetHtml
                 | Method::ToolNavigate
                 | Method::ToolNavigateBack
@@ -291,16 +292,14 @@ async fn handle_tool_dispatch(
     };
     // Pre-flight: if the user has clicked the agent-window mask's
     // stop button, every session carries a one-shot "pending
-    // interrupt" marker. The marker is consumed by the next
-    // *mutating* tool call (which is rejected with `UserAborted`).
-    // Read-only tools (snapshot / get_html / waits / tab_list) and
-    // session-lifecycle RPCs pass through transparently — gating
-    // them would prevent the agent from observing page state
-    // before asking the user, or from cleanly tearing down the
-    // session. Classification lives on `Method::is_mutating()` so
-    // adding a new tool variant requires an explicit
-    // classification call.
-    if method.is_mutating() && state.session_interrupts.try_consume(&session_id) {
+    // interrupt" marker. The marker is consumed by the next method
+    // that dispatches browser/page input (which is rejected with
+    // `UserAborted`). Passive reads and control-plane RPCs pass through
+    // transparently — gating them would prevent the agent from observing
+    // page state before asking the user, or from cleanly tearing down the
+    // session. Classification lives on `Method::effect()` so adding a new
+    // tool variant requires an explicit classification call.
+    if method.requires_interrupt_gate() && state.session_interrupts.try_consume(&session_id) {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::UserAborted,
             message: "tool dispatch rejected: pending user interrupt. The user explicitly requested to stop. Ask the user how to proceed before issuing further actions.".into(),

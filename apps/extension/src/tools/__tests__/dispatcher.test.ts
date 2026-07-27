@@ -274,6 +274,35 @@ describe("ToolDispatcher", () => {
     expect(onSessionsChanged).toHaveBeenCalledTimes(2);
   });
 
+  it("invokes onBrowserControlResumed for browser-control tools but not passive reads", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 1),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const onBrowserControlResumed = vi.fn();
+    const dispatcher = new ToolDispatcher({ transport, sessions, onBrowserControlResumed });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.session_start", { session_id: "aa11" }));
+    await flushMicrotasks();
+    sent.length = 0;
+
+    deliver({ ...makeRequest("tool.snapshot", { session_id: "aa11" }), id: "r-passive" });
+    await flushMicrotasks();
+    expect(onBrowserControlResumed).not.toHaveBeenCalled();
+
+    deliver({
+      ...makeRequest("tool.tab_create", { session_id: "aa11", url: "https://example.test/" }),
+      id: "r-control",
+    });
+    await flushMicrotasks();
+    expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
+  });
+
   it("disconnects the transport when send() fails so keepalive can rebuild", async () => {
     const { transport, deliver } = fakeTransport();
     const sessions = new SessionManager({

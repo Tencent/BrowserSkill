@@ -3,9 +3,8 @@
  * between the content-script control overlay and the background SW.
  *
  * Content script → background:
- *  - `{ kind: "overlay.who_am_i", tabId, windowId }` → background
- *      replies `{ sessionId: string | null }` so the overlay knows
- *      whether to render itself.
+ *  - `{ kind: "overlay.ready" }` → background replies with the authoritative
+ *      overlay state for the sender's window.
  *  - `{ kind: "overlay.interrupt", sessionId }` → background asks the
  *      daemon (via a `session.user_interrupt` WS event) to cancel
  *      every inflight + queued tool call for that session with
@@ -14,6 +13,7 @@
  */
 
 export const OVERLAY_MSG_WHO_AM_I = "overlay.who_am_i";
+export const OVERLAY_MSG_READY = "overlay.ready";
 export const OVERLAY_MSG_INTERRUPT = "overlay.interrupt";
 
 /**
@@ -57,6 +57,22 @@ export interface OverlayWhoAmIResponse {
   sessionId: string | null;
 }
 
+export interface OverlayReadyRequest {
+  kind: typeof OVERLAY_MSG_READY;
+}
+
+export type OverlayMode = "control" | "interrupting" | "paused" | "hidden";
+
+/** Background → content: complete, authoritative control-overlay state. */
+export const OVERLAY_AGENT_STATE = "bh-agent-overlay-state";
+
+export interface OverlayAgentStateMessage {
+  type: typeof OVERLAY_AGENT_STATE;
+  sessionId: string | null;
+  mode: OverlayMode;
+  generation: number;
+}
+
 export interface OverlayInterruptRequest {
   kind: typeof OVERLAY_MSG_INTERRUPT;
   sessionId: string;
@@ -90,4 +106,23 @@ export function isOverlayAgentOverlayResetMessage(
   return candidate.type === OVERLAY_AGENT_OVERLAY_RESET && typeof candidate.sessionId === "string";
 }
 
-export type OverlayMessage = OverlayWhoAmIRequest | OverlayInterruptRequest;
+export function isOverlayAgentStateMessage(message: unknown): message is OverlayAgentStateMessage {
+  if (!message || typeof message !== "object") return false;
+  const candidate = message as {
+    type?: unknown;
+    sessionId?: unknown;
+    mode?: unknown;
+    generation?: unknown;
+  };
+  return (
+    candidate.type === OVERLAY_AGENT_STATE &&
+    (typeof candidate.sessionId === "string" || candidate.sessionId === null) &&
+    (candidate.mode === "control" ||
+      candidate.mode === "interrupting" ||
+      candidate.mode === "paused" ||
+      candidate.mode === "hidden") &&
+    typeof candidate.generation === "number"
+  );
+}
+
+export type OverlayMessage = OverlayWhoAmIRequest | OverlayReadyRequest | OverlayInterruptRequest;

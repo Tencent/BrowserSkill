@@ -1,0 +1,40 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ObserveParams",
+  "description": "Parameters for `tool.observe` — produce a semantic VOM observation for one tab plus a fresh `@e<N>` ref-store on the extension side.\n\nUnlike `tool.snapshot`, this path may run bounded perception probes such as hover-surface discovery. It must not submit input, click, navigate, or otherwise commit page state.",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "max_depth": {
+      "description": "Cap the depth of the rendered VOM tree.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_tokens": {
+      "description": "Soft cap on rendered tokens (approximate; extension uses a best-effort heuristic based on character count).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Optional target tab. Defaults to the Agent Window's currently active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  }
+}

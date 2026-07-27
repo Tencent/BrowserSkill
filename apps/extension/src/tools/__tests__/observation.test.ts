@@ -7,6 +7,7 @@ import {
   buildVomScene,
   type CdpAxNode,
   handleGetHtml,
+  handleObserve,
   handleScreenshot,
   handleSnapshot,
   parsePngDimensions,
@@ -1412,7 +1413,7 @@ describe("buildVomScene", () => {
     expect(scene.surfaces).toEqual([
       { triggerId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
     ]);
-    expect(renderVom(scene).text).toContain('@e1 button "Products" [→ Shoes | Bags]');
+    expect(renderVom(scene).text).toContain('@e1 button "Products" [hover: Shoes | Bags]');
   });
 
   it("enriches names and active scope signals from AX properties", () => {
@@ -1739,6 +1740,225 @@ describe("handleSnapshot", () => {
     expect(ctx.refStore.resolve("e1", { tabId: 5 })).toBeNull();
     expect(ctx.refStore.resolveEntry("e1")).toMatchObject({ backendNodeId: 200, tabId: 4 });
     expect(ctx.refStore.resolve("e2")).toBeNull();
+  });
+
+  it("keeps snapshots static without conditional surface probing", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "Example" },
+      backendDOMNodeId: 100,
+      childIds: ["2"],
+    };
+    const button: CdpAxNode = {
+      nodeId: "2",
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: "Products" },
+      backendDOMNodeId: 200,
+    };
+    const strings = ["body", "button", "position", "static", "pointer-events", "auto", "cursor"];
+    const i = (s: string) => strings.indexOf(s);
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+      }
+      if (method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return {
+          strings,
+          documents: [
+            {
+              nodes: {
+                parentIndex: [-1, 0],
+                nodeName: [i("body"), i("button")],
+                backendNodeId: [100, 200],
+                attributes: [[], []],
+              },
+              layout: {
+                nodeIndex: [0, 1],
+                styles: [
+                  [i("static"), i("auto"), i("auto")],
+                  [i("static"), i("auto"), i("auto")],
+                ],
+                bounds: [
+                  [0, 0, 1000, 800],
+                  [20, 20, 120, 40],
+                ],
+                paintOrders: [0, 1],
+              },
+            },
+          ],
+        };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: [] } };
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+    const res = await handleSnapshot(
+      sm,
+      { session_id: "aa11" },
+      {
+        cdp: {
+          send: send as unknown as <T = unknown>(
+            tabId: number,
+            method: string,
+            params?: object,
+          ) => Promise<T>,
+          trackSessionTab: vi.fn(),
+        },
+        tabsApi: {
+          get: vi.fn(
+            async (tabId: number) =>
+              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+          ),
+          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+        },
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(send).not.toHaveBeenCalledWith(
+      4,
+      "Runtime.evaluate",
+      expect.objectContaining({ returnByValue: true }),
+    );
+  });
+
+  it("enables conditional surface probing for semantic observe", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "Example" },
+      backendDOMNodeId: 100,
+      childIds: ["2"],
+    };
+    const button: CdpAxNode = {
+      nodeId: "2",
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: "Products" },
+      backendDOMNodeId: 200,
+    };
+    const strings = ["body", "button", "position", "static", "pointer-events", "auto", "cursor"];
+    const i = (s: string) => strings.indexOf(s);
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+      }
+      if (method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return {
+          strings,
+          documents: [
+            {
+              nodes: {
+                parentIndex: [-1, 0],
+                nodeName: [i("body"), i("button")],
+                backendNodeId: [100, 200],
+                attributes: [[], []],
+              },
+              layout: {
+                nodeIndex: [0, 1],
+                styles: [
+                  [i("static"), i("auto"), i("auto")],
+                  [i("static"), i("auto"), i("auto")],
+                ],
+                bounds: [
+                  [0, 0, 1000, 800],
+                  [20, 20, 120, 40],
+                ],
+                paintOrders: [0, 1],
+              },
+            },
+          ],
+        };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: [] } };
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+    const res = await handleObserve(
+      sm,
+      { session_id: "aa11" },
+      {
+        cdp: {
+          send: send as unknown as <T = unknown>(
+            tabId: number,
+            method: string,
+            params?: object,
+          ) => Promise<T>,
+          trackSessionTab: vi.fn(),
+        },
+        tabsApi: {
+          get: vi.fn(
+            async (tabId: number) =>
+              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+          ),
+          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+        },
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(send).toHaveBeenCalledWith(
+      4,
+      "Runtime.evaluate",
+      expect.objectContaining({ returnByValue: true }),
+    );
+  });
+
+  it("allows passive snapshots of explicit user-window tabs", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "User tab" },
+      backendDOMNodeId: 100,
+      childIds: ["2"],
+    };
+    const button: CdpAxNode = {
+      nodeId: "2",
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: "Read" },
+      backendDOMNodeId: 200,
+    };
+    const deps = makeDeps([root, button]);
+    deps.tabsApi.get = vi.fn(
+      async (tabId: number) => ({ id: tabId, windowId: 200, active: true }) as chrome.tabs.Tab,
+    );
+
+    const res = await handleSnapshot(sm, { session_id: "aa11", tab_id: 9 }, deps);
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_id).toBe(9);
+    expect(res.text).toContain('@e1 button "Read"');
+    expect(deps.send).toHaveBeenCalledWith(9, "Accessibility.enable", {});
+  });
+
+  it("rejects semantic observe on explicit user-window tabs before CDP probing", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const deps = makeDeps([]);
+    deps.tabsApi.get = vi.fn(
+      async (tabId: number) => ({ id: tabId, windowId: 200, active: true }) as chrome.tabs.Tab,
+    );
+
+    const res = await handleObserve(sm, { session_id: "aa11", tab_id: 9 }, deps);
+
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+    });
+    expect(deps.send).not.toHaveBeenCalled();
   });
 
   it("resets the RefStore on every fresh snapshot", async () => {

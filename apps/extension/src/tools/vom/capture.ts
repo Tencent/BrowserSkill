@@ -16,9 +16,14 @@ const STYLE_COL = Object.fromEntries(
 export interface CapturedNode {
   backendNodeId: number;
   parentBackendNodeId: number | null;
+  /** Owning iframe backend node id; `null` for the top-level document. */
+  ownerFrameBackendNodeId?: number | null;
   tag: string;
   attrs: Record<string, string>;
+  /** Top-level viewport-relative CSS px, clipped to the owning frame viewport. */
   rect: Rect | null;
+  /** Frame-local viewport-relative CSS px before top-level translation/clipping. */
+  localRect?: Rect | null;
   paintOrder: number;
   position: string;
   pointerEvents: string;
@@ -31,6 +36,7 @@ export interface CapturedNode {
    */
   cursor?: string;
   textContent?: string;
+  formState?: "empty" | "filled" | "default";
   formValue?: string;
   formDefaultValue?: string;
   formPlaceholder?: string;
@@ -51,6 +57,10 @@ export interface CapturedViewModel {
   surfaceProbes?: CapturedSurfaceProbe[];
   /** Backend node ids belonging to the agent overlay host + its shadow subtree. */
   excludedBackendNodeIds: Set<number>;
+}
+
+export interface CaptureViewModelOptions {
+  conditionalSurfaceProbe?: boolean;
 }
 
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
@@ -102,45 +112,109 @@ function isFormControlTag(tag: string): boolean {
   return tag === "input" || tag === "textarea" || tag === "select";
 }
 
-async function enrichFormControlState(cdp: CdpRunner, tabId: number, nodes: CapturedNode[]) {
+const MAX_FORM_ENRICH_CONTROLS = 250;
+
+interface CapturedFormState {
+  value?: string;
+  defaultValue?: string;
+  placeholder?: string;
+  state?: "empty" | "filled" | "default";
+  sensitive?: boolean;
+}
+
+interface CapturedFrameFormState {
+  controls: CapturedFormState[];
+  childFrames: CapturedFrameFormState[];
+}
+
+function formStateBatchExpression(maxControls: number): string {
+  return `(() => {
+    const maxControls = ${JSON.stringify(maxControls)};
+    let remaining = maxControls;
+    const controlSelector = "input,textarea,select";
+    const controlState = (el) => {
+      const tag = el.tagName.toLowerCase();
+      const type = tag === "input" ? String(el.type || "text").toLowerCase() : tag;
+      const sensitive = type === "password" || type === "credit-card";
+      const rawValue = typeof el.value === "string" ? el.value : "";
+      const defaultValue = typeof el.defaultValue === "string" ? el.defaultValue : "";
+      const placeholder = typeof el.placeholder === "string" ? el.placeholder : "";
+      const state = rawValue === "" ? "empty" : rawValue === defaultValue ? "default" : "filled";
+      return {
+        state,
+        sensitive,
+        defaultValue,
+        placeholder,
+        ...(sensitive ? {} : { value: rawValue }),
+      };
+    };
+    const collect = (doc) => {
+      const controls = [];
+      for (const el of Array.from(doc.querySelectorAll(controlSelector))) {
+        if (remaining <= 0) break;
+        controls.push(controlState(el));
+        remaining -= 1;
+      }
+      const childFrames = [];
+      for (const frame of Array.from(doc.querySelectorAll("iframe"))) {
+        let childDoc = null;
+        try { childDoc = frame.contentDocument; } catch { childDoc = null; }
+        childFrames.push(childDoc && remaining > 0 ? collect(childDoc) : { controls: [], childFrames: [] });
+      }
+      return { controls, childFrames };
+    };
+    return collect(document);
+  })()`;
+}
+
+function flattenFrameFormStates(
+  frame: CapturedFrameFormState | undefined,
+  out: CapturedFormState[][] = [],
+): CapturedFormState[][] {
+  if (!frame) return out;
+  out.push(Array.isArray(frame.controls) ? frame.controls : []);
+  for (const child of Array.isArray(frame.childFrames) ? frame.childFrames : []) {
+    flattenFrameFormStates(child, out);
+  }
+  return out;
+}
+
+function applyFormStates(nodes: CapturedNode[], states: CapturedFormState[]): void {
+  let index = 0;
   for (const node of nodes) {
     if (!isFormControlTag(node.tag)) continue;
-    let objectId: string | undefined;
-    try {
-      const resolved = await cdp.send<{ object?: { objectId?: string } }>(
-        tabId,
-        "DOM.resolveNode",
-        {
-          backendNodeId: node.backendNodeId,
-        },
-      );
-      objectId = resolved.object?.objectId;
-      if (!objectId) continue;
-      const result = await cdp.send<{
-        result?: { value?: { value?: string; defaultValue?: string; placeholder?: string } };
-      }>(tabId, "Runtime.callFunctionOn", {
-        objectId,
-        returnByValue: true,
-        functionDeclaration: `function(){
-          return {
-            value: typeof this.value === "string" ? this.value : "",
-            defaultValue: typeof this.defaultValue === "string" ? this.defaultValue : "",
-            placeholder: typeof this.placeholder === "string" ? this.placeholder : ""
-          };
-        }`,
-      });
-      const value = result.result?.value;
-      if (!value) continue;
-      node.formValue = value.value ?? "";
-      node.formDefaultValue = value.defaultValue ?? "";
-      node.formPlaceholder = value.placeholder ?? "";
-    } catch {
-      // Best-effort enrichment. DOMSnapshot/AX data still carries the node.
-    } finally {
-      if (objectId) {
-        await cdp.send(tabId, "Runtime.releaseObject", { objectId }).catch(() => {});
-      }
+    const state = states[index];
+    index += 1;
+    if (!state) continue;
+    node.formState = state.state;
+    node.formDefaultValue = state.defaultValue ?? "";
+    node.formPlaceholder = state.placeholder ?? "";
+    if (!state.sensitive && state.value !== undefined) {
+      node.formValue = state.value;
     }
+  }
+}
+
+async function enrichFormControlStates(
+  cdp: CdpRunner,
+  tabId: number,
+  frameNodeGroups: CapturedNode[][],
+): Promise<void> {
+  const hasControls = frameNodeGroups.some((nodes) =>
+    nodes.some((node) => isFormControlTag(node.tag)),
+  );
+  if (!hasControls) return;
+  try {
+    const result = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+      expression: formStateBatchExpression(MAX_FORM_ENRICH_CONTROLS),
+      returnByValue: true,
+    });
+    const frameStates = flattenFrameFormStates(runtimeValue<CapturedFrameFormState>(result));
+    for (let i = 0; i < frameNodeGroups.length; i += 1) {
+      applyFormStates(frameNodeGroups[i], frameStates[i] ?? []);
+    }
+  } catch {
+    // Best-effort enrichment. DOMSnapshot/AX data still carries the nodes.
   }
 }
 
@@ -169,6 +243,14 @@ interface ParseDocumentResult {
   excludedBackendNodeIds: Set<number>;
 }
 
+interface FrameContext {
+  ownerFrameBackendNodeId: number | null;
+  originInTop: { x: number; y: number };
+  clipRectInTop: Rect;
+  scrollX: number;
+  scrollY: number;
+}
+
 function str(strings: string[], idx: number | undefined): string {
   if (idx === undefined || idx < 0) return "";
   return strings[idx] ?? "";
@@ -181,6 +263,49 @@ function devicePixelRatio(metrics: LayoutMetricsReply): number {
   const dpr = layoutW / cssW;
   if (!Number.isFinite(dpr) || dpr <= 0) return 1;
   return dpr >= 1 ? dpr : 1;
+}
+
+function viewportRect(viewport: Viewport): Rect {
+  return { x: 0, y: 0, w: Math.max(0, viewport.width), h: Math.max(0, viewport.height) };
+}
+
+function intersectRects(a: Rect, b: Rect): Rect | null {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w);
+  const y2 = Math.min(a.y + a.h, b.y + b.h);
+  if (x2 <= x1 || y2 <= y1) return null;
+  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+}
+
+function rectInTop(localRect: Rect, context: FrameContext): Rect | null {
+  const translated = {
+    x: context.originInTop.x + localRect.x,
+    y: context.originInTop.y + localRect.y,
+    w: localRect.w,
+    h: localRect.h,
+  };
+  return intersectRects(translated, context.clipRectInTop);
+}
+
+function unclipRectInTop(localRect: Rect, context: FrameContext): Rect {
+  return {
+    x: context.originInTop.x + localRect.x,
+    y: context.originInTop.y + localRect.y,
+    w: localRect.w,
+    h: localRect.h,
+  };
+}
+
+function sparseIndexMap(sparse: SparseArray | undefined): Map<number, number> {
+  const out = new Map<number, number>();
+  if (!sparse?.index || !sparse.value) return out;
+  for (let i = 0; i < sparse.index.length; i++) {
+    const nodeIndex = sparse.index[i];
+    const docIndex = sparse.value[i];
+    if (nodeIndex !== undefined && docIndex !== undefined) out.set(nodeIndex, docIndex);
+  }
+  return out;
 }
 
 function collectBackendIdsFromDomNode(node: CdpDomNode | undefined, out: Set<number>): void {
@@ -235,14 +360,24 @@ function hoverCssScanExpression(): string {
 
     const candidates = [];
     const seenLabels = new Set();
+    const isUnsafeTrigger = (el) => {
+      if (!(el instanceof HTMLElement)) return true;
+      const tag = el.tagName.toLowerCase();
+      if (["input", "textarea", "select", "option"].includes(tag)) return true;
+      if (el.isContentEditable) return true;
+      if (el.hasAttribute("disabled") || el.hasAttribute("inert")) return true;
+      if ((el.getAttribute("aria-disabled") || "").toLowerCase() === "true") return true;
+      return false;
+    };
     for (const pair of pairs) {
       let elements;
       try { elements = Array.from(document.querySelectorAll(pair.triggerSel)); } catch { continue; }
       for (const el of elements) {
         if (!(el instanceof Element)) continue;
+        if (isUnsafeTrigger(el)) continue;
         const rect = el.getBoundingClientRect();
         const style = getComputedStyle(el);
-        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none") continue;
+        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none" || style.pointerEvents === "none") continue;
         const label = (el.textContent || "").replace(/\\s+/g, " ").trim();
         if (!label || seenLabels.has(label)) continue;
         seenLabels.add(label);
@@ -304,6 +439,20 @@ async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
+  await cdp
+    .send(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: -10,
+      y: -10,
+    })
+    .catch(() =>
+      cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 }).catch(() => {
+        // best effort
+      }),
+    );
+}
+
 async function probeHoverSurfaces(cdp: CdpRunner, tabId: number): Promise<CapturedSurfaceProbe[]> {
   const started = Date.now();
   try {
@@ -328,7 +477,6 @@ async function probeHoverSurfaces(cdp: CdpRunner, tabId: number): Promise<Captur
           expression: hoverCollectExpression(candidate),
           returnByValue: true,
         });
-        await cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
         const subItems = (runtimeValue<string[]>(collected) ?? [])
           .map((item) => item.replace(/\s+/g, " ").trim())
           .filter(Boolean);
@@ -341,6 +489,8 @@ async function probeHoverSurfaces(cdp: CdpRunner, tabId: number): Promise<Captur
         });
       } catch {
         continue;
+      } finally {
+        await clearHover(cdp, tabId);
       }
     }
     return results;
@@ -391,15 +541,13 @@ export async function collectOverlayExcludedBackendIds(
  * @param doc   - the raw DOMSnapshot document object
  * @param strings - the shared string table for the whole snapshot
  * @param dpr   - device-pixel-ratio from Page.getLayoutMetrics
- * @param scrollX - horizontal scroll offset to subtract (CSS px)
- * @param scrollY - vertical scroll offset to subtract (CSS px)
+ * @param context - frame coordinate context; output rects are top viewport-relative
  */
 function parseDocumentNodes(
   doc: SnapshotDocument,
   strings: string[],
   dpr: number,
-  scrollX: number,
-  scrollY: number,
+  context: FrameContext,
 ): ParseDocumentResult {
   const dn = doc.nodes;
   const dl = doc.layout;
@@ -477,6 +625,7 @@ function parseDocumentNodes(
     }
 
     let rect: Rect | null = null;
+    let localRect: Rect | null = null;
     let paintOrder = 0;
     let position = "static";
     let pointerEvents = "auto";
@@ -485,12 +634,13 @@ function parseDocumentNodes(
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
       if (b && b.length >= 4 && b[2] > 0 && b[3] > 0) {
-        rect = {
-          x: b[0] / dpr - scrollX,
-          y: b[1] / dpr - scrollY,
+        localRect = {
+          x: b[0] / dpr - context.scrollX,
+          y: b[1] / dpr - context.scrollY,
           w: b[2] / dpr,
           h: b[3] / dpr,
         };
+        rect = rectInTop(localRect, context);
       }
       paintOrder = dl?.paintOrders?.[li] ?? 0;
       const styleRow = dl?.styles?.[li] ?? [];
@@ -508,9 +658,11 @@ function parseDocumentNodes(
     nodes.push({
       backendNodeId,
       parentBackendNodeId,
+      ownerFrameBackendNodeId: context.ownerFrameBackendNodeId,
       tag,
       attrs,
       rect,
+      localRect,
       paintOrder,
       position,
       pointerEvents,
@@ -521,7 +673,81 @@ function parseDocumentNodes(
   return { nodes, excludedBackendNodeIds };
 }
 
-export async function captureViewModel(cdp: CdpRunner, tabId: number): Promise<CapturedViewModel> {
+interface ParseFrameDocumentsResult {
+  iframeNodes: CapturedIframeNodes;
+  excludedBackendNodeIds: Set<number>;
+}
+
+function parseChildFrameDocuments(
+  documents: SnapshotDocument[],
+  strings: string[],
+  dpr: number,
+  parentDocIndex: number,
+  parentNodes: CapturedNode[],
+  parentContext: FrameContext,
+  visited = new Set<number>(),
+): ParseFrameDocumentsResult {
+  const iframeNodes: CapturedIframeNodes = new Map();
+  const excludedBackendNodeIds = new Set<number>();
+  const parentDoc = documents[parentDocIndex];
+  const cdi = sparseIndexMap(parentDoc?.nodes?.contentDocumentIndex);
+  if (cdi.size === 0) return { iframeNodes, excludedBackendNodeIds };
+
+  const parentBackendIds = parentDoc?.nodes?.backendNodeId ?? [];
+  const parentNodeByBackendId = new Map(parentNodes.map((node) => [node.backendNodeId, node]));
+
+  for (const [nodeArrayIdx, childDocIndex] of cdi) {
+    if (visited.has(childDocIndex)) continue;
+    const childDoc = documents[childDocIndex];
+    if (!childDoc) continue;
+    const iframeBackendId = parentBackendIds[nodeArrayIdx];
+    if (iframeBackendId === undefined) continue;
+    const iframeNode = parentNodeByBackendId.get(iframeBackendId);
+    if (!iframeNode?.localRect) continue;
+
+    const iframeRectInTop = unclipRectInTop(iframeNode.localRect, parentContext);
+    const childClip = intersectRects(iframeRectInTop, parentContext.clipRectInTop);
+    if (!childClip) {
+      iframeNodes.set(iframeBackendId, []);
+      continue;
+    }
+
+    const childContext: FrameContext = {
+      ownerFrameBackendNodeId: iframeBackendId,
+      originInTop: { x: iframeRectInTop.x, y: iframeRectInTop.y },
+      clipRectInTop: childClip,
+      scrollX: childDoc.scrollOffsetX ?? 0,
+      scrollY: childDoc.scrollOffsetY ?? 0,
+    };
+    const nextVisited = new Set(visited);
+    nextVisited.add(childDocIndex);
+    const parsed = parseDocumentNodes(childDoc, strings, dpr, childContext);
+    iframeNodes.set(iframeBackendId, parsed.nodes);
+    for (const id of parsed.excludedBackendNodeIds) excludedBackendNodeIds.add(id);
+
+    const nested = parseChildFrameDocuments(
+      documents,
+      strings,
+      dpr,
+      childDocIndex,
+      parsed.nodes,
+      childContext,
+      nextVisited,
+    );
+    for (const [nestedFrameId, nestedNodes] of nested.iframeNodes) {
+      iframeNodes.set(nestedFrameId, nestedNodes);
+    }
+    for (const id of nested.excludedBackendNodeIds) excludedBackendNodeIds.add(id);
+  }
+
+  return { iframeNodes, excludedBackendNodeIds };
+}
+
+export async function captureViewModel(
+  cdp: CdpRunner,
+  tabId: number,
+  options: CaptureViewModelOptions = {},
+): Promise<CapturedViewModel> {
   const metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
   const dpr = devicePixelRatio(metrics);
   const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
@@ -552,42 +778,26 @@ export async function captureViewModel(cdp: CdpRunner, tabId: number): Promise<C
     };
   }
 
-  const mainParsed = parseDocumentNodes(doc0, strings, dpr, scrollX, scrollY);
+  const topContext: FrameContext = {
+    ownerFrameBackendNodeId: null,
+    originInTop: { x: 0, y: 0 },
+    clipRectInTop: viewportRect(viewport),
+    scrollX,
+    scrollY,
+  };
+  const mainParsed = parseDocumentNodes(doc0, strings, dpr, topContext);
   const nodes = mainParsed.nodes;
   const excludedBackendNodeIds = new Set(mainParsed.excludedBackendNodeIds);
 
-  // Build a map from node-array-index → sub-document-index using the sparse
-  // contentDocumentIndex field. Chrome emits this only for <iframe> nodes.
-  const iframeNodes: CapturedIframeNodes = new Map();
-  if (documents.length > 1) {
-    const cdi = doc0.nodes?.contentDocumentIndex;
-    if (cdi?.index && cdi.value) {
-      for (let k = 0; k < cdi.index.length; k++) {
-        const nodeArrayIdx = cdi.index[k];
-        const docIdx = cdi.value[k];
-        const subDoc = documents[docIdx];
-        if (!subDoc) continue;
-        const iframeBid = doc0.nodes?.backendNodeId?.[nodeArrayIdx];
-        if (iframeBid === undefined) continue;
-        // Sub-documents have their own scroll offsets; bounds are relative
-        // to the iframe's own coordinate space (not the main viewport).
-        const subScrollX = subDoc.scrollOffsetX ?? 0;
-        const subScrollY = subDoc.scrollOffsetY ?? 0;
-        const subParsed = parseDocumentNodes(subDoc, strings, dpr, subScrollX, subScrollY);
-        iframeNodes.set(iframeBid, subParsed.nodes);
-        for (const id of subParsed.excludedBackendNodeIds) {
-          excludedBackendNodeIds.add(id);
-        }
-      }
-    }
+  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, nodes, topContext);
+  const iframeNodes = frameParsed.iframeNodes;
+  for (const id of frameParsed.excludedBackendNodeIds) {
+    excludedBackendNodeIds.add(id);
   }
 
-  await enrichFormControlState(cdp, tabId, nodes);
-  for (const subNodes of iframeNodes.values()) {
-    await enrichFormControlState(cdp, tabId, subNodes);
-  }
+  await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()]);
 
-  const surfaceProbes = await probeHoverSurfaces(cdp, tabId);
+  const surfaceProbes = options.conditionalSurfaceProbe ? await probeHoverSurfaces(cdp, tabId) : [];
 
   return { nodes, viewport, iframeNodes, surfaceProbes, excludedBackendNodeIds };
 }

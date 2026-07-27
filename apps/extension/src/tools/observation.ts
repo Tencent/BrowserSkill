@@ -1,5 +1,5 @@
-// Read-only observation handlers — `tool.screenshot`, `tool.snapshot`,
-// and `tool.get_html` (design §7). Each handler resolves the target
+// Observation handlers — `tool.snapshot`, `tool.get_html`, `tool.screenshot`,
+// and semantic `tool.observe` (design §7). Each handler resolves the target
 // tab (defaulting to the Agent Window's active tab when omitted) and
 // returns a payload that mirrors the bsk-protocol Rust structs.
 
@@ -15,6 +15,8 @@ import type { SessionManager } from "@/session-manager/manager";
 import type {
   GetHtmlParams,
   GetHtmlResult,
+  ObserveParams,
+  ObserveResult,
   RpcError,
   ScreenshotParams,
   ScreenshotResult,
@@ -26,11 +28,13 @@ import { nodeBoundingRect, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
 import {
   type ChromeTabsApi,
+  enforceToolTargetScope,
   isRpcError,
   lookupSession,
-  resolveTargetTab,
+  resolveCdpAccessibleTargetTab,
   type CdpRunner as SharedCdpRunner,
   normaliseRef as sharedNormaliseRef,
+  type ToolEffect,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import {
@@ -167,7 +171,13 @@ export async function handleScreenshot(
   const ctxOrErr = lookupSession(manager, params, "screenshot");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  const target = await resolveCdpAccessibleTargetTab(
+    manager,
+    ctx,
+    params.tab_id,
+    deps.tabsApi,
+    "screenshot",
+  );
   if (isRpcError(target)) return target;
   const dialogCursor = deps.cdp ? markDialogCursor(deps.cdp, target.tabId) : 0;
   const withShotDialogs = <T extends object>(result: T) =>
@@ -181,6 +191,7 @@ export async function handleScreenshot(
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     const captured = await captureElementScreenshot(deps.cdp, target.tabId, node.backendNodeId);
     if (isRpcError(captured)) return captured;
     return withShotDialogs({
@@ -664,6 +675,7 @@ function inputStateFor(
   value: string | undefined,
 ): VomNode["inputState"] {
   if (!capturedNode || !FORM_CONTROL_TAGS.has(normalizeTag(capturedNode.tag))) return undefined;
+  if (capturedNode.formState) return capturedNode.formState;
   const formValue = capturedNode.formValue;
   if (formValue !== undefined) {
     if (formValue === "") return "empty";
@@ -1099,7 +1111,13 @@ export async function handleGetHtml(
   const ctxOrErr = lookupSession(manager, params, "get_html");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  const target = await resolveCdpAccessibleTargetTab(
+    manager,
+    ctx,
+    params.tab_id,
+    deps.tabsApi,
+    "get_html",
+  );
   if (isRpcError(target)) return target;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
@@ -1108,6 +1126,7 @@ export async function handleGetHtml(
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     let html: string;
     if (params.ref) {
       const resolved = resolveSnapshotRef(ctx, params.ref, target.tabId);
@@ -1178,28 +1197,44 @@ async function fallbackCapturedViewModel(
   return { ...emptyCapturedViewModel(viewport), excludedBackendNodeIds };
 }
 
-async function captureForVom(cdp: CdpRunner, tabId: number): Promise<CapturedViewModel> {
+async function captureForVom(
+  cdp: CdpRunner,
+  tabId: number,
+  conditionalSurfaceProbe: boolean,
+): Promise<CapturedViewModel> {
   try {
-    return await captureViewModel(cdp, tabId);
+    return await captureViewModel(cdp, tabId, { conditionalSurfaceProbe });
   } catch {
     return fallbackCapturedViewModel(cdp, tabId);
   }
 }
 
-export async function handleSnapshot(
+async function handleVomObservation(
   manager: SessionManager,
-  params: SnapshotParams,
+  params: SnapshotParams | ObserveParams,
+  toolName: "snapshot" | "observe",
+  effect: ToolEffect,
+  conditionalSurfaceProbe: boolean,
   deps: SnapshotDeps = getDefaultDeps(),
-): Promise<SnapshotResult | RpcError> {
-  const ctxOrErr = lookupSession(manager, params, "snapshot");
+): Promise<SnapshotResult | ObserveResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, toolName);
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  const target = await resolveCdpAccessibleTargetTab(
+    manager,
+    ctx,
+    params.tab_id,
+    deps.tabsApi,
+    toolName,
+  );
   if (isRpcError(target)) return target;
+  const denied = enforceToolTargetScope(ctx, target, effect, toolName);
+  if (denied) return denied;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     await deps.cdp.send<unknown>(target.tabId, "Accessibility.enable", {});
     const result = await deps.cdp.send<{ nodes: CdpAxNode[] }>(
       target.tabId,
@@ -1207,7 +1242,7 @@ export async function handleSnapshot(
       {},
     );
     const axNodes = result.nodes ?? [];
-    const captured = await captureForVom(deps.cdp, target.tabId);
+    const captured = await captureForVom(deps.cdp, target.tabId, conditionalSurfaceProbe);
     const scene = buildVomScene(axNodes, captured);
     const rendered = renderVom(scene, {
       maxDepth: params.max_depth,
@@ -1231,4 +1266,20 @@ export async function handleSnapshot(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+export async function handleSnapshot(
+  manager: SessionManager,
+  params: SnapshotParams,
+  deps: SnapshotDeps = getDefaultDeps(),
+): Promise<SnapshotResult | RpcError> {
+  return handleVomObservation(manager, params, "snapshot", "passive_read", false, deps);
+}
+
+export async function handleObserve(
+  manager: SessionManager,
+  params: ObserveParams,
+  deps: SnapshotDeps = getDefaultDeps(),
+): Promise<ObserveResult | RpcError> {
+  return handleVomObservation(manager, params, "observe", "transient_input", true, deps);
 }

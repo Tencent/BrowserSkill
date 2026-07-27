@@ -119,6 +119,88 @@ describe("ChromiumCdp", () => {
     expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 9 }, "Page.enable", {});
   });
 
+  it("validates the attached top-frame URL for page reads", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { url: "https://example.test/page" } } };
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    await expect(
+      cdp.ensureAttachedToUrl(9, "https://example.test/page#section"),
+    ).resolves.toBeUndefined();
+    expect(api.detach).not.toHaveBeenCalled();
+  });
+
+  it("reattaches when the cached CDP target points at an extension page", async () => {
+    const { api } = fakeApi();
+    let frameReads = 0;
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Page.getFrameTree") {
+          frameReads += 1;
+          return {
+            frameTree: {
+              frame: {
+                url:
+                  frameReads === 1
+                    ? "chrome-extension://other-extension/page.html"
+                    : "https://example.test/page",
+              },
+            },
+          };
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    await expect(cdp.ensureAttachedToUrl(9, "https://example.test/page")).resolves.toBeUndefined();
+    expect(api.attach).toHaveBeenCalledTimes(2);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 9 });
+  });
+
+  it("rejects when reattach still points at the wrong page", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Page.getFrameTree") {
+          return { frameTree: { frame: { url: "https://wrong.test/" } } };
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    await expect(cdp.ensureAttachedToUrl(9, "https://example.test/")).rejects.toThrow(
+      /CDP target URL mismatch/,
+    );
+    expect(api.attach).toHaveBeenCalledTimes(2);
+  });
+
+  it("clears the attach cache after an internal-page access error", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "DOM.getDocument") {
+          throw new Error("Cannot access a chrome-extension:// URL of different extension");
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    await expect(cdp.ensureAttached(9)).resolves.toBeUndefined();
+    expect(cdp.isAttached(9)).toBe(true);
+    await expect(cdp.send(9, "DOM.getDocument")).rejects.toThrow(/chrome-extension/);
+    expect(cdp.isAttached(9)).toBe(false);
+  });
+
   it("enables console capture domains best-effort during attach", async () => {
     const { api } = fakeApi();
     (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(

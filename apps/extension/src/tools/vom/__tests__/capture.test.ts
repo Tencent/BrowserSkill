@@ -59,6 +59,23 @@ function makeCdp(snapshot: unknown) {
       if (method === "Page.getLayoutMetrics") {
         return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
       }
+      if (method === "Runtime.evaluate") {
+        return {
+          result: {
+            value: {
+              controls: [
+                {
+                  state: "filled",
+                  sensitive: true,
+                  defaultValue: "",
+                  placeholder: "secret",
+                },
+              ],
+              childFrames: [],
+            },
+          },
+        };
+      }
       throw new Error(`unexpected ${method}`);
     }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
   };
@@ -78,6 +95,89 @@ describe("captureViewModel", () => {
     expect(div?.paintOrder).toBe(50);
     const input = nodes.find((n) => n.backendNodeId === 13);
     expect(input?.attrs).toEqual({ type: "password" });
+  });
+
+  it("does not run conditional surface probes by default", async () => {
+    const cdp = makeCdp(fakeSnapshotReply());
+    const result = await captureViewModel(cdp, 4);
+
+    expect(result.surfaceProbes).toEqual([]);
+    expect(cdp.send).not.toHaveBeenCalledWith(4, "Input.dispatchMouseEvent", expect.anything());
+  });
+
+  it("batch-enriches form controls without per-node object resolution", async () => {
+    const cdp = makeCdp(fakeSnapshotReply());
+    const result = await captureViewModel(cdp, 4);
+    const input = result.nodes.find((node) => node.backendNodeId === 13);
+
+    expect(input).toMatchObject({
+      formState: "filled",
+      formDefaultValue: "",
+      formPlaceholder: "secret",
+    });
+    expect(input?.formValue).toBeUndefined();
+    expect(cdp.send).toHaveBeenCalledWith(
+      4,
+      "Runtime.evaluate",
+      expect.objectContaining({ returnByValue: true }),
+    );
+    expect(cdp.send).not.toHaveBeenCalledWith(4, "DOM.resolveNode", expect.anything());
+    expect(cdp.send).not.toHaveBeenCalledWith(4, "Runtime.callFunctionOn", expect.anything());
+  });
+
+  it("runs hover surface probes when explicitly enabled", async () => {
+    let runtimeCalls = 0;
+    const cdp = {
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        if (method === "DOMSnapshot.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return fakeSnapshotReply();
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = (params as { expression?: string } | undefined)?.expression ?? "";
+          if (expression.includes("input,textarea,select")) {
+            return { result: { value: { controls: [], childFrames: [] } } };
+          }
+          runtimeCalls += 1;
+          return runtimeCalls === 1
+            ? {
+                result: {
+                  value: [
+                    {
+                      triggerSel: ".menu",
+                      affectedSub: " .items",
+                      label: "Products",
+                      x: 50,
+                      y: 20,
+                    },
+                  ],
+                },
+              }
+            : { result: { value: ["Shoes", "Bags"] } };
+        }
+        if (method === "Input.dispatchMouseEvent") return {};
+        throw new Error(`unexpected ${method}`);
+      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+    };
+
+    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+
+    expect(result.surfaceProbes).toEqual([
+      { triggerLabel: "Products", triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+    ]);
+    expect(cdp.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchMouseEvent",
+      expect.objectContaining({ type: "mouseMoved", x: 50, y: 20 }),
+    );
+    expect(cdp.send).toHaveBeenCalledWith(
+      4,
+      "Input.dispatchMouseEvent",
+      expect.objectContaining({ type: "mouseMoved", x: -10, y: -10 }),
+    );
   });
 
   it("excludes the agent's own overlay shadow host and its inlined shadow subtree", async () => {
@@ -349,8 +449,11 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
     const { nodes } = await captureViewModel(cdp, 4);
-    // overlay div bounds y=0 minus scroll pageY=200 → y=-200
-    expect(nodes.find((n) => n.backendNodeId === 12)?.rect?.y).toBe(-200);
+    const div = nodes.find((n) => n.backendNodeId === 12);
+    // local rect preserves viewport-relative scroll math.
+    expect(div?.localRect?.y).toBe(-200);
+    // exported rect is clipped to the top-level viewport before VOM consumes it.
+    expect(div?.rect).toMatchObject({ y: 0, h: 600 });
   });
 
   it("normalizes device-pixel bounds by devicePixelRatio", async () => {
@@ -557,8 +660,187 @@ describe("captureViewModel", () => {
     expect(iframeNodes.size).toBe(1);
     expect(iframeNodes.has(13)).toBe(true);
     const subNodes = iframeNodes.get(13)!;
-    expect(subNodes.find((n) => n.backendNodeId === 101)?.tag).toBe("input");
-    expect(subNodes.find((n) => n.backendNodeId === 101)?.attrs.type).toBe("text");
+    const input = subNodes.find((n) => n.backendNodeId === 101);
+    expect(input?.tag).toBe("input");
+    expect(input?.attrs.type).toBe("text");
+    expect(input?.ownerFrameBackendNodeId).toBe(13);
+    expect(input?.localRect).toEqual({ x: 0, y: 0, w: 200, h: 40 });
+    expect(input?.rect).toEqual({ x: 100, y: 300, w: 200, h: 40 });
+  });
+
+  it("clips iframe sub-document rects to the iframe viewport in top coordinates", async () => {
+    const S = [
+      "html",
+      "body",
+      "iframe",
+      "input",
+      "position",
+      "static",
+      "pointer-events",
+      "auto",
+      "type",
+      "text",
+    ];
+    const i = (s: string) => S.indexOf(s);
+    const snapshot = {
+      strings: S,
+      documents: [
+        {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          nodes: {
+            parentIndex: [-1, 0, 1],
+            nodeName: [i("html"), i("body"), i("iframe")],
+            backendNodeId: [10, 11, 13],
+            attributes: [[], [], []],
+            contentDocumentIndex: { index: [2], value: [1] },
+          },
+          layout: {
+            nodeIndex: [1, 2],
+            styles: [
+              [i("static"), i("auto")],
+              [i("static"), i("auto")],
+            ],
+            bounds: [
+              [0, 0, 1000, 800],
+              [950, 760, 200, 100],
+            ],
+            paintOrders: [0, 1],
+          },
+        },
+        {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          nodes: {
+            parentIndex: [-1, 0],
+            nodeName: [i("body"), i("input")],
+            backendNodeId: [100, 101],
+            attributes: [[], [i("type"), i("text")]],
+          },
+          layout: {
+            nodeIndex: [1],
+            styles: [[i("static"), i("auto")]],
+            bounds: [[20, 20, 120, 60]],
+            paintOrders: [0],
+          },
+        },
+      ],
+    };
+    const cdp = {
+      send: vi.fn(async (_t: number, method: string) => {
+        if (method === "DOMSnapshot.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+          };
+        }
+        throw new Error(method);
+      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+    };
+
+    const { iframeNodes } = await captureViewModel(cdp, 4);
+    const input = iframeNodes.get(13)?.find((n) => n.backendNodeId === 101);
+
+    expect(input?.localRect).toEqual({ x: 20, y: 20, w: 120, h: 60 });
+    expect(input?.rect).toEqual({ x: 970, y: 780, w: 30, h: 20 });
+  });
+
+  it("recursively normalizes nested iframe sub-documents", async () => {
+    const S = [
+      "html",
+      "body",
+      "iframe",
+      "input",
+      "position",
+      "static",
+      "pointer-events",
+      "auto",
+      "type",
+      "text",
+    ];
+    const i = (s: string) => S.indexOf(s);
+    const snapshot = {
+      strings: S,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1],
+            nodeName: [i("html"), i("body"), i("iframe")],
+            backendNodeId: [10, 11, 13],
+            attributes: [[], [], []],
+            contentDocumentIndex: { index: [2], value: [1] },
+          },
+          layout: {
+            nodeIndex: [1, 2],
+            styles: [
+              [i("static"), i("auto")],
+              [i("static"), i("auto")],
+            ],
+            bounds: [
+              [0, 0, 1000, 800],
+              [10, 20, 300, 200],
+            ],
+            paintOrders: [0, 1],
+          },
+        },
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1],
+            nodeName: [i("html"), i("body"), i("iframe")],
+            backendNodeId: [20, 21, 23],
+            attributes: [[], [], []],
+            contentDocumentIndex: { index: [2], value: [2] },
+          },
+          layout: {
+            nodeIndex: [1, 2],
+            styles: [
+              [i("static"), i("auto")],
+              [i("static"), i("auto")],
+            ],
+            bounds: [
+              [0, 0, 300, 200],
+              [5, 6, 100, 80],
+            ],
+            paintOrders: [0, 1],
+          },
+        },
+        {
+          nodes: {
+            parentIndex: [-1, 0],
+            nodeName: [i("body"), i("input")],
+            backendNodeId: [30, 31],
+            attributes: [[], [i("type"), i("text")]],
+          },
+          layout: {
+            nodeIndex: [1],
+            styles: [[i("static"), i("auto")]],
+            bounds: [[1, 2, 40, 20]],
+            paintOrders: [0],
+          },
+        },
+      ],
+    };
+    const cdp = {
+      send: vi.fn(async (_t: number, method: string) => {
+        if (method === "DOMSnapshot.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+          };
+        }
+        throw new Error(method);
+      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+    };
+
+    const { iframeNodes } = await captureViewModel(cdp, 4);
+    const nestedIframe = iframeNodes.get(13)?.find((n) => n.backendNodeId === 23);
+    const input = iframeNodes.get(23)?.find((n) => n.backendNodeId === 31);
+
+    expect(nestedIframe?.rect).toEqual({ x: 15, y: 26, w: 100, h: 80 });
+    expect(input?.ownerFrameBackendNodeId).toBe(23);
+    expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
   });
 
   it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {

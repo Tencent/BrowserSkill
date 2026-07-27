@@ -633,7 +633,7 @@ function renderNodeLine(
   if (surface && surface.subItems.length > 0) {
     const items = surface.subItems.slice(0, MAX_SURFACE_ITEMS).join(" | ");
     const suffix = surface.subItems.length > MAX_SURFACE_ITEMS ? " | …" : "";
-    line += ` [→ ${items}${suffix}]`;
+    line += ` [${surface.triggerAction}: ${items}${suffix}]`;
   }
 
   return line;

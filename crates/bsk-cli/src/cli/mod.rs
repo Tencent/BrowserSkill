@@ -19,6 +19,7 @@ pub mod interaction;
 pub mod logs;
 pub mod navigate;
 pub mod network;
+pub mod observe;
 pub mod record;
 pub mod record_state;
 pub mod render_error;
@@ -41,6 +42,7 @@ use crate::cli::install_skill::InstallSkillArgs;
 use crate::cli::interaction::{ClickArgs, FillArgs, PressArgs, SelectArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
+use crate::cli::observe::ObserveArgs;
 use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::session::SessionCmd;
@@ -121,6 +123,9 @@ pub enum Command {
 
     /// Produce an indented aria-snapshot with @eN refs.
     Snapshot(SnapshotArgs),
+
+    /// Produce a semantic VOM observation with perception probes.
+    Observe(ObserveArgs),
 
     /// Read buffered console/log/exception messages.
     Console(ConsoleArgs),

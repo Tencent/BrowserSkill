@@ -283,11 +283,11 @@ async fn session_user_interrupt_event_cancels_inflight_with_user_aborted() {
     handle.shutdown().await;
 }
 
-/// The pending-interrupt marker must reject a *new* mutating tool
+/// The pending-interrupt marker must reject a *new* browser-input tool
 /// call that arrives AFTER the user clicked stop, even when no
 /// tool was inflight at click time. Under v2 single-use marker
 /// semantics, the marker survives indefinitely until consumed by
-/// a mutating tool call — there is no time window. This is the
+/// an input-dispatching tool call — there is no time window. This is the
 /// core motivating scenario: agents spend most of their time
 /// between tool calls (LLM thinking), and the stop button must
 /// catch a tool dispatched arbitrarily later.
@@ -426,12 +426,12 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
     let ws_sink = Arc::new(tokio::sync::Mutex::new(ws_sink));
 
     // Fake extension: replies to session_start, console, and snapshot
-    // (read-only tools must succeed transparently). Records click count
-    // — must remain 0 because the daemon should reject the click
+    // (passive reads must succeed transparently). Records observe count
+    // — must remain 0 because the daemon should reject transient input
     // without forwarding.
     let ws_sink_for_responder = Arc::clone(&ws_sink);
-    let observed_click_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed_click_count_clone = Arc::clone(&observed_click_count);
+    let observed_observe_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_observe_count_clone = Arc::clone(&observed_observe_count);
     let responder = tokio::spawn(async move {
         let mut ws_stream = ws_stream;
         while let Some(Ok(msg)) = ws_stream.next().await {
@@ -458,8 +458,8 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
                         "truncated": false
                     })),
                     Method::ToolSnapshot => ResponseBody::Ok(json!({"ok": true})),
-                    Method::ToolClick => {
-                        observed_click_count_clone
+                    Method::ToolObserve => {
+                        observed_observe_count_clone
                             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         continue;
                     }
@@ -547,26 +547,25 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
         snapshot_outcome
     );
 
-    // The mutating click that follows MUST still be rejected — the
-    // marker survived the snapshot.
-    let click_outcome = ipc
+    // The transient-input observe that follows MUST still be rejected — the
+    // marker survived the passive reads.
+    let observe_outcome = ipc
         .call::<_, serde_json::Value>(
-            "click-after-snapshot",
-            Method::ToolClick,
+            "observe-after-snapshot",
+            Method::ToolObserve,
             Some(json!({
                 "session_id": start.session_id,
-                "ref": "fake-ref-2",
             })),
             Duration::from_secs(3),
         )
         .await
         .unwrap();
-    let err = click_outcome.expect_err("tool.click must be rejected");
+    let err = observe_outcome.expect_err("tool.observe must be rejected");
     assert_eq!(err.code, ErrorCode::UserAborted, "got {:?}", err);
     assert_eq!(
-        observed_click_count.load(std::sync::atomic::Ordering::SeqCst),
+        observed_observe_count.load(std::sync::atomic::Ordering::SeqCst),
         0,
-        "tool.click must NOT have been forwarded after snapshot transparency"
+        "tool.observe must NOT have been forwarded after passive-read transparency"
     );
 
     responder.abort();
@@ -574,7 +573,7 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
 }
 
 /// The pending-interrupt marker must survive an arbitrary delay
-/// between user click and next mutating tool call. This is the
+/// between user click and next browser-input tool call. This is the
 /// regression test for v2's core motivating bug: v1's 500ms time
 /// window dropped interrupts whenever the LLM's thinking phase
 /// took longer to respond than the window allowed.

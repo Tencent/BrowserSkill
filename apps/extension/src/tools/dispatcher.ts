@@ -11,6 +11,7 @@ import type {
   NavigateForwardParams,
   NavigateParams,
   NetworkParams,
+  ObserveParams,
   PressParams,
   ProtocolFrame,
   RecordAwaitParams,
@@ -42,6 +43,7 @@ import {
   type CdpRunner,
   chromeTabsCaptureApi,
   handleGetHtml,
+  handleObserve,
   handleScreenshot,
   handleSnapshot,
 } from "./observation";
@@ -86,6 +88,8 @@ export interface DispatcherDeps {
    * `chrome.storage.session` "sessions live" flag (review M4/M5 I3).
    */
   onSessionsChanged?: () => void;
+  /** Invoked before a tool that dispatches page input or mutates browser state is forwarded. */
+  onBrowserControlResumed?: (sessionId: string) => void;
   /** User approval for `tool.tab_borrow` (overlay in content script). */
   approveBorrow?: BorrowConfirmationApprover;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
@@ -114,6 +118,7 @@ export class ToolDispatcher {
   private readonly sessions: SessionManager;
   private readonly cdp?: DispatcherCdpRunner;
   private readonly onSessionsChanged?: () => void;
+  private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
@@ -130,6 +135,7 @@ export class ToolDispatcher {
     this.sessions = deps.sessions;
     this.cdp = deps.cdp;
     this.onSessionsChanged = deps.onSessionsChanged;
+    this.onBrowserControlResumed = deps.onBrowserControlResumed;
     this.approveBorrow = deps.approveBorrow;
     this.helpNotificationCopy = deps.helpNotificationCopy;
   }
@@ -193,6 +199,8 @@ export class ToolDispatcher {
     let body: ResponseFrame;
     let startedSession: string | null = null;
     try {
+      const sessionId = sessionIdForBrowserControlMethod(req);
+      if (sessionId) this.onBrowserControlResumed?.(sessionId);
       const result = await Promise.race([this.invoke(req, ac.signal), abortPromise(ac.signal)]);
       if (isRpcError(result)) {
         body = { id: req.id, error: result };
@@ -302,6 +310,12 @@ export class ToolDispatcher {
         return handleSnapshot(
           this.sessions,
           req.params as SnapshotParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+        );
+      case "tool.observe":
+        return handleObserve(
+          this.sessions,
+          req.params as ObserveParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
         );
       case "tool.get_html":
@@ -455,6 +469,33 @@ function isRpcError(v: unknown): v is RpcError {
     "message" in v &&
     typeof (v as RpcError).code === "string"
   );
+}
+
+function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
+  switch (req.method) {
+    case "tool.tab_create":
+    case "tool.tab_close":
+    case "tool.tab_select":
+    case "tool.tab_borrow":
+    case "tool.tab_return":
+    case "tool.navigate":
+    case "tool.navigate_back":
+    case "tool.navigate_forward":
+    case "tool.reload":
+    case "tool.click":
+    case "tool.fill":
+    case "tool.press":
+    case "tool.select":
+    case "tool.evaluate":
+    case "tool.observe":
+    case "tool.request_help":
+    case "tool.record_start": {
+      const sessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;
+      return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
+    }
+    default:
+      return null;
+  }
 }
 
 /**

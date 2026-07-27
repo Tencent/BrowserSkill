@@ -9,12 +9,16 @@ import {
 } from "@/lib/instance-id";
 import { startKeepalive } from "@/lib/keepalive";
 import {
+  OVERLAY_AGENT_STATE,
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_INTERRUPT,
+  OVERLAY_MSG_READY,
   OVERLAY_MSG_WHO_AM_I,
+  type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
   type OverlayInterruptResponse,
   type OverlayMessage,
+  type OverlayMode,
 } from "@/lib/overlay-bridge";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
@@ -44,6 +48,91 @@ export default defineBackground(() => {
   const sessions = new SessionManager();
   const cdp = new ChromiumCdp();
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
+  let overlayGeneration = 0;
+  const controlModes = new Map<string, OverlayMode>();
+
+  function setControlMode(sessionId: string, mode: OverlayMode): void {
+    if (controlModes.get(sessionId) === mode) return;
+    controlModes.set(sessionId, mode);
+    overlayGeneration += 1;
+    const ctx = sessions.get(sessionId);
+    if (ctx) void pushOverlayStateForWindow(ctx.agentWindowId);
+  }
+
+  function overlayStateForWindow(windowId?: number): OverlayAgentStateMessage {
+    const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
+    if (!ctx) {
+      return {
+        type: OVERLAY_AGENT_STATE,
+        sessionId: null,
+        mode: "hidden",
+        generation: overlayGeneration,
+      };
+    }
+    return {
+      type: OVERLAY_AGENT_STATE,
+      sessionId: ctx.sessionId,
+      mode: controlModes.get(ctx.sessionId) ?? "control",
+      generation: overlayGeneration,
+    };
+  }
+
+  async function pushOverlayStateToTab(
+    tabId: number,
+    state: OverlayAgentStateMessage,
+  ): Promise<void> {
+    try {
+      await chrome.tabs.sendMessage(tabId, state);
+    } catch {
+      // Restricted pages and not-yet-loaded content scripts cannot receive messages.
+    }
+  }
+
+  async function pushOverlayStateForWindow(windowId: number): Promise<void> {
+    const state = overlayStateForWindow(windowId);
+    const tabs = await chrome.tabs.query({ windowId });
+    await Promise.all(
+      tabs.map((tab) =>
+        typeof tab.id === "number" ? pushOverlayStateToTab(tab.id, state) : Promise.resolve(),
+      ),
+    );
+  }
+
+  function pushAllAgentOverlayStates(): void {
+    const windowIds = new Set(sessions.list().map((ctx) => ctx.agentWindowId));
+    for (const windowId of windowIds) {
+      void pushOverlayStateForWindow(windowId);
+    }
+  }
+
+  function onOverlaySessionStateChanged(): void {
+    void sessionsLive.syncFromManager();
+    const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
+    for (const sessionId of controlModes.keys()) {
+      if (!liveSessionIds.has(sessionId)) controlModes.delete(sessionId);
+    }
+    overlayGeneration += 1;
+    pushAllAgentOverlayStates();
+  }
+
+  function onBrowserControlResumed(sessionId: string): void {
+    const ctx = sessions.get(sessionId);
+    if (!ctx) return;
+    setControlMode(sessionId, "control");
+  }
+
+  function pushOverlayStateForAgentWindow(windowId: number): void {
+    if (!sessions.findByWindowId(windowId)) return;
+    void pushOverlayStateForWindow(windowId);
+  }
+  chrome.tabs.onActivated.addListener((activeInfo) => {
+    pushOverlayStateForAgentWindow(activeInfo.windowId);
+  });
+  chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+    if (changeInfo.status !== "complete") return;
+    if (typeof tab.windowId !== "number") return;
+    pushOverlayStateForAgentWindow(tab.windowId);
+  });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
   // first mutation (review M4/M5 round 3 m-R3-1).
@@ -52,9 +141,8 @@ export default defineBackground(() => {
     transport,
     sessions,
     cdp,
-    onSessionsChanged: () => {
-      void sessionsLive.syncFromManager();
-    },
+    onSessionsChanged: onOverlaySessionStateChanged,
+    onBrowserControlResumed,
     approveBorrow: (ctx) =>
       requestBorrowConfirmation(ctx.tabId, {
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
@@ -124,9 +212,7 @@ export default defineBackground(() => {
     manager: sessions,
     transport,
     cdp,
-    onSessionsChanged: () => {
-      void sessionsLive.syncFromManager();
-    },
+    onSessionsChanged: onOverlaySessionStateChanged,
   });
 
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
@@ -197,9 +283,19 @@ export default defineBackground(() => {
       return false;
     }
 
+    if (msg.kind === OVERLAY_MSG_READY) {
+      sendResponse(overlayStateForWindow(sender.tab?.windowId));
+      return false;
+    }
+
     if (msg.kind === OVERLAY_MSG_INTERRUPT) {
       const req = msg as OverlayInterruptRequest;
+      const ctx = sessions.get(req.sessionId);
+      if (ctx) setControlMode(req.sessionId, "interrupting");
       void handleOverlayInterrupt(transport, req.sessionId).then((reply) => {
+        if (reply.ok && sessions.get(req.sessionId)) {
+          setControlMode(req.sessionId, "paused");
+        }
         sendResponse(reply);
       });
       return true; // keep channel open
