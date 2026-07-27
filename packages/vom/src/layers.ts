@@ -8,6 +8,14 @@ export const MASK_COVERAGE_THRESHOLD = 0.9;
 const POSITIONED = new Set(["fixed", "absolute", "sticky"]);
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
 
+function normalizedRole(node: VomNode): string {
+  return node.role?.toLowerCase() ?? "";
+}
+
+function normalizedTag(node: VomNode): string {
+  return node.tag.toLowerCase();
+}
+
 export function coverage(rect: Rect | null, vp: Viewport): number {
   if (!rect || vp.width <= 0 || vp.height <= 0) return 0;
   const ix = Math.max(0, Math.min(rect.x + rect.w, vp.width) - Math.max(rect.x, 0));
@@ -23,12 +31,9 @@ function isBlockingCandidate(node: VomNode): boolean {
 }
 
 function hasModalFeature(node: VomNode): boolean {
-  return (
-    node.modal === true ||
-    node.tag === "dialog" ||
-    node.role === "dialog" ||
-    node.role === "alertdialog"
-  );
+  const role = normalizedRole(node);
+  const tag = normalizedTag(node);
+  return node.modal === true || tag === "dialog" || role === "dialog" || role === "alertdialog";
 }
 
 function classifyLayer(
@@ -39,8 +44,8 @@ function classifyLayer(
   for (const node of nodes) {
     if (!members.has(node.id)) continue;
     if (hasModalFeature(node)) return "modal";
-    if (FORM_TAGS.has(node.tag)) return "modal";
-    if (node.tag === "iframe") return "modal";
+    if (FORM_TAGS.has(normalizedTag(node))) return "modal";
+    if (normalizedTag(node) === "iframe") return "modal";
   }
   return blockerCoverage >= MASK_COVERAGE_THRESHOLD ? "mask" : "modal";
 }

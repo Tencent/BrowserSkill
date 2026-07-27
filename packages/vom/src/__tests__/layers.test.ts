@@ -115,6 +115,27 @@ describe("detectBlockingLayer", () => {
     expect(layer?.kind).toBe("modal");
   });
 
+  it("detects modal features regardless of role or tag casing", () => {
+    const layer = detectBlockingLayer(
+      [
+        node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+        node({
+          id: 2,
+          parentId: 1,
+          tag: "DIV",
+          role: "Dialog",
+          rect: { x: 300, y: 200, w: 400, h: 300 },
+          paintOrder: 90,
+          position: "fixed",
+        }),
+      ],
+      VP,
+    );
+
+    expect(layer?.rootId).toBe(2);
+    expect(layer?.kind).toBe("modal");
+  });
+
   it("ignores small toasts and pointer-events:none covers", () => {
     expect(
       detectBlockingLayer(

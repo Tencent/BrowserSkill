@@ -969,7 +969,29 @@ function axNodeInOverlaySubtree(
   );
 }
 
-export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel): VomScene {
+export interface BuildVomSceneOptions {
+  pageUrl?: string;
+}
+
+function externalHrefHost(
+  href: string | undefined,
+  pageUrl: string | undefined,
+): string | undefined {
+  if (!href || !pageUrl) return undefined;
+  try {
+    const page = new URL(pageUrl);
+    const target = new URL(href, page);
+    return target.origin !== page.origin ? target.hostname : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function buildVomScene(
+  axNodes: CdpAxNode[],
+  captured: CapturedViewModel,
+  options: BuildVomSceneOptions = {},
+): VomScene {
   const signals = capturedOnlySignals(captured.nodes);
   const { capturedByBackendId } = signals;
   const axSignals = buildAxSignals(axNodes);
@@ -993,15 +1015,9 @@ export function buildVomScene(axNodes: CdpAxNode[], captured: CapturedViewModel)
 
     // For link nodes, attach external hostname so the renderer can annotate it.
     // Relative hrefs and same-origin hrefs are omitted to avoid noise.
-    if (role === "link" && capturedNode?.attrs.href) {
-      try {
-        const target = new URL(capturedNode.attrs.href, window.location.href);
-        if (target.origin !== window.location.origin) {
-          vomNode.href = target.hostname;
-        }
-      } catch {
-        // Relative or non-URL href (e.g. javascript:) — skip
-      }
+    if (role?.toLowerCase() === "link") {
+      const hrefHost = externalHrefHost(capturedNode?.attrs.href, options.pageUrl);
+      if (hrefHost) vomNode.href = hrefHost;
     }
 
     seenBackendIds.add(axNode.backendDOMNodeId);
@@ -1243,7 +1259,7 @@ async function handleVomObservation(
     );
     const axNodes = result.nodes ?? [];
     const captured = await captureForVom(deps.cdp, target.tabId, conditionalSurfaceProbe);
-    const scene = buildVomScene(axNodes, captured);
+    const scene = buildVomScene(axNodes, captured, { pageUrl: target.url });
     const rendered = renderVom(scene, {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,

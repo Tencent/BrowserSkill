@@ -87,6 +87,24 @@ describe("renderVom single-layer page", () => {
     expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
   });
 
+  it("annotates external links regardless of role casing", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "Link",
+          name: "Docs",
+          href: "docs.example.org",
+          tag: "a",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 Link "Docs" [→ docs.example.org]');
+  });
+
   it("renders additional structural roles without assigning refs", () => {
     const out = renderVom(
       scene([

@@ -424,6 +424,73 @@ describe("buildVomScene", () => {
     );
   });
 
+  it("annotates external links from the explicit page URL without reading window.location", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 100,
+        childIds: ["2", "3"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "Link" },
+        name: { type: "computedString", value: "Docs" },
+        backendDOMNodeId: 200,
+      },
+      {
+        nodeId: "3",
+        parentId: "1",
+        role: { type: "role", value: "link" },
+        name: { type: "computedString", value: "Local" },
+        backendDOMNodeId: 300,
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      nodes: [
+        {
+          backendNodeId: 100,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 200,
+          parentBackendNodeId: 100,
+          tag: "a",
+          attrs: { href: "https://docs.example.org/start" },
+          rect: { x: 10, y: 10, w: 60, h: 20 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 300,
+          parentBackendNodeId: 100,
+          tag: "a",
+          attrs: { href: "/local" },
+          rect: { x: 80, y: 10, w: 60, h: 20 },
+          paintOrder: 2,
+          position: "static",
+          pointerEvents: "auto",
+        },
+      ],
+    };
+
+    const scene = buildVomScene(axNodes, captured, { pageUrl: "https://app.example.test/home" });
+
+    expect(scene.nodes.find((node) => node.id === 200)?.href).toBe("docs.example.org");
+    expect(scene.nodes.find((node) => node.id === 300)?.href).toBeUndefined();
+  });
+
   it("uses the nearest backend AX ancestor as parentId", () => {
     const axNodes: CdpAxNode[] = [
       {

@@ -166,6 +166,10 @@ function normalizedRole(node: VomNode): string {
   return node.role?.toLowerCase() ?? "";
 }
 
+function normalizedTag(node: VomNode): string {
+  return node.tag.toLowerCase();
+}
+
 function normalizeContextKey(s: string): string {
   return s.split(/\s+/).join(" ").toLowerCase();
 }
@@ -296,7 +300,7 @@ function rectArea(node: VomNode): number {
 
 function passesRecoveryGuards(node: VomNode, children: Map<number | null, VomNode[]>): boolean {
   const area = rectArea(node);
-  const tag = node.tag.toLowerCase();
+  const tag = normalizedTag(node);
 
   if (node.pointerEvents === "none") return false;
   if (node.disabled || node.inert || node.insideNative) return false;
@@ -611,7 +615,7 @@ function renderNodeLine(
 
   // For link nodes with an external href, annotate so the agent can
   // distinguish external navigation from same-origin links.
-  if (node.role === "link" && node.href) {
+  if (normalizedRole(node) === "link" && node.href) {
     line += ` [→ ${node.href}]`;
   }
 
@@ -838,9 +842,8 @@ function interactionPoints(rect: Rect): Array<[number, number]> {
 
 function isModalLike(node: VomNode): boolean {
   const role = normalizedRole(node);
-  return (
-    node.modal === true || node.tag === "dialog" || role === "dialog" || role === "alertdialog"
-  );
+  const tag = normalizedTag(node);
+  return node.modal === true || tag === "dialog" || role === "dialog" || role === "alertdialog";
 }
 
 function activeRegionCandidatePriority(node: VomNode, viewportCoverage: number): number {
