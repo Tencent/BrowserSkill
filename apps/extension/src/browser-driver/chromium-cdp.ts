@@ -93,15 +93,6 @@ const MAX_CONSOLE_STACK_FRAMES = 20;
 const MAX_NETWORK_BUFFER = 200;
 const MAX_NETWORK_FIELD_LENGTH = 4096;
 const MAX_NETWORK_REQUEST_META = 1024;
-const CDP_INTERNAL_PROTOCOLS = new Set([
-  "chrome:",
-  "chrome-extension:",
-  "devtools:",
-  "edge:",
-  "brave:",
-  "vivaldi:",
-  "opera:",
-]);
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -183,31 +174,6 @@ export class ChromiumCdp {
   }
 
   /**
-   * Attach and verify Chrome's actual CDP target still points at the page URL
-   * Chrome tabs reported to the tool resolver. A stale debugger target can
-   * otherwise surface another extension/internal URL while the tab record looks
-   * like a normal page.
-   */
-  async ensureAttachedToUrl(tabId: number, expectedUrl: string | undefined): Promise<void> {
-    await this.ensureAttached(tabId);
-    if (!expectedUrl) return;
-
-    const first = await this.readTopFrameUrl(tabId).catch((err) => {
-      if (isInternalTargetAccessError(err)) return null;
-      throw err;
-    });
-    if (first && cdpUrlsCompatible(first, expectedUrl)) return;
-
-    await this.forceReattach(tabId);
-    const second = await this.readTopFrameUrl(tabId);
-    if (cdpUrlsCompatible(second, expectedUrl)) return;
-
-    throw new Error(
-      `CDP target URL mismatch for tab ${tabId}: expected ${expectedUrl}, attached to ${second}`,
-    );
-  }
-
-  /**
    * Send a CDP command and decode the result as `T`. Throws on any
    * `chrome.runtime.lastError`.
    */
@@ -219,9 +185,6 @@ export class ChromiumCdp {
       const result = await this.api.sendCommand({ tabId }, method, params ?? {});
       return result as T;
     } catch (err) {
-      if (isInternalTargetAccessError(err)) {
-        this.clearAttachedState(tabId);
-      }
       throw normalizeError(err);
     }
   }
@@ -394,31 +357,6 @@ export class ChromiumCdp {
     } catch (err) {
       console.debug("[bsk cdp] network domain enable failed", { tabId, err });
     }
-  }
-
-  private async forceReattach(tabId: number): Promise<void> {
-    this.clearAttachedState(tabId);
-    try {
-      await this.api.detach({ tabId });
-    } catch {
-      // Chrome may already have detached; attach below is the source of truth.
-    }
-    await this.ensureAttached(tabId);
-  }
-
-  private clearAttachedState(tabId: number): void {
-    this.attachInFlight.delete(tabId);
-    this.attachedTabs.delete(tabId);
-    this.clearDialogState(tabId);
-    this.clearConsoleState(tabId);
-    this.clearNetworkState(tabId);
-  }
-
-  private async readTopFrameUrl(tabId: number): Promise<string> {
-    const frameTree = await this.api.sendCommand({ tabId }, "Page.getFrameTree", {});
-    const url = topFrameUrl(frameTree);
-    if (!url) throw new Error(`Page.getFrameTree returned no top-frame URL for tab ${tabId}`);
-    return url;
   }
 
   private bindDialogHandler(): void {
@@ -967,50 +905,4 @@ function normalizeError(err: unknown): Error {
     return new Error(String((err as { message: unknown }).message));
   }
   return new Error("unknown chrome.debugger error");
-}
-
-function isInternalTargetAccessError(err: unknown): boolean {
-  const message = normalizeError(err).message;
-  return (
-    /Cannot access a chrome-extension:\/\/ URL/i.test(message) ||
-    /Cannot access a chrome:\/\/ URL/i.test(message) ||
-    /Cannot access contents of url/i.test(message)
-  );
-}
-
-function topFrameUrl(frameTree: unknown): string | null {
-  const raw = (frameTree ?? {}) as Record<string, unknown>;
-  const tree = (raw.frameTree ?? {}) as Record<string, unknown>;
-  const frame = (tree.frame ?? {}) as Record<string, unknown>;
-  return typeof frame.url === "string" && frame.url.length > 0 ? frame.url : null;
-}
-
-function cdpUrlsCompatible(actualUrl: string, expectedUrl: string): boolean {
-  const actual = normalizeComparableUrl(actualUrl);
-  const expected = normalizeComparableUrl(expectedUrl);
-  if (!actual || !expected) return false;
-  if (isInternalCdpUrl(actual)) return false;
-  return actual === expected;
-}
-
-function normalizeComparableUrl(value: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return null;
-  }
-  parsed.hash = "";
-  return parsed.toString();
-}
-
-function isInternalCdpUrl(value: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(value);
-  } catch {
-    return false;
-  }
-  if (CDP_INTERNAL_PROTOCOLS.has(parsed.protocol)) return true;
-  return parsed.protocol === "about:" && parsed.pathname !== "blank";
 }
