@@ -42,7 +42,11 @@ describe("HelpRequestOverlay", () => {
     const { container, rerender } = renderOverlay(null);
 
     rerender(
-      createElement(I18nextProvider, { i18n }, createElement(HelpRequestOverlay, { request: null })),
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(HelpRequestOverlay, { request: null }),
+      ),
     );
 
     expect(container.querySelector("[data-slot='help-request-banner']")).toBeNull();
