@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type HelpRequestData, HelpRequestOverlay } from "../HelpRequestOverlay";
 
-function renderOverlay(req: HelpRequestData) {
+function renderOverlay(req: HelpRequestData | null) {
   return render(
     createElement(I18nextProvider, { i18n }, createElement(HelpRequestOverlay, { request: req })),
   );
@@ -36,6 +36,16 @@ describe("HelpRequestOverlay", () => {
   it("renders the prompt", () => {
     renderOverlay(baseRequest());
     expect(screen.getByText("Please complete the captcha")).toBeTruthy();
+  });
+
+  it("keeps the inactive render stable", () => {
+    const { container, rerender } = renderOverlay(null);
+
+    rerender(
+      createElement(I18nextProvider, { i18n }, createElement(HelpRequestOverlay, { request: null })),
+    );
+
+    expect(container.querySelector("[data-slot='help-request-banner']")).toBeNull();
   });
 
   it("renders a compact status without full request controls", () => {

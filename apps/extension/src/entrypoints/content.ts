@@ -1,8 +1,10 @@
 import { i18n } from "@browser-skill/i18n";
 import { I18nextProvider } from "@browser-skill/i18n/react";
 import React from "react";
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
+import { ControlOverlay } from "@/content/ControlOverlay";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import overlayCss from "@/content/overlay.css?inline";
 import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
@@ -45,7 +47,6 @@ import type {
   BorrowRequestMessage,
   BorrowResponseMessage,
 } from "@/tools/borrow-confirmation";
-import logoUrl from "../../assets/logo.png";
 
 // Run at document_end so the overlay does not block first paint. Only attach
 // in the top-level frame so iframes do not double-render overlays.
@@ -64,7 +65,6 @@ export default defineContentScript({
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
-    let controlRoot: HTMLElement | null = null;
     let activeAgentState: OverlayAgentStateMessage | null = null;
     let hostLossReported = false;
     let remountInProgress = false;
@@ -91,29 +91,23 @@ export default defineContentScript({
       onRemove(root) {
         overlayHost = null;
         overlayContainer = null;
-        controlRoot = null;
         root?.unmount();
         reactRoot = null;
       },
     });
 
-    function removeControlOverlay(): void {
-      controlRoot?.remove();
-      controlRoot = null;
-    }
-
-    function setControlSurfaceActive(active: boolean): void {
+    function setOverlaySurfaceState(active: boolean, blocking: boolean): void {
       const host = overlayHost;
       const container = overlayContainer;
       if (!host || !container) return;
 
       if (active) {
-        Object.assign(host.style, {
-          position: "fixed",
-          inset: "0",
-          zIndex: "2147483647",
-          pointerEvents: "auto",
-        });
+        host.setAttribute("data-bsk-overlay-surface", "");
+        if (blocking) {
+          host.setAttribute("data-bsk-overlay-blocking", "");
+        } else {
+          host.removeAttribute("data-bsk-overlay-blocking");
+        }
         Object.assign(container.style, {
           position: "fixed",
           inset: "0",
@@ -122,226 +116,73 @@ export default defineContentScript({
         return;
       }
 
-      host.style.removeProperty("position");
-      host.style.removeProperty("inset");
-      host.style.removeProperty("z-index");
-      host.style.removeProperty("pointer-events");
+      host.removeAttribute("data-bsk-overlay-surface");
+      host.removeAttribute("data-bsk-overlay-blocking");
       container.style.removeProperty("position");
       container.style.removeProperty("inset");
       container.style.removeProperty("pointer-events");
     }
 
-    function ensureControlOverlayRoot(): HTMLElement | null {
-      if (!overlayContainer) return null;
-      if (!controlRoot) {
-        controlRoot = document.createElement("div");
-        controlRoot.className = "bsk-control-overlay";
-        controlRoot.style.opacity = "0";
-        controlRoot.style.transition = "opacity 300ms ease-out";
-        overlayContainer.append(controlRoot);
-        window.requestAnimationFrame(() => {
-          if (controlRoot) controlRoot.style.opacity = "1";
-        });
-      }
-      return controlRoot;
-    }
+    function setOverlayHostHiddenFromAccessibility(hidden: boolean): void {
+      const host = overlayHost;
+      if (!host) return;
 
-    function createStopCircleIcon(): SVGSVGElement {
-      const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-      svg.setAttribute("width", "18");
-      svg.setAttribute("height", "18");
-      svg.setAttribute("viewBox", "0 0 24 24");
-      svg.setAttribute("fill", "currentColor");
-      svg.setAttribute("aria-hidden", "true");
-      svg.style.color = "#fff";
-      svg.style.flexShrink = "0";
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute(
-        "d",
-        "M12 22C6.477 22 2 17.523 2 12S6.477 2 12 2s10 4.477 10 10-4.477 10-10 10Zm0-2a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM9 9h6v6H9V9Z",
-      );
-      svg.append(path);
-      return svg;
-    }
-
-    function renderControlOverlay(): void {
-      const overlayState = overlays.snapshot();
-      if (!shouldShowAgentControlOverlay(overlayState)) {
-        removeControlOverlay();
-        setControlSurfaceActive(false);
+      if (!hidden) {
+        host.removeAttribute("aria-hidden");
         return;
       }
 
-      const root = ensureControlOverlayRoot();
-      if (!root) return;
-
-      const pointerEvents = overlayState.automationBypassCount > 0 ? "none" : "auto";
-      setControlSurfaceActive(true);
-      root.innerHTML = "";
-      Object.assign(root.style, {
-        position: "fixed",
-        inset: "0",
-        pointerEvents: "none",
-      });
-
-      const style = document.createElement("style");
-      style.textContent = `
-        @keyframes bsk-breathe {
-          0%, 100% { box-shadow: inset 0 0 20px 4px rgba(249,115,22,0.25); }
-          50% { box-shadow: inset 0 0 40px 8px rgba(249,115,22,0.5); }
-        }
-      `;
-
-      const border = document.createElement("div");
-      border.setAttribute("data-slot", "control-overlay");
-      Object.assign(border.style, {
-        position: "fixed",
-        inset: "0",
-        zIndex: "2147483646",
-        pointerEvents: "none",
-        animation: "bsk-breathe 3s ease-in-out infinite",
-      });
-
-      const blocker = document.createElement("div");
-      blocker.setAttribute("data-slot", "control-overlay-blocker");
-      Object.assign(blocker.style, {
-        position: "fixed",
-        inset: "0",
-        zIndex: "2147483646",
-        pointerEvents,
-        background: "transparent",
-      });
-      blocker.addEventListener("pointerdown", (event) => {
-        if (overlayState.automationBypassCount > 0) return;
-        event.preventDefault();
-        event.stopPropagation();
-      });
-      blocker.addEventListener("click", (event) => {
-        if (overlayState.automationBypassCount > 0) return;
-        event.preventDefault();
-        event.stopPropagation();
-      });
-      blocker.addEventListener(
-        "wheel",
-        (event) => {
-          if (overlayState.automationBypassCount > 0) return;
-          event.preventDefault();
-          event.stopPropagation();
-        },
-        { passive: false },
-      );
-      blocker.addEventListener(
-        "touchmove",
-        (event) => {
-          if (overlayState.automationBypassCount > 0) return;
-          event.preventDefault();
-          event.stopPropagation();
-        },
-        { passive: false },
-      );
-
-      const pill = document.createElement("div");
-      pill.setAttribute("data-slot", "control-overlay-pill");
-      Object.assign(pill.style, {
-        position: "fixed",
-        bottom: "32px",
-        left: "50%",
-        transform: "translateX(-50%)",
-        zIndex: "2147483647",
-        pointerEvents: "auto",
-        display: "flex",
-        alignItems: "center",
-        gap: "12px",
-        borderRadius: "999px",
-        backgroundColor: "#fff",
-        padding: "10px 10px 10px 20px",
-        boxShadow: "0 8px 32px rgba(124,45,18,0.16), 0 2px 8px rgba(0,0,0,0.1)",
-        fontFamily:
-          '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
-      });
-
-      const logo = document.createElement("img");
-      logo.src = logoUrl;
-      logo.alt = "browser-skill";
-      Object.assign(logo.style, {
-        width: "24px",
-        height: "24px",
-        borderRadius: "4px",
-        flexShrink: "0",
-      });
-
-      const label = document.createElement("span");
-      label.textContent = i18n.t("controlOverlay.status", { ns: "extension" });
-      Object.assign(label.style, {
-        fontSize: "16px",
-        fontWeight: "500",
-        color: "#333",
-        whiteSpace: "nowrap",
-        userSelect: "none",
-      });
-
-      const button = document.createElement("button");
-      button.type = "button";
-      button.setAttribute("data-slot", "control-overlay-stop-all");
-      button.disabled = overlayState.interrupting;
-      Object.assign(button.style, {
-        pointerEvents: "auto",
-        display: "flex",
-        alignItems: "center",
-        gap: "6px",
-        border: "none",
-        borderRadius: "999px",
-        padding: "8px 20px 8px 16px",
-        fontSize: "15px",
-        fontWeight: "600",
-        color: "#fff",
-        backgroundColor: overlayState.interrupting ? "#9ca3af" : "#f97316",
-        cursor: overlayState.interrupting ? "default" : "pointer",
-        opacity: overlayState.interrupting ? "0.7" : "1",
-        transition: "background-color 150ms ease-out, opacity 150ms ease-out",
-        whiteSpace: "nowrap",
-        lineHeight: "1",
-      });
-      button.append(
-        createStopCircleIcon(),
-        document.createTextNode(
-          overlayState.interrupting
-            ? i18n.t("controlOverlay.interrupting", { ns: "extension" })
-            : i18n.t("controlOverlay.interrupt", { ns: "extension" }),
-        ),
-      );
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        handleInterrupt();
-      });
-
-      pill.append(logo, label, button);
-      root.append(style, border, blocker, pill);
+      const focusedInShadow = host.shadowRoot?.activeElement;
+      if (focusedInShadow instanceof HTMLElement) {
+        focusedInShadow.blur();
+      }
+      if (document.activeElement === host) {
+        host.blur();
+      }
+      host.setAttribute("aria-hidden", "true");
     }
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      reactRoot?.render(
-        React.createElement(
-          I18nextProvider,
-          { i18n },
-          React.createElement(
-            React.Fragment,
-            null,
-            React.createElement(BorrowConfirmationOverlay, {
-              requests: overlayState.borrowRequests,
-            }),
-            React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
-            React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
-          ),
-        ),
+      const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      const interactiveOverlayVisible =
+        overlayState.borrowRequests.length > 0 ||
+        overlayState.activeHelp !== null ||
+        overlayState.activeRecord !== null;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      setOverlaySurfaceState(
+        controlOverlayVisible,
+        controlOverlayVisible && overlayState.automationBypassCount === 0,
       );
+      const root = reactRoot;
+      if (!root) return;
+      flushSync(() => {
+        root.render(
+          React.createElement(
+            I18nextProvider,
+            { i18n },
+            React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(BorrowConfirmationOverlay, {
+                requests: overlayState.borrowRequests,
+              }),
+              React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
+              React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(ControlOverlay, {
+                visible: controlOverlayVisible,
+                interrupting: overlayState.interrupting,
+                automationBypass: overlayState.automationBypassCount > 0,
+                onInterrupt: handleInterrupt,
+              }),
+            ),
+          ),
+        );
+      });
     }
 
     function renderAll(): void {
       renderReactOverlays();
-      renderControlOverlay();
     }
 
     async function waitForRenderedOverlayUpdate(): Promise<void> {

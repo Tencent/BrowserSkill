@@ -48,6 +48,7 @@ const VIEWPORT_MARGIN = 16;
 const PANEL_WIDTH = 420;
 const FALLBACK_PANEL_H = 180;
 const FALLBACK_PANEL_H_COLLAPSED = 44;
+const EMPTY_SELECTORS: string[] = [];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -177,7 +178,7 @@ function measure(selectors: string[]): Box[] {
 export function HelpRequestOverlay({ request }: Props) {
   const { t } = useTranslation("extension");
   const isCompact = request?.displayMode === "compact";
-  const effectiveSelectors = isCompact ? [] : (request?.selectors ?? []);
+  const effectiveSelectors = isCompact ? EMPTY_SELECTORS : (request?.selectors ?? EMPTY_SELECTORS);
   const [note, setNote] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -226,7 +227,7 @@ export function HelpRequestOverlay({ request }: Props) {
   // Keep highlight boxes aligned with the page as it scrolls / resizes.
   useEffect(() => {
     if (!request) {
-      setBoxes([]);
+      setBoxes((prev) => (prev.length === 0 ? prev : []));
       return;
     }
     const update = () => {
