@@ -5,7 +5,7 @@
  *
  * Mirrors the borrow-confirmation message style (see
  * `@/tools/borrow-confirmation`). The background asks a specific tab to
- * enter "help mode" (render HelpRequestOverlay + hide the control mask);
+ * enter "help mode" (render HelpRequestOverlay + hide ControlOverlay);
  * the content script acks display, then later reports Done / Cancel.
  */
 

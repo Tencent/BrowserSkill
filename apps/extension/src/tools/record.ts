@@ -369,7 +369,7 @@ async function rearmRecording(
   deps: RecordDeps,
 ): Promise<boolean> {
   // Do NOT toggle automation-bypass here: each retry used to increment the
-  // content-script counter, and a single stop decrement left the control mask
+  // content-script counter, and a single stop decrement left the ControlOverlay
   // stuck with pointer-events:none (page usable, Interrupt dead). RecordOverlay
   // already hides the control chrome while activeRecord is set.
   for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
@@ -561,9 +561,9 @@ export async function handleRecordStart(
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
 
-  // Register the recording *before* navigate so the destination content script's
-  // overlay.ready flow can RECORD_QUERY → rearm → show RecordOverlay
-  // instead of flashing the control mask ("Agent 正在控制").
+  // Register the recording *before* navigate so content-script syncAgentOverlay
+  // on the destination page can RECORD_QUERY → rearm → show RecordOverlay
+  // instead of flashing ControlOverlay ("Agent 正在控制").
   const requestId = makeRequestId(target.tabId);
   let resolveFinish!: (trace: Trace) => void;
   let rejectFinish!: (err: Error) => void;
