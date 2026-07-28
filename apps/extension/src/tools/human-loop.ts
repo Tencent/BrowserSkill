@@ -304,11 +304,12 @@ async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
   );
 }
 
-function finishHelp(
+async function finishHelp(
   help: ActiveHelpRequest,
   value: RequestHelpResult | RpcError,
   notifyContent = true,
-): void {
+  waitForCleanup = false,
+): Promise<void> {
   if (help.settled) return;
   help.settled = true;
   activeHelpRequests.delete(help.requestId);
@@ -317,7 +318,11 @@ function finishHelp(
   if (help.abortHandler) help.deps.signal?.removeEventListener("abort", help.abortHandler);
   clearRearmTimer(help.primaryTabId);
   for (const tabId of help.overlayTabIds) clearRearmTimer(tabId);
-  if (notifyContent) void cleanupHelp(help);
+  if (notifyContent) {
+    const cleanup = cleanupHelp(help);
+    if (waitForCleanup) await cleanup;
+    else void cleanup;
+  }
   help.resolve(value);
 }
 
@@ -386,12 +391,17 @@ async function rearmHelp(help: ActiveHelpRequest, tabId: number): Promise<boolea
     try {
       const legacyFinish = await refreshAndSendHelpOverlay(help, tabId);
       if (legacyFinish && !help.settled) {
-        finishHelp(help, {
-          outcome: legacyFinish.outcome,
-          ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
-          tab_id: help.primaryTabId,
-          resolved_targets: help.resolvedTargets,
-        });
+        await finishHelp(
+          help,
+          {
+            outcome: legacyFinish.outcome,
+            ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
+            tab_id: help.primaryTabId,
+            resolved_targets: help.resolvedTargets,
+          },
+          true,
+          true,
+        );
       }
       return true;
     } catch {
@@ -501,12 +511,17 @@ async function finishHelpFromContent(
     const match = await findHelpForTab(tabId, deps);
     if (match !== help) return;
   }
-  finishHelp(help, {
-    outcome: message.outcome,
-    ...(message.note ? { note: message.note } : {}),
-    tab_id: help.primaryTabId,
-    resolved_targets: help.resolvedTargets,
-  });
+  await finishHelp(
+    help,
+    {
+      outcome: message.outcome,
+      ...(message.note ? { note: message.note } : {}),
+      tab_id: help.primaryTabId,
+      resolved_targets: help.resolvedTargets,
+    },
+    true,
+    true,
+  );
 }
 
 function attachHelpTabListener(deps: RequestHelpDeps): () => void {
@@ -639,7 +654,7 @@ function startCompletionPolling(help: ActiveHelpRequest): void {
     }
     help.completionMatchedSince ??= now;
     if (now - help.completionMatchedSince < stableMs) return;
-    finishHelp(help, {
+    void finishHelp(help, {
       outcome: "completed",
       completed_by: "system",
       tab_id: help.primaryTabId,
@@ -698,7 +713,7 @@ export async function handleRequestHelp(
 
   return new Promise<RequestHelpResult | RpcError>((resolve) => {
     const timeoutTimer = setTimeout(() => {
-      finishHelp(help, {
+      void finishHelp(help, {
         outcome: "timed_out",
         tab_id: help.primaryTabId,
         resolved_targets: help.resolvedTargets,
@@ -727,7 +742,8 @@ export async function handleRequestHelp(
       abortHandler: null,
     };
 
-    const onAbort = () => finishHelp(help, { code: "cancelled", message: "request_help aborted" });
+    const onAbort = () =>
+      void finishHelp(help, { code: "cancelled", message: "request_help aborted" });
     help.abortHandler = onAbort;
     activeHelpRequests.set(requestId, help);
     if (deps.signal?.aborted) {
@@ -738,14 +754,19 @@ export async function handleRequestHelp(
     startCompletionPolling(help);
 
     void sendCurrentHelpOverlay(help)
-      .then((legacyFinish) => {
+      .then(async (legacyFinish) => {
         if (!legacyFinish || help.settled) return;
-        finishHelp(help, {
-          outcome: legacyFinish.outcome,
-          ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
-          tab_id: help.primaryTabId,
-          resolved_targets: help.resolvedTargets,
-        });
+        await finishHelp(
+          help,
+          {
+            outcome: legacyFinish.outcome,
+            ...(legacyFinish.note ? { note: legacyFinish.note } : {}),
+            tab_id: help.primaryTabId,
+            resolved_targets: help.resolvedTargets,
+          },
+          true,
+          true,
+        );
       })
       .catch(() => {
         scheduleRearmForTab(tabId, deps);

@@ -215,6 +215,11 @@ refreshes do not return control by themselves. The result `outcome` is one of:
 `note` carries any text the user typed back. `resolved_targets` reports
 which refs/selectors matched a live element.
 
+`request-help` does not refresh the page model after the user returns
+control. After a `continued` or `completed` result, issue a separate
+observation tool call (usually `bsk snapshot --session <id>`) before using
+new refs or reasoning about the post-help page state.
+
 ### Recording — `bsk record`
 
 Capture the user's own actions in the Agent Window to a `trace.json`, for later LLM-driven automation:

@@ -344,6 +344,11 @@ export default defineContentScript({
       renderControlOverlay();
     }
 
+    async function waitForRenderedOverlayUpdate(): Promise<void> {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    }
+
     function clearCurrentAgentSession(): void {
       const sessionId = overlays.snapshot().activeSessionId;
       if (!sessionId) return;
@@ -528,6 +533,7 @@ export default defineContentScript({
       };
       overlays.clearAgentHelpRequest(requestId);
       renderAll();
+      await waitForRenderedOverlayUpdate();
       await chrome.runtime.sendMessage(msg).catch((err) => {
         console.debug("[bsk overlay] help finish failed", err);
       });
