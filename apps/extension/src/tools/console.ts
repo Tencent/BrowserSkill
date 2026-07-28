@@ -27,7 +27,9 @@ export async function handleConsole(
   manager: SessionManager,
   params: ConsoleParams,
   deps: ConsoleDeps = defaultConsoleDeps(),
+  signal?: AbortSignal,
 ): Promise<ConsoleResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
   const ctxOrErr = lookupSession(manager, params, "console");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const bounds = parseBufferedReadBounds(params);
@@ -40,6 +42,7 @@ export async function handleConsole(
 
   try {
     await deps.cdp.ensureConsoleCapture(target.tabId);
+    if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
     deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     return deps.cdp.consoleEntriesSince(
       target.tabId,
