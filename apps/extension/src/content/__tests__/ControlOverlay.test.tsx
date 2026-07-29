@@ -1,5 +1,5 @@
 import { cleanup, render } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ControlOverlay } from "../ControlOverlay";
 
 describe("ControlOverlay", () => {
@@ -43,5 +43,22 @@ describe("ControlOverlay", () => {
     const blocker = container.querySelector("[data-slot='control-overlay-blocker']");
     expect(blocker).toBeTruthy();
     expect((blocker as HTMLElement).style.pointerEvents).toBe("auto");
+  });
+
+  it("calls onInterrupt from the stop button", () => {
+    const onInterrupt = vi.fn();
+    const { container } = render(
+      <ControlOverlay
+        visible={true}
+        interrupting={false}
+        automationBypass={false}
+        onInterrupt={onInterrupt}
+      />,
+    );
+
+    const stopBtn = container.querySelector("[data-slot='control-overlay-stop-all']");
+    (stopBtn as HTMLButtonElement).click();
+
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
   });
 });

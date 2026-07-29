@@ -26,6 +26,9 @@ importers:
       '@browser-skill/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@browser-skill/vom':
+        specifier: workspace:*
+        version: link:../../packages/vom
       '@remixicon/react':
         specifier: ^4.9.0
         version: 4.9.0(react@19.2.6)
@@ -121,6 +124,15 @@ importers:
       '@types/react-dom':
         specifier: ^19.2.3
         version: 19.2.3(@types/react@19.2.14)
+
+  packages/vom:
+    devDependencies:
+      typescript:
+        specifier: ^5.8.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.6
+        version: 4.1.6(@types/node@25.8.0)(happy-dom@15.11.7)(vite@8.0.13(@types/node@25.8.0)(esbuild@0.27.7)(jiti@2.7.0))
 
 packages:
 

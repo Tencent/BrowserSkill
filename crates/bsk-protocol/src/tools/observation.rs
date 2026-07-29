@@ -1,4 +1,4 @@
-//! Read-only observation tools (`tool.snapshot`, `tool.get_html`, `tool.screenshot`).
+//! Observation tools (`tool.snapshot`, `tool.observe`, `tool.get_html`, `tool.screenshot`).
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,50 @@ pub struct SnapshotResult {
     pub ref_count: u32,
     /// Tab the snapshot was actually computed for (after resolving the
     /// optional `tab_id` default).
+    pub tab_id: i64,
+    /// Whether the rendered tree was truncated because of `max_depth` /
+    /// `max_tokens`. Agents may re-run with looser caps.
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// observe
+// ---------------------------------------------------------------------------
+
+/// Parameters for `tool.observe` — produce a semantic VOM observation
+/// for one tab plus a fresh `@e<N>` ref-store on the extension side.
+///
+/// Unlike `tool.snapshot`, this path may run bounded perception probes
+/// such as hover-surface discovery. It must not submit input, click,
+/// navigate, or otherwise commit page state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ObserveParams {
+    pub session_id: String,
+    /// Optional target tab. Defaults to the Agent Window's currently
+    /// active tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    /// Cap the depth of the rendered VOM tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+    /// Soft cap on rendered tokens (approximate; extension uses a
+    /// best-effort heuristic based on character count).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ObserveResult {
+    /// Semantic VOM observation text. Refs are rendered as `@e<N>` so
+    /// the agent can copy them into subsequent interaction tools.
+    pub text: String,
+    /// Number of `@e<N>` refs registered for this session by this
+    /// observation. Equivalent to the size of the new ref-store map.
+    pub ref_count: u32,
+    /// Tab the observation was computed for.
     pub tab_id: i64,
     /// Whether the rendered tree was truncated because of `max_depth` /
     /// `max_tokens`. Agents may re-run with looser caps.
@@ -225,6 +269,21 @@ mod tests {
         };
         let v = serde_json::to_value(&r).unwrap();
         let round: ScreenshotResult = serde_json::from_value(v).unwrap();
+        assert_eq!(round, r);
+    }
+
+    #[test]
+    fn observe_result_round_trips_with_ref_count() {
+        let r = ObserveResult {
+            text: "@vom 1\n  @e1 button \"submit\"\n".into(),
+            ref_count: 1,
+            tab_id: 42,
+            truncated: false,
+            dialogs: Vec::new(),
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v.get("ref_count").and_then(|v| v.as_u64()), Some(1));
+        let round: ObserveResult = serde_json::from_value(v).unwrap();
         assert_eq!(round, r);
     }
 }

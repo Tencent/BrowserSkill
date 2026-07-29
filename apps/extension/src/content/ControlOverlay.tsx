@@ -1,6 +1,6 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { RiStopCircleLine } from "@remixicon/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import logoUrl from "../../assets/logo.png";
 
 export interface ControlOverlayProps {
@@ -18,6 +18,7 @@ export function ControlOverlay({
 }: ControlOverlayProps) {
   const { t } = useTranslation("extension");
   const [show, setShow] = useState(false);
+  const blockerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (visible) {
@@ -26,6 +27,36 @@ export function ControlOverlay({
     }
     setShow(false);
   }, [visible]);
+
+  useEffect(() => {
+    const blocker = blockerRef.current;
+    if (!blocker) return;
+    const stopScroll = (event: WheelEvent | TouchEvent) => {
+      if (automationBypass) return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    blocker.addEventListener("wheel", stopScroll, { passive: false });
+    blocker.addEventListener("touchmove", stopScroll, { passive: false });
+    return () => {
+      blocker.removeEventListener("wheel", stopScroll);
+      blocker.removeEventListener("touchmove", stopScroll);
+    };
+  }, [automationBypass]);
+
+  useEffect(() => {
+    if (!visible || automationBypass) return;
+    const stopScroll = (event: WheelEvent | TouchEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("wheel", stopScroll, { capture: true, passive: false });
+    window.addEventListener("touchmove", stopScroll, { capture: true, passive: false });
+    return () => {
+      window.removeEventListener("wheel", stopScroll, { capture: true });
+      window.removeEventListener("touchmove", stopScroll, { capture: true });
+    };
+  }, [visible, automationBypass]);
 
   if (!visible) return null;
 
@@ -58,6 +89,7 @@ export function ControlOverlay({
       />
 
       <div
+        ref={blockerRef}
         data-slot="control-overlay-blocker"
         onPointerDown={(event) => {
           if (automationBypass) return;
@@ -88,8 +120,6 @@ export function ControlOverlay({
           left: "50%",
           transform: "translateX(-50%)",
           zIndex: 2147483647,
-          // Always receive clicks so Interrupt works even while the page
-          // blocker is in automation-bypass mode (CDP pass-through).
           pointerEvents: "auto",
           display: "flex",
           alignItems: "center",

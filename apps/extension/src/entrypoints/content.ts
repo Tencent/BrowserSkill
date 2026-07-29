@@ -1,6 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { I18nextProvider } from "@browser-skill/i18n/react";
 import React from "react";
+import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
@@ -27,11 +28,12 @@ import {
 } from "@/lib/help-bridge";
 import {
   isOverlayAgentOverlayResetMessage,
+  isOverlayAgentStateMessage,
   OVERLAY_AUTOMATION_BYPASS,
-  OVERLAY_MSG_WHO_AM_I,
+  OVERLAY_MSG_READY,
   type OverlayAgentOverlayResetMessage,
+  type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
-  type OverlayWhoAmIResponse,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
@@ -40,7 +42,6 @@ import {
   type RecordStartAck,
   type RecordStopAck,
 } from "@/lib/record-bridge";
-import { SESSIONS_LIVE_FLAG_KEY } from "@/lib/sessions-live-flag";
 import type {
   BorrowCancelMessage,
   BorrowRequestMessage,
@@ -63,6 +64,8 @@ export default defineContentScript({
     let activeRecordRequestId: string | null = null;
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
+    let overlayContainer: HTMLElement | null = null;
+    let activeAgentState: OverlayAgentStateMessage | null = null;
     let hostLossReported = false;
     let remountInProgress = false;
 
@@ -75,44 +78,128 @@ export default defineContentScript({
         shadowHost.setAttribute("aria-hidden", "true");
         shadowHost.setAttribute("data-bsk-overlay", "");
         overlayHost = shadowHost;
+        overlayContainer = container;
         hostLossReported = false;
         const app = document.createElement("div");
         app.className = "bsk-overlay-root";
         container.append(app);
         reactRoot = ReactDOM.createRoot(app);
-        renderOverlay();
+        renderAll();
+        void requestOverlayState();
         return reactRoot;
       },
       onRemove(root) {
         overlayHost = null;
+        overlayContainer = null;
         root?.unmount();
         reactRoot = null;
       },
     });
 
-    function renderOverlay() {
+    function setOverlaySurfaceState(active: boolean, blocking: boolean): void {
+      const host = overlayHost;
+      const container = overlayContainer;
+      if (!host || !container) return;
+
+      if (active) {
+        host.setAttribute("data-bsk-overlay-surface", "");
+        if (blocking) {
+          host.setAttribute("data-bsk-overlay-blocking", "");
+        } else {
+          host.removeAttribute("data-bsk-overlay-blocking");
+        }
+        Object.assign(container.style, {
+          position: "fixed",
+          inset: "0",
+          pointerEvents: "none",
+        });
+        return;
+      }
+
+      host.removeAttribute("data-bsk-overlay-surface");
+      host.removeAttribute("data-bsk-overlay-blocking");
+      container.style.removeProperty("position");
+      container.style.removeProperty("inset");
+      container.style.removeProperty("pointer-events");
+    }
+
+    function setOverlayHostHiddenFromAccessibility(hidden: boolean): void {
+      const host = overlayHost;
+      if (!host) return;
+
+      if (!hidden) {
+        host.removeAttribute("aria-hidden");
+        return;
+      }
+
+      const focusedInShadow = host.shadowRoot?.activeElement;
+      if (focusedInShadow instanceof HTMLElement) {
+        focusedInShadow.blur();
+      }
+      if (document.activeElement === host) {
+        host.blur();
+      }
+      host.setAttribute("aria-hidden", "true");
+    }
+
+    function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      reactRoot?.render(
-        React.createElement(
-          I18nextProvider,
-          { i18n },
-          React.createElement(
-            React.Fragment,
-            null,
-            React.createElement(BorrowConfirmationOverlay, {
-              requests: overlayState.borrowRequests,
-            }),
-            React.createElement(ControlOverlay, {
-              visible: shouldShowAgentControlOverlay(overlayState),
-              interrupting: overlayState.interrupting,
-              automationBypass: overlayState.automationBypassCount > 0,
-              onInterrupt: handleInterrupt,
-            }),
-            React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
-            React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
-          ),
-        ),
+      const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      const interactiveOverlayVisible =
+        overlayState.borrowRequests.length > 0 ||
+        overlayState.activeHelp !== null ||
+        overlayState.activeRecord !== null;
+      setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      setOverlaySurfaceState(
+        controlOverlayVisible,
+        controlOverlayVisible && overlayState.automationBypassCount === 0,
       );
+      const root = reactRoot;
+      if (!root) return;
+      flushSync(() => {
+        root.render(
+          React.createElement(
+            I18nextProvider,
+            { i18n },
+            React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(BorrowConfirmationOverlay, {
+                requests: overlayState.borrowRequests,
+              }),
+              React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
+              React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(ControlOverlay, {
+                visible: controlOverlayVisible,
+                interrupting: overlayState.interrupting,
+                automationBypass: overlayState.automationBypassCount > 0,
+                onInterrupt: handleInterrupt,
+              }),
+            ),
+          ),
+        );
+      });
+    }
+
+    function renderAll(): void {
+      renderReactOverlays();
+    }
+
+    async function waitForRenderedOverlayUpdate(): Promise<void> {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    }
+
+    function clearCurrentAgentSession(): void {
+      const sessionId = overlays.snapshot().activeSessionId;
+      if (!sessionId) return;
+      resetAgentOverlayState(sessionId);
+    }
+
+    function applyOverlayState(state: OverlayAgentStateMessage): void {
+      activeAgentState = state;
+      overlays.applyAgentControlMode(state.sessionId, state.mode);
+      renderAll();
     }
 
     function resetAgentOverlayState(sessionId: string) {
@@ -123,7 +210,7 @@ export default defineContentScript({
       recordCapture?.dispose();
       recordCapture = null;
       activeRecordRequestId = null;
-      renderOverlay();
+      renderAll();
     }
 
     function handleInterrupt() {
@@ -135,12 +222,8 @@ export default defineContentScript({
         return;
       }
       overlays.setInterrupting(true);
-      renderOverlay();
+      renderAll();
       void sendInterrupt((msg) => chrome.runtime.sendMessage(msg), sessionId).then((reply) => {
-        // Always retract the mask after the round trip resolves
-        // (success, failure, or timeout). Cancellation is fire-and-
-        // forget on the daemon side; the user must not be stuck
-        // behind a transient issue. The Agent Window stays open.
         resetAgentOverlayState(sessionId);
         if (!reply.ok) {
           console.warn("[bsk overlay] interrupt did not get a clean ack from daemon");
@@ -155,6 +238,7 @@ export default defineContentScript({
         | HelpRequestMessage
         | HelpCancelMessage
         | OverlayAgentOverlayResetMessage
+        | OverlayAgentStateMessage
         | OverlayAutomationBypassMessage,
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response: BorrowResponseMessage | HelpAckMessage) => void,
@@ -181,11 +265,11 @@ export default defineContentScript({
                   });
                 },
               });
-              renderOverlay();
+              renderAll();
             },
             onStop: () => {
               overlays.clearAgentRecordRequest(activeRecordRequestId ?? undefined);
-              renderOverlay();
+              renderAll();
             },
           },
           sendResponse as unknown as
@@ -203,7 +287,12 @@ export default defineContentScript({
       ) {
         const bypassMsg = message as OverlayAutomationBypassMessage;
         overlays.setAutomationBypass(bypassMsg.enabled);
-        renderOverlay();
+        renderAll();
+        return false;
+      }
+
+      if (isOverlayAgentStateMessage(message)) {
+        applyOverlayState(message);
         return false;
       }
 
@@ -214,7 +303,7 @@ export default defineContentScript({
 
       if (message.type === "borrow-cancel") {
         overlays.removeBorrowRequest(message.requestId);
-        renderOverlay();
+        renderAll();
         return false;
       }
 
@@ -222,7 +311,7 @@ export default defineContentScript({
         const state = overlays.snapshot();
         if (state.activeHelp && state.activeHelp.id === message.requestId) {
           overlays.clearAgentHelpRequest(message.requestId);
-          renderOverlay();
+          renderAll();
         }
         return false;
       }
@@ -242,7 +331,7 @@ export default defineContentScript({
         if (previousHelp && previousHelp.id !== helpMsg.requestId) {
           void sendHelpFinish(previousHelp.id, "cancelled");
         }
-        renderOverlay();
+        renderAll();
         sendResponse({ type: HELP_ACK, ok: true });
         return false;
       }
@@ -254,7 +343,7 @@ export default defineContentScript({
           responded = true;
           sendResponse({ type: "borrow-response", allowed });
           overlays.removeBorrowRequest(message.requestId);
-          renderOverlay();
+          renderAll();
         };
 
         overlays.addBorrowRequest({
@@ -265,7 +354,7 @@ export default defineContentScript({
           onAllow: () => respond(true),
           onDeny: () => respond(false),
         });
-        renderOverlay();
+        renderAll();
         return true;
       }
 
@@ -284,7 +373,8 @@ export default defineContentScript({
         ...(note ? { note } : {}),
       };
       overlays.clearAgentHelpRequest(requestId);
-      renderOverlay();
+      renderAll();
+      await waitForRenderedOverlayUpdate();
       await chrome.runtime.sendMessage(msg).catch((err) => {
         console.debug("[bsk overlay] help finish failed", err);
       });
@@ -303,7 +393,7 @@ export default defineContentScript({
       });
     }
 
-    async function queryActiveHelpWithRetry(): Promise<boolean> {
+    async function queryActiveHelpWithRetry(): Promise<void> {
       for (let attempt = 0; attempt < 6; attempt += 1) {
         try {
           const helpQuery = (await chrome.runtime.sendMessage({
@@ -311,38 +401,21 @@ export default defineContentScript({
           })) as HelpQueryResponse | undefined;
           if (helpQuery?.active && helpQuery.request) {
             mountHelpRequest(helpQuery.request);
-            renderOverlay();
-            return true;
+            renderAll();
+            return;
           }
         } catch (err) {
           console.debug("[bsk overlay] help query failed", err);
         }
         await new Promise((resolve) => window.setTimeout(resolve, 150));
       }
-      return false;
     }
 
-    async function syncAgentOverlay(): Promise<void> {
-      if (!(await anySessionLive())) return;
+    async function queryActiveRecord(): Promise<void> {
       try {
-        const helpActive = await queryActiveHelpWithRetry();
-        const reply = (await chrome.runtime.sendMessage({
-          kind: OVERLAY_MSG_WHO_AM_I,
-        })) as OverlayWhoAmIResponse | undefined;
-        if (!reply?.sessionId) return;
-
-        // Query / re-arm recording *before* activating the control overlay so
-        // record start (navigate → content load) does not flash
-        // 「Agent 正在控制」before RecordOverlay mounts.
-        let recordQuery: { active?: boolean; requestId?: string } | undefined;
-        try {
-          recordQuery = (await chrome.runtime.sendMessage({
-            type: RECORD_QUERY,
-          })) as { active?: boolean; requestId?: string } | undefined;
-        } catch (err) {
-          console.debug("[bsk overlay] record query failed", err);
-        }
-
+        const recordQuery = (await chrome.runtime.sendMessage({
+          type: RECORD_QUERY,
+        })) as { active?: boolean; requestId?: string } | undefined;
         if (
           recordQuery?.active &&
           typeof recordQuery.requestId === "string" &&
@@ -358,26 +431,38 @@ export default defineContentScript({
               });
             },
           });
+          renderAll();
         }
-
-        if (!helpActive && overlays.snapshot().activeHelp === null) {
-          void queryActiveHelpWithRetry();
-        }
-
-        overlays.activateAgentSession(reply.sessionId);
-        renderOverlay();
       } catch (err) {
-        console.debug("[bsk overlay] syncAgentOverlay failed", err);
+        console.debug("[bsk overlay] record query failed", err);
+      }
+    }
+
+    async function refreshAuxiliaryOverlayState(): Promise<void> {
+      await Promise.all([queryActiveHelpWithRetry(), queryActiveRecord()]);
+    }
+
+    async function requestOverlayState(): Promise<void> {
+      try {
+        const state = (await chrome.runtime.sendMessage({
+          kind: OVERLAY_MSG_READY,
+        })) as OverlayAgentStateMessage | undefined;
+        if (state && isOverlayAgentStateMessage(state)) {
+          applyOverlayState(state);
+        }
+        void refreshAuxiliaryOverlayState();
+      } catch (err) {
+        console.debug("[bsk overlay] overlay.ready failed", err);
       }
     }
 
     const onPageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) void syncAgentOverlay();
+      if (event.persisted) void requestOverlayState();
     };
 
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
-    void syncAgentOverlay();
+    void requestOverlayState();
 
     window.addEventListener("pageshow", onPageShow);
 
@@ -389,7 +474,8 @@ export default defineContentScript({
           remountInProgress = true;
           try {
             ui.mount();
-            void syncAgentOverlay();
+            if (activeAgentState) applyOverlayState(activeAgentState);
+            void requestOverlayState();
           } finally {
             remountInProgress = false;
           }
@@ -412,16 +498,3 @@ export default defineContentScript({
     });
   },
 });
-
-async function anySessionLive(): Promise<boolean> {
-  if (!chrome.storage?.session?.get) return true;
-  try {
-    const result = (await chrome.storage.session.get({
-      [SESSIONS_LIVE_FLAG_KEY]: false,
-    })) as Record<string, unknown> | undefined;
-    return Boolean(result?.[SESSIONS_LIVE_FLAG_KEY]);
-  } catch (err) {
-    console.debug("[bsk overlay] sessions-live flag read failed", err);
-    return true;
-  }
-}

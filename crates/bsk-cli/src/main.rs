@@ -82,6 +82,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Tab(cmd) => cli::tab::dispatch(cmd, format),
         Command::Screenshot(args) => cli::screenshot::dispatch(args, format),
         Command::Snapshot(args) => cli::snapshot::dispatch(args, format),
+        Command::Observe(args) => cli::observe::dispatch(args, format),
         Command::Console(args) => cli::console::dispatch(args, format),
         Command::Network(args) => cli::network::dispatch(args, format),
         Command::GetHtml(args) => cli::get_html::dispatch(args, format),

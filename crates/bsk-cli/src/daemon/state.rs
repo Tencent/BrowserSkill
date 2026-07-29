@@ -46,8 +46,8 @@ pub struct DaemonState {
     /// Per-session "pending interrupt" signal. The WS event handler
     /// `mark`s the session when the user clicks the agent-window
     /// mask's stop button; the IPC tool-dispatch handler
-    /// `try_consume`s on the way in so the next mutating tool call
-    /// is rejected with `UserAborted`. Independent of
+    /// `try_consume`s on the way in so the next browser-input-dispatching
+    /// tool call is rejected with `UserAborted`. Independent of
     /// `SessionRegistry` because the signal is a transient runtime
     /// control state.
     pub session_interrupts: Arc<SessionInterruptRegistry>,

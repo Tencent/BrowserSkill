@@ -11,9 +11,9 @@ use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
     ConsoleEntry, ConsoleEntryKind, ConsoleParams, ConsoleResult, GetHtmlParams, GetHtmlResult,
-    NetworkEntry, NetworkEntryKind, NetworkParams, NetworkResult, ScreenshotParams,
-    ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams, SnapshotResult,
-    TabInfo, TabListParams, TabListResult, TabScope,
+    NetworkEntry, NetworkEntryKind, NetworkParams, NetworkResult, ObserveParams, ObserveResult,
+    ScreenshotParams, ScreenshotResult, SessionStartParams, SessionStartResult, SnapshotParams,
+    SnapshotResult, TabInfo, TabListParams, TabListResult, TabScope,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -458,6 +458,46 @@ async fn snapshot_returns_text_and_ref_count() {
     .expect("snapshot ok");
     assert_eq!(result.ref_count, 2);
     assert!(result.text.contains("@e1"));
+    assert_eq!(result.tab_id, 13);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observe_returns_semantic_text_and_ref_count() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolObserve);
+        let _: ObserveParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        ResponseBody::Ok(
+            serde_json::to_value(ObserveResult {
+                text: "@vom 1\n  @e1 button \"Products\" [hover: Shoes]\n".into(),
+                ref_count: 1,
+                tab_id: 13,
+                truncated: false,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: ObserveResult = ipc_tool_call(
+        &sock,
+        Method::ToolObserve,
+        ObserveParams {
+            session_id,
+            tab_id: None,
+            max_depth: None,
+            max_tokens: None,
+        },
+    )
+    .await
+    .expect("observe ok");
+    assert_eq!(result.ref_count, 1);
+    assert!(result.text.contains("[hover: Shoes]"));
     assert_eq!(result.tab_id, 13);
     handle.shutdown().await;
 }

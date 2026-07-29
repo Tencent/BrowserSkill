@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
-import { lookupSession, parseBufferedReadBounds } from "../shared";
+import {
+  cdpBlockedUrlReason,
+  enforceCdpAccessibleTarget,
+  lookupSession,
+  parseBufferedReadBounds,
+  resolveCdpAccessibleTargetTab,
+} from "../shared";
 
 function fakeAgentWindow() {
   return {
@@ -65,5 +71,103 @@ describe("parseBufferedReadBounds", () => {
       code: "invalid_params",
       message: expect.stringContaining(field),
     });
+  });
+});
+
+describe("CDP target URL guard", () => {
+  it("allows ordinary pages and about:blank", () => {
+    expect(cdpBlockedUrlReason("https://example.test/path")).toBeNull();
+    expect(cdpBlockedUrlReason("http://example.test/path")).toBeNull();
+    expect(cdpBlockedUrlReason("about:blank")).toBeNull();
+  });
+
+  it("blocks browser and extension internal pages", () => {
+    expect(cdpBlockedUrlReason("chrome-extension://abc/options.html")).toBe("chrome-extension:");
+    expect(cdpBlockedUrlReason("chrome://extensions")).toBe("chrome:");
+    expect(cdpBlockedUrlReason("about:newtab")).toBe("about:");
+  });
+
+  it("returns a structured permission error before page CDP access", () => {
+    expect(
+      enforceCdpAccessibleTarget(
+        {
+          tabId: 7,
+          windowId: 100,
+          active: true,
+          url: "chrome-extension://other-extension/page.html",
+        },
+        "snapshot",
+      ),
+    ).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "restricted_tab_url" },
+      message: expect.stringContaining("snapshot cannot access tab 7"),
+    });
+  });
+
+  it("falls back from a restricted default active tab to an accessible agent tab", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const ctx = await sm.start("aa11");
+    const tabsApi = {
+      get: vi.fn(),
+      query: vi.fn(async (query: chrome.tabs.QueryInfo) => {
+        if (query.active) {
+          return [
+            {
+              id: 7,
+              windowId: ctx.agentWindowId,
+              active: true,
+              url: "chrome-extension://other-extension/page.html",
+            } as chrome.tabs.Tab,
+          ];
+        }
+        return [
+          {
+            id: 7,
+            windowId: ctx.agentWindowId,
+            active: true,
+            url: "chrome-extension://other-extension/page.html",
+          } as chrome.tabs.Tab,
+          {
+            id: 8,
+            windowId: ctx.agentWindowId,
+            active: false,
+            url: "https://example.test/",
+          } as chrome.tabs.Tab,
+        ];
+      }),
+    };
+
+    await expect(
+      resolveCdpAccessibleTargetTab(sm, ctx, undefined, tabsApi, "snapshot"),
+    ).resolves.toMatchObject({
+      tabId: 8,
+      url: "https://example.test/",
+    });
+  });
+
+  it("does not replace an explicitly requested restricted tab", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+    const ctx = await sm.start("aa11");
+    const tabsApi = {
+      get: vi.fn(
+        async () =>
+          ({
+            id: 7,
+            windowId: ctx.agentWindowId,
+            active: true,
+            url: "chrome-extension://other-extension/page.html",
+          }) as chrome.tabs.Tab,
+      ),
+      query: vi.fn(),
+    };
+
+    await expect(
+      resolveCdpAccessibleTargetTab(sm, ctx, 7, tabsApi, "snapshot"),
+    ).resolves.toMatchObject({
+      code: "permission_denied",
+      data: { reason: "restricted_tab_url" },
+    });
+    expect(tabsApi.query).not.toHaveBeenCalled();
   });
 });

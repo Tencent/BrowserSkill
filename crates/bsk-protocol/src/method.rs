@@ -2,6 +2,22 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Observable browser-side effect class for a protocol method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodEffect {
+    /// Reads browser/session state without dispatching page input.
+    PassiveRead,
+    /// Dispatches temporary input such as hover probes. It must not submit,
+    /// navigate, or persist page state, but it can trigger page event handlers.
+    TransientInput,
+    /// Drives browser/page state such as clicking, filling, navigation, tabs,
+    /// or arbitrary page script.
+    BrowserMutation,
+    /// Control-plane/session lifecycle operation. These are deliberately not
+    /// gated by the pending browser-action interrupt path.
+    ControlPlane,
+}
+
 /// Namespaced method string (`system.handshake`, `tool.tab_list`, …).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Method {
@@ -58,6 +74,8 @@ pub enum Method {
     ToolSelect,
     #[serde(rename = "tool.snapshot")]
     ToolSnapshot,
+    #[serde(rename = "tool.observe")]
+    ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
     #[serde(rename = "tool.screenshot")]
@@ -86,13 +104,13 @@ pub enum Method {
 }
 
 impl Method {
-    /// Whether this RPC may modify browser state.
+    /// Browser-side effect classification for this method.
     ///
     /// Used by the daemon's pending-interrupt machinery: when the
     /// user has clicked the agent-window mask's stop button, the
-    /// next *mutating* tool call for that session is rejected with
-    /// `ErrorCode::UserAborted`. Read-only tools and session-
-    /// lifecycle RPCs pass through transparently.
+    /// next tool call that dispatches browser/page input for that
+    /// session is rejected with `ErrorCode::UserAborted`. Passive reads
+    /// and control-plane RPCs pass through transparently.
     ///
     /// **Compile-time enforcement.** The match below is exhaustive
     /// (no `_ =>` fallthrough). Adding a new `Method` variant is a
@@ -101,9 +119,12 @@ impl Method {
     ///
     /// **Judgment calls** (read these before adding new variants):
     ///
-    /// * `tool.evaluate` is classified as mutating because the
+    /// * `tool.evaluate` is classified as browser-mutating because the
     ///   daemon cannot statically distinguish a `document.title`
     ///   read from a `form.submit()` write.
+    /// * `tool.observe` is classified as transient input: its bounded
+    ///   hover probes do not commit browser state, but they dispatch real
+    ///   page input events and therefore must be gated like automation.
     /// * `tool.wait_*` are classified as read-only: they do not
     ///   initiate any browser action; they observe state only.
     /// * `session.*` and `tool.session_*` are NOT gated. Blocking
@@ -111,9 +132,9 @@ impl Method {
     ///   tearing down after observing the user's interrupt.
     /// * `cancel` is NOT gated. It's a control-plane operation
     ///   (stops another in-flight RPC), not a browser action.
-    pub fn is_mutating(&self) -> bool {
+    pub fn effect(&self) -> MethodEffect {
         match self {
-            // Mutating tool calls — gated by pending-interrupt.
+            // Browser/page mutations — gated by pending-interrupt.
             Method::ToolTabCreate
             | Method::ToolTabClose
             | Method::ToolTabBorrow
@@ -130,10 +151,13 @@ impl Method {
             | Method::ToolEvaluate
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
-            | Method::ToolRecordStart => true,
+            | Method::ToolRecordStart => MethodEffect::BrowserMutation,
 
-            // Read-only tool calls — transparent.
-            //
+            // Transient input — no committed browser action, but still page
+            // input. It must be stopped by pending user interrupts.
+            Method::ToolObserve => MethodEffect::TransientInput,
+
+            // Passive reads — transparent.
             // `record_stop` / `record_await` observe / finish a recording
             // without driving new automation gestures, so they stay
             // ungated (teardown after interrupt must still work).
@@ -147,7 +171,7 @@ impl Method {
             | Method::ToolWaitMs
             | Method::ToolRequestHelp
             | Method::ToolRecordStop
-            | Method::ToolRecordAwait => false,
+            | Method::ToolRecordAwait => MethodEffect::PassiveRead,
 
             // Session lifecycle — not gated.
             Method::SessionStart
@@ -155,15 +179,28 @@ impl Method {
             | Method::SessionStopAll
             | Method::SessionList
             | Method::ToolSessionStart
-            | Method::ToolSessionStop => false,
+            | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
             // System / control — not gated.
             Method::SystemHandshake
             | Method::SystemPing
             | Method::SystemStatus
             | Method::BrowserList
-            | Method::Cancel => false,
+            | Method::Cancel => MethodEffect::ControlPlane,
         }
+    }
+
+    /// Whether this RPC drives browser/page state in the traditional sense.
+    pub fn is_mutating(&self) -> bool {
+        self.effect() == MethodEffect::BrowserMutation
+    }
+
+    /// Whether a pending user interrupt should reject this method.
+    pub fn requires_interrupt_gate(&self) -> bool {
+        matches!(
+            self.effect(),
+            MethodEffect::TransientInput | MethodEffect::BrowserMutation
+        )
     }
 }
 
@@ -209,6 +246,7 @@ mod tests {
     fn is_mutating_classifies_read_only_tools_as_non_mutating() {
         assert!(!Method::ToolTabList.is_mutating());
         assert!(!Method::ToolSnapshot.is_mutating());
+        assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
@@ -263,5 +301,21 @@ mod tests {
         assert!(!Method::SystemStatus.is_mutating());
         assert!(!Method::BrowserList.is_mutating());
         assert!(!Method::Cancel.is_mutating());
+    }
+
+    #[test]
+    fn effect_classifies_observe_as_transient_input() {
+        assert_eq!(Method::ToolSnapshot.effect(), MethodEffect::PassiveRead);
+        assert_eq!(Method::ToolObserve.effect(), MethodEffect::TransientInput);
+        assert_eq!(Method::ToolClick.effect(), MethodEffect::BrowserMutation);
+        assert_eq!(Method::Cancel.effect(), MethodEffect::ControlPlane);
+    }
+
+    #[test]
+    fn interrupt_gate_includes_transient_input() {
+        assert!(!Method::ToolSnapshot.requires_interrupt_gate());
+        assert!(Method::ToolObserve.requires_interrupt_gate());
+        assert!(Method::ToolClick.requires_interrupt_gate());
+        assert!(!Method::Cancel.requires_interrupt_gate());
     }
 }

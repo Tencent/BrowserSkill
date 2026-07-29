@@ -107,6 +107,30 @@ describe("handleRequestHelp", () => {
     expect(res).toMatchObject({ outcome: "continued", note: "ok", tab_id: 5 });
   });
 
+  it("does not refresh observations after the user returns control", async () => {
+    const cdpSend = vi.fn(async () => ({}));
+    const deps = baseDeps({
+      cdp: { send: cdpSend } as unknown as RequestHelpDeps["cdp"],
+    });
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ tab_id: 5 }),
+      deps,
+    );
+
+    expect(res).toMatchObject({ outcome: "continued", tab_id: 5 });
+    expect(cdpSend).not.toHaveBeenCalledWith(
+      expect.any(Number),
+      "Accessibility.getFullAXTree",
+      expect.anything(),
+    );
+    expect(cdpSend).not.toHaveBeenCalledWith(
+      expect.any(Number),
+      "DOMSnapshot.captureSnapshot",
+      expect.anything(),
+    );
+  });
+
   it("forwards title into the help request message when provided", async () => {
     const deps = baseDeps();
     await handleRequestHelp(

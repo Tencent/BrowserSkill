@@ -78,6 +78,8 @@ fn main() {
 
     dump!(SnapshotParams, "tool_snapshot_params");
     dump!(SnapshotResult, "tool_snapshot_result");
+    dump!(ObserveParams, "tool_observe_params");
+    dump!(ObserveResult, "tool_observe_result");
     dump!(GetHtmlParams, "tool_get_html_params");
     dump!(GetHtmlResult, "tool_get_html_result");
     dump!(ScreenshotParams, "tool_screenshot_params");

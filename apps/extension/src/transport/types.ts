@@ -30,6 +30,7 @@ export type RpcErrorReason =
   | "option_not_found"
   | "single_select_value_count"
   | "tab_not_active"
+  | "restricted_tab_url"
   | "borrow_conflict";
 
 export interface RpcErrorData {
@@ -312,6 +313,9 @@ export interface SnapshotResult {
   truncated?: boolean;
   dialogs?: JavaScriptDialogInfo[];
 }
+
+export type ObserveParams = SnapshotParams;
+export type ObserveResult = SnapshotResult;
 
 export interface GetHtmlParams {
   session_id: string;
