@@ -86,6 +86,7 @@
   },
   "recordOverlay": {
     "recording": "Recording your actions",
-    "finish": "Finish"
+    "finish": "Finish",
+    "dragHandle": "Drag to move"
   }
 }
