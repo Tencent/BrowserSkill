@@ -44,3 +44,39 @@ describe("chromeAgentWindowApi.ensureActiveTab", () => {
     expect(update).not.toHaveBeenCalled();
   });
 });
+
+describe("chromeAgentWindowApi.create", () => {
+  const create = vi.fn();
+
+  beforeEach(() => {
+    vi.stubGlobal("chrome", {
+      windows: { create },
+    });
+    create.mockReset();
+    create.mockResolvedValue({ id: 100 });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("focuses Agent Windows by default", async () => {
+    await chromeAgentWindowApi.create(AGENT_WINDOW_HOME);
+
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: true,
+      url: AGENT_WINDOW_HOME,
+    });
+  });
+
+  it("can create an Agent Window without stealing focus", async () => {
+    await chromeAgentWindowApi.create(AGENT_WINDOW_HOME, false);
+
+    expect(create).toHaveBeenCalledWith({
+      type: "normal",
+      focused: false,
+      url: AGENT_WINDOW_HOME,
+    });
+  });
+});

@@ -12,6 +12,13 @@
         "null"
       ]
     },
+    "focused": {
+      "description": "Whether the new Agent Window should take focus. Omitted means the extension's default (`true`) for compatibility with older clients.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "session_id": {
       "type": "string"
     }

@@ -404,6 +404,27 @@ pub async fn start_session(
     connect_wait: Duration,
     timeout_dur: Duration,
 ) -> Result<Session, StartSessionError> {
+    start_session_with_focus(
+        registry,
+        sessions,
+        queues,
+        requested,
+        None,
+        connect_wait,
+        timeout_dur,
+    )
+    .await
+}
+
+pub async fn start_session_with_focus(
+    registry: &Arc<BrowserRegistry>,
+    sessions: &Arc<SessionRegistry>,
+    queues: &Arc<ToolQueueRegistry>,
+    requested: Option<&str>,
+    focused: Option<bool>,
+    connect_wait: Duration,
+    timeout_dur: Duration,
+) -> Result<Session, StartSessionError> {
     let client: Arc<BrowserClient> = registry
         .select_with_connect_wait(requested, connect_wait)
         .await
@@ -427,6 +448,7 @@ pub async fn start_session(
     let params = SessionStartParams {
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
+        focused,
     };
     let rpc_id = next_rpc_id("sess-start");
     let request = RequestFrame {

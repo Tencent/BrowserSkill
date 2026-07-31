@@ -5,6 +5,7 @@ use std::time::Duration;
 use bsk::cli::daemon::{DaemonCmd, parse_duration};
 use bsk::cli::navigate::NavigateCmd;
 use bsk::cli::record::{RecordCmd, RecordSub};
+use bsk::cli::session::{SessionCmd, SessionSub};
 use bsk::{Cli, Command};
 use clap::Parser;
 
@@ -226,4 +227,16 @@ fn parses_record_start_without_url() {
     };
     assert_eq!(args.browser.as_deref(), Some("022ca8ac"));
     assert!(args.url.is_none());
+}
+
+#[test]
+fn parses_session_start_no_focus() {
+    let cli = parse(&["bsk", "session", "start", "--no-focus"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert!(args.no_focus);
 }

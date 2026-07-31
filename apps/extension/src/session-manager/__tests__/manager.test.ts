@@ -8,7 +8,7 @@ function fakeAgentWindow(): AgentWindowApi & {
   ensureActiveTabMock: ReturnType<typeof vi.fn>;
 } {
   let nextId = 100;
-  const createMock = vi.fn(async (_url: string) => {
+  const createMock = vi.fn(async (_url: string, _focused?: boolean) => {
     const id = nextId++;
     return id;
   });
@@ -30,7 +30,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager({ agentWindow: aw, now: () => 1700000000000 });
     const ctx = await sm.start("aa11");
     expect(aw.createMock).toHaveBeenCalledOnce();
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank");
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", true);
     expect(aw.ensureActiveTabMock).toHaveBeenCalledOnce();
     expect(aw.ensureActiveTabMock).toHaveBeenCalledWith(100, "about:blank");
     expect(ctx.sessionId).toBe("aa11");
@@ -38,6 +38,15 @@ describe("SessionManager", () => {
     expect(ctx.createdAtMs).toBe(1700000000000);
     expect(ctx.refStore.isEmpty()).toBe(true);
     expect(ctx.borrowedTabs.size).toBe(0);
+  });
+
+  it("forwards an explicit unfocused start to the Agent Window", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await sm.start("aa11", false);
+
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", false);
   });
 
   it("indexes the session by sessionId and agent window id", async () => {
