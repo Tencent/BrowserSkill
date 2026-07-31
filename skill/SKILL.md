@@ -220,15 +220,10 @@ control. After a `continued` or `completed` result, issue a separate
 observation tool call (usually `bsk snapshot --session <id>`) before using
 new refs or reasoning about the post-help page state.
 #### Disabling request-help (unattended mode)
-Set `BSK_REQUEST_HELP=off` to disable `bsk request-help` entirely. This is
-meant for unattended / background-server deployments where a blocking
-human-in-the-loop overlay must never appear. When disabled, the call
-returns immediately with `outcome="disabled"`: no overlay is shown, nothing
-waits, and the command still exits 0. The variable is unset or holds any
-other value by default, which keeps request-help enabled.
-If you receive `outcome="disabled"`, do **not** retry `request-help` —
-nobody will ever answer it. Complete the task autonomously instead, or
-terminate gracefully when the step genuinely requires a human.
+Set `BSK_REQUEST_HELP=off` on unattended servers: `bsk request-help` then
+returns immediately with `outcome="disabled"` (no overlay, no waiting,
+exit 0). Any other value keeps it enabled. If you get `disabled`, do not
+retry — complete the task autonomously or stop gracefully.
 
 ### Recording — `bsk record`
 
