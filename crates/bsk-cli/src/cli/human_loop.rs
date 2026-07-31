@@ -8,13 +8,38 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    HelpCompletionCriteria, HelpTarget, RequestHelpParams, RequestHelpResult,
+    HelpCompletionCriteria, HelpOutcome, HelpTarget, RequestHelpParams, RequestHelpResult,
 };
 use clap::Args;
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
+
+/// Environment variable that disables the blocking `request-help`
+/// human-in-loop tool, for unattended / background-server deployments
+/// where a blocking help overlay must never appear.
+pub(crate) const REQUEST_HELP_ENV: &str = "BSK_REQUEST_HELP";
+
+/// Note attached to the synthetic result returned when request-help is
+/// disabled, so the agent knows why no overlay was shown.
+pub(crate) const REQUEST_HELP_DISABLED_NOTE: &str =
+    "request-help disabled by BSK_REQUEST_HELP=off (unattended mode)";
+
+/// Whether `request-help` is disabled via [`REQUEST_HELP_ENV`]. Only the
+/// value `off` (case-insensitive, surrounding whitespace ignored)
+/// disables it; unset or any other value keeps the default enabled
+/// behaviour.
+pub(crate) fn request_help_disabled() -> bool {
+    is_off_value(std::env::var(REQUEST_HELP_ENV).ok().as_deref())
+}
+
+/// Pure value check behind [`request_help_disabled`], kept separate so it
+/// can be unit-tested without touching process env (parallel tests race
+/// on `std::env::set_var`, which is also `unsafe` in edition 2024).
+fn is_off_value(value: Option<&str>) -> bool {
+    value.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
+}
 
 #[derive(Debug, Clone, Args)]
 pub struct RequestHelpArgs {
@@ -72,6 +97,18 @@ pub fn parse_target(raw: &str) -> HelpTarget {
 }
 
 pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
+    // Disabled (`BSK_REQUEST_HELP=off`): return a synthetic `disabled`
+    // result immediately — no daemon startup, no overlay, no waiting.
+    if request_help_disabled() {
+        let result = RequestHelpResult {
+            outcome: HelpOutcome::Disabled,
+            completed_by: None,
+            note: Some(REQUEST_HELP_DISABLED_NOTE.into()),
+            tab_id: args.tab_id.unwrap_or(0),
+            resolved_targets: None,
+        };
+        return render(&result, format);
+    }
     let info = ensure_daemon().context("ensure daemon is running")?;
     let targets: Vec<HelpTarget> = args.target.iter().map(|t| parse_target(t)).collect();
     let completion_criteria = args
@@ -155,5 +192,20 @@ mod tests {
         // `email` starts with `e` but is not `e<digits>` → selector.
         assert_eq!(parse_target("email").selector.as_deref(), Some("email"));
         assert!(parse_target("#login").ref_.is_none());
+    }
+
+    #[test]
+    fn off_value_detection() {
+        assert!(is_off_value(Some("off")));
+        assert!(is_off_value(Some("OFF")));
+        assert!(is_off_value(Some("Off")));
+        assert!(is_off_value(Some("  off  ")));
+        assert!(is_off_value(Some("\toff\n")));
+        assert!(!is_off_value(None));
+        assert!(!is_off_value(Some("")));
+        assert!(!is_off_value(Some("on")));
+        assert!(!is_off_value(Some("0")));
+        assert!(!is_off_value(Some("offx")));
+        assert!(!is_off_value(Some("of f")));
     }
 }

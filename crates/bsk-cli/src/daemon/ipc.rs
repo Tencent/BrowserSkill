@@ -26,7 +26,9 @@ use bsk_protocol::system::{
     BrowserListParams, BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult,
     VersionSkewEntry,
 };
-use bsk_protocol::tools::{ReturnFailure, WaitMsParams, WaitMsResult};
+use bsk_protocol::tools::{
+    HelpOutcome, RequestHelpResult, ReturnFailure, WaitMsParams, WaitMsResult,
+};
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
 };
@@ -280,6 +282,19 @@ async fn handle_tool_dispatch(
     method: Method,
     params: Value,
 ) -> ResponseBody {
+    // `BSK_REQUEST_HELP=off` (unattended mode): never forward the
+    // blocking human-in-loop call to the extension; answer immediately
+    // with a synthetic `disabled` result.
+    if method == Method::ToolRequestHelp && crate::cli::human_loop::request_help_disabled() {
+        let result = RequestHelpResult {
+            outcome: HelpOutcome::Disabled,
+            completed_by: None,
+            note: Some(crate::cli::human_loop::REQUEST_HELP_DISABLED_NOTE.into()),
+            tab_id: params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
+            resolved_targets: None,
+        };
+        return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
+    }
     let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => SessionId(s.to_string()),
         _ => {

@@ -518,7 +518,7 @@ export interface HelpTarget {
   selector?: string;
 }
 
-export type HelpOutcome = "continued" | "cancelled" | "timed_out" | "completed" | "navigated";
+export type HelpOutcome = "continued" | "cancelled" | "timed_out" | "completed" | "navigated" | "disabled";
 
 export interface HelpCompletionCondition {
   url_contains?: string;
