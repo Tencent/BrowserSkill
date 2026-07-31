@@ -30,6 +30,7 @@ pub mod status;
 pub mod tab;
 pub mod update;
 pub mod waits;
+pub mod window;
 
 use clap::{Args, Parser, Subcommand};
 
@@ -50,6 +51,7 @@ use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
 use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
+use crate::cli::window::WindowCmd;
 
 /// Tool calls wait slightly longer than the daemon's 30s tool timeout so
 /// callers receive the structured daemon timeout instead of dropping the
@@ -117,6 +119,9 @@ pub enum Command {
 
     /// Tab management commands.
     Tab(TabCmd),
+
+    /// Agent Window management commands.
+    Window(WindowCmd),
 
     /// Capture a PNG of the active tab or a snapshot ref element.
     Screenshot(ScreenshotArgs),

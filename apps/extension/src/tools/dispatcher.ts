@@ -71,6 +71,7 @@ import {
   type TabSelectParams,
 } from "./tabs";
 import { handleWaitForNavigation } from "./waits";
+import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
   NetworkCdpRunner & {
@@ -286,6 +287,8 @@ export class ToolDispatcher {
         });
       case "tool.tab_return":
         return handleTabReturn(this.sessions, req.params as TabReturnParams);
+      case "tool.window_resize":
+        return handleWindowResize(this.sessions, req.params as WindowResizeParams);
       case "tool.screenshot":
         return handleScreenshot(
           this.sessions,
@@ -478,6 +481,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.tab_select":
     case "tool.tab_borrow":
     case "tool.tab_return":
+    case "tool.window_resize":
     case "tool.navigate":
     case "tool.navigate_back":
     case "tool.navigate_forward":

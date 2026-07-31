@@ -12,8 +12,26 @@
         "null"
       ]
     },
+    "height": {
+      "description": "Optional Agent Window outer height in CSS pixels (100..=7680).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
     "session_id": {
       "type": "string"
+    },
+    "width": {
+      "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
     }
   }
 }

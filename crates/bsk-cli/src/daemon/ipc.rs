@@ -227,6 +227,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolTabSelect
                 | Method::ToolTabBorrow
                 | Method::ToolTabReturn
+                | Method::ToolWindowResize
                 | Method::ToolScreenshot
                 | Method::ToolConsole
                 | Method::ToolNetwork
@@ -523,6 +524,10 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 struct CliSessionStartParams {
     #[serde(default)]
     pub browser_instance_id: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -614,6 +619,8 @@ async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
             browser_instance_id: None,
+            width: None,
+            height: None,
         }
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
@@ -622,11 +629,25 @@ async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result
             data: None,
         })?
     };
+    // `--width` without `--height` (or vice versa) is rejected: the
+    // extension only accepts a complete size pair.
+    let window_size = match (params.width, params.height) {
+        (Some(width), Some(height)) => Some((width, height)),
+        (None, None) => None,
+        _ => {
+            return Err(RpcError {
+                code: ErrorCode::InvalidParams,
+                message: "width and height must be given together".into(),
+                data: None,
+            });
+        }
+    };
     match start_session(
         &state.browsers,
         &state.sessions,
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
+        window_size,
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
     )

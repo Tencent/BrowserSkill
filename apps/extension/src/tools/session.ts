@@ -1,11 +1,55 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { clearRecordingForSession } from "./record";
+import { isRpcError } from "./shared";
 import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
+
+/** Valid range for Agent Window dimensions in CSS pixels. */
+export const WINDOW_SIZE_MIN = 100;
+export const WINDOW_SIZE_MAX = 7680;
+
+/**
+ * Validate an optional width/height pair. Both must be given (or
+ * neither), be integers, and fall within 100..=7680. Returns the size
+ * to pass down, or an `invalid_params` RpcError.
+ */
+export function validateWindowSize(
+  width: unknown,
+  height: unknown,
+): { width: number; height: number } | undefined | RpcError {
+  if (width === undefined && height === undefined) return undefined;
+  if (width === undefined || height === undefined) {
+    return {
+      code: "invalid_params",
+      message: "width and height must be given together",
+    };
+  }
+  for (const [name, value] of [
+    ["width", width],
+    ["height", height],
+  ] as const) {
+    if (
+      typeof value !== "number" ||
+      !Number.isInteger(value) ||
+      value < WINDOW_SIZE_MIN ||
+      value > WINDOW_SIZE_MAX
+    ) {
+      return {
+        code: "invalid_params",
+        message: `${name} must be an integer in 100..=7680`,
+      };
+    }
+  }
+  return { width: width as number, height: height as number };
+}
 
 export interface SessionStartParams {
   session_id: string;
   browser_instance_id?: string;
+  /** Optional Agent Window outer width in CSS pixels (100..=7680). */
+  width?: number;
+  /** Optional Agent Window outer height in CSS pixels (100..=7680). */
+  height?: number;
 }
 
 export interface SessionStartResult {
@@ -52,8 +96,10 @@ export async function handleSessionStart(
       message: "session.start requires session_id",
     };
   }
+  const sizeOrErr = validateWindowSize(params.width, params.height);
+  if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
-    const ctx = await manager.start(params.session_id);
+    const ctx = await manager.start(params.session_id, sizeOrErr);
     return { agent_window_id: ctx.agentWindowId };
   } catch (err) {
     // chrome.windows.create / SessionManager failures are not CDP

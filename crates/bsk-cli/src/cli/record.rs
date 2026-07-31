@@ -85,7 +85,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     }
 
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let session = start_session(info.sock_path.clone(), args.browser)?;
+    let session = start_session(info.sock_path.clone(), args.browser, None, None)?;
 
     let start_params = RecordStartParams {
         session_id: session.session_id.clone(),

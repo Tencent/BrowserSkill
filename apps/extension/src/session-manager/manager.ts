@@ -128,11 +128,18 @@ export class SessionManager {
    * Returns the created window id so callers can echo it back to the
    * daemon in the `tool.session_start` reply.
    */
-  async start(sessionId: string): Promise<SessionContext> {
+  async start(
+    sessionId: string,
+    size?: { width: number; height: number },
+  ): Promise<SessionContext> {
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
-    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME);
+    // Only pass `size` when given so the no-size call shape (and its
+    // chrome.windows.create payload) stays exactly as before.
+    const windowId = size
+      ? await this.agentWindow.create(AGENT_WINDOW_HOME, size)
+      : await this.agentWindow.create(AGENT_WINDOW_HOME);
     await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
     const ctx: SessionContext = {
       sessionId,

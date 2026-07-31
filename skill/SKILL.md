@@ -123,10 +123,16 @@ Details and flags: **`bsk <cmd> --help`**
 
 | Command | Summary |
 |---------|---------|
-| `bsk session start` | Open Agent Window; prints **4-letter session id** |
+| `bsk session start` | Open Agent Window (`--width`/`--height` for initial size); prints **4-letter session id** |
 | `bsk session stop <id>` | End session, close Agent Window, auto-return borrowed tabs |
 | `bsk session stop --all` | Stop every active session |
 | `bsk session list` | List active sessions |
+
+### Window (require `--session <id>`)
+
+| Command | Summary |
+|---------|---------|
+| `bsk window resize` | Resize the Agent Window (`--width`, `--height`; 100..=7680 CSS px) |
 
 ### Tabs (require `--session <id>`)
 

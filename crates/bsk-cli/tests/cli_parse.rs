@@ -227,3 +227,99 @@ fn parses_record_start_without_url() {
     assert_eq!(args.browser.as_deref(), Some("022ca8ac"));
     assert!(args.url.is_none());
 }
+
+#[test]
+fn parses_session_start_with_window_size() {
+    use bsk::cli::session::{SessionCmd, SessionSub};
+    let cli = parse(&[
+        "bsk", "session", "start", "--width", "1280", "--height", "800",
+    ]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert_eq!(args.width, Some(1280));
+    assert_eq!(args.height, Some(800));
+}
+
+#[test]
+fn session_start_window_size_defaults_to_none() {
+    use bsk::cli::session::{SessionCmd, SessionSub};
+    let cli = parse(&["bsk", "session", "start"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert!(args.width.is_none());
+    assert!(args.height.is_none());
+}
+
+#[test]
+fn rejects_out_of_range_session_start_window_size() {
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--width", "99"]).is_err());
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--height", "7681"]).is_err());
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--width", "abc"]).is_err());
+}
+
+#[test]
+fn parses_window_resize() {
+    use bsk::cli::window::{WindowCmd, WindowSub};
+    let cli = parse(&[
+        "bsk",
+        "window",
+        "resize",
+        "--session",
+        "s1",
+        "--width",
+        "1280",
+        "--height",
+        "800",
+    ]);
+    let Command::Window(WindowCmd {
+        sub: WindowSub::Resize(args),
+    }) = cli.command
+    else {
+        panic!("expected window resize subcommand");
+    };
+    assert_eq!(args.session, "s1");
+    assert_eq!(args.width, 1280);
+    assert_eq!(args.height, 800);
+}
+
+#[test]
+fn rejects_invalid_window_resize_dimensions() {
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "window",
+            "resize",
+            "--session",
+            "s1",
+            "--width",
+            "99",
+            "--height",
+            "800"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "window",
+            "resize",
+            "--session",
+            "s1",
+            "--width",
+            "1280",
+            "--height",
+            "7681"
+        ])
+        .is_err()
+    );
+    // width/height are required for resize.
+    assert!(Cli::try_parse_from(["bsk", "window", "resize", "--session", "s1"]).is_err());
+}
