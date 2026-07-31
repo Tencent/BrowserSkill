@@ -83,6 +83,13 @@
           "enum": [
             "navigated"
           ]
+        },
+        {
+          "description": "request-help is disabled by configuration (`BSK_REQUEST_HELP=off`): the call returns immediately without ever showing the overlay.",
+          "type": "string",
+          "enum": [
+            "disabled"
+          ]
         }
       ]
     },

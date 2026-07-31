@@ -219,6 +219,11 @@ which refs/selectors matched a live element.
 control. After a `continued` or `completed` result, issue a separate
 observation tool call (usually `bsk snapshot --session <id>`) before using
 new refs or reasoning about the post-help page state.
+#### Disabling request-help (unattended mode)
+Set `BSK_REQUEST_HELP=off` on unattended servers: `bsk request-help` then
+returns immediately with `outcome="disabled"` (no overlay, no waiting,
+exit 0). Any other value keeps it enabled. If you get `disabled`, do not
+retry — complete the task autonomously or stop gracefully.
 
 ### Recording — `bsk record`
 

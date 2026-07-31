@@ -95,6 +95,9 @@ pub enum HelpOutcome {
     /// The page navigated while waiting (full reload or SPA URL change).
     /// Deprecated: navigation alone should not end a help request.
     Navigated,
+    /// request-help is disabled by configuration (`BSK_REQUEST_HELP=off`):
+    /// the call returns immediately without ever showing the overlay.
+    Disabled,
 }
 
 impl HelpOutcome {
@@ -105,6 +108,7 @@ impl HelpOutcome {
             Self::TimedOut => "timed_out",
             Self::Completed => "completed",
             Self::Navigated => "navigated",
+            Self::Disabled => "disabled",
         }
     }
 }
@@ -201,6 +205,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(HelpOutcome::Navigated).unwrap(),
             json!("navigated")
+        );
+        assert_eq!(
+            serde_json::to_value(HelpOutcome::Disabled).unwrap(),
+            json!("disabled")
         );
     }
 
