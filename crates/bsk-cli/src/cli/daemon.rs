@@ -31,6 +31,11 @@ pub struct StartArgs {
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
 
+    /// Bind the WebSocket server to a specific IP (default 127.0.0.1).
+    /// Use 0.0.0.0 to allow the extension to connect from other machines.
+    #[arg(long, value_name = "IP", default_value = "127.0.0.1")]
+    pub ws_host: String,
+
     /// Run in the foreground (do not double-fork). Useful for development.
     #[arg(long)]
     pub foreground: bool,
@@ -47,6 +52,11 @@ pub struct StartArgs {
 impl StartArgs {
     pub fn resolved_port(&self) -> u16 {
         self.port.unwrap_or(DEFAULT_WS_PORT)
+    }
+
+    /// Resolve the WS bind host, honoring the BSK_DAEMON_WS_HOST env var.
+    pub fn resolved_ws_host(&self) -> String {
+        std::env::var("BSK_DAEMON_WS_HOST").unwrap_or_else(|_| self.ws_host.clone())
     }
 
     pub fn resolved_session_idle(&self) -> Duration {

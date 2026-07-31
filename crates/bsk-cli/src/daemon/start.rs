@@ -11,7 +11,7 @@
 //! startup, redirects stdio to `/dev/null`, calls `setsid` (Unix), and
 //! falls through to `run_foreground`.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -38,6 +38,8 @@ pub(crate) const DAEMONIZED_ENV: &str = "BSK_DAEMONIZED";
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub ws_port: u16,
+    /// IP the WebSocket server binds to (default 127.0.0.1).
+    pub ws_host: std::net::IpAddr,
     pub session_idle: Duration,
     pub daemon_idle: Duration,
     /// Skip the Origin allow-list (tests / `--insecure-origin`).
@@ -60,6 +62,7 @@ impl DaemonConfig {
     pub fn new(port: u16) -> Self {
         Self {
             ws_port: port,
+            ws_host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
             allow_any_origin: false,
@@ -86,8 +89,13 @@ impl DaemonConfig {
 
 impl From<&StartArgs> for DaemonConfig {
     fn from(args: &StartArgs) -> Self {
+        let ws_host: std::net::IpAddr = args
+            .resolved_ws_host()
+            .parse()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
         Self {
             ws_port: args.resolved_port(),
+            ws_host,
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
             allow_any_origin: false,
@@ -220,7 +228,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let state = Arc::new(DaemonState::new(cfg.clone()));
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
-        let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.ws_port);
+        let ws_addr = SocketAddr::new(cfg.ws_host, cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
             .await
@@ -654,6 +662,7 @@ fn apply_start_args(cmd: &mut std::process::Command, args: &StartArgs) {
     if let Some(p) = args.port {
         cmd.arg("--port").arg(p.to_string());
     }
+    cmd.arg("--ws-host").arg(args.resolved_ws_host());
     if let Some(d) = args.session_idle {
         cmd.arg("--session-idle").arg(format_duration(d));
     }
