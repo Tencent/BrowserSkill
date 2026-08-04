@@ -6,6 +6,8 @@ import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
 export interface SessionStartParams {
   session_id: string;
   browser_instance_id?: string;
+  /** Defaults to true so existing clients preserve visible Agent Windows. */
+  focused?: boolean;
 }
 
 export interface SessionStartResult {
@@ -53,7 +55,7 @@ export async function handleSessionStart(
     };
   }
   try {
-    const ctx = await manager.start(params.session_id);
+    const ctx = await manager.start(params.session_id, params.focused ?? true);
     return { agent_window_id: ctx.agentWindowId };
   } catch (err) {
     // chrome.windows.create / SessionManager failures are not CDP

@@ -10,6 +10,10 @@ pub struct SessionStartParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
+    /// Whether the new Agent Window should take focus. Omitted means the
+    /// extension's default (`true`) for compatibility with older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +46,23 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_start_focus_is_optional_and_round_trips_false() {
+        let defaulted: SessionStartParams = serde_json::from_value(json!({
+            "session_id": "aa11"
+        }))
+        .unwrap();
+        assert_eq!(defaulted.focused, None);
+
+        let background: SessionStartParams = serde_json::from_value(json!({
+            "session_id": "aa11",
+            "focused": false
+        }))
+        .unwrap();
+        assert_eq!(background.focused, Some(false));
+        assert_eq!(serde_json::to_value(background).unwrap()["focused"], false);
+    }
 
     #[test]
     fn session_stop_result_round_trips_auto_return_payload() {

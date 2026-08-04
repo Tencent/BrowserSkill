@@ -128,11 +128,11 @@ export class SessionManager {
    * Returns the created window id so callers can echo it back to the
    * daemon in the `tool.session_start` reply.
    */
-  async start(sessionId: string): Promise<SessionContext> {
+  async start(sessionId: string, focused = true): Promise<SessionContext> {
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
-    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME);
+    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, focused);
     await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
     const ctx: SessionContext = {
       sessionId,

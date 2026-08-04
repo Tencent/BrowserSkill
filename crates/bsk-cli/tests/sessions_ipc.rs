@@ -144,8 +144,9 @@ async fn session_start_stop_round_trip_via_ipc() {
             if let Frame::Request(req) = frame {
                 let reply = match req.method {
                     Method::ToolSessionStart => {
-                        let _: SessionStartParams =
+                        let params: SessionStartParams =
                             serde_json::from_value(req.params.clone().unwrap()).unwrap();
+                        assert_eq!(params.focused, Some(false));
                         let result = SessionStartResult {
                             agent_window_id: Some(4242),
                         };
@@ -177,6 +178,7 @@ async fn session_start_stop_round_trip_via_ipc() {
     #[derive(serde::Serialize)]
     struct StartParams {
         browser_instance_id: Option<String>,
+        focused: Option<bool>,
     }
     #[derive(serde::Deserialize, Debug)]
     struct StartReply {
@@ -191,6 +193,7 @@ async fn session_start_stop_round_trip_via_ipc() {
             Method::SessionStart,
             Some(StartParams {
                 browser_instance_id: None,
+                focused: Some(false),
             }),
             Duration::from_secs(5),
         )

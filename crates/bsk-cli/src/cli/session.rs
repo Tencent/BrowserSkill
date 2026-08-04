@@ -54,6 +54,10 @@ pub struct SessionStartArgs {
     /// are connected).
     #[arg(long)]
     pub browser: Option<String>,
+
+    /// Open the Agent Window in the background without stealing focus.
+    #[arg(long)]
+    pub no_focus: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -71,6 +75,8 @@ pub struct SessionStopArgs {
 struct StartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focused: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,7 +146,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
-    let result = start_session(sock, args.browser);
+    let result = start_session_with_focus(sock, args.browser, args.no_focus.then_some(false));
     waited.store(true, Ordering::SeqCst);
     match result {
         Ok(reply) => match format {
@@ -166,11 +172,20 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, browser: Option<String>) -> Result<StartReply, CliError> {
+    start_session_with_focus(sock, browser, None)
+}
+
+fn start_session_with_focus(
+    sock: PathBuf,
+    browser: Option<String>,
+    focused: Option<bool>,
+) -> Result<StartReply, CliError> {
     call(
         sock,
         Method::SessionStart,
         Some(StartParams {
             browser_instance_id: browser,
+            focused,
         }),
         SESSION_START_IPC_TIMEOUT,
     )
