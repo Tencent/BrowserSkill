@@ -22,7 +22,7 @@ pub struct InstallSkillArgs {
     #[arg(long = "harness", short = 'H', value_name = "HARNESS")]
     pub harness: Vec<String>,
 
-    /// Install into every harness on this machine (detected or not).
+    /// Install into every harness detected on this machine.
     #[arg(long)]
     pub all: bool,
 
@@ -96,10 +96,6 @@ fn resolve_targets(
     args: &InstallSkillArgs,
     reports: &[crate::skill_install::HarnessReport],
 ) -> Result<Vec<HarnessId>> {
-    if args.all {
-        return Ok(HarnessId::ALL.to_vec());
-    }
-
     if !args.harness.is_empty() {
         let mut ids = Vec::with_capacity(args.harness.len());
         for raw in &args.harness {
@@ -110,25 +106,30 @@ fn resolve_targets(
         return Ok(ids);
     }
 
-    let stdin_tty = io::stdin().is_terminal();
-    let stderr_tty = io::stderr().is_terminal();
-
-    if stdin_tty && stderr_tty && !args.yes {
-        return run_interactive_prompt(reports);
-    }
-
-    if args.yes {
-        let detected: Vec<_> = reports
+    if args.all || args.yes {
+        // `--all` means "every harness present on this machine": restrict
+        // to detected harnesses so we never create skill directories for
+        // harnesses the user does not have installed.
+        let mut detected: Vec<_> = reports
             .iter()
             .filter(|r| r.detected)
             .map(|r| r.id)
             .collect();
+        detected.sort_by_key(|id| id.index());
+        detected.dedup();
         if detected.is_empty() {
             bail!(
-                "no harnesses detected; pass --harness <id> or use --all -y to install everywhere"
+                "no harnesses detected on this machine; pass --harness <id> to install into a specific harness, or use --list to inspect"
             );
         }
         return Ok(detected);
+    }
+
+    let stdin_tty = io::stdin().is_terminal();
+    let stderr_tty = io::stderr().is_terminal();
+
+    if stdin_tty && stderr_tty {
+        return run_interactive_prompt(reports);
     }
 
     bail!(
@@ -172,5 +173,62 @@ fn render_human(output: &crate::skill_install::InstallSkillOutput) {
     }
     for err in &output.errors {
         eprintln!("× {} — {}", err.harness, err.message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skill_install::HarnessReport;
+
+    fn args(all: bool, yes: bool) -> InstallSkillArgs {
+        InstallSkillArgs {
+            harness: Vec::new(),
+            all,
+            list: false,
+            yes,
+            source: None,
+            force: false,
+        }
+    }
+
+    fn report(id: HarnessId, detected: bool) -> HarnessReport {
+        HarnessReport {
+            id,
+            skills_dir: PathBuf::from("/tmp/skills"),
+            detected,
+            detection_detail: None,
+            installed: false,
+        }
+    }
+
+    #[test]
+    fn all_targets_detected_harnesses_only() {
+        let reports = vec![
+            report(HarnessId::Cursor, true),
+            report(HarnessId::Codex, false),
+            report(HarnessId::ClaudeCode, true),
+        ];
+        let targets = resolve_targets(&args(true, false), &reports).unwrap();
+        // Sorted by HarnessId::ALL order: ClaudeCode before Cursor;
+        // undetected Codex must not be targeted.
+        assert_eq!(targets, vec![HarnessId::ClaudeCode, HarnessId::Cursor]);
+    }
+
+    #[test]
+    fn yes_targets_detected_harnesses_only() {
+        let reports = vec![
+            report(HarnessId::Cursor, true),
+            report(HarnessId::Codex, false),
+        ];
+        let targets = resolve_targets(&args(false, true), &reports).unwrap();
+        assert_eq!(targets, vec![HarnessId::Cursor]);
+    }
+
+    #[test]
+    fn all_and_yes_error_when_nothing_detected() {
+        let reports = vec![report(HarnessId::Cursor, false)];
+        assert!(resolve_targets(&args(true, false), &reports).is_err());
+        assert!(resolve_targets(&args(false, true), &reports).is_err());
     }
 }
