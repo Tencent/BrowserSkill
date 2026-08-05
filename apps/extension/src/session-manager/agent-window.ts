@@ -8,7 +8,7 @@
  */
 
 export interface AgentWindowApi {
-  create(url: string): Promise<number>;
+  create(url: string, size?: { width: number; height: number }): Promise<number>;
   remove(windowId: number): Promise<void>;
   /**
    * Guarantee the Agent Window has an active, CDP-navigable tab.
@@ -22,11 +22,12 @@ export interface AgentWindowApi {
 export const AGENT_WINDOW_HOME = "about:blank";
 
 export const chromeAgentWindowApi: AgentWindowApi = {
-  async create(url: string): Promise<number> {
+  async create(url: string, size?: { width: number; height: number }): Promise<number> {
     const win = await chrome.windows.create({
       type: "normal",
       focused: true,
       url,
+      ...(size ? { width: size.width, height: size.height } : {}),
     });
     if (typeof win?.id !== "number") {
       throw new Error("[bh] chrome.windows.create returned no window id");

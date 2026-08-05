@@ -39,6 +39,13 @@ describe("SessionManager", () => {
     expect(ctx.refStore.isEmpty()).toBe(true);
     expect(ctx.borrowedTabs.size).toBe(0);
   });
+  it("forwards an optional window size when starting a session", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11", { width: 1280, height: 800 });
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { width: 1280, height: 800 });
+    expect(ctx.agentWindowId).toBe(100);
+  });
 
   it("indexes the session by sessionId and agent window id", async () => {
     const aw = fakeAgentWindow();

@@ -10,6 +10,12 @@ pub struct SessionStartParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
+    /// Optional Agent Window outer width in CSS pixels (100..=7680).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Optional Agent Window outer height in CSS pixels (100..=7680).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

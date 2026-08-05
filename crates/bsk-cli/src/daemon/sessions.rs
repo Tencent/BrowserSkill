@@ -401,6 +401,8 @@ pub async fn start_session(
     sessions: &Arc<SessionRegistry>,
     queues: &Arc<ToolQueueRegistry>,
     requested: Option<&str>,
+    // Optional Agent Window outer size as `(width, height)` CSS pixels.
+    window_size: Option<(u32, u32)>,
     connect_wait: Duration,
     timeout_dur: Duration,
 ) -> Result<Session, StartSessionError> {
@@ -427,6 +429,8 @@ pub async fn start_session(
     let params = SessionStartParams {
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
+        width: window_size.map(|(width, _)| width),
+        height: window_size.map(|(_, height)| height),
     };
     let rpc_id = next_rpc_id("sess-start");
     let request = RequestFrame {

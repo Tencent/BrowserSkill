@@ -44,6 +44,8 @@ pub enum Method {
     ToolSessionStart,
     #[serde(rename = "tool.session_stop")]
     ToolSessionStop,
+    #[serde(rename = "tool.window_resize")]
+    ToolWindowResize,
     #[serde(rename = "tool.tab_list")]
     ToolTabList,
     #[serde(rename = "tool.tab_create")]
@@ -140,6 +142,7 @@ impl Method {
             | Method::ToolTabBorrow
             | Method::ToolTabReturn
             | Method::ToolTabSelect
+            | Method::ToolWindowResize
             | Method::ToolNavigate
             | Method::ToolNavigateBack
             | Method::ToolNavigateForward
@@ -272,6 +275,7 @@ mod tests {
         assert!(Method::ToolSelect.is_mutating());
         assert!(Method::ToolEvaluate.is_mutating());
         assert!(Method::ToolRecordStart.is_mutating());
+        assert!(Method::ToolWindowResize.is_mutating());
     }
 
     #[test]

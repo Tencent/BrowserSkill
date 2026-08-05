@@ -45,6 +45,9 @@ fn main() {
     dump!(SessionStopParams, "tool_session_stop_params");
     dump!(SessionStopResult, "tool_session_stop_result");
 
+    dump!(WindowResizeParams, "tool_window_resize_params");
+    dump!(WindowResizeResult, "tool_window_resize_result");
+
     dump!(TabListParams, "tool_tab_list_params");
     dump!(TabListResult, "tool_tab_list_result");
     dump!(TabCreateParams, "tool_tab_create_params");

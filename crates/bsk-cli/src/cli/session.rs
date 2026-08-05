@@ -54,6 +54,30 @@ pub struct SessionStartArgs {
     /// are connected).
     #[arg(long)]
     pub browser: Option<String>,
+
+    /// Agent Window outer width in CSS pixels (100..=7680). Both
+    /// `--width` and `--height` must be given to take effect.
+    #[arg(long, value_parser = window_size)]
+    pub width: Option<u32>,
+
+    /// Agent Window outer height in CSS pixels (100..=7680). Both
+    /// `--width` and `--height` must be given to take effect.
+    #[arg(long, value_parser = window_size)]
+    pub height: Option<u32>,
+}
+
+/// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
+fn window_size(s: &str) -> Result<u32, String> {
+    let value: u32 = s
+        .parse()
+        .map_err(|_| format!("invalid window dimension {s:?}: expected a positive integer"))?;
+    if (100..=7680).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "window dimension {value} out of range (100..=7680)"
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Args)]
@@ -71,6 +95,10 @@ pub struct SessionStopArgs {
 struct StartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -124,6 +152,11 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
 }
 
 fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<(), CliError> {
+    if args.width.is_some() != args.height.is_some() {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--width and --height must be given together"
+        )));
+    }
     // The daemon may hold `session.start` open for up to
     // `EXTENSION_CONNECT_WAIT` while a just-woken service worker
     // reconnects. Let the user know we are waiting rather than hung —
@@ -140,7 +173,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
-    let result = start_session(sock, args.browser);
+    let result = start_session(sock, args.browser, args.width, args.height);
     waited.store(true, Ordering::SeqCst);
     match result {
         Ok(reply) => match format {
@@ -165,12 +198,19 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 }
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
-pub fn start_session(sock: PathBuf, browser: Option<String>) -> Result<StartReply, CliError> {
+pub fn start_session(
+    sock: PathBuf,
+    browser: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<StartReply, CliError> {
     call(
         sock,
         Method::SessionStart,
         Some(StartParams {
             browser_instance_id: browser,
+            width,
+            height,
         }),
         SESSION_START_IPC_TIMEOUT,
     )
