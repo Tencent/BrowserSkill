@@ -4,6 +4,7 @@ import type { Transport } from "@/transport/transport";
 import type {
   ClickParams,
   ConsoleParams,
+  EmulateParams,
   EvaluateParams,
   FillParams,
   GetHtmlParams,
@@ -29,6 +30,7 @@ import type {
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
+import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
 import { handleClick, handleFill, handlePress, handleSelect } from "./interaction";
@@ -74,7 +76,8 @@ import { handleWaitForNavigation } from "./waits";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
-  NetworkCdpRunner & {
+  NetworkCdpRunner &
+  EmulateCdpRunner & {
     detachSession(sessionId: string): Promise<void>;
   };
 
@@ -289,6 +292,12 @@ export class ToolDispatcher {
         return handleTabReturn(this.sessions, req.params as TabReturnParams);
       case "tool.window_resize":
         return handleWindowResize(this.sessions, req.params as WindowResizeParams);
+      case "tool.emulate":
+        return handleEmulate(
+          this.sessions,
+          req.params as EmulateParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+        );
       case "tool.screenshot":
         return handleScreenshot(
           this.sessions,
@@ -482,6 +491,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.tab_borrow":
     case "tool.tab_return":
     case "tool.window_resize":
+    case "tool.emulate":
     case "tool.navigate":
     case "tool.navigate_back":
     case "tool.navigate_forward":

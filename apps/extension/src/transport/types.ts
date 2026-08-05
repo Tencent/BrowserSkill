@@ -566,6 +566,61 @@ export interface RequestHelpResult {
 }
 
 // --------------------------------------------------------------------------
+// Device-emulation payloads — tool.emulate (mirror bsk-protocol emulate.rs)
+// --------------------------------------------------------------------------
+
+export interface UserAgentBrandVersion {
+  brand: string;
+  version: string;
+}
+
+/** Mirror of CDP `Emulation.UserAgentMetadata`; all fields optional. */
+export interface UserAgentMetadata {
+  brands?: UserAgentBrandVersion[];
+  full_version?: string;
+  platform?: string;
+  platform_version?: string;
+  architecture?: string;
+  model?: string;
+  mobile?: boolean;
+}
+
+/**
+ * Concrete emulation overrides for one tab. Field presence drives the
+ * extension: only the overrides whose fields are set are touched.
+ */
+export interface EmulateOverrides {
+  width?: number;
+  height?: number;
+  device_scale_factor?: number;
+  mobile?: boolean;
+  user_agent?: string;
+  accept_language?: string;
+  user_agent_metadata?: UserAgentMetadata;
+  touch?: boolean;
+  max_touch_points?: number;
+}
+
+export interface EmulateParams {
+  session_id: string;
+  tab_id?: number;
+  /** Clear every emulation override on the tab. Exclusive with `overrides`. */
+  off?: boolean;
+  /** Overrides to apply. Required unless `off` is set. */
+  overrides?: EmulateOverrides;
+}
+
+export interface EmulateResult {
+  tab_id: number;
+  /** True when overrides were cleared (`off`); false when applied. */
+  cleared: boolean;
+  /** Echo of the overrides that were applied. Absent when cleared. */
+  applied?: EmulateOverrides;
+  /** Scope note: overrides are per-tab (CDP target), not inherited by new tabs. */
+  note?: string;
+}
+
+// --------------------------------------------------------------------------
 // Semantic record payloads — mirror bsk-protocol record.rs (Trace v2)
 // --------------------------------------------------------------------------
 

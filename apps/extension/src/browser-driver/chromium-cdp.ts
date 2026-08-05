@@ -85,6 +85,23 @@ export const CDP_PROTOCOL_VERSION = "1.3";
 /** Per-tab monotonic sequence returned by [`ChromiumCdp.dialogCursor`]. */
 export type DialogCursor = number;
 
+/** CDP `Emulation.setDeviceMetricsOverride` payload. */
+export interface DeviceMetricsOverride {
+  width: number;
+  height: number;
+  /** `0` asks Chrome to use the display's native factor. */
+  deviceScaleFactor: number;
+  mobile: boolean;
+}
+
+/** CDP `Emulation.setUserAgentOverride` payload. */
+export interface UserAgentOverride {
+  userAgent: string;
+  acceptLanguage?: string;
+  /** CDP `Emulation.UserAgentMetadata` (already camelCase). */
+  userAgentMetadata?: Record<string, unknown>;
+}
+
 const MAX_DIALOG_BUFFER = 32;
 const MAX_DIALOG_FIELD_LENGTH = 4096;
 const MAX_CONSOLE_BUFFER = 200;
@@ -192,6 +209,33 @@ export class ChromiumCdp {
   /** Return a cursor marking the current dialog sequence for `tabId`. */
   dialogCursor(tabId: number): DialogCursor {
     return this.dialogSequences.get(tabId) ?? 0;
+  }
+
+  /** `Emulation.setDeviceMetricsOverride` — pin the tab's viewport metrics. */
+  async setDeviceMetricsOverride(tabId: number, metrics: DeviceMetricsOverride): Promise<void> {
+    await this.send(tabId, "Emulation.setDeviceMetricsOverride", { ...metrics });
+  }
+
+  /** `Emulation.clearDeviceMetricsOverride` — restore native viewport metrics. */
+  async clearDeviceMetricsOverride(tabId: number): Promise<void> {
+    await this.send(tabId, "Emulation.clearDeviceMetricsOverride", {});
+  }
+
+  /** `Emulation.setUserAgentOverride` — an empty `userAgent` restores the real UA. */
+  async setUserAgentOverride(tabId: number, override: UserAgentOverride): Promise<void> {
+    await this.send(tabId, "Emulation.setUserAgentOverride", { ...override });
+  }
+
+  /** `Emulation.setTouchEmulationEnabled`. */
+  async setTouchEmulationEnabled(
+    tabId: number,
+    enabled: boolean,
+    maxTouchPoints?: number,
+  ): Promise<void> {
+    await this.send(tabId, "Emulation.setTouchEmulationEnabled", {
+      enabled,
+      ...(maxTouchPoints !== undefined ? { maxTouchPoints } : {}),
+    });
   }
 
   /** Dialogs observed on `tabId` with sequence strictly greater than `cursor`. */

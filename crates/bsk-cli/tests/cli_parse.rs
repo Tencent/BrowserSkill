@@ -323,3 +323,129 @@ fn rejects_invalid_window_resize_dimensions() {
     // width/height are required for resize.
     assert!(Cli::try_parse_from(["bsk", "window", "resize", "--session", "s1"]).is_err());
 }
+
+#[test]
+fn parses_emulate_with_device_preset() {
+    use bsk::cli::emulate::EmulateArgs;
+    let cli = parse(&["bsk", "emulate", "--session", "s1", "--device", "iphone-14"]);
+    let Command::Emulate(EmulateArgs {
+        session,
+        device,
+        off,
+        ..
+    }) = cli.command
+    else {
+        panic!("expected emulate subcommand");
+    };
+    assert_eq!(session, "s1");
+    assert_eq!(device.as_deref(), Some("iphone-14"));
+    assert!(!off);
+}
+
+#[test]
+fn parses_emulate_manual_overrides() {
+    let cli = parse(&[
+        "bsk",
+        "emulate",
+        "--session",
+        "s1",
+        "--width",
+        "390",
+        "--height",
+        "844",
+        "--dpr",
+        "3",
+        "--mobile",
+        "--ua",
+        "Mozilla/5.0 (iPhone)",
+        "--accept-language",
+        "zh-CN",
+        "--touch",
+        "--max-touch-points",
+        "5",
+        "--tab-id",
+        "7",
+    ]);
+    let Command::Emulate(args) = cli.command else {
+        panic!("expected emulate subcommand");
+    };
+    assert_eq!(args.width, Some(390));
+    assert_eq!(args.height, Some(844));
+    assert_eq!(args.dpr, Some(3.0));
+    assert!(args.mobile);
+    assert_eq!(args.ua.as_deref(), Some("Mozilla/5.0 (iPhone)"));
+    assert_eq!(args.accept_language.as_deref(), Some("zh-CN"));
+    assert!(args.touch);
+    assert_eq!(args.max_touch_points, Some(5));
+    assert_eq!(args.tab_id, Some(7));
+}
+
+#[test]
+fn parses_emulate_off() {
+    let cli = parse(&["bsk", "emulate", "--session", "s1", "--off"]);
+    let Command::Emulate(args) = cli.command else {
+        panic!("expected emulate subcommand");
+    };
+    assert!(args.off);
+}
+
+#[test]
+fn rejects_invalid_emulate_values() {
+    // Zero / out-of-range dimensions.
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "emulate",
+            "--session",
+            "s1",
+            "--width",
+            "0",
+            "--height",
+            "844"
+        ])
+        .is_err()
+    );
+    // Non-positive dpr.
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "emulate",
+            "--session",
+            "s1",
+            "--width",
+            "390",
+            "--height",
+            "844",
+            "--dpr",
+            "0"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "emulate",
+            "--session",
+            "s1",
+            "--width",
+            "390",
+            "--height",
+            "844",
+            "--dpr",
+            "abc"
+        ])
+        .is_err()
+    );
+    // Zero touch points.
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "emulate",
+            "--session",
+            "s1",
+            "--max-touch-points",
+            "0"
+        ])
+        .is_err()
+    );
+}

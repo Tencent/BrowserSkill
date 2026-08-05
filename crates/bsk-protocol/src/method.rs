@@ -46,6 +46,8 @@ pub enum Method {
     ToolSessionStop,
     #[serde(rename = "tool.window_resize")]
     ToolWindowResize,
+    #[serde(rename = "tool.emulate")]
+    ToolEmulate,
     #[serde(rename = "tool.tab_list")]
     ToolTabList,
     #[serde(rename = "tool.tab_create")]
@@ -143,6 +145,7 @@ impl Method {
             | Method::ToolTabReturn
             | Method::ToolTabSelect
             | Method::ToolWindowResize
+            | Method::ToolEmulate
             | Method::ToolNavigate
             | Method::ToolNavigateBack
             | Method::ToolNavigateForward
@@ -235,6 +238,13 @@ mod tests {
     }
 
     #[test]
+    fn emulate_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("tool.emulate")).unwrap();
+        assert_eq!(method, Method::ToolEmulate);
+        assert_eq!(serde_json::to_value(method).unwrap(), json!("tool.emulate"));
+    }
+
+    #[test]
     fn cancel_params_and_result_round_trip() {
         let params: CancelParams = serde_json::from_value(json!({ "rpc_id": "wait-1" })).unwrap();
         assert_eq!(params.rpc_id, "wait-1");
@@ -276,6 +286,7 @@ mod tests {
         assert!(Method::ToolEvaluate.is_mutating());
         assert!(Method::ToolRecordStart.is_mutating());
         assert!(Method::ToolWindowResize.is_mutating());
+        assert!(Method::ToolEmulate.is_mutating());
     }
 
     #[test]

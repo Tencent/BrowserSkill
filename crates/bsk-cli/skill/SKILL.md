@@ -134,6 +134,21 @@ Details and flags: **`bsk <cmd> --help`**
 |---------|---------|
 | `bsk window resize` | Resize the Agent Window (`--width`, `--height`; 100..=7680 CSS px) |
 
+### Device emulation — `bsk emulate` (requires `--session <id>`)
+
+Emulate a mobile device environment on the agent tab via CDP — viewport, User-Agent, and touch — to debug a page's mobile layout and behaviour:
+
+```bash
+bsk emulate --session <id> --device iphone-14
+bsk emulate --session <id> --width 390 --height 844 --dpr 3 --mobile --ua "Mozilla/5.0 (iPhone…" --touch
+bsk emulate --session <id> --off
+```
+
+- Presets (`--device`): `iphone-14`, `iphone-14-pro-max`, `iphone-se`, `pixel-7`, `galaxy-s23`, `ipad-mini`, `galaxy-tab-s8`. Manual flags (`--width`/`--height`/`--dpr`/`--mobile`/`--ua`/`--accept-language`/`--touch`/`--max-touch-points`) also work without a preset, or override individual preset fields.
+- `--off` clears every override (viewport, UA, touch) and restores the tab's real environment.
+- Scope: overrides apply to **one tab only** (CDP per-target) and are **not inherited by new tabs** — re-run `bsk emulate` after opening or switching to another tab (default target is the session's active tab; `--tab-id` overrides).
+- Emulation covers viewport/UA/touch only; it does not throttle the network, fake geolocation, or synthesise real touch-event streams.
+
 ### Tabs (require `--session <id>`)
 
 | Command | Summary |

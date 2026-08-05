@@ -124,6 +124,10 @@ describe("ToolDispatcher", () => {
             truncated: false,
           }) satisfies ConsoleResult,
       ),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
@@ -163,6 +167,10 @@ describe("ToolDispatcher", () => {
         next_since: 0,
         truncated: false,
       })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
     dispatcher.start();
