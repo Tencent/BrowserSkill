@@ -131,11 +131,13 @@ pub struct EmulateArgs {
     #[arg(long)]
     pub device: Option<String>,
 
-    /// Viewport width in CSS pixels (requires --height).
+    /// Viewport width in CSS pixels (requires --height unless --device
+    /// supplies it).
     #[arg(long, value_parser = viewport_dimension)]
     pub width: Option<u32>,
 
-    /// Viewport height in CSS pixels (requires --width).
+    /// Viewport height in CSS pixels (requires --width unless --device
+    /// supplies it).
     #[arg(long, value_parser = viewport_dimension)]
     pub height: Option<u32>,
 
@@ -148,6 +150,10 @@ pub struct EmulateArgs {
     #[arg(long)]
     pub mobile: bool,
 
+    /// Turn a preset's mobile viewport flag back off.
+    #[arg(long, conflicts_with = "mobile")]
+    pub no_mobile: bool,
+
     /// User-Agent override string.
     #[arg(long)]
     pub ua: Option<String>,
@@ -159,6 +165,10 @@ pub struct EmulateArgs {
     /// Enable touch emulation (combines with --device or manual flags).
     #[arg(long)]
     pub touch: bool,
+
+    /// Turn a preset's touch emulation back off.
+    #[arg(long, conflicts_with = "touch")]
+    pub no_touch: bool,
 
     /// Touch points reported while touch emulation is enabled (implies
     /// --touch).
@@ -221,14 +231,20 @@ fn invalid_params(message: &str) -> CliError {
 
 /// Validate the argument combination and build the wire params. Pure so
 /// it can be unit-tested without a daemon.
+///
+/// The preset (if any) forms the base, manual flags override individual
+/// fields, and only the merged result is validated — so a preset can
+/// supply the dimension a lone `--width`/`--height` lacks.
 pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
     let has_manual = args.width.is_some()
         || args.height.is_some()
         || args.dpr.is_some()
         || args.mobile
+        || args.no_mobile
         || args.ua.is_some()
         || args.accept_language.is_some()
         || args.touch
+        || args.no_touch
         || args.max_touch_points.is_some();
 
     if args.off {
@@ -250,21 +266,6 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
             "nothing to do: pass --device <preset> ({}), manual options (--width/--height/--dpr/--mobile/--ua/--touch), or --off",
             preset_names()
         )));
-    }
-
-    match (args.width, args.height) {
-        (Some(_), None) | (None, Some(_)) => {
-            return Err(invalid_params(
-                "--width and --height must be provided together",
-            ));
-        }
-        _ => {}
-    }
-
-    if args.device.is_none() && args.width.is_none() && (args.dpr.is_some() || args.mobile) {
-        return Err(invalid_params(
-            "--dpr and --mobile require --width/--height (viewport metrics need dimensions)",
-        ));
     }
 
     let mut overrides = match args.device.as_deref() {
@@ -290,8 +291,10 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
         None => EmulateOverrides::default(),
     };
 
-    if let (Some(w), Some(h)) = (args.width, args.height) {
+    if let Some(w) = args.width {
         overrides.width = Some(w);
+    }
+    if let Some(h) = args.height {
         overrides.height = Some(h);
     }
     if let Some(dpr) = args.dpr {
@@ -299,6 +302,9 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
     }
     if args.mobile {
         overrides.mobile = Some(true);
+    }
+    if args.no_mobile {
+        overrides.mobile = Some(false);
     }
     if let Some(ua) = &args.ua {
         overrides.user_agent = Some(ua.clone());
@@ -309,8 +315,29 @@ pub fn build_params(args: &EmulateArgs) -> Result<EmulateParams, CliError> {
     if args.touch || args.max_touch_points.is_some() {
         overrides.touch = Some(true);
     }
+    if args.no_touch {
+        overrides.touch = Some(false);
+    }
     if let Some(max_touch_points) = args.max_touch_points {
         overrides.max_touch_points = Some(max_touch_points);
+    }
+
+    // Cross-field checks run on the merged result.
+    match (overrides.width, overrides.height) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(invalid_params(
+                "--width and --height must be provided together",
+            ));
+        }
+        _ => {}
+    }
+
+    if overrides.width.is_none()
+        && (overrides.device_scale_factor.is_some() || overrides.mobile.is_some())
+    {
+        return Err(invalid_params(
+            "--dpr/--mobile/--no-mobile require --width/--height (viewport metrics need dimensions)",
+        ));
     }
 
     if overrides.accept_language.is_some() && overrides.user_agent.is_none() {
@@ -398,9 +425,11 @@ mod tests {
             height: None,
             dpr: None,
             mobile: false,
+            no_mobile: false,
             ua: None,
             accept_language: None,
             touch: false,
+            no_touch: false,
             max_touch_points: None,
             off: false,
         }
@@ -605,6 +634,68 @@ mod tests {
         let o = build(&args).overrides.unwrap();
         assert_eq!(o.device_scale_factor, Some(2.5));
         assert_eq!(o.width, Some(375));
+    }
+
+    #[test]
+    fn preset_supplies_the_missing_dimension() {
+        // Pairing is validated on the merged result, so a lone --width
+        // keeps the preset's height instead of erroring out.
+        let args = EmulateArgs {
+            device: Some("iphone-14".into()),
+            width: Some(500),
+            ..base_args()
+        };
+        let o = build(&args).overrides.unwrap();
+        assert_eq!(o.width, Some(500));
+        assert_eq!(o.height, Some(844));
+        // Same for a lone --height.
+        let args = EmulateArgs {
+            device: Some("iphone-14".into()),
+            height: Some(900),
+            ..base_args()
+        };
+        let o = build(&args).overrides.unwrap();
+        assert_eq!(o.width, Some(390));
+        assert_eq!(o.height, Some(900));
+    }
+
+    #[test]
+    fn no_mobile_and_no_touch_override_preset_fields() {
+        let args = EmulateArgs {
+            device: Some("iphone-14".into()),
+            no_mobile: true,
+            no_touch: true,
+            ..base_args()
+        };
+        let o = build(&args).overrides.unwrap();
+        assert_eq!(o.mobile, Some(false));
+        assert_eq!(o.touch, Some(false));
+        // Untouched preset fields survive.
+        assert_eq!(o.width, Some(390));
+        assert_eq!(o.max_touch_points, Some(5));
+    }
+
+    #[test]
+    fn no_mobile_without_dimensions_is_rejected() {
+        // --no-mobile still maps to the mobile field, which needs a
+        // viewport without a preset.
+        let args = EmulateArgs {
+            no_mobile: true,
+            ..base_args()
+        };
+        let err = build_params(&args).unwrap_err();
+        assert!(err.to_string().contains("--width/--height"));
+    }
+
+    #[test]
+    fn no_touch_alone_is_valid() {
+        let args = EmulateArgs {
+            no_touch: true,
+            ..base_args()
+        };
+        let o = build(&args).overrides.unwrap();
+        assert_eq!(o.touch, Some(false));
+        assert!(o.width.is_none());
     }
 
     #[test]

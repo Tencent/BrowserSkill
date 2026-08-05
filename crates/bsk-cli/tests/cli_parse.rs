@@ -390,6 +390,39 @@ fn parses_emulate_off() {
 }
 
 #[test]
+fn parses_emulate_no_mobile_no_touch() {
+    let cli = parse(&[
+        "bsk",
+        "emulate",
+        "--session",
+        "s1",
+        "--device",
+        "iphone-14",
+        "--no-mobile",
+        "--no-touch",
+    ]);
+    let Command::Emulate(args) = cli.command else {
+        panic!("expected emulate subcommand");
+    };
+    assert!(args.no_mobile);
+    assert!(args.no_touch);
+    assert!(!args.mobile);
+    assert!(!args.touch);
+}
+
+#[test]
+fn rejects_conflicting_emulate_flags() {
+    for extra in [
+        &["--mobile", "--no-mobile"][..],
+        &["--touch", "--no-touch"][..],
+    ] {
+        let mut argv = vec!["bsk", "emulate", "--session", "s1", "--device", "iphone-14"];
+        argv.extend_from_slice(extra);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+}
+
+#[test]
 fn rejects_invalid_emulate_values() {
     // Zero / out-of-range dimensions.
     assert!(

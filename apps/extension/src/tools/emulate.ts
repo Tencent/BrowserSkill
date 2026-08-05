@@ -4,7 +4,10 @@
 // not inherit them, and `off` restores the tab's real environment.
 //
 // Device presets are resolved CLI-side; this handler only executes the
-// concrete override parameters it receives.
+// concrete override parameters it receives. Each request is merged
+// field by field onto the tab's remembered emulation state and the
+// merged state is applied as a whole, so a partial request does not
+// reset fields set by an earlier one.
 
 import type { DeviceMetricsOverride, UserAgentOverride } from "@/browser-driver/chromium-cdp";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
@@ -76,6 +79,69 @@ function invalidParams(message: string): RpcError {
 }
 
 /**
+ * Per-tab record of the emulation state applied so far. New requests
+ * are merged onto it field by field (see `mergeEmulateOverrides`) and
+ * the merged state is applied as a whole, so e.g. a later
+ * `--width/--height` does not silently reset the dpr/mobile of an
+ * earlier `--device` preset.
+ *
+ * The record is best-effort: an entry left behind by a closed tab is
+ * simply overwritten by the next emulate call that targets the same tab
+ * id, and the whole map is lost when the extension service worker
+ * reloads — after a reload the next emulate is equivalent to a full
+ * (re)set of just the fields it carries.
+ */
+const tabEmulationStates = new Map<number, EmulateOverrides>();
+
+/** Test hook: drop every per-tab emulation state record. */
+export function resetEmulateStatesForTests(): void {
+  tabEmulationStates.clear();
+}
+
+/**
+ * Merge one validated request onto the tab's stored state: fields
+ * present in `overrides` overwrite the stored value, absent fields keep
+ * it. Returns a fresh object; `stored` is not mutated.
+ */
+export function mergeEmulateOverrides(
+  stored: EmulateOverrides | undefined,
+  overrides: EmulateOverrides,
+): EmulateOverrides {
+  const merged: EmulateOverrides = { ...stored };
+  if (overrides.width !== undefined) merged.width = overrides.width;
+  if (overrides.height !== undefined) merged.height = overrides.height;
+  if (overrides.device_scale_factor !== undefined) {
+    merged.device_scale_factor = overrides.device_scale_factor;
+  }
+  if (overrides.mobile !== undefined) merged.mobile = overrides.mobile;
+  if (overrides.user_agent !== undefined) merged.user_agent = overrides.user_agent;
+  if (overrides.accept_language !== undefined) {
+    merged.accept_language = overrides.accept_language;
+  }
+  if (overrides.user_agent_metadata !== undefined) {
+    merged.user_agent_metadata = overrides.user_agent_metadata;
+  }
+  if (overrides.touch !== undefined) merged.touch = overrides.touch;
+  if (overrides.max_touch_points !== undefined) {
+    merged.max_touch_points = overrides.max_touch_points;
+  }
+  return merged;
+}
+
+/**
+ * CDP calls run in sequence without rollback: on a mid-way failure the
+ * overrides already applied stay in effect, so the error says how to
+ * reset them.
+ */
+function cdpFailed(err: unknown): RpcError {
+  const cause = err instanceof Error ? err.message : String(err);
+  return {
+    code: "cdp_failed",
+    message: `${cause} (overrides applied before the failure were not rolled back — use --off to reset)`,
+  };
+}
+
+/**
  * Cross-field validation for one overrides set. The CLI performs the
  * same checks; the extension re-validates because the wire format is
  * public.
@@ -134,9 +200,10 @@ export function validateOverrides(overrides: EmulateOverrides): RpcError | null 
 /**
  * Handler for `tool.emulate` (called by the daemon over WS).
  *
- * Applies the requested overrides in a fixed order — viewport metrics,
- * then UA, then touch — or clears everything when `off` is set. Raw CDP
- * failures surface as `cdp_failed` (§4.5).
+ * Merges the requested overrides onto the tab's remembered state and
+ * applies the merged state in a fixed order — viewport metrics, then
+ * UA, then touch — or clears everything (state included) when `off` is
+ * set. Raw CDP failures surface as `cdp_failed` (§4.5).
  */
 export async function handleEmulate(
   manager: SessionManager,
@@ -162,11 +229,9 @@ export async function handleEmulate(
       // An empty userAgent string clears the override (CDP convention).
       await deps.cdp.setUserAgentOverride(target.tabId, { userAgent: "" });
     } catch (err) {
-      return {
-        code: "cdp_failed",
-        message: err instanceof Error ? err.message : String(err),
-      };
+      return cdpFailed(err);
     }
+    tabEmulationStates.delete(target.tabId);
     return { tab_id: target.tabId, cleared: true, note: EMULATE_SCOPE_NOTE };
   }
 
@@ -177,44 +242,44 @@ export async function handleEmulate(
   const invalid = validateOverrides(overrides);
   if (invalid) return invalid;
 
+  // Fields absent from this request keep their previously applied
+  // values; the merged state is what gets applied (and echoed back).
+  const merged = mergeEmulateOverrides(tabEmulationStates.get(target.tabId), overrides);
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    if (overrides.width !== undefined && overrides.height !== undefined) {
+    if (merged.width !== undefined && merged.height !== undefined) {
       await deps.cdp.setDeviceMetricsOverride(target.tabId, {
-        width: overrides.width,
-        height: overrides.height,
-        deviceScaleFactor: overrides.device_scale_factor ?? 0,
-        mobile: overrides.mobile ?? false,
+        width: merged.width,
+        height: merged.height,
+        deviceScaleFactor: merged.device_scale_factor ?? 0,
+        mobile: merged.mobile ?? false,
       });
     }
-    if (overrides.user_agent !== undefined) {
+    if (merged.user_agent !== undefined) {
       await deps.cdp.setUserAgentOverride(target.tabId, {
-        userAgent: overrides.user_agent,
-        ...(overrides.accept_language !== undefined
-          ? { acceptLanguage: overrides.accept_language }
-          : {}),
-        ...(overrides.user_agent_metadata !== undefined
-          ? { userAgentMetadata: toCdpUserAgentMetadata(overrides.user_agent_metadata) }
+        userAgent: merged.user_agent,
+        ...(merged.accept_language !== undefined ? { acceptLanguage: merged.accept_language } : {}),
+        ...(merged.user_agent_metadata !== undefined
+          ? { userAgentMetadata: toCdpUserAgentMetadata(merged.user_agent_metadata) }
           : {}),
       });
     }
-    if (overrides.touch !== undefined || overrides.max_touch_points !== undefined) {
+    if (merged.touch !== undefined || merged.max_touch_points !== undefined) {
       await deps.cdp.setTouchEmulationEnabled(
         target.tabId,
-        overrides.touch ?? true,
-        overrides.max_touch_points,
+        merged.touch ?? true,
+        merged.max_touch_points,
       );
     }
   } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    return cdpFailed(err);
   }
+  // Record the merged state only once it was fully applied.
+  tabEmulationStates.set(target.tabId, merged);
   return {
     tab_id: target.tabId,
     cleared: false,
-    applied: overrides,
+    applied: merged,
     note: EMULATE_SCOPE_NOTE,
   };
 }

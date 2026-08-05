@@ -586,8 +586,10 @@ export interface UserAgentMetadata {
 }
 
 /**
- * Concrete emulation overrides for one tab. Field presence drives the
- * extension: only the overrides whose fields are set are touched.
+ * Concrete emulation overrides for one tab. The extension merges each
+ * request field by field onto the tab's remembered emulation state:
+ * fields present here overwrite the stored value, absent fields keep
+ * it, and the merged state is applied as a whole.
  */
 export interface EmulateOverrides {
   width?: number;

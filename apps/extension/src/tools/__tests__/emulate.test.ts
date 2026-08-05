@@ -1,11 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DeviceMetricsOverride, UserAgentOverride } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
-import type { EmulateOverrides } from "@/transport/types";
+import type { EmulateOverrides, RpcError } from "@/transport/types";
 import {
   EMULATE_SCOPE_NOTE,
   type EmulateCdpRunner,
   handleEmulate,
+  resetEmulateStatesForTests,
   toCdpUserAgentMetadata,
   validateOverrides,
 } from "../emulate";
@@ -84,6 +85,10 @@ const fullOverrides: EmulateOverrides = {
 };
 
 describe("handleEmulate", () => {
+  beforeEach(() => {
+    resetEmulateStatesForTests();
+  });
+
   it("applies viewport, UA and touch overrides to the active tab", async () => {
     const sm = await makeManager();
     const deps = makeDeps();
@@ -246,7 +251,72 @@ describe("handleEmulate", () => {
     expect(deps.calls.clearedMetrics).toEqual([]);
   });
 
-  it("maps CDP failures to cdp_failed", async () => {
+  it("merges onto the tab's stored state: later width/height keep the earlier dpr/mobile", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps();
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    const result = await handleEmulate(
+      sm,
+      { session_id: "aa11", overrides: { width: 500, height: 900 } },
+      deps,
+    );
+    expect(result).toMatchObject({
+      tab_id: 7,
+      cleared: false,
+      applied: { width: 500, height: 900, device_scale_factor: 3, mobile: true },
+    });
+    expect(deps.calls.metrics).toEqual([
+      { tabId: 7, metrics: { width: 390, height: 844, deviceScaleFactor: 3, mobile: true } },
+      { tabId: 7, metrics: { width: 500, height: 900, deviceScaleFactor: 3, mobile: true } },
+    ]);
+    // The merged state is applied as a whole: UA and touch are re-applied too.
+    expect(deps.calls.ua).toHaveLength(2);
+    expect(deps.calls.touch).toHaveLength(2);
+  });
+
+  it("keeps emulation state per tab", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps();
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    await handleEmulate(
+      sm,
+      { session_id: "aa11", tab_id: 9, overrides: { width: 500, height: 900 } },
+      deps,
+    );
+    // Tab 9 has no stored state, so dpr/mobile fall back to the CDP defaults.
+    expect(deps.calls.metrics.at(-1)).toEqual({
+      tabId: 9,
+      metrics: { width: 500, height: 900, deviceScaleFactor: 0, mobile: false },
+    });
+  });
+
+  it("off clears the stored state: a later request starts from scratch", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps();
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    await handleEmulate(sm, { session_id: "aa11", off: true }, deps);
+    const result = await handleEmulate(
+      sm,
+      { session_id: "aa11", overrides: { width: 500, height: 900 } },
+      deps,
+    );
+    expect(result).toEqual({
+      tab_id: 7,
+      cleared: false,
+      applied: { width: 500, height: 900 },
+      note: EMULATE_SCOPE_NOTE,
+    });
+    // dpr/mobile fell back to the CDP defaults instead of the cleared values,
+    // and the cleared UA/touch were not re-applied.
+    expect(deps.calls.metrics.at(-1)).toEqual({
+      tabId: 7,
+      metrics: { width: 500, height: 900, deviceScaleFactor: 0, mobile: false },
+    });
+    expect(deps.calls.ua).toHaveLength(2); // preset + the clearing empty UA
+    expect(deps.calls.touch).toHaveLength(2); // preset + the disabling call
+  });
+
+  it("maps CDP failures to cdp_failed and points at --off", async () => {
     const sm = await makeManager();
     const deps = makeDeps({ throwOn: "ua" });
     const result = await handleEmulate(
@@ -254,7 +324,22 @@ describe("handleEmulate", () => {
       { session_id: "aa11", overrides: { user_agent: "custom-ua" } },
       deps,
     );
-    expect(result).toMatchObject({ code: "cdp_failed", message: "simulated ua failure" });
+    expect(result).toMatchObject({ code: "cdp_failed" });
+    const message = (result as RpcError).message;
+    expect(message).toContain("simulated ua failure");
+    expect(message).toContain("not rolled back");
+    expect(message).toContain("--off");
+  });
+
+  it("reports an off-branch CDP failure with the same not-rolled-back note", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps({ throwOn: "metrics" });
+    const result = await handleEmulate(sm, { session_id: "aa11", off: true }, deps);
+    expect(result).toMatchObject({ code: "cdp_failed" });
+    const message = (result as RpcError).message;
+    expect(message).toContain("simulated metrics failure");
+    expect(message).toContain("not rolled back");
+    expect(message).toContain("--off");
   });
 });
 

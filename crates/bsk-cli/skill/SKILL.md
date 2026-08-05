@@ -144,8 +144,9 @@ bsk emulate --session <id> --width 390 --height 844 --dpr 3 --mobile --ua "Mozil
 bsk emulate --session <id> --off
 ```
 
-- Presets (`--device`): `iphone-14`, `iphone-14-pro-max`, `iphone-se`, `pixel-7`, `galaxy-s23`, `ipad-mini`, `galaxy-tab-s8`. Manual flags (`--width`/`--height`/`--dpr`/`--mobile`/`--ua`/`--accept-language`/`--touch`/`--max-touch-points`) also work without a preset, or override individual preset fields.
-- `--off` clears every override (viewport, UA, touch) and restores the tab's real environment.
+- Presets (`--device`): `iphone-14`, `iphone-14-pro-max`, `iphone-se`, `pixel-7`, `galaxy-s23`, `ipad-mini`, `galaxy-tab-s8`. Manual flags (`--width`/`--height`/`--dpr`/`--mobile`/`--ua`/`--accept-language`/`--touch`/`--max-touch-points`) also work without a preset, or override individual preset fields; `--no-mobile`/`--no-touch` turn a preset's mobile viewport / touch emulation back off.
+- Repeated runs merge field by field onto the tab's current emulation state — only the flags you pass change. E.g. after `--device iphone-14`, `bsk emulate --session <id> --width 390 --height 844` keeps the preset's dpr (`3`) and mobile viewport. (The extension remembers the state per tab; after an extension reload the next run applies only the fields it carries.)
+- `--off` clears every override (viewport, UA, touch) and the remembered state, restoring the tab's real environment.
 - Scope: overrides apply to **one tab only** (CDP per-target) and are **not inherited by new tabs** — re-run `bsk emulate` after opening or switching to another tab (default target is the session's active tab; `--tab-id` overrides).
 - Emulation covers viewport/UA/touch only; it does not throttle the network, fake geolocation, or synthesise real touch-event streams.
 
