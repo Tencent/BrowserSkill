@@ -2,6 +2,7 @@
 
 pub mod console;
 pub mod dialog;
+pub mod emulate;
 pub mod human_loop;
 pub mod interaction;
 pub mod navigation;
@@ -16,6 +17,7 @@ pub mod window;
 
 pub use console::*;
 pub use dialog::*;
+pub use emulate::*;
 pub use human_loop::*;
 pub use interaction::*;
 pub use navigation::*;

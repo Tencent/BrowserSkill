@@ -9,6 +9,7 @@ pub mod console;
 pub mod daemon;
 pub mod dialogs;
 pub mod doctor;
+pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
 pub mod evaluate;
@@ -36,6 +37,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::cli::console::ConsoleArgs;
 use crate::cli::daemon::DaemonCmd;
+use crate::cli::emulate::EmulateArgs;
 use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
@@ -122,6 +124,9 @@ pub enum Command {
 
     /// Agent Window management commands.
     Window(WindowCmd),
+
+    /// Emulate a mobile device environment (viewport, UA, touch) on a tab.
+    Emulate(EmulateArgs),
 
     /// Capture a PNG of the active tab or a snapshot ref element.
     Screenshot(ScreenshotArgs),
