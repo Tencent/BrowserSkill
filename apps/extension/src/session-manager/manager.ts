@@ -6,6 +6,38 @@ export interface SessionContext {
   agentWindowId: number;
   refStore: RefStore;
   borrowedTabs: Map<number, BorrowedTab>;
+  /**
+   * Tabs created by the agent via `tool.tab_create` in this session's
+   * Agent Window. Tracked so `session_stop` can close them before
+   * releasing the window (design §3.1). User-created tabs (via Chrome UI)
+   * never enter this set.
+   */
+  agentCreatedTabs: Set<number>;
+  /**
+   * Tabs the user opened themselves inside the Agent Window via Chrome UI
+   * (new-tab button, Cmd+T, right-click → open in new tab, …). These must
+   * NOT be controlled by the agent overlay and must be left free for the
+   * user to operate. Distinguishing them from agent-created tabs is done
+   * by the `chrome.tabs.onCreated` listener in background.ts, which consults
+   * `pendingAgentTabCount` to tell "opened via tool.tab_create" apart from
+   * "opened by the user".
+   */
+  userTabs: Set<number>;
+  /**
+   * Number of agent tabs currently being created via `tool.tab_create` but
+   * whose `onCreated` event has not yet been observed. `handleTabCreate`
+   * increments this *before* calling `chrome.tabs.create`; the
+   * `onCreated` listener decrements it once per new tab in the Agent Window.
+   * This lets us tell agent-created tabs from user-created tabs even though
+   * both fire `onCreated` (design §3.1, user-tab freedom fix).
+   */
+  pendingAgentTabCount: number;
+  /**
+   * Id of the home tab created/activated when the session started
+   * (`ensureActiveTab`). Used to clean up the home tab precisely on
+   * stop instead of matching by URL (design §3.2).
+   */
+  homeTabId: number | null;
   createdAtMs: number;
 }
 
@@ -41,6 +73,13 @@ export class SessionManager {
   private readonly sessions = new Map<string, SessionContext>();
   private readonly windowIndex = new Map<number, string>();
   private readonly borrowReservations = new Map<number, string>();
+  /**
+   * Windows that are still being initialised by `start()` (the home tab is
+   * being created). Tabs born into one of these windows via `onCreated`
+   * belong to the agent (the home tab), not the user, and must not be
+   * mistaken for user-created tabs.
+   */
+  private readonly windowInitializing = new Set<number>();
   private readonly agentWindow: AgentWindowApi;
   private readonly now: () => number;
 
@@ -133,17 +172,59 @@ export class SessionManager {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
     const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME);
-    await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
+    // Mark the window as initialising so `onCreated` (driven by the home
+    // tab) does not mistake the home tab for a user-created tab.
+    this.windowInitializing.add(windowId);
+    const homeTabId = await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
     const ctx: SessionContext = {
       sessionId,
       agentWindowId: windowId,
       refStore: new RefStore(),
       borrowedTabs: new Map(),
+      agentCreatedTabs: new Set(),
+      userTabs: new Set(),
+      pendingAgentTabCount: 0,
+      homeTabId,
       createdAtMs: this.now(),
     };
     this.sessions.set(sessionId, ctx);
     this.windowIndex.set(windowId, sessionId);
+    this.windowInitializing.delete(windowId);
     return ctx;
+  }
+
+  /**
+   * Record that a `tool.tab_create` is about to open a tab. Called *before*
+   * `chrome.tabs.create` so the pending count is visible to the
+   * `onCreated` listener that will fire for the new tab.
+   */
+  markAgentTabPending(windowId: number): void {
+    const ctx = this.findByWindowId(windowId);
+    if (!ctx) return;
+    ctx.pendingAgentTabCount += 1;
+  }
+
+  /**
+   * Called by the `onCreated` listener for each new tab in an Agent Window.
+   * Returns `"agent"` when the tab corresponds to a pending `tool.tab_create`
+   * (and registers it), `"user"` when the user opened it via Chrome UI, or
+   * `"initializing"` when the window is still booting its home tab.
+   */
+  classifyNewTab(tabId: number, windowId: number): "agent" | "user" | "initializing" | "unknown" {
+    const ctx = this.findByWindowId(windowId);
+    if (!ctx) return "unknown";
+    if (this.windowInitializing.has(windowId)) {
+      // Home tab / window boot — belongs to the agent, not the user.
+      ctx.agentCreatedTabs.add(tabId);
+      return "initializing";
+    }
+    if (ctx.pendingAgentTabCount > 0) {
+      ctx.pendingAgentTabCount -= 1;
+      ctx.agentCreatedTabs.add(tabId);
+      return "agent";
+    }
+    ctx.userTabs.add(tabId);
+    return "user";
   }
 
   /**

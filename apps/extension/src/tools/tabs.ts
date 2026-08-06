@@ -416,8 +416,17 @@ export async function handleTabCreate(
   const paramErr = validateTabCreateParams(params);
   if (paramErr) return paramErr;
 
+  // Flag the pending agent tab *before* create so the chrome.tabs.onCreated
+  // listener (background.ts) can tell this tab apart from a user-opened tab.
+  manager.markAgentTabPending(ctx.agentWindowId);
+
   const tab = await createTabAndCleanup(deps, buildCreateProps(ctx, params));
   if (isRpcError(tab)) return tab;
+
+  // Track agent-created tabs so session_stop can clean them up (design §3.1).
+  // The onCreated listener also adds this id; this is an idempotent fallback
+  // in case the listener has not fired yet.
+  ctx.agentCreatedTabs.add(tab.id);
 
   return {
     tab_id: tab.id,
@@ -516,6 +525,9 @@ export async function handleTabClose(
   }
   try {
     await getTabsApi(deps).remove(params.tab_id);
+    // Keep the tracking set accurate so session_stop won't try to close a
+    // tab that's already gone (design §3.1).
+    ctx.agentCreatedTabs.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",
