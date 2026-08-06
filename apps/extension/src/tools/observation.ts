@@ -1072,6 +1072,7 @@ export interface SnapshotDeps {
     get(tabId: number): Promise<chrome.tabs.Tab>;
     query(q: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
   };
+  conditionalSurfaceProbe?: boolean;
 }
 
 let defaultDeps: SnapshotDeps | null = null;
@@ -1258,7 +1259,9 @@ async function handleVomObservation(
       {},
     );
     const axNodes = result.nodes ?? [];
-    const captured = await captureForVom(deps.cdp, target.tabId, conditionalSurfaceProbe);
+    const effectiveConditionalSurfaceProbe =
+      deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
+    const captured = await captureForVom(deps.cdp, target.tabId, effectiveConditionalSurfaceProbe);
     const scene = buildVomScene(axNodes, captured, { pageUrl: target.url });
     const rendered = renderVom(scene, {
       maxDepth: params.max_depth,

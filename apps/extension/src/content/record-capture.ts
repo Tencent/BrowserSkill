@@ -1,4 +1,9 @@
-import { describeEventTarget, describeTarget, type TargetDescriptor } from "@/lib/describe-target";
+import {
+  describeEventTarget,
+  describeTarget,
+  resolveHoverElement,
+  type TargetDescriptor,
+} from "@/lib/describe-target";
 import {
   isRecordCancelMessage,
   isRecordStartMessage,
@@ -49,7 +54,15 @@ interface FillSession {
   lastValue: string;
 }
 
+interface PendingHover {
+  element: Element;
+  target: TargetDescriptor;
+  recordedAt: number;
+}
+
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+
+const HOVER_BEFORE_CLICK_MAX_MS = 10_000;
 
 function eventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -122,6 +135,14 @@ function fillableValue(el: FillableElement): string {
   return el.textContent ?? "";
 }
 
+function hoverTargetFromEvent(target: EventTarget | null): PendingHover | null {
+  if (!(target instanceof Element)) return null;
+  const element = resolveHoverElement(target);
+  if (!element) return null;
+  const desc = describeTarget(element);
+  return { element, target: desc, recordedAt: Date.now() };
+}
+
 /** Clicks that only pick an autocomplete/suggestion value — not a semantic submit action. */
 function isInputCompletionClick(target: EventTarget | null, session: FillSession | null): boolean {
   if (!session || !(target instanceof Element)) return false;
@@ -172,6 +193,7 @@ export function startRecordCapture(
   let composing = false;
   let lastUrl = location.href;
   let keyboardActivation: { target: EventTarget | null; recordedAt: number } | undefined;
+  let pendingHover: PendingHover | null = null;
   let generatedControlClick: Element | null = null;
   let navigationActionPending = false;
   let navigationActionVersion = 0;
@@ -249,6 +271,28 @@ export function startRecordCapture(
     });
   };
 
+  const emitPendingHoverBeforeClick = (clickTarget: EventTarget | null) => {
+    if (!pendingHover || !(clickTarget instanceof Element)) return;
+    if (Date.now() - pendingHover.recordedAt > HOVER_BEFORE_CLICK_MAX_MS) {
+      pendingHover = null;
+      return;
+    }
+    if (pendingHover.element.contains(clickTarget)) return;
+    emitStep({
+      op: "hover",
+      target: pendingHover.target,
+    });
+    pendingHover = null;
+  };
+
+  const onMouseOver = (event: MouseEvent) => {
+    const target = eventTarget(event);
+    if (isOverlayTarget(target)) return;
+    const hover = hoverTargetFromEvent(target);
+    if (!hover || hover.element === pendingHover?.element) return;
+    pendingHover = hover;
+  };
+
   const onClick = (event: MouseEvent) => {
     if (event.button !== 0) return;
     const target = eventTarget(event);
@@ -304,6 +348,7 @@ export function startRecordCapture(
 
     commitFillSession();
     if (target instanceof Element && target.closest("select")) return;
+    emitPendingHoverBeforeClick(target);
     emitClick(event);
   };
 
@@ -408,6 +453,7 @@ export function startRecordCapture(
   };
 
   document.addEventListener("click", onClick, true);
+  document.addEventListener("mouseover", onMouseOver, true);
   document.addEventListener("focusin", onFocusIn, true);
   document.addEventListener("focusout", onFocusOut, true);
   document.addEventListener("input", onInput, true);
@@ -438,6 +484,7 @@ export function startRecordCapture(
     dispose() {
       commitFillSession();
       document.removeEventListener("click", onClick, true);
+      document.removeEventListener("mouseover", onMouseOver, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
       document.removeEventListener("input", onInput, true);

@@ -8,6 +8,8 @@ import type {
   EvaluateParams,
   FillParams,
   GetHtmlParams,
+  HoverParams,
+  HoverResult,
   NavigateBackParams,
   NavigateForwardParams,
   NavigateParams,
@@ -33,7 +35,7 @@ import { handleConsole } from "./console";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
-import { handleClick, handleFill, handlePress, handleSelect } from "./interaction";
+import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
 import {
   handleNavigate,
   handleNavigateBack,
@@ -126,6 +128,8 @@ export class ToolDispatcher {
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
+  private readonly hoverBypassTabs = new Set<number>();
+  private readonly hoverLatches = new Map<number, { x: number; y: number }>();
   /**
    * Per-rpc-id `AbortController` registry. Populated inside
    * [`dispatch`] before we await the tool handler and torn down in
@@ -271,10 +275,12 @@ export class ToolDispatcher {
     switch (req.method) {
       case "tool.session_start":
         return handleSessionStart(this.sessions, req.params as SessionStartParams);
-      case "tool.session_stop":
+      case "tool.session_stop": {
+        await this.releaseHoverLatch();
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
         });
+      }
       case "tool.tab_list":
         return handleTabList(this.sessions, req.params as TabListParams);
       case "tool.tab_create":
@@ -319,16 +325,26 @@ export class ToolDispatcher {
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
         );
       case "tool.snapshot":
-        return handleSnapshot(
-          this.sessions,
-          req.params as SnapshotParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+        return this.withHoverReassert(() =>
+          handleSnapshot(
+            this.sessions,
+            req.params as SnapshotParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+          ),
         );
       case "tool.observe":
-        return handleObserve(
-          this.sessions,
-          req.params as ObserveParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+        return this.withHoverReassert(() =>
+          handleObserve(
+            this.sessions,
+            req.params as ObserveParams,
+            this.cdp
+              ? {
+                  cdp: this.cdp,
+                  tabsApi: chromeTabsCaptureApi,
+                  conditionalSurfaceProbe: !this.hasHoverLatch(),
+                }
+              : undefined,
+          ),
         );
       case "tool.get_html":
         return handleGetHtml(
@@ -361,27 +377,38 @@ export class ToolDispatcher {
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
       case "tool.click":
-        return handleClick(
+        return this.withHoverReassert(
+          () =>
+            handleClick(
+              this.sessions,
+              req.params as ClickParams,
+              this.cdp
+                ? {
+                    cdp: this.cdp,
+                    tabsApi: chromeTabsApi,
+                    signal,
+                    bypassOverlay,
+                  }
+                : undefined,
+            ),
+          { releaseAfter: true },
+        );
+      case "tool.hover": {
+        const result = await handleHover(
           this.sessions,
-          req.params as ClickParams,
+          req.params as HoverParams,
           this.cdp
             ? {
                 cdp: this.cdp,
                 tabsApi: chromeTabsApi,
                 signal,
-                bypassOverlay: async (tabId, enabled) => {
-                  try {
-                    await chrome.tabs.sendMessage(tabId, {
-                      type: OVERLAY_AUTOMATION_BYPASS,
-                      enabled,
-                    });
-                  } catch {
-                    // Content script may be unavailable on restricted pages.
-                  }
-                },
+                bypassOverlay: (tabId, enabled) => this.setHoverBypass(tabId, enabled),
+                keepOverlayBypassAfterHover: true,
               }
             : undefined,
         );
+        return this.rememberHover(result);
+      }
       case "tool.fill":
         return handleFill(
           this.sessions,
@@ -471,6 +498,66 @@ export class ToolDispatcher {
         } satisfies RpcError;
     }
   }
+
+  private async setHoverBypass(tabId: number, enabled: boolean): Promise<void> {
+    if (enabled) {
+      if (this.hoverBypassTabs.has(tabId)) return;
+      await bypassOverlay(tabId, true);
+      this.hoverBypassTabs.add(tabId);
+    } else {
+      if (!this.hoverBypassTabs.has(tabId)) return;
+      await bypassOverlay(tabId, false);
+      this.hoverBypassTabs.delete(tabId);
+    }
+  }
+
+  private rememberHover(result: HoverResult | RpcError): HoverResult | RpcError {
+    if (!isRpcError(result)) {
+      this.hoverLatches.set(result.tab_id, { x: result.x, y: result.y });
+    }
+    return result;
+  }
+
+  private hasHoverLatch(): boolean {
+    return this.hoverLatches.size > 0;
+  }
+
+  private async withHoverReassert<T>(
+    work: () => Promise<T>,
+    options: { releaseAfter?: boolean } = {},
+  ): Promise<T> {
+    await this.reassertHover();
+    try {
+      return await work();
+    } finally {
+      if (options.releaseAfter) {
+        await this.releaseHoverLatch();
+      }
+    }
+  }
+
+  private async reassertHover(): Promise<void> {
+    if (!this.cdp) return;
+    await Promise.all(
+      [...this.hoverLatches.entries()].map(([tabId, point]) =>
+        this.cdp!.send(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: point.x,
+          y: point.y,
+        }).catch((err) => {
+          console.debug("[bsk dispatcher] hover reassert failed", err);
+          this.hoverLatches.delete(tabId);
+        }),
+      ),
+    );
+  }
+
+  private async releaseHoverLatch(): Promise<void> {
+    const tabs = new Set([...this.hoverBypassTabs, ...this.hoverLatches.keys()]);
+    this.hoverBypassTabs.clear();
+    this.hoverLatches.clear();
+    await Promise.all([...tabs].map((tabId) => bypassOverlay(tabId, false)));
+  }
 }
 
 function isRpcError(v: unknown): v is RpcError {
@@ -497,6 +584,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.navigate_forward":
     case "tool.reload":
     case "tool.click":
+    case "tool.hover":
     case "tool.fill":
     case "tool.press":
     case "tool.select":
@@ -509,6 +597,17 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     }
     default:
       return null;
+  }
+}
+
+async function bypassOverlay(tabId: number, enabled: boolean): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: OVERLAY_AUTOMATION_BYPASS,
+      enabled,
+    });
+  } catch {
+    // Content script may be unavailable on restricted pages.
   }
 }
 

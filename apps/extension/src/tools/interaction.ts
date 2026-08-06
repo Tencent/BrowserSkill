@@ -17,6 +17,8 @@ import type {
   ClickResult,
   FillParams,
   FillResult,
+  HoverParams,
+  HoverResult,
   KeyModifier,
   MouseButton,
   PressParams,
@@ -53,9 +55,12 @@ export interface InteractionDeps {
   defaultTimeoutMs?: number;
   /** Temporarily disable overlay click blocker during CDP automation. */
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  /** Keep hover hit-testing active for the caller's next observation/action. */
+  keepOverlayBypassAfterHover?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_HOVER_SETTLE_MS = 200;
 
 let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
 function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
@@ -98,6 +103,27 @@ function throwIfAborted(signal: AbortSignal | undefined): RpcError | null {
     return { code: "cancelled", message: "interaction aborted" };
   }
   return null;
+}
+
+function isAbortLikeError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
+async function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new DOMException("aborted", "AbortError");
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -286,7 +312,104 @@ export async function handleClick(
       message: err instanceof Error ? err.message : String(err),
     };
   } finally {
-    if (automationBypassEnabled && deps.bypassOverlay) {
+    if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
+      try {
+        await deps.bypassOverlay(target.tabId, false);
+      } catch (err) {
+        console.debug("[bsk interaction] overlay bypass disable failed", err);
+      }
+    }
+  }
+
+  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+    tab_id: target.tabId,
+    used_ref: node.usedRef,
+    used_selector: node.usedSelector,
+    x: centre.x,
+    y: centre.y,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// tool.hover
+// ---------------------------------------------------------------------------
+
+export async function handleHover(
+  manager: SessionManager,
+  params: HoverParams,
+  deps: InteractionDeps = getDefaultDeps(),
+): Promise<HoverResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "hover");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const aborted = throwIfAborted(deps.signal);
+  if (aborted) return aborted;
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "hover");
+  if (denied) return denied;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+
+  const node = await resolveBackendNode(deps.cdp, ctx, target, params, "hover");
+  if (isRpcError(node)) return node;
+
+  try {
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    const scrollErr = await scrollNodeIntoView(deps.cdp, target.tabId, node.backendNodeId);
+    if (scrollErr) return scrollErr;
+  } catch (err) {
+    return {
+      code: "cdp_failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const centre = await nodeCentre(deps.cdp, target.tabId, node.backendNodeId);
+  if (isRpcError(centre)) return centre;
+
+  if (throwIfAborted(deps.signal)) {
+    return { code: "cancelled", message: "hover aborted" };
+  }
+
+  const modifiers = modifiersBitfield(params.modifiers);
+  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
+  let automationBypassEnabled = false;
+  let hoverCompleted = false;
+  if (overlayBlocking && deps.bypassOverlay) {
+    try {
+      await deps.bypassOverlay(target.tabId, true);
+      automationBypassEnabled = true;
+    } catch (err) {
+      console.debug("[bsk interaction] overlay bypass enable failed", err);
+    }
+  }
+
+  try {
+    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: centre.x,
+      y: centre.y,
+      modifiers,
+    });
+    const settleMs = params.settle_ms ?? DEFAULT_HOVER_SETTLE_MS;
+    if (settleMs > 0) {
+      await wait(settleMs, deps.signal);
+    }
+    hoverCompleted = true;
+  } catch (err) {
+    if (isAbortLikeError(err)) {
+      return { code: "cancelled", message: "hover aborted" };
+    }
+    return {
+      code: "cdp_failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    if (
+      automationBypassEnabled &&
+      deps.bypassOverlay &&
+      (!deps.keepOverlayBypassAfterHover || !hoverCompleted)
+    ) {
       try {
         await deps.bypassOverlay(target.tabId, false);
       } catch (err) {

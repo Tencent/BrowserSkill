@@ -1480,7 +1480,7 @@ describe("buildVomScene", () => {
     expect(scene.surfaces).toEqual([
       { triggerId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
     ]);
-    expect(renderVom(scene).text).toContain('@e1 button "Products" [hover: Shoes | Bags]');
+    expect(renderVom(scene).text).toContain('@e1 button "Products" [hover first: Shoes | Bags]');
   });
 
   it("enriches names and active scope signals from AX properties", () => {

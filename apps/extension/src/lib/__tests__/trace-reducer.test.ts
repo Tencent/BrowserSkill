@@ -130,6 +130,30 @@ describe("reduceTraceSteps", () => {
     });
   });
 
+  it("keeps hover steps before menu clicks", () => {
+    const { steps } = reduceTraceSteps(
+      [
+        {
+          op: "hover",
+          target: { tag: "span", role: "button", name: "Account" },
+          page_url: "https://example.com/app",
+        },
+        {
+          op: "click",
+          target: { tag: "a", role: "link", name: "Profile" },
+          page_url: "https://example.com/app",
+        },
+      ],
+      "https://example.com/app",
+    );
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      page: "p1",
+      target: { name: "Account" },
+    });
+  });
+
   it("resolveTraceStartUrl prefers explicit start URL", () => {
     expect(
       resolveTraceStartUrl(

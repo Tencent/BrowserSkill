@@ -67,22 +67,25 @@ Write operations only affect tabs in the **Agent Window** (or tabs you **borrowe
 
 ```
 bsk navigate <url> --session <id>
-bsk snapshot --session <id>          → aria tree with @e1, @e2, … refs
-bsk observe --session <id>           → semantic VOM view; may reveal hover/focus surfaces
-bsk click @e3 --session <id>          → or bsk fill, bsk select, bsk press
-bsk snapshot --session <id>            → again after navigation / DOM change
+bsk observe --session <id>           → primary semantic VOM view; reveals hover/focus surfaces
+bsk snapshot --session <id>          → static aria tree fallback when VOM is insufficient
+bsk hover @e3 --session <id>          → reveal hover-triggered menus before re-observing/clicking
+bsk click @e4 --session <id>          → or bsk fill, bsk select, bsk press
+bsk observe --session <id>             → again after navigation / DOM change
 ```
 
 **Refs invalidate after navigation** — always re-snapshot before clicking, filling, or selecting on a new page.
 
 Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` / `--selector` when ambiguous (`bsk click --help`).
 
+When VOM renders `[hover first: …]` on an element, the listed items are not currently clickable refs. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action.
+
 ## Observation priority
 
-Start with `bsk snapshot` to understand page structure, text, controls, and element refs. Use `bsk observe` when semantic VOM output or conditional hover/focus surfaces would materially help. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
+Start with `bsk observe` to understand page structure, text, controls, element refs, and conditional hover/focus surfaces. Use `bsk snapshot` only when you need the stricter static accessibility tree or VOM is insufficient. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
 
-1. `bsk snapshot` — strict static page understanding and interaction planning
-2. `bsk observe` — semantic VOM observation; may run bounded perception probes such as hover-surface discovery
+1. `bsk observe` — primary semantic VOM observation; may run bounded perception probes such as hover-surface discovery
+2. `bsk snapshot` — strict static accessibility tree fallback
 3. `bsk get-html` — when hidden DOM, metadata, or markup details are required
 4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
 
@@ -186,6 +189,7 @@ bsk emulate --session <id> --off
 | Command | Summary |
 |---------|---------|
 | `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |
+| `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
 | `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |

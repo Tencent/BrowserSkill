@@ -637,7 +637,9 @@ function renderNodeLine(
   if (surface && surface.subItems.length > 0) {
     const items = surface.subItems.slice(0, MAX_SURFACE_ITEMS).join(" | ");
     const suffix = surface.subItems.length > MAX_SURFACE_ITEMS ? " | …" : "";
-    line += ` [${surface.triggerAction}: ${items}${suffix}]`;
+    const action =
+      surface.triggerAction === "hover" ? "hover first" : `${surface.triggerAction} first`;
+    line += ` [${action}: ${items}${suffix}]`;
   }
 
   return line;

@@ -42,7 +42,7 @@ use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
-use crate::cli::interaction::{ClickArgs, FillArgs, PressArgs, SelectArgs};
+use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
@@ -163,6 +163,9 @@ pub enum Command {
 
     /// Click a snapshot ref or CSS selector.
     Click(ClickArgs),
+
+    /// Hover a snapshot ref or CSS selector.
+    Hover(HoverArgs),
 
     /// Fill an input / textarea / contenteditable.
     Fill(FillArgs),

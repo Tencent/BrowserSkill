@@ -33,7 +33,7 @@ export interface RecordStartMessage {
 }
 
 export interface RecordStepPayload {
-  op: "click" | "fill" | "press" | "select" | "navigate";
+  op: "click" | "hover" | "fill" | "press" | "select" | "navigate";
   target?: TargetDescriptor;
   value?: string;
   key?: string;

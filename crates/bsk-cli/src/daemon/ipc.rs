@@ -242,6 +242,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolNavigateForward
                 | Method::ToolReload
                 | Method::ToolClick
+                | Method::ToolHover
                 | Method::ToolFill
                 | Method::ToolPress
                 | Method::ToolSelect

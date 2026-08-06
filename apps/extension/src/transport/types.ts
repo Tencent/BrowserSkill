@@ -410,6 +410,25 @@ export interface ClickResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface HoverParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  modifiers?: KeyModifier[];
+  settle_ms?: number;
+  timeout_ms?: number;
+}
+
+export interface HoverResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  x: number;
+  y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 export interface FillParams {
   session_id: string;
   value: string;
@@ -669,6 +688,11 @@ export type DraftTraceStep =
       page_url?: string;
     }
   | {
+      op: "hover";
+      target: TargetDescriptor;
+      page_url?: string;
+    }
+  | {
       op: "fill";
       target: TargetDescriptor;
       value: string;
@@ -701,6 +725,7 @@ export type DraftTraceStep =
 export type Step =
   | ({ op: "navigate" } & StepCommon & { to: string })
   | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
+  | ({ op: "hover" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "fill" } & StepCommon & {
         target: TargetDescriptor;
         value: string;
