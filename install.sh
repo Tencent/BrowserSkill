@@ -56,13 +56,25 @@ detect_platform() {
   esac
 }
 
-fetch_latest_version() {
-  version_json="${GITHUB}/releases/latest/download/version.json"
-  log "fetching latest version from ${version_json}"
-  json="$(curl -fsSL "$version_json")"
-  version="$(printf '%s' "$json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-  [ -n "$version" ] || die "could not parse version.json"
-  printf '%s' "$version"
+# Extract the per-platform `assets[<platform_key>].sha256` hex from a
+# version.json manifest. POSIX sed only (no jq dependency) — matches the
+# platform's object block then the sha256 field inside it.
+extract_asset_sha256() {
+  json="$1"
+  key="$2"
+  printf '%s\n' "$json" | sed -n '/"'"$key"'":[[:space:]]*{/,/}/ s/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9a-fA-F]\{1,\}\)".*/\1/p' | head -n 1
+}
+
+# Print the lowercase sha256 of a file. Returns non-zero (and prints
+# nothing) when neither sha256sum nor shasum is available.
+compute_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | sed 's/[[:space:]].*//'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | sed 's/[[:space:]].*//'
+  else
+    return 1
+  fi
 }
 
 path_contains_dir() {
@@ -115,23 +127,60 @@ main() {
 
   detect_platform
 
+  # Resolve the version + manifest once. The manifest also carries the
+  # per-asset sha256 we use to verify the download (mirrors `bsk update`,
+  # which refuses to auto-update a release without a checksum).
+  manifest_json=""
   if [ -n "${BSK_VERSION:-}" ]; then
     version="${BSK_VERSION#v}"
+    tag="cli-v${version}"
+    manifest_url="${GITHUB}/releases/download/${tag}/version.json"
     log "using pinned version ${version}"
+    manifest_json="$(curl -fsSL "$manifest_url" 2>/dev/null || true)"
   else
-    version="$(fetch_latest_version)"
+    manifest_url="${GITHUB}/releases/latest/download/version.json"
+    log "fetching latest version from ${manifest_url}"
+    manifest_json="$(curl -fsSL "$manifest_url")" || die "could not fetch version.json"
+    version="$(printf '%s' "$manifest_json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+    [ -n "$version" ] || die "could not parse version from version.json"
+    tag="cli-v${version}"
     log "latest version is ${version}"
   fi
 
-  tag="cli-v${version}"
   archive="bsk-v${version}-${triple}.tar.gz"
   download_url="${GITHUB}/releases/download/${tag}/${archive}"
+
+  # Best-effort checksum: a missing manifest/checksum only skips
+  # verification (does not block the install), but a *mismatch* is fatal.
+  expected_sha=""
+  if [ -n "$manifest_json" ]; then
+    expected_sha="$(extract_asset_sha256 "$manifest_json" "$platform_key")"
+  else
+    log "warning: could not fetch version.json; skipping checksum verification"
+  fi
+  if [ -z "$expected_sha" ] && [ -n "$manifest_json" ]; then
+    log "warning: no checksum published for ${platform_key}; skipping checksum verification"
+  fi
 
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"' EXIT INT TERM
 
   log "downloading ${download_url}"
   curl -fsSL "$download_url" -o "${tmp_dir}/${archive}"
+
+  if [ -n "$expected_sha" ]; then
+    log "verifying checksum"
+    if actual_sha="$(compute_sha256 "${tmp_dir}/${archive}")"; then
+      expected_lower="$(printf '%s' "$expected_sha" | tr 'A-F' 'a-z')"
+      if [ "$actual_sha" = "$expected_lower" ]; then
+        log "checksum OK"
+      else
+        die "checksum mismatch: expected ${expected_lower}, got ${actual_sha}"
+      fi
+    else
+      log "warning: no sha256 tool (sha256sum/shasum) found; skipping checksum verification"
+    fi
+  fi
 
   log "extracting ${archive}"
   tar -xzf "${tmp_dir}/${archive}" -C "$tmp_dir"
