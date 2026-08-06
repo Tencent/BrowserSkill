@@ -404,6 +404,27 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
+/// Repair hint emitted by [`check_extension_connected`] when zero
+/// browsers are online. Mirrors the ACTION/FALLBACK decision tree of
+/// `ErrorCode::NoBrowserConnected` in `cli::render_error` (issue #40)
+/// so an LLM driving `bsk doctor` is steered to launch a browser
+/// itself (the default), fall back to asking the user only when it
+/// genuinely cannot spawn GUI apps, and reach for the Web Store URL
+/// only as a last-resort "no Chromium installed on this host" path.
+/// Kept as a single line because [`render_human`] concatenates it
+/// after `— hint: ` without wrapping.
+const NO_BROWSER_HINT: &str = "BrowserSkill does not launch browsers itself. \
+Launch a supported Chromium browser (Chrome / Chromium / Edge / Brave) so the extension can connect — \
+quit and relaunch any stale one whose extension popup is not green. \
+macOS: `open -a \"Google Chrome\"` (or Chromium / \"Microsoft Edge\" / \"Brave Browser\"); \
+Linux: `google-chrome &` (or chromium / microsoft-edge / brave-browser &); \
+Windows: `start chrome` (or start chromium / start msedge / start brave). \
+Then `bsk status` / `bsk browsers` and retry. \
+FALLBACK — only if you genuinely CANNOT launch applications (sandboxed, no GUI spawn, or no shell/OS access): \
+- Can detect processes but cannot launch: detect which browsers are running and report state; ask user to open a supported browser and confirm extension is connected (popup green); retry after they confirm. \
+- Cannot detect processes at all: ask user to confirm a supported Chromium browser is started and the extension is connected (popup green); retry. \
+If no supported Chromium browser is installed on this host at all, install one and the browser-skill extension from {URL}.";
+
 fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     let name = "extension connected";
     let Some(status) = status else {
@@ -417,11 +438,8 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     if browsers > 0 {
         CheckResult::ok(name, format!("{} browser(s) connected", browsers))
     } else {
-        CheckResult::fail(
-            name,
-            "0 browsers connected",
-            format!("install the extension from {EXTENSION_STORE_URL} and load it in Chromium"),
-        )
+        let hint = NO_BROWSER_HINT.replace("{URL}", EXTENSION_STORE_URL);
+        CheckResult::fail(name, "0 browsers connected", hint)
     }
 }
 

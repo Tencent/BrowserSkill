@@ -32,6 +32,27 @@ Drive the user's **real Chromium browser** (with their logins and cookies) throu
 2. browser-skill **extension** loaded in Chromium and connected (popup shows green)
 3. Any `bsk` command auto-starts background services as needed; use `bsk doctor` if anything fails
 
+### 0-browser recovery protocol (mandatory)
+
+When you observe `browsers connected: 0` (from `bsk status`) or a `NoBrowserConnected` failure (from `bsk session start` / `bsk doctor`), **do not ask the user to check anything yet**. The default behaviour — every time — is to recover on the agent's own, in this exact order:
+
+1. **Self-detect.** Run `pgrep -lf 'Google Chrome|Chromium|brave-browser|microsoft-edge'` (or the platform equivalent). If any of those processes are running, the browser is up but its extension is not connected — go straight to step 3.
+2. **Self-launch (if nothing was running).** You almost certainly have a shell that can spawn GUI apps. Launch the user's default supported browser yourself:
+   - macOS: `open -a "Google Chrome"` (or `Chromium` / `"Microsoft Edge"` / `"Brave Browser"`)
+   - Linux: `google-chrome &` (or `chromium` / `microsoft-edge` / `brave-browser &`)
+   - Windows: `start chrome` (or `start chromium` / `start msedge` / `start brave`)
+3. **Wait + verify.** Sleep a few seconds (`bsk wait-ms 3s` or `sleep 3`), then re-run `bsk status` (or `bsk browsers`). If `browsers connected` is still 0, retry once (an extension service worker may need a moment to wake).
+4. **Now retry the original task** (`bsk session start`, etc.) — do not pre-emptively message the user.
+
+Only fall back to involving the user if you hit one of these blockers and **only at the matching step**:
+
+- **Step 1 detected a browser, but step 3 still shows 0 after retry** → the extension is likely not installed or the popup is not green. Ask the user to confirm the browser-skill extension is loaded in that browser and the popup is green, then retry step 3.
+- **Step 2 cannot launch** (sandboxed shell, no GUI spawn) → detect which browsers are present, report state, ask the user to open a supported browser themselves, then retry from step 3 after they confirm.
+- **Step 1 cannot detect processes at all** (no `pgrep` / no OS access) → ask the user to confirm a supported Chromium browser is started with the extension connected, then retry.
+- **No supported Chromium browser is installed on this host** → tell the user to install one (Chrome, Chromium, Edge, or Brave) and the browser-skill extension; retry after they confirm.
+
+The `hint:` line that `bsk status` and `bsk doctor` print in this state is the same tree condensed into one line — follow it.
+
 ## Mandatory workflow
 
 Every automation task **must** follow this lifecycle. Do **not** rely on idle timeouts (default session idle is 5 minutes).
@@ -286,6 +307,17 @@ Human errors print `error:` + `hint:` on stderr; `--json` includes `code`, `mess
 | Before first task in a session | `bsk status` — extension connected? |
 | Any failure you cannot fix in one retry | `bsk doctor` |
 | Multiple browsers / wrong target | `bsk browsers` then `bsk session start --browser <id>` |
+
+### NoBrowserConnected (exit 1)
+
+No browser with the browser-skill extension installed and connected was found.
+BrowserSkill never launches a browser — the agent or user must. Get one connected:
+
+| Capability | Action |
+|------------|--------|
+| Can detect + launch (default) | Launch the browser yourself (relaunch if a stale one is open but not green); confirm connected via `bsk status`; retry. |
+| Can detect, no launch | Report detected state; ask user to open the browser and confirm extension installed and connected; retry after confirm. |
+| No OS access / human | Ask user to confirm a supported browser is started and the extension is installed and connected; retry. |
 
 Always **`bsk session stop <id>`** in a `finally`-style path so the Agent Window closes and borrowed tabs return.
 
