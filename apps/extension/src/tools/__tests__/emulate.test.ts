@@ -20,7 +20,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => {}),
+    ensureActiveTab: vi.fn(async () => 1),
   };
 }
 

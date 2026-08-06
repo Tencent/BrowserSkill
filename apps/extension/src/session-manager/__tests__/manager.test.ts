@@ -13,7 +13,7 @@ function fakeAgentWindow(): AgentWindowApi & {
     return id;
   });
   const removeMock = vi.fn(async (_id: number) => {});
-  const ensureActiveTabMock = vi.fn(async (_windowId: number, _url: string) => {});
+  const ensureActiveTabMock = vi.fn(async (_windowId: number, _url: string) => 0);
   return {
     create: createMock,
     remove: removeMock,
@@ -149,6 +149,55 @@ describe("SessionManager", () => {
     const dropped = await sm.stopAll();
     expect(dropped.sort()).toEqual(["aa11", "bb22"]);
     expect(sm.list()).toEqual([]);
+  });
+
+  describe("classifyNewTab (user vs agent tab freedom)", () => {
+    it("classifies a tab born during window init as agent (home tab)", async () => {
+      const aw = fakeAgentWindow();
+      const sm = new SessionManager({ agentWindow: aw });
+      const ctx = await sm.start("aa11");
+      // Simulate the onCreated event for the home tab while still initializing.
+      // (start() already clears the flag, so re-add to emulate the race.)
+      (sm as unknown as { windowInitializing: Set<number> }).windowInitializing.add(
+        ctx.agentWindowId,
+      );
+      const kind = sm.classifyNewTab(0, ctx.agentWindowId);
+      expect(kind).toBe("initializing");
+      expect(ctx.agentCreatedTabs.has(0)).toBe(true);
+      expect(ctx.userTabs.has(0)).toBe(false);
+    });
+
+    it("classifies a pending tab_create tab as agent", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      sm.markAgentTabPending(ctx.agentWindowId);
+      const kind = sm.classifyNewTab(11, ctx.agentWindowId);
+      expect(kind).toBe("agent");
+      expect(ctx.agentCreatedTabs.has(11)).toBe(true);
+      expect(ctx.userTabs.has(11)).toBe(false);
+      expect(ctx.pendingAgentTabCount).toBe(0);
+    });
+
+    it("classifies a user-opened tab (no pending) as user and keeps it free", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      const kind = sm.classifyNewTab(99, ctx.agentWindowId);
+      expect(kind).toBe("user");
+      expect(ctx.userTabs.has(99)).toBe(true);
+      expect(ctx.agentCreatedTabs.has(99)).toBe(false);
+    });
+
+    it("matches multiple pending agent tabs to multiple onCreated events", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      sm.markAgentTabPending(ctx.agentWindowId);
+      sm.markAgentTabPending(ctx.agentWindowId);
+      expect(sm.classifyNewTab(11, ctx.agentWindowId)).toBe("agent");
+      // Second agent tab still pending → agent; not mistaken for user.
+      expect(sm.classifyNewTab(12, ctx.agentWindowId)).toBe("agent");
+      // No more pending → a later user tab is user.
+      expect(sm.classifyNewTab(99, ctx.agentWindowId)).toBe("user");
+    });
   });
 
   describe("findBorrowingSession", () => {

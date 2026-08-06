@@ -66,6 +66,7 @@ import {
 import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
 import {
   type BorrowConfirmationApprover,
+  chromeTabMutationApi,
   handleTabBorrow,
   handleTabClose,
   handleTabCreate,
@@ -298,6 +299,11 @@ export class ToolDispatcher {
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
+          // Must be wired in production: the agent-tab cleanup and the
+          // window-release decision (issue #57) read these deps directly
+          // and silently no-op when they are absent.
+          tabManagement: { tabs: chromeTabMutationApi },
+          tabsQuery: chromeTabsApi,
           signal,
         });
       }

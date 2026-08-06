@@ -1,7 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStop } from "../session";
+import type { ChromeTabsApi } from "../shared";
 import { type AgentOverlayResetApi, type ChromeWindowsApi, type TabMutationApi } from "../tabs";
+
+/** Build a read-only query api over a FakeState. */
+function makeQuery(state: FakeState): ChromeTabsApi {
+  return {
+    get: vi.fn(async (id) => {
+      const t = state.tabs.get(id);
+      if (!t) throw new Error(`tab ${id} not found`);
+      return t;
+    }),
+    query: vi.fn(async (q: chrome.tabs.QueryInfo) => {
+      const w = q.windowId;
+      return Array.from(state.tabs.values()).filter(
+        (t) => typeof w !== "number" || t.windowId === w,
+      );
+    }),
+  };
+}
 
 function fakeAgentWindow(ids: number[]) {
   let i = 0;
@@ -11,7 +29,7 @@ function fakeAgentWindow(ids: number[]) {
     return id;
   });
   const remove = vi.fn(async () => {});
-  const ensureActiveTab = vi.fn(async () => {});
+  const ensureActiveTab = vi.fn(async () => 0);
   return { create, remove, ensureActiveTab };
 }
 
@@ -30,7 +48,9 @@ function makeApis(
 } {
   const tabs: TabMutationApi = {
     create: vi.fn(),
-    remove: vi.fn(async () => {}),
+    remove: vi.fn(async (id: number) => {
+      state.tabs.delete(id);
+    }),
     update: vi.fn(async (_id, _p) => undefined),
     get: vi.fn(async (id) => {
       const t = state.tabs.get(id);
@@ -266,5 +286,218 @@ describe("handleSessionStop with auto-return", () => {
     const { tabs, windows } = makeApis(state);
     await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
     expect(ctx.refStore.isEmpty()).toBe(true);
+  });
+});
+
+describe("handleSessionStop window release (issue #57)", () => {
+  const agentWindowId = 100;
+
+  it("releases the window when user-created tabs remain", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    // ensureActiveTab returns the home tab id (10). We override the fake to
+    // return a known id.
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11);
+    ctx.agentCreatedTabs.add(12);
+    // home tab id from ensureActiveTab override
+    ctx.homeTabId = 10;
+    // user tab 99 (created via Chrome UI, NOT in agentCreatedTabs)
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab],
+        [12, { id: 12, windowId: agentWindowId } as chrome.tabs.Tab],
+        [99, { id: 99, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.window_released).toBe(true);
+    // agent tabs + home removed, user tab 99 kept
+    expect((tabs.remove as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]).sort()).toEqual([
+      10, 11, 12,
+    ]);
+    expect(state.tabs.has(99)).toBe(true);
+    // window released (dropOnly), not closed
+    expect(aw.remove).not.toHaveBeenCalled();
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("closes the window (not release) when no user tabs remain", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11);
+    ctx.homeTabId = 10;
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("is non-fatal when an agent tab is already gone", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11); // no longer in state → remove throws
+    ctx.homeTabId = 10;
+    const state: FakeState = {
+      tabs: new Map([[10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab]]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    (tabs.remove as ReturnType<typeof vi.fn>).mockImplementation(async (id: number) => {
+      if (id === 11) throw new Error("tab 11 already closed");
+      state.tabs.delete(id); // home (10) removed normally
+    });
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // user tab 10? no — 10 is home, removed. window would be empty → close.
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalled();
+  });
+
+  it("degrades to close-window when tabsQuery is missing", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11);
+    ctx.homeTabId = 10;
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows } }, // no tabsQuery
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // No query available → conservatively close the window.
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
+  });
+
+  it("degrades to close-window when tabsQuery.query throws", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11);
+    ctx.homeTabId = 10;
+    const state: FakeState = {
+      tabs: new Map([[11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab]]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+    (query.query as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      throw new Error("query failed");
+    });
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalled();
+  });
+
+  it("tracks agentCreatedTabs across tab_create / tab_close", async () => {
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    // Simulate handleTabCreate adding, then handleTabClose removing.
+    ctx.agentCreatedTabs.add(11);
+    expect(ctx.agentCreatedTabs.has(11)).toBe(true);
+    ctx.agentCreatedTabs.delete(11); // as handleTabClose does on success
+    expect(ctx.agentCreatedTabs.has(11)).toBe(false);
+    // Unknown id delete is a safe no-op (user-closed tab).
+    expect(() => ctx.agentCreatedTabs.delete(999)).not.toThrow();
+  });
+
+  it("closes the window (not release) when an agent tab fails to close", async () => {
+    // Regression: a leaked agent tab (still in agentCreatedTabs, but
+    // still present because Step 4 remove() threw) must NOT be mistaken
+    // for a user tab. Otherwise the window would be released (dropOnly)
+    // and the agent tab would leak (issue #57 regression).
+    const aw = fakeAgentWindow([agentWindowId]);
+    aw.ensureActiveTab = vi.fn(async () => 10);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.agentCreatedTabs.add(11); // Step 4 remove() will throw for this tab
+    ctx.homeTabId = 10;
+    const state: FakeState = {
+      tabs: new Map([
+        [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
+        [11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    (tabs.remove as ReturnType<typeof vi.fn>).mockImplementation(async (id: number) => {
+      if (id === 11) throw new Error("tab 11 failed to close");
+      state.tabs.delete(id); // home (10) removed normally; 11 lingers
+    });
+    const query = makeQuery(state);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { tabManagement: { tabs, windows }, tabsQuery: query },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // The leaked agent tab must NOT keep the window open.
+    expect(res.window_released).toBeFalsy();
+    expect(aw.remove).toHaveBeenCalledWith(agentWindowId);
+    expect(sm.has("aa11")).toBe(false);
   });
 });

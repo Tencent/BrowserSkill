@@ -41,6 +41,8 @@ import {
   attachRecordStepListener,
   type RecordRuntimeDeps,
 } from "@/tools/record";
+import { chromeTabsApi } from "@/tools/shared";
+import { chromeTabMutationApi } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
@@ -80,6 +82,29 @@ export default defineBackground(() => {
     };
   }
 
+  /**
+   * Authoritative overlay state for a *specific* tab. A user-created tab
+   * (`ctx.userTabs`) inside the Agent Window must never show the control
+   * mask — return hidden immediately. This is what lets a freshly-mounted
+   * content script receive the correct state on its first `overlay.ready`
+   * ping instead of flashing control and then hiding (design: decide before
+   * showing, never show then correct).
+   */
+  function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
+    if (typeof tabId === "number" && typeof windowId === "number") {
+      const ctx = sessions.findByWindowId(windowId);
+      if (ctx && ctx.userTabs.has(tabId)) {
+        return {
+          type: OVERLAY_AGENT_STATE,
+          sessionId: null,
+          mode: "hidden",
+          generation: overlayGeneration,
+        };
+      }
+    }
+    return overlayStateForWindow(windowId);
+  }
+
   async function pushOverlayStateToTab(
     tabId: number,
     state: OverlayAgentStateMessage,
@@ -91,13 +116,27 @@ export default defineBackground(() => {
     }
   }
 
+  async function pushOverlayStateForTab(tabId: number, windowId?: number): Promise<void> {
+    const state = overlayStateForTab(tabId, windowId);
+    await pushOverlayStateToTab(tabId, state);
+  }
+
   async function pushOverlayStateForWindow(windowId: number): Promise<void> {
-    const state = overlayStateForWindow(windowId);
+    const ctx = sessions.findByWindowId(windowId);
+    const baseState = overlayStateForWindow(windowId);
     const tabs = await chrome.tabs.query({ windowId });
     await Promise.all(
-      tabs.map((tab) =>
-        typeof tab.id === "number" ? pushOverlayStateToTab(tab.id, state) : Promise.resolve(),
-      ),
+      tabs.map((tab) => {
+        if (typeof tab.id !== "number") return Promise.resolve();
+        // A user-created tab in the Agent Window must stay free for the user
+        // to operate — never show the control mask over it. Override the
+        // window-level control state with a hidden state for those tabs.
+        const isUserTab = ctx ? ctx.userTabs.has(tab.id) : false;
+        const state: OverlayAgentStateMessage = isUserTab
+          ? { ...baseState, sessionId: null, mode: "hidden" }
+          : baseState;
+        return pushOverlayStateToTab(tab.id, state);
+      }),
     );
   }
 
@@ -136,13 +175,40 @@ export default defineBackground(() => {
     if (typeof tab.windowId !== "number") return;
     pushOverlayStateForAgentWindow(tab.windowId);
   });
+  // A new tab inside an Agent Window is either agent-created (via
+  // tool.tab_create, flagged by the pending count) or user-created (via
+  // Chrome UI). Classify it so user-opened tabs are kept free and can be
+  // pushed a hidden overlay immediately. See SessionManager.classifyNewTab.
+  chrome.tabs.onCreated.addListener((tab) => {
+    if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
+    const kind = sessions.classifyNewTab(tab.id, tab.windowId);
+    if (kind === "user") {
+      // User tab: explicitly free it from the agent control mask.
+      void pushOverlayStateToTab(tab.id, {
+        type: OVERLAY_AGENT_STATE,
+        sessionId: null,
+        mode: "hidden",
+        generation: overlayGeneration,
+      });
+    } else if (kind === "agent" || kind === "initializing") {
+      // Agent tab (or home tab): make sure it reflects the session's
+      // current control mode.
+      void pushOverlayStateForAgentWindow(tab.windowId);
+    }
+  });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
   // first mutation (review M4/M5 round 3 m-R3-1).
   void sessionsLive.refresh();
   const cleanupAfterDisconnect = createDisconnectCleanup({
     manager: sessions,
-    sessionStopDeps: { cdp },
+    // Same contract as the dispatcher's `tool.session_stop`: without these
+    // deps the agent-tab cleanup and the window-release path are dead code.
+    sessionStopDeps: {
+      cdp,
+      tabManagement: { tabs: chromeTabMutationApi },
+      tabsQuery: chromeTabsApi,
+    },
     onSessionsChanged: () => {
       void sessionsLive.syncFromManager();
     },
@@ -309,7 +375,11 @@ export default defineBackground(() => {
     }
 
     if (msg.kind === OVERLAY_MSG_READY) {
-      sendResponse(overlayStateForWindow(sender.tab?.windowId));
+      // Decide per-tab *before* sending: a user-created tab gets hidden
+      // immediately so the content script never flashes the control mask.
+      if (typeof sender.tab?.id === "number") {
+        void pushOverlayStateForTab(sender.tab.id, sender.tab.windowId);
+      }
       return false;
     }
 

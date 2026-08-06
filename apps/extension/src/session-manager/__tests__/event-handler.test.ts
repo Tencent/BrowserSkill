@@ -39,7 +39,7 @@ describe("attachSessionEventHandler", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await manager.start("aa11");
@@ -73,7 +73,7 @@ describe("attachSessionEventHandler", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const ctx = await manager.start("aa11");
@@ -113,7 +113,7 @@ describe("attachSessionEventHandler", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const transport = fakeTransport();
@@ -129,7 +129,7 @@ describe("attachSessionEventHandler", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const transport = fakeTransport();
