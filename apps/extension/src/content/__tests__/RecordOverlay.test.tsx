@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RecordOverlay } from "../RecordOverlay";
 
-function renderOverlay(request: { id: string; onFinish: () => void } | null) {
+function renderOverlay(request: { id: string; startedAtMs?: number; onFinish: () => void } | null) {
   return render(
     createElement(I18nextProvider, { i18n }, createElement(RecordOverlay, { request })),
   );
@@ -127,6 +127,20 @@ describe("RecordOverlay", () => {
     advanceRecording(10_000);
     expect(pill.dataset.phase).toBe("timer");
     expect(label.textContent).toBe("00:10");
+  });
+
+  it("continues the session timer when the overlay remounts on a new page", () => {
+    vi.useFakeTimers();
+    const startedAtMs = Date.now() - 65_000;
+    const { container } = renderOverlay({ id: "rec-1", startedAtMs, onFinish: vi.fn() });
+
+    const pill = container.querySelector("[data-slot='record-overlay-pill']") as HTMLElement;
+    const label = container.querySelector("[data-slot='record-overlay-label']") as HTMLElement;
+    expect(pill.dataset.phase).toBe("timer");
+    expect(label.textContent).toBe("01:05");
+
+    advanceRecording(5_000);
+    expect(label.textContent).toBe("01:10");
   });
 
   it("does not start drag when pointer down on finish", () => {

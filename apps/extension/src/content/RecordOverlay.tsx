@@ -10,6 +10,12 @@ import recordIconUrl from "../../assets/record-icon.png";
 
 export interface RecordRequestData {
   id: string;
+  /**
+   * Epoch ms when the recording began. Supplied by the background so the timer
+   * keeps counting the whole session across navigations; falls back to mount
+   * time when the background could not report it.
+   */
+  startedAtMs?: number;
   onFinish: () => void;
 }
 
@@ -71,20 +77,25 @@ export function RecordOverlay({ request }: Props) {
     setShow(false);
   }, [request]);
 
+  const requestStartedAtMs = request?.startedAtMs;
+
   useEffect(() => {
-    setElapsedSeconds(0);
     setDragPos(null);
     setDragging(false);
     dragStartRef.current = null;
-    if (!request) return;
+    if (!request) {
+      setElapsedSeconds(0);
+      return;
+    }
 
-    const startedAt = Date.now();
+    const startedAt = requestStartedAtMs ?? Date.now();
     const updateElapsed = () => {
-      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000));
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1_000)));
     };
+    updateElapsed();
     const timer = window.setInterval(updateElapsed, TIMER_REFRESH_MS);
     return () => window.clearInterval(timer);
-  }, [request?.id]);
+  }, [request?.id, requestStartedAtMs]);
 
   const onPillPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
