@@ -49,6 +49,7 @@ interface ActiveRecording {
   purpose?: string;
   steps: DraftTraceStep[];
   startedAt: string;
+  startedAtMs: number;
   finishPromise: Promise<Trace>;
   resolveFinish: (trace: Trace) => void;
   rejectFinish: (err: Error) => void;
@@ -373,7 +374,11 @@ async function rearmRecording(
   // stuck with pointer-events:none (page usable, Interrupt dead). RecordOverlay
   // already hides the control chrome while activeRecord is set.
   for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
-    const startMsg: RecordStartMessage = { type: RECORD_START, requestId: recording.requestId };
+    const startMsg: RecordStartMessage = {
+      type: RECORD_START,
+      requestId: recording.requestId,
+      startedAtMs: recording.startedAtMs,
+    };
     try {
       await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab);
       recording.tabId = targetTabId;
@@ -501,7 +506,11 @@ export function attachRecordQueryListener(deps: RecordDeps = getDefaultDeps()): 
         return;
       }
       await rearmRecording(recording, tabId, deps);
-      sendResponse({ active: true, requestId: recording.requestId });
+      sendResponse({
+        active: true,
+        requestId: recording.requestId,
+        startedAtMs: recording.startedAtMs,
+      });
     })();
     return true;
   };
@@ -572,6 +581,7 @@ export async function handleRecordStart(
     rejectFinish = reject;
   });
   const navigateUrl = params.url ?? RECORD_DEFAULT_START_URL;
+  const startedAtMs = Date.now();
   recordings.set(params.session_id, {
     requestId,
     tabId: target.tabId,
@@ -579,7 +589,8 @@ export async function handleRecordStart(
     startUrl: navigateUrl,
     ...(params.purpose ? { purpose: params.purpose } : {}),
     steps: [],
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(startedAtMs).toISOString(),
+    startedAtMs,
     finishPromise,
     resolveFinish,
     rejectFinish,
@@ -707,7 +718,7 @@ export async function handleRecordStart(
     if (cancelled) return cancelled;
   }
 
-  const startMsg: RecordStartMessage = { type: RECORD_START, requestId };
+  const startMsg: RecordStartMessage = { type: RECORD_START, requestId, startedAtMs };
 
   try {
     await sendRecordStartWithAck(target.tabId, startMsg, deps.sendToTab);

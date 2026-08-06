@@ -39,6 +39,7 @@ import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
   RECORD_FINISH,
   RECORD_QUERY,
+  type RecordQueryResponse,
   type RecordStartAck,
   type RecordStopAck,
 } from "@/lib/record-bridge";
@@ -255,9 +256,10 @@ export default defineContentScript({
             setCapture: (capture) => {
               recordCapture = capture;
             },
-            onStart: (requestId) => {
+            onStart: (requestId, startedAtMs) => {
               overlays.setAgentRecordRequest({
                 id: requestId,
+                ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
                 onFinish: () => {
                   void chrome.runtime.sendMessage({
                     type: RECORD_FINISH,
@@ -415,15 +417,17 @@ export default defineContentScript({
       try {
         const recordQuery = (await chrome.runtime.sendMessage({
           type: RECORD_QUERY,
-        })) as { active?: boolean; requestId?: string } | undefined;
+        })) as RecordQueryResponse | undefined;
         if (
           recordQuery?.active &&
           typeof recordQuery.requestId === "string" &&
           overlays.snapshot().activeRecord === null
         ) {
           const requestId = recordQuery.requestId;
+          const startedAtMs = recordQuery.startedAtMs;
           overlays.setAgentRecordRequest({
             id: requestId,
+            ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),
             onFinish: () => {
               void chrome.runtime.sendMessage({
                 type: RECORD_FINISH,

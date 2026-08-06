@@ -25,11 +25,19 @@ export interface RecordQueryMessage {
 export interface RecordQueryResponse {
   active: boolean;
   requestId?: string;
+  /** Epoch ms when the recording began; see `RecordStartMessage.startedAtMs`. */
+  startedAtMs?: number;
 }
 
 export interface RecordStartMessage {
   type: typeof RECORD_START;
   requestId: string;
+  /**
+   * Epoch ms when the whole recording began, not when this tab was armed.
+   * The overlay timer must span the session, so it survives navigations and
+   * content-script remounts instead of restarting per page.
+   */
+  startedAtMs?: number;
 }
 
 export interface RecordStepPayload {

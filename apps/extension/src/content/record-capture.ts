@@ -468,7 +468,7 @@ export function handleRecordContentMessage(
     capture: RecordCaptureController | null;
     setActiveRequestId(id: string | null): void;
     setCapture(capture: RecordCaptureController | null): void;
-    onStart(requestId: string): void;
+    onStart(requestId: string, startedAtMs?: number): void;
     onStop(): void;
   },
   sendResponse?: (response: RecordStartAck | RecordStopAck) => void,
@@ -485,7 +485,7 @@ export function handleRecordContentMessage(
       }),
     );
     state.setActiveRequestId(message.requestId);
-    state.onStart(message.requestId);
+    state.onStart(message.requestId, message.startedAtMs);
     sendResponse?.({ ok: true });
     return sendResponse !== undefined;
   }
