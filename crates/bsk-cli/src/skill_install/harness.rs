@@ -21,6 +21,7 @@ pub enum HarnessId {
     Workbuddy,
     PiAgent,
     Hermes,
+    KimiCode,
 }
 
 impl HarnessId {
@@ -36,6 +37,7 @@ impl HarnessId {
         HarnessId::Workbuddy,
         HarnessId::PiAgent,
         HarnessId::Hermes,
+        HarnessId::KimiCode,
     ];
 
     pub fn index(self) -> usize {
@@ -55,6 +57,7 @@ impl HarnessId {
             HarnessId::Workbuddy => "workbuddy",
             HarnessId::PiAgent => "pi",
             HarnessId::Hermes => "hermes",
+            HarnessId::KimiCode => "kimi-code",
         }
     }
 
@@ -71,6 +74,7 @@ impl HarnessId {
             HarnessId::Workbuddy => "WorkBuddy",
             HarnessId::PiAgent => "Pi",
             HarnessId::Hermes => "Hermes Agent",
+            HarnessId::KimiCode => "Kimi Code",
         }
     }
 
@@ -87,6 +91,10 @@ impl HarnessId {
             HarnessId::Workbuddy => home.join(".workbuddy").join("skills"),
             HarnessId::PiAgent => home.join(".pi").join("agent").join("skills"),
             HarnessId::Hermes => hermes_home_for_user_home(home).join("skills"),
+            // Kimi Code CLI 用户级 skills 目录：`$KIMI_CODE_HOME/skills`，
+            // 默认 ~/.kimi-code/skills，见
+            // https://github.com/MoonshotAI/kimi-code/blob/main/docs/en/customization/skills.md
+            HarnessId::KimiCode => kimi_code_home_for_user_home(home).join("skills"),
         }
     }
 
@@ -215,6 +223,23 @@ impl HarnessId {
                     push("`hermes` on PATH");
                 }
             }
+            HarnessId::KimiCode => {
+                let kimi_home = kimi_code_home_for_user_home(home);
+                if kimi_home.is_dir() {
+                    let label = if std::env::var("KIMI_CODE_HOME")
+                        .ok()
+                        .is_some_and(|value| !value.trim().is_empty())
+                    {
+                        format!("$KIMI_CODE_HOME ({})", kimi_home.display())
+                    } else {
+                        "~/.kimi-code".to_string()
+                    };
+                    push(&label);
+                }
+                if command_exists("kimi") {
+                    push("`kimi` on PATH");
+                }
+            }
         }
 
         let detected = !signals.is_empty();
@@ -265,6 +290,7 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
         "workbuddy" | "work-buddy" => Ok(HarnessId::Workbuddy),
         "pi" | "pi-agent" | "pi_agent" | "piagent" => Ok(HarnessId::PiAgent),
         "hermes" | "hermes-agent" | "hermes_agent" | "hermesagent" => Ok(HarnessId::Hermes),
+        "kimi-code" | "kimi" | "kimicode" | "kimi-cli" | "kimi_cli" => Ok(HarnessId::KimiCode),
         other => bail!(
             "unknown harness '{other}'; expected one of: {}",
             HarnessId::ALL
@@ -278,6 +304,18 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
 
 pub(crate) fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))
+}
+
+/// Kimi Code CLI 的数据根目录：`KIMI_CODE_HOME` 设置时用之，否则 `~/.kimi-code`
+/// （见 kimi-code 官方 skills 文档：用户级 skills 在 `$KIMI_CODE_HOME/skills`）。
+fn kimi_code_home_for_user_home(home: &Path) -> PathBuf {
+    if let Ok(override_home) = std::env::var("KIMI_CODE_HOME") {
+        let trimmed = override_home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    home.join(".kimi-code")
 }
 
 /// Mirrors [`get_hermes_home()`](https://github.com/NousResearch/hermes-agent/blob/main/hermes_constants.py):
@@ -360,6 +398,12 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// 读写 KIMI_CODE_HOME 环境变量的测试共用的互斥锁（Rust 测试默认并行）。
+    fn kimi_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        &LOCK
+    }
+
     #[test]
     fn parse_aliases() {
         assert_eq!(parse_harness_id("codebody").unwrap(), HarnessId::Codebuddy);
@@ -369,6 +413,9 @@ mod tests {
         );
         assert_eq!(parse_harness_id("pi-agent").unwrap(), HarnessId::PiAgent);
         assert_eq!(parse_harness_id("hermes-agent").unwrap(), HarnessId::Hermes);
+        assert_eq!(parse_harness_id("kimi").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("kimi-code").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("kimi-cli").unwrap(), HarnessId::KimiCode);
     }
 
     #[test]
@@ -424,6 +471,52 @@ mod tests {
             HarnessId::Hermes.skills_dir_for_home(home),
             PathBuf::from("/home/user/.hermes/skills")
         );
+        assert_eq!(
+            HarnessId::KimiCode.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.kimi-code/skills")
+        );
+    }
+
+    #[test]
+    fn detects_kimi_code_from_home_layout() {
+        // 与改动 KIMI_CODE_HOME 的测试互斥，避免并行读写环境变量产生竞争。
+        let _guard = kimi_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
+        let report = HarnessId::KimiCode.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".kimi-code").join("skills"));
+        assert_eq!(HarnessId::KimiCode.cli_name(), "kimi-code");
+        assert_eq!(HarnessId::KimiCode.display_name(), "Kimi Code");
+    }
+
+    #[test]
+    fn kimi_code_skills_dir_honors_kimi_code_home_env() {
+        let _guard = kimi_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let custom = tmp.path().join("custom-kimi-code");
+        std::fs::create_dir_all(&custom).unwrap();
+        let previous = std::env::var("KIMI_CODE_HOME").ok();
+        // SAFETY: 持有 kimi_env_lock，覆盖所有读写 KIMI_CODE_HOME 的测试。
+        unsafe {
+            std::env::set_var("KIMI_CODE_HOME", &custom);
+        }
+        let home = Path::new("/home/user");
+        assert_eq!(
+            HarnessId::KimiCode.skills_dir_for_home(home),
+            custom.join("skills")
+        );
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("KIMI_CODE_HOME", value),
+                None => std::env::remove_var("KIMI_CODE_HOME"),
+            }
+        }
     }
 
     #[test]
