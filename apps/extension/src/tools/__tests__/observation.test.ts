@@ -1,5 +1,6 @@
 import { renderVom } from "@browser-skill/vom";
 import { describe, expect, it, vi } from "vitest";
+import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
@@ -342,6 +343,98 @@ describe("handleScreenshot", () => {
       }),
     );
     expect(res).toMatchObject({ code: "cdp_failed", message: /capture refused/ });
+  });
+});
+
+describe("handleScreenshot overlay suppression", () => {
+  /**
+   * Fake background→content bridge that mirrors the content script's
+   * contract: `begin` hides the overlay, `end` restores it. Records the
+   * phase order so tests can assert begin → capture → end.
+   */
+  function fakeSuppressBridge(events: string[]) {
+    let overlayHidden = false;
+    const sendToTab = vi.fn(async (_tabId: number, message: CaptureSuppressMessage) => {
+      events.push(message.phase);
+      overlayHidden = message.phase === "begin";
+      return { type: CAPTURE_SUPPRESS, ok: true };
+    });
+    return { sendToTab, isHidden: () => overlayHidden };
+  }
+
+  it("hides the overlay around a visible-tab capture", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const events: string[] = [];
+    const bridge = fakeSuppressBridge(events);
+    const capture = vi.fn(async (_w: number) => {
+      events.push("capture");
+      // The overlay must already be hidden when the capture runs.
+      expect(bridge.isHidden()).toBe(true);
+      return `data:image/png;base64,${TINY_PNG}`;
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      { ...makeScreenshotDeps({ captureVisibleTab: capture }), sendToTab: bridge.sendToTab },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(events).toEqual(["begin", "capture", "end"]);
+    expect(bridge.isHidden()).toBe(false);
+  });
+
+  it("hides the overlay around a CDP element capture", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 7 });
+    const events: string[] = [];
+    const bridge = fakeSuppressBridge(events);
+    const { cdp } = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Page.captureScreenshot": () => {
+        events.push("capture");
+        expect(bridge.isHidden()).toBe(true);
+        return { data: TINY_PNG };
+      },
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      {
+        ...makeScreenshotDeps({
+          cdp,
+          get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+          query: vi.fn(),
+          captureVisibleTab: vi.fn(),
+        }),
+        sendToTab: bridge.sendToTab,
+      },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(events).toEqual(["begin", "capture", "end"]);
+    expect(bridge.isHidden()).toBe(false);
+  });
+
+  it("still captures when the tab has no content script to ack", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const sendToTab = vi.fn(async () => {
+      throw new Error("Could not establish connection. Receiving end does not exist.");
+    });
+    const capture = vi.fn(async (_w: number) => `data:image/png;base64,${TINY_PNG}`);
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      { ...makeScreenshotDeps({ captureVisibleTab: capture }), sendToTab },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(capture).toHaveBeenCalledTimes(1);
+    // The failed begin must not be followed by an end.
+    expect(sendToTab).toHaveBeenCalledTimes(1);
   });
 });
 

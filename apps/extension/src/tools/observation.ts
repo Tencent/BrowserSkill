@@ -11,6 +11,10 @@ import {
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import {
+  type CaptureSuppressSendToTab,
+  withOverlaysHiddenForCapture,
+} from "@/lib/capture-suppress-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type {
   GetHtmlParams,
@@ -114,6 +118,12 @@ export interface ScreenshotDeps {
   cdp?: SharedCdpRunner;
   tabsApi: ChromeTabsApi;
   captureApi: ChromeTabsCaptureApi;
+  /**
+   * Bridge used to hide the in-page overlay while a screenshot is taken,
+   * so captured frames only contain page content. Defaults to
+   * `chrome.tabs.sendMessage`; tests inject a fake.
+   */
+  sendToTab?: CaptureSuppressSendToTab;
 }
 
 function defaultScreenshotDeps(): ScreenshotDeps {
@@ -192,7 +202,12 @@ export async function handleScreenshot(
     if (isRpcError(node)) return node;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
-    const captured = await captureElementScreenshot(deps.cdp, target.tabId, node.backendNodeId);
+    const cdp = deps.cdp;
+    const captured = await withOverlaysHiddenForCapture(
+      target.tabId,
+      () => captureElementScreenshot(cdp, target.tabId, node.backendNodeId),
+      deps.sendToTab,
+    );
     if (isRpcError(captured)) return captured;
     return withShotDialogs({
       image_base64: captured.image_base64,
@@ -212,7 +227,11 @@ export async function handleScreenshot(
   }
 
   try {
-    const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
+    const dataUrl = await withOverlaysHiddenForCapture(
+      target.tabId,
+      () => deps.captureApi.captureVisibleTab(target.windowId, { format: "png" }),
+      deps.sendToTab,
+    );
     const image_base64 = stripDataUrlPrefix(dataUrl);
     const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
     return withShotDialogs({

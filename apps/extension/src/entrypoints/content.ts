@@ -5,6 +5,7 @@ import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
+import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import overlayCss from "@/content/overlay.css?inline";
 import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
@@ -14,6 +15,11 @@ import {
   isRecordContentMessage,
   type RecordCaptureController,
 } from "@/content/record-capture";
+import {
+  type CaptureSuppressAck,
+  type CaptureSuppressMessage,
+  isCaptureSuppressMessage,
+} from "@/lib/capture-suppress-bridge";
 import {
   HELP_ACK,
   HELP_FINISH,
@@ -69,6 +75,8 @@ export default defineContentScript({
     let hostLossReported = false;
     let remountInProgress = false;
 
+    const captureSuppress = createCaptureSuppressController(() => overlayHost);
+
     const ui = await createShadowRootUi(ctx, {
       name: "browser-skill-overlay",
       position: "inline",
@@ -80,6 +88,8 @@ export default defineContentScript({
         overlayHost = shadowHost;
         overlayContainer = container;
         hostLossReported = false;
+        // A host rebuilt mid-capture must stay hidden until `end` arrives.
+        captureSuppress.onHostMounted(shadowHost);
         const app = document.createElement("div");
         app.className = "bsk-overlay-root";
         container.append(app);
@@ -237,12 +247,17 @@ export default defineContentScript({
         | BorrowCancelMessage
         | HelpRequestMessage
         | HelpCancelMessage
+        | CaptureSuppressMessage
         | OverlayAgentOverlayResetMessage
         | OverlayAgentStateMessage
         | OverlayAutomationBypassMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response: BorrowResponseMessage | HelpAckMessage) => void,
+      sendResponse: (response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck) => void,
     ) => {
+      if (isCaptureSuppressMessage(message)) {
+        return captureSuppress.handleMessage(message, sendResponse);
+      }
+
       if (isRecordContentMessage(message)) {
         const needsAsync = handleRecordContentMessage(
           message,
