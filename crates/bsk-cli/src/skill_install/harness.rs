@@ -21,6 +21,7 @@ pub enum HarnessId {
     Workbuddy,
     PiAgent,
     Hermes,
+    KimiCode,
 }
 
 impl HarnessId {
@@ -36,6 +37,7 @@ impl HarnessId {
         HarnessId::Workbuddy,
         HarnessId::PiAgent,
         HarnessId::Hermes,
+        HarnessId::KimiCode,
     ];
 
     pub fn index(self) -> usize {
@@ -55,6 +57,7 @@ impl HarnessId {
             HarnessId::Workbuddy => "workbuddy",
             HarnessId::PiAgent => "pi",
             HarnessId::Hermes => "hermes",
+            HarnessId::KimiCode => "kimi-code",
         }
     }
 
@@ -71,6 +74,7 @@ impl HarnessId {
             HarnessId::Workbuddy => "WorkBuddy",
             HarnessId::PiAgent => "Pi",
             HarnessId::Hermes => "Hermes Agent",
+            HarnessId::KimiCode => "Kimi Code",
         }
     }
 
@@ -87,6 +91,9 @@ impl HarnessId {
             HarnessId::Workbuddy => home.join(".workbuddy").join("skills"),
             HarnessId::PiAgent => home.join(".pi").join("agent").join("skills"),
             HarnessId::Hermes => hermes_home_for_user_home(home).join("skills"),
+            // Kimi Code CLI 用户级 skills 目录（brand group 最高优先级），见
+            // https://github.com/MoonshotAI/kimi-cli/blob/main/docs/en/customization/skills.md
+            HarnessId::KimiCode => home.join(".kimi").join("skills"),
         }
     }
 
@@ -215,6 +222,16 @@ impl HarnessId {
                     push("`hermes` on PATH");
                 }
             }
+            HarnessId::KimiCode => {
+                if home.join(".kimi").is_dir() {
+                    push("~/.kimi");
+                }
+                for cmd in ["kimi", "kimi-cli"] {
+                    if command_exists(cmd) {
+                        signals.push(format!("`{cmd}` on PATH"));
+                    }
+                }
+            }
         }
 
         let detected = !signals.is_empty();
@@ -265,6 +282,7 @@ pub fn parse_harness_id(raw: &str) -> Result<HarnessId> {
         "workbuddy" | "work-buddy" => Ok(HarnessId::Workbuddy),
         "pi" | "pi-agent" | "pi_agent" | "piagent" => Ok(HarnessId::PiAgent),
         "hermes" | "hermes-agent" | "hermes_agent" | "hermesagent" => Ok(HarnessId::Hermes),
+        "kimi-code" | "kimi" | "kimicode" | "kimi-cli" | "kimi_cli" => Ok(HarnessId::KimiCode),
         other => bail!(
             "unknown harness '{other}'; expected one of: {}",
             HarnessId::ALL
@@ -369,6 +387,9 @@ mod tests {
         );
         assert_eq!(parse_harness_id("pi-agent").unwrap(), HarnessId::PiAgent);
         assert_eq!(parse_harness_id("hermes-agent").unwrap(), HarnessId::Hermes);
+        assert_eq!(parse_harness_id("kimi").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("kimi-code").unwrap(), HarnessId::KimiCode);
+        assert_eq!(parse_harness_id("kimi-cli").unwrap(), HarnessId::KimiCode);
     }
 
     #[test]
@@ -424,6 +445,22 @@ mod tests {
             HarnessId::Hermes.skills_dir_for_home(home),
             PathBuf::from("/home/user/.hermes/skills")
         );
+        assert_eq!(
+            HarnessId::KimiCode.skills_dir_for_home(home),
+            PathBuf::from("/home/user/.kimi/skills")
+        );
+    }
+
+    #[test]
+    fn detects_kimi_code_from_home_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let home = tmp.path();
+        std::fs::create_dir_all(home.join(".kimi")).unwrap();
+        let report = HarnessId::KimiCode.report_for_home(home);
+        assert!(report.detected);
+        assert_eq!(report.skills_dir, home.join(".kimi").join("skills"));
+        assert_eq!(HarnessId::KimiCode.cli_name(), "kimi-code");
+        assert_eq!(HarnessId::KimiCode.display_name(), "Kimi Code");
     }
 
     #[test]
