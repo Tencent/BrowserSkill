@@ -29,6 +29,10 @@ pub struct ObserveArgs {
     /// Soft cap on rendered tokens (~4 chars/token).
     #[arg(long = "max-tokens")]
     pub max_tokens: Option<u32>,
+
+    /// Include conditional surface probe diagnostics in JSON output.
+    #[arg(long = "debug-surfaces")]
+    pub debug_surfaces: bool,
 }
 
 pub fn dispatch(args: ObserveArgs, format: Format) -> Result<(), CliError> {
@@ -42,6 +46,7 @@ fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError>
         tab_id: args.tab_id,
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,
+        debug_surfaces: args.debug_surfaces,
     };
     let reply: ObserveResult = call(sock, params)?;
     match format {

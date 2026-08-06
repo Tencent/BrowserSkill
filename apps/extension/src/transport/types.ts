@@ -314,8 +314,21 @@ export interface SnapshotResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
-export type ObserveParams = SnapshotParams;
-export type ObserveResult = SnapshotResult;
+export interface ObserveParams extends SnapshotParams {
+  debug_surfaces?: boolean;
+}
+
+export interface ObserveResult extends SnapshotResult {
+  debug?: {
+    surface_probes?: Array<{
+      trigger_backend_node_id: number;
+      trigger_point?: { x: number; y: number };
+      trigger_action: string;
+      sub_items: string[];
+      confidence?: string;
+    }>;
+  };
+}
 
 export interface GetHtmlParams {
   session_id: string;

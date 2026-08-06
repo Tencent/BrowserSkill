@@ -342,6 +342,7 @@ export class ToolDispatcher {
                   cdp: this.cdp,
                   tabsApi: chromeTabsCaptureApi,
                   conditionalSurfaceProbe: !this.hasHoverLatch(),
+                  hoverProbeBypassOverlay: bypassOverlay,
                 }
               : undefined,
           ),

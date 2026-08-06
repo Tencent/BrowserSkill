@@ -5,7 +5,9 @@
 
 import {
   type ActiveScopeBlock,
+  applyVomInteractionRecovery,
   type CondSurface,
+  isVomReferenceNode,
   renderVom,
   type VomNode,
   type VomScene,
@@ -908,44 +910,102 @@ function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): A
   return blocks;
 }
 
-function labelForSurfaceMatch(node: VomNode): string {
-  return (
-    cleanAttr(node.name) ??
-    cleanAttr(node.text) ??
-    cleanAttr(node.attrs?.["aria-label"]) ??
-    cleanAttr(node.attrs?.title) ??
-    ""
-  );
-}
-
 function buildConditionalSurfaces(nodes: VomNode[], captured: CapturedViewModel): CondSurface[] {
   const probes = captured.surfaceProbes ?? [];
   if (probes.length === 0) return [];
 
   const surfaces: CondSurface[] = [];
-  const nodesWithLabels = nodes
-    .map((node) => ({ node, key: normalizeProbeKey(labelForSurfaceMatch(node)) }))
-    .filter((entry) => entry.key.length > 0);
+  const recoveredNodes = applyVomInteractionRecovery(nodes);
+  const signals = capturedOnlySignals(captured.nodes);
   const used = new Set<number>();
   for (const probe of probes) {
-    const probeKey = normalizeProbeKey(probe.triggerLabel);
-    if (!probeKey || probe.subItems.length === 0) continue;
-    const match =
-      nodesWithLabels.find((entry) => entry.key === probeKey && !used.has(entry.node.id)) ??
-      nodesWithLabels.find(
-        (entry) =>
-          !used.has(entry.node.id) &&
-          (probeKey.startsWith(entry.key) || entry.key.startsWith(probeKey)),
-      );
+    if (probe.subItems.length === 0 || used.has(probe.triggerBackendNodeId)) continue;
+    const match = findSurfaceTriggerNode(
+      probe.triggerBackendNodeId,
+      recoveredNodes,
+      signals,
+      probe.triggerPoint,
+    );
     if (!match) continue;
-    used.add(match.node.id);
+    used.add(match.id);
     surfaces.push({
-      triggerId: match.node.id,
+      triggerId: match.id,
       triggerAction: probe.triggerAction,
       subItems: probe.subItems,
     });
   }
   return surfaces;
+}
+
+function findSurfaceTriggerNode(
+  triggerBackendNodeId: number,
+  nodes: VomNode[],
+  signals: VomNodeDomSignals,
+  triggerPoint?: { x: number; y: number },
+): VomNode | undefined {
+  const renderedById = new Map(nodes.map((node) => [node.id, node]));
+  const exact = renderedById.get(triggerBackendNodeId);
+  if (exact && isSurfaceAttachableNode(exact)) return exact;
+
+  const domDescendant = nodes.find(
+    (node) =>
+      isSurfaceAttachableNode(node) &&
+      (node.domParentId === triggerBackendNodeId ||
+        node.domAncestorIds?.includes(triggerBackendNodeId) === true),
+  );
+  if (domDescendant) return domDescendant;
+
+  const queue = [...(signals.childrenByParentId.get(triggerBackendNodeId) ?? [])];
+  while (queue.length > 0) {
+    const child = queue.shift() as CapturedNode;
+    const rendered = renderedById.get(child.backendNodeId);
+    if (rendered && isSurfaceAttachableNode(rendered)) return rendered;
+    queue.push(...(signals.childrenByParentId.get(child.backendNodeId) ?? []));
+  }
+
+  let current = signals.capturedByBackendId.get(triggerBackendNodeId);
+  while (current?.parentBackendNodeId !== null && current?.parentBackendNodeId !== undefined) {
+    const parent = renderedById.get(current.parentBackendNodeId);
+    if (parent && isSurfaceAttachableNode(parent)) return parent;
+    current = signals.capturedByBackendId.get(current.parentBackendNodeId);
+  }
+
+  if (triggerPoint) {
+    return findSurfaceNodeByPoint(triggerPoint, nodes, signals);
+  }
+
+  return undefined;
+}
+
+function isSurfaceAttachableNode(node: VomNode): boolean {
+  return isVomReferenceNode(node);
+}
+
+function findSurfaceNodeByPoint(
+  point: { x: number; y: number },
+  nodes: VomNode[],
+  signals: VomNodeDomSignals,
+): VomNode | undefined {
+  let best: { node: VomNode; score: number } | undefined;
+  for (const node of nodes) {
+    if (!isSurfaceAttachableNode(node)) continue;
+    const rect = node.rect ?? signals.capturedByBackendId.get(node.id)?.rect;
+    if (!rect) continue;
+    const contains =
+      point.x >= rect.x &&
+      point.x <= rect.x + rect.w &&
+      point.y >= rect.y &&
+      point.y <= rect.y + rect.h;
+    const centerX = rect.x + rect.w / 2;
+    const centerY = rect.y + rect.h / 2;
+    const distance = Math.hypot(point.x - centerX, point.y - centerY);
+    if (!contains && distance > 40) continue;
+    const score = contains ? distance : distance + 1_000;
+    if (!best || score < best.score) {
+      best = { node, score };
+    }
+  }
+  return best?.node;
 }
 
 function axNodeInOverlaySubtree(
@@ -1073,6 +1133,7 @@ export interface SnapshotDeps {
     query(q: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
   };
   conditionalSurfaceProbe?: boolean;
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
 }
 
 let defaultDeps: SnapshotDeps | null = null;
@@ -1218,9 +1279,13 @@ async function captureForVom(
   cdp: CdpRunner,
   tabId: number,
   conditionalSurfaceProbe: boolean,
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>,
 ): Promise<CapturedViewModel> {
   try {
-    return await captureViewModel(cdp, tabId, { conditionalSurfaceProbe });
+    return await captureViewModel(cdp, tabId, {
+      conditionalSurfaceProbe,
+      hoverProbeBypassOverlay,
+    });
   } catch {
     return fallbackCapturedViewModel(cdp, tabId);
   }
@@ -1261,7 +1326,12 @@ async function handleVomObservation(
     const axNodes = result.nodes ?? [];
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
-    const captured = await captureForVom(deps.cdp, target.tabId, effectiveConditionalSurfaceProbe);
+    const captured = await captureForVom(
+      deps.cdp,
+      target.tabId,
+      effectiveConditionalSurfaceProbe,
+      deps.hoverProbeBypassOverlay,
+    );
     const scene = buildVomScene(axNodes, captured, { pageUrl: target.url });
     const rendered = renderVom(scene, {
       maxDepth: params.max_depth,
@@ -1278,6 +1348,19 @@ async function handleVomObservation(
       ref_count: rendered.refs.length,
       tab_id: target.tabId,
       truncated: rendered.truncated,
+      ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
+        ? {
+            debug: {
+              surface_probes: (captured.surfaceProbes ?? []).map((probe) => ({
+                trigger_backend_node_id: probe.triggerBackendNodeId,
+                ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
+                trigger_action: probe.triggerAction,
+                sub_items: probe.subItems,
+                ...(probe.confidence ? { confidence: probe.confidence } : {}),
+              })),
+            },
+          }
+        : {}),
     });
   } catch (err) {
     return {

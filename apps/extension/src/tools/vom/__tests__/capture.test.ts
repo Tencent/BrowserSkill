@@ -51,6 +51,156 @@ function fakeSnapshotReply() {
   };
 }
 
+function hoverTriggerSnapshotReply() {
+  const S = [
+    "html",
+    "body",
+    "button",
+    "class",
+    "user-avatar",
+    "position",
+    "static",
+    "pointer-events",
+    "auto",
+    "cursor",
+    "pointer",
+  ];
+  const i = (s: string) => S.indexOf(s);
+  return {
+    strings: S,
+    documents: [
+      {
+        nodes: {
+          parentIndex: [-1, 0, 1],
+          nodeType: [1, 1, 1],
+          nodeName: [i("html"), i("body"), i("button")],
+          backendNodeId: [10, 11, 12],
+          attributes: [[], [], [i("class"), i("user-avatar")]],
+        },
+        layout: {
+          nodeIndex: [1, 2],
+          styles: [
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+          ],
+          bounds: [
+            [0, 0, 1000, 800],
+            [940, 16, 32, 32],
+          ],
+          paintOrders: [0, 1],
+        },
+      },
+    ],
+  };
+}
+
+function twoHoverTriggerSnapshotReply() {
+  const S = [
+    "html",
+    "body",
+    "button",
+    "class",
+    "user-avatar",
+    "secondary-trigger",
+    "position",
+    "static",
+    "pointer-events",
+    "auto",
+    "cursor",
+    "pointer",
+  ];
+  const i = (s: string) => S.indexOf(s);
+  return {
+    strings: S,
+    documents: [
+      {
+        nodes: {
+          parentIndex: [-1, 0, 1, 1],
+          nodeType: [1, 1, 1, 1],
+          nodeName: [i("html"), i("body"), i("button"), i("button")],
+          backendNodeId: [10, 11, 12, 13],
+          attributes: [
+            [],
+            [],
+            [i("class"), i("user-avatar")],
+            [i("class"), i("secondary-trigger")],
+          ],
+        },
+        layout: {
+          nodeIndex: [1, 2, 3],
+          styles: [
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+          ],
+          bounds: [
+            [0, 0, 1000, 800],
+            [940, 16, 32, 32],
+            [100, 120, 32, 32],
+          ],
+          paintOrders: [0, 1, 2],
+        },
+      },
+    ],
+  };
+}
+
+function nestedHoverTriggerSnapshotReply() {
+  const S = [
+    "html",
+    "body",
+    "div",
+    "img",
+    "class",
+    "tg-avatar",
+    "tg-avatar__inner",
+    "tg-avatar__image",
+    "position",
+    "static",
+    "pointer-events",
+    "auto",
+    "cursor",
+    "pointer",
+  ];
+  const i = (s: string) => S.indexOf(s);
+  return {
+    strings: S,
+    documents: [
+      {
+        nodes: {
+          parentIndex: [-1, 0, 1, 2, 3],
+          nodeType: [1, 1, 1, 1, 1],
+          nodeName: [i("html"), i("body"), i("div"), i("div"), i("img")],
+          backendNodeId: [10, 11, 12, 13, 14],
+          attributes: [
+            [],
+            [],
+            [i("class"), i("tg-avatar")],
+            [i("class"), i("tg-avatar__inner")],
+            [i("class"), i("tg-avatar__image")],
+          ],
+        },
+        layout: {
+          nodeIndex: [1, 2, 3, 4],
+          styles: [
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+            [i("static"), i("auto"), i("pointer")],
+          ],
+          bounds: [
+            [0, 0, 1000, 800],
+            [940, 16, 32, 32],
+            [942, 18, 28, 28],
+            [944, 20, 24, 24],
+          ],
+          paintOrders: [0, 1, 2, 3],
+        },
+      },
+    ],
+  };
+}
+
 function makeCdp(snapshot: unknown) {
   return {
     send: vi.fn(async (_tab: number, method: string) => {
@@ -126,11 +276,11 @@ describe("captureViewModel", () => {
   });
 
   it("runs hover surface probes when explicitly enabled", async () => {
-    let runtimeCalls = 0;
+    let hoverStateCalls = 0;
     const cdp = {
       send: vi.fn(async (_tabId: number, method: string, params?: object) => {
         if (method === "DOMSnapshot.enable") return {};
-        if (method === "DOMSnapshot.captureSnapshot") return fakeSnapshotReply();
+        if (method === "DOMSnapshot.captureSnapshot") return hoverTriggerSnapshotReply();
         if (method === "Page.getLayoutMetrics") {
           return {
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
@@ -141,22 +291,23 @@ describe("captureViewModel", () => {
           if (expression.includes("input,textarea,select")) {
             return { result: { value: { controls: [], childFrames: [] } } };
           }
-          runtimeCalls += 1;
-          return runtimeCalls === 1
-            ? {
-                result: {
-                  value: [
-                    {
-                      triggerSel: ".menu",
-                      affectedSub: " .items",
-                      label: "Products",
-                      x: 50,
-                      y: 20,
-                    },
-                  ],
-                },
-              }
-            : { result: { value: ["Shoes", "Bags"] } };
+          if (expression.includes("document.styleSheets")) {
+            return { result: { value: [] } };
+          }
+          if (expression.includes("querySelectorAll(selectors)")) {
+            hoverStateCalls += 1;
+            return hoverStateCalls === 1
+              ? { result: { value: [] } }
+              : {
+                  result: {
+                    value: [
+                      { text: "My profile", role: "", tag: "a", x: 900, y: 60 },
+                      { text: "Sign out", role: "", tag: "a", x: 900, y: 90 },
+                    ],
+                  },
+                };
+          }
+          throw new Error(`unexpected Runtime.evaluate: ${expression.slice(0, 80)}`);
         }
         if (method === "Input.dispatchMouseEvent") return {};
         throw new Error(`unexpected ${method}`);
@@ -166,18 +317,109 @@ describe("captureViewModel", () => {
     const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
 
     expect(result.surfaceProbes).toEqual([
-      { triggerLabel: "Products", triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+      {
+        triggerBackendNodeId: 12,
+        triggerPoint: { x: 956, y: 32 },
+        triggerAction: "hover",
+        subItems: ["My profile", "Sign out"],
+        confidence: "high",
+      },
     ]);
     expect(cdp.send).toHaveBeenCalledWith(
       4,
       "Input.dispatchMouseEvent",
-      expect.objectContaining({ type: "mouseMoved", x: 50, y: 20 }),
+      expect.objectContaining({ type: "mouseMoved", x: 956, y: 32 }),
     );
     expect(cdp.send).toHaveBeenCalledWith(
       4,
       "Input.dispatchMouseEvent",
       expect.objectContaining({ type: "mouseMoved", x: -10, y: -10 }),
     );
+  });
+
+  it("uses a fresh baseline for each hover candidate", async () => {
+    let hoverStateCalls = 0;
+    const cdp = {
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        if (method === "DOMSnapshot.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return twoHoverTriggerSnapshotReply();
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = (params as { expression?: string } | undefined)?.expression ?? "";
+          if (expression.includes("input,textarea,select")) {
+            return { result: { value: { controls: [], childFrames: [] } } };
+          }
+          if (expression.includes("document.styleSheets")) {
+            return { result: { value: [] } };
+          }
+          if (expression.includes("querySelectorAll(selectors)")) {
+            hoverStateCalls += 1;
+            const visibleMenu = [
+              { text: "My profile", role: "", tag: "a", x: 900, y: 60 },
+              { text: "Sign out", role: "", tag: "a", x: 900, y: 90 },
+            ];
+            return hoverStateCalls === 1
+              ? { result: { value: [] } }
+              : { result: { value: visibleMenu } };
+          }
+          throw new Error(`unexpected Runtime.evaluate: ${expression.slice(0, 80)}`);
+        }
+        if (method === "Input.dispatchMouseEvent") return {};
+        throw new Error(`unexpected ${method}`);
+      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+    };
+
+    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+
+    expect(result.surfaceProbes).toEqual([
+      expect.objectContaining({
+        triggerBackendNodeId: 12,
+        subItems: ["My profile", "Sign out"],
+      }),
+    ]);
+    expect(hoverStateCalls).toBeGreaterThanOrEqual(4);
+  });
+
+  it("deduplicates nested hover candidates for one visual trigger", async () => {
+    let hoverMoves = 0;
+    const cdp = {
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        if (method === "DOMSnapshot.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return nestedHoverTriggerSnapshotReply();
+        if (method === "Page.getLayoutMetrics") {
+          return {
+            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+          };
+        }
+        if (method === "Runtime.evaluate") {
+          const expression = (params as { expression?: string } | undefined)?.expression ?? "";
+          if (expression.includes("input,textarea,select")) {
+            return { result: { value: { controls: [], childFrames: [] } } };
+          }
+          if (expression.includes("document.styleSheets")) {
+            return { result: { value: [] } };
+          }
+          if (expression.includes("querySelectorAll(selectors)")) {
+            return { result: { value: [] } };
+          }
+          throw new Error(`unexpected Runtime.evaluate: ${expression.slice(0, 80)}`);
+        }
+        if (method === "Input.dispatchMouseEvent") {
+          const point = params as { x?: number; y?: number };
+          if (point.x !== -10 && point.x !== 0) hoverMoves += 1;
+          return {};
+        }
+        throw new Error(`unexpected ${method}`);
+      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+    };
+
+    await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+
+    expect(hoverMoves).toBe(1);
   });
 
   it("excludes the agent's own overlay shadow host and its inlined shadow subtree", async () => {
