@@ -456,6 +456,60 @@ describe("ToolDispatcher", () => {
     );
   });
 
+  it("limits default-target hover reassertion to the active tab", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        query: vi.fn(async () => [{ id: 9, windowId: 4242, active: true }]),
+        get: vi.fn(async (tabId: number) => ({ id: tabId, windowId: 4242, active: tabId === 9 })),
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const { transport } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    await sessions.start("aa11");
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 9,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+
+    helpers.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    helpers.rememberHover("aa11", { tab_id: 9, x: 30, y: 40 });
+
+    await helpers.withHoverReassert({ session_id: "aa11" }, async () => ({}));
+
+    expect(cdp.send).toHaveBeenCalledTimes(1);
+    expect(cdp.send).toHaveBeenCalledWith(9, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: 30,
+      y: 40,
+    });
+  });
+
   it("releases the current session hover latch before navigation-style work", async () => {
     vi.stubGlobal("chrome", {
       tabs: {

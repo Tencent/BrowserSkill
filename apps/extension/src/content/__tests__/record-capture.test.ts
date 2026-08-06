@@ -470,6 +470,92 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it("records hover before filling a field inside the hover surface", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <div class="user-menu dropdown-menu">
+        <label for="nickname">Nickname</label>
+        <input id="nickname" />
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-fill-surface", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const input = document.querySelector("input")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    input.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "Ada";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "fill"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "Open user navigation menu" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "fill",
+      target: { tag: "input" },
+      value: "Ada",
+    });
+  });
+
+  it("records hover before selecting inside the hover surface", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <div class="user-menu dropdown-menu">
+        <select aria-label="Status">
+          <option value="online">Online</option>
+          <option value="away">Away</option>
+        </select>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-select-surface", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const select = document.querySelector("select")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    select.value = "away";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "select"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "Open user navigation menu" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "select",
+      target: { role: "combobox", name: "Status" },
+      values: ["away"],
+      labels: ["Away"],
+    });
+  });
+
   it("records hover before clicking an unlabelled positioned floating surface", () => {
     document.body.innerHTML = `
       <button type="button" aria-label="Open user navigation menu">avatar</button>

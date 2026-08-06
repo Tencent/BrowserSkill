@@ -388,18 +388,18 @@ export function startRecordCapture(
     });
   };
 
-  const emitPendingHoverBeforeClick = (clickTarget: EventTarget | null) => {
-    if (!pendingHover || !(clickTarget instanceof Element)) return;
+  const emitPendingHoverBeforeAction = (actionTarget: EventTarget | null) => {
+    if (!pendingHover || !(actionTarget instanceof Element)) return;
     if (Date.now() - pendingHover.recordedAt > HOVER_BEFORE_CLICK_MAX_MS) {
       pendingHover = null;
       return;
     }
-    const clickElement = resolveClickableElement(clickTarget);
-    if (clickElement === pendingHover.element) {
+    const actionElement = resolveClickableElement(actionTarget);
+    if (actionElement === pendingHover.element) {
       return;
     }
-    const relationTarget = clickElement ?? clickTarget;
-    if (!clickElement && pendingHover.element.contains(relationTarget)) {
+    const relationTarget = actionElement ?? actionTarget;
+    if (!actionElement && pendingHover.element.contains(relationTarget)) {
       return;
     }
     const relation = decideHoverSurfaceRelation(
@@ -460,6 +460,7 @@ export function startRecordCapture(
 
     const fillable = fillableFromTarget(target);
     if (fillable) {
+      emitPendingHoverBeforeAction(fillable);
       ensureFillSession(fillable);
       return;
     }
@@ -467,6 +468,7 @@ export function startRecordCapture(
     if (target instanceof Element) {
       const nearbyFillable = nearbyFillableFromSearchChrome(target);
       if (nearbyFillable) {
+        emitPendingHoverBeforeAction(nearbyFillable);
         ensureFillSession(nearbyFillable);
         return;
       }
@@ -486,7 +488,7 @@ export function startRecordCapture(
 
     commitFillSession();
     if (target instanceof Element && target.closest("select")) return;
-    emitPendingHoverBeforeClick(target);
+    emitPendingHoverBeforeAction(target);
     emitClick(event);
   };
 
@@ -528,6 +530,7 @@ export function startRecordCapture(
     commitFillSession();
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
+      emitPendingHoverBeforeAction(target);
       const values = Array.from(target.selectedOptions).map((opt) => opt.value);
       const labels = Array.from(target.selectedOptions).map((opt) =>
         (opt.label || opt.textContent || opt.value).trim(),
@@ -581,6 +584,7 @@ export function startRecordCapture(
     }
     const desc = describeEventTarget(target);
     if (!desc && !event.key) return;
+    emitPendingHoverBeforeAction(target);
     emitStep({
       op: "press",
       key: event.key,

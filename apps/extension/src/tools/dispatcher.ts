@@ -58,7 +58,7 @@ import {
   type SessionStartParams,
   type SessionStopParams,
 } from "./session";
-import { chromeTabsApi } from "./shared";
+import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
 import {
   type BorrowConfirmationApprover,
   handleTabBorrow,
@@ -88,6 +88,11 @@ interface HoverLatch {
   tabId: number;
   x: number;
   y: number;
+}
+
+interface HoverLatchScope {
+  session_id: string;
+  tab_id?: number;
 }
 
 export interface DispatcherDeps {
@@ -341,23 +346,24 @@ export class ToolDispatcher {
             this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
           ),
         );
-      case "tool.observe":
-        return this.withHoverReassert(req.params as ObserveParams, () =>
+      case "tool.observe": {
+        const params = req.params as ObserveParams;
+        const hoverScope = await this.resolveHoverLatchScope(params);
+        return this.withHoverReassert(params, () =>
           handleObserve(
             this.sessions,
-            req.params as ObserveParams,
+            params,
             this.cdp
               ? {
                   cdp: this.cdp,
                   tabsApi: chromeTabsCaptureApi,
-                  conditionalSurfaceProbe: !this.hasHoverLatchForRequest(
-                    req.params as ObserveParams,
-                  ),
+                  conditionalSurfaceProbe: !this.hasHoverLatchForScope(hoverScope),
                   hoverProbeBypassOverlay: bypassOverlay,
                 }
               : undefined,
           ),
         );
+      }
       case "tool.get_html":
         return handleGetHtml(
           this.sessions,
@@ -551,8 +557,8 @@ export class ToolDispatcher {
     return result;
   }
 
-  private hasHoverLatchForRequest(params: { session_id: string; tab_id?: number }): boolean {
-    return this.hoverLatchesForRequest(params).length > 0;
+  private hasHoverLatchForScope(scope: HoverLatchScope): boolean {
+    return this.hoverLatchesForRequest(scope).length > 0;
   }
 
   private async withHoverReassert<T>(
@@ -560,12 +566,13 @@ export class ToolDispatcher {
     work: () => Promise<T>,
     options: { releaseAfter?: boolean } = {},
   ): Promise<T> {
-    await this.reassertHover(params);
+    const scope = await this.resolveHoverLatchScope(params);
+    await this.reassertHover(scope);
     try {
       return await work();
     } finally {
       if (options.releaseAfter) {
-        await this.releaseHoverLatch(params.session_id, params.tab_id);
+        await this.releaseHoverLatch(scope.session_id, scope.tab_id);
       }
     }
   }
@@ -574,8 +581,21 @@ export class ToolDispatcher {
     params: { session_id: string; tab_id?: number },
     work: () => Promise<T>,
   ): Promise<T> {
-    await this.releaseHoverLatch(params.session_id, params.tab_id);
+    const scope = await this.resolveHoverLatchScope(params);
+    await this.releaseHoverLatch(scope.session_id, scope.tab_id);
     return work();
+  }
+
+  private async resolveHoverLatchScope(params: {
+    session_id: string;
+    tab_id?: number;
+  }): Promise<HoverLatchScope> {
+    if (params.tab_id !== undefined) return params;
+    const ctx = lookupSession(this.sessions, params, "hover latch");
+    if (isRpcError(ctx)) return params;
+    const target = await resolveTargetTab(this.sessions, ctx, undefined, chromeTabsApi);
+    if (isRpcError(target)) return params;
+    return { session_id: params.session_id, tab_id: target.tabId };
   }
 
   private hoverLatchesForRequest(params: { session_id: string; tab_id?: number }): HoverLatch[] {
