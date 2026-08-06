@@ -9,6 +9,8 @@ import type {
 } from "@/transport/types";
 import { ToolDispatcher } from "../dispatcher";
 
+type TestDispatcherCdp = NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["cdp"]>;
+
 function fakeTransport() {
   const handlers = new Set<FrameHandler>();
   const stateHandlers = new Set<ConnectionStateHandler>();
@@ -129,7 +131,7 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     dispatcher.start();
 
     deliver(makeRequest("tool.console", { session_id: "aa11" }));
@@ -172,7 +174,7 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
@@ -327,9 +329,9 @@ describe("ToolDispatcher", () => {
     });
     const order: string[] = [];
     const cdp = {
-      send: vi.fn(async () => {
+      send: vi.fn(async <T,>() => {
         order.push("hover");
-        return {};
+        return {} as T;
       }),
       detachSession: vi.fn(async () => {}),
       ensureNetworkCapture: vi.fn(async () => {}),
@@ -344,7 +346,7 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
 
     (
       dispatcher as unknown as { rememberHover: (sessionId: string, result: unknown) => unknown }
@@ -408,7 +410,7 @@ describe("ToolDispatcher", () => {
       },
     });
     const cdp = {
-      send: vi.fn(async () => ({})),
+      send: vi.fn(async <T,>() => ({} as T)),
       detachSession: vi.fn(async () => {}),
       ensureNetworkCapture: vi.fn(async () => {}),
       networkEntriesSince: vi.fn(() => ({
@@ -422,7 +424,7 @@ describe("ToolDispatcher", () => {
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
     };
-    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     const helpers = dispatcher as unknown as {
       rememberHover: (sessionId: string, result: unknown) => unknown;
       setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;

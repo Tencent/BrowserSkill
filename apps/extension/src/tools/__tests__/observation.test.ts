@@ -1543,6 +1543,69 @@ describe("buildVomScene", () => {
     expect(renderVom(scene).text).toContain('@e1 button "image" [hover first: My profile]');
   });
 
+  it("deduplicates hover surface probes by original trigger backend id", () => {
+    const axNodes: CdpAxNode[] = [
+      {
+        nodeId: "1",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 10,
+        childIds: ["2"],
+      },
+      {
+        nodeId: "2",
+        parentId: "1",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "image" },
+        backendDOMNodeId: 21,
+      },
+    ];
+    const scene = buildVomScene(axNodes, {
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      excludedBackendNodeIds: new Set(),
+      surfaceProbes: [
+        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
+        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
+      ],
+      nodes: [
+        {
+          backendNodeId: 10,
+          parentBackendNodeId: null,
+          tag: "body",
+          attrs: {},
+          rect: { x: 0, y: 0, w: 1000, h: 800 },
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 20,
+          parentBackendNodeId: 10,
+          tag: "div",
+          attrs: { class: "tg-avatar" },
+          rect: { x: 900, y: 10, w: 30, h: 30 },
+          paintOrder: 1,
+          position: "static",
+          pointerEvents: "auto",
+        },
+        {
+          backendNodeId: 21,
+          parentBackendNodeId: 20,
+          tag: "div",
+          attrs: { class: "tg-avatar__inner" },
+          rect: { x: 902, y: 12, w: 26, h: 26 },
+          paintOrder: 2,
+          position: "static",
+          pointerEvents: "auto",
+        },
+      ],
+    });
+
+    expect(scene.surfaces).toEqual([
+      { triggerId: 21, triggerAction: "hover", subItems: ["My profile"] },
+    ]);
+  });
+
   it("maps hover surface probes to DOM-recovered custom controls", () => {
     const axNodes: CdpAxNode[] = [
       {

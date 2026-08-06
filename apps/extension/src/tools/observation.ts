@@ -927,6 +927,7 @@ function buildConditionalSurfaces(nodes: VomNode[], captured: CapturedViewModel)
       probe.triggerPoint,
     );
     if (!match) continue;
+    used.add(probe.triggerBackendNodeId);
     used.add(match.id);
     surfaces.push({
       triggerId: match.id,

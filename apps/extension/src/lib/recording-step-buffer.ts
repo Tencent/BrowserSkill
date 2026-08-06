@@ -21,6 +21,14 @@ function toDraftStep(payload: RecordStepPayload): DraftTraceStep | null {
             ...(pageUrl ? { page_url: pageUrl } : {}),
           }
         : null;
+    case "hover":
+      return payload.target
+        ? {
+            op: "hover",
+            target: payload.target,
+            ...(pageUrl ? { page_url: pageUrl } : {}),
+          }
+        : null;
     case "fill":
       return payload.target
         ? {
