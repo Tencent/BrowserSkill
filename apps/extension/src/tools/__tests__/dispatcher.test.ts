@@ -329,7 +329,7 @@ describe("ToolDispatcher", () => {
     });
     const order: string[] = [];
     const cdp = {
-      send: vi.fn(async <T,>() => {
+      send: vi.fn(async <T>() => {
         order.push("hover");
         return {} as T;
       }),
@@ -410,7 +410,7 @@ describe("ToolDispatcher", () => {
       },
     });
     const cdp = {
-      send: vi.fn(async <T,>() => ({} as T)),
+      send: vi.fn(async <T>() => ({}) as T),
       detachSession: vi.fn(async () => {}),
       ensureNetworkCapture: vi.fn(async () => {}),
       networkEntriesSince: vi.fn(() => ({
