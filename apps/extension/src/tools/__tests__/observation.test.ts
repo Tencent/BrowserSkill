@@ -1566,6 +1566,7 @@ describe("buildVomScene", () => {
       surfaceProbes: [
         { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
         { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
+        { triggerBackendNodeId: 21, triggerAction: "hover", subItems: ["Settings"] },
       ],
       nodes: [
         {

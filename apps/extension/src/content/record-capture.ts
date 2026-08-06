@@ -422,6 +422,10 @@ export function startRecordCapture(
   const onMouseOver = (event: MouseEvent) => {
     const target = eventTarget(event);
     if (isOverlayTarget(target)) return;
+    if (pendingHover && target instanceof Element && pendingHover.element.contains(target)) {
+      if (Date.now() - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
+      pendingHover = null;
+    }
     const hover = hoverTargetFromEvent(target);
     if (!hover) return;
     const now = Date.now();

@@ -456,6 +456,41 @@ describe("ToolDispatcher", () => {
     );
   });
 
+  it("transfers hover overlay bypass ownership between sessions", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const { transport } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 1),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    const helpers = dispatcher as unknown as {
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+    };
+
+    await helpers.setHoverBypass("aa11", 7, true);
+    await helpers.setHoverBypass("bb22", 7, true);
+    await helpers.setHoverBypass("aa11", 7, false);
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+
+    await helpers.setHoverBypass("bb22", 7, false);
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
   it("limits default-target hover reassertion to the active tab", async () => {
     vi.stubGlobal("chrome", {
       tabs: {

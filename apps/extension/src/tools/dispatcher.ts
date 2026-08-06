@@ -534,12 +534,13 @@ export class ToolDispatcher {
   }
 
   private async setHoverBypass(sessionId: string, tabId: number, enabled: boolean): Promise<void> {
+    const owner = this.hoverBypassTabs.get(tabId);
     if (enabled) {
-      if (this.hoverBypassTabs.has(tabId)) return;
-      await bypassOverlay(tabId, true);
+      if (owner === sessionId) return;
+      if (owner === undefined) await bypassOverlay(tabId, true);
       this.hoverBypassTabs.set(tabId, sessionId);
     } else {
-      if (!this.hoverBypassTabs.has(tabId)) return;
+      if (owner !== sessionId) return;
       await bypassOverlay(tabId, false);
       this.hoverBypassTabs.delete(tabId);
     }
