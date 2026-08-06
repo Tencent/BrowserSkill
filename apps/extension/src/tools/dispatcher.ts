@@ -83,6 +83,13 @@ type DispatcherCdpRunner = CdpRunner &
     detachSession(sessionId: string): Promise<void>;
   };
 
+interface HoverLatch {
+  sessionId: string;
+  tabId: number;
+  x: number;
+  y: number;
+}
+
 export interface DispatcherDeps {
   transport: Transport;
   sessions: SessionManager;
@@ -128,8 +135,8 @@ export class ToolDispatcher {
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
-  private readonly hoverBypassTabs = new Set<number>();
-  private readonly hoverLatches = new Map<number, { x: number; y: number }>();
+  private readonly hoverBypassTabs = new Map<number, string>();
+  private readonly hoverLatches = new Map<number, HoverLatch>();
   /**
    * Per-rpc-id `AbortController` registry. Populated inside
    * [`dispatch`] before we await the tool handler and torn down in
@@ -276,7 +283,7 @@ export class ToolDispatcher {
       case "tool.session_start":
         return handleSessionStart(this.sessions, req.params as SessionStartParams);
       case "tool.session_stop": {
-        await this.releaseHoverLatch();
+        await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
         });
@@ -286,7 +293,9 @@ export class ToolDispatcher {
       case "tool.tab_create":
         return handleTabCreate(this.sessions, req.params as TabCreateParams);
       case "tool.tab_close":
-        return handleTabClose(this.sessions, req.params as TabCloseParams);
+        return this.withHoverReleaseForRequest(req.params as TabCloseParams, () =>
+          handleTabClose(this.sessions, req.params as TabCloseParams),
+        );
       case "tool.tab_select":
         return handleTabSelect(this.sessions, req.params as TabSelectParams);
       case "tool.tab_borrow":
@@ -325,7 +334,7 @@ export class ToolDispatcher {
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
         );
       case "tool.snapshot":
-        return this.withHoverReassert(() =>
+        return this.withHoverReassert(req.params as SnapshotParams, () =>
           handleSnapshot(
             this.sessions,
             req.params as SnapshotParams,
@@ -333,7 +342,7 @@ export class ToolDispatcher {
           ),
         );
       case "tool.observe":
-        return this.withHoverReassert(() =>
+        return this.withHoverReassert(req.params as ObserveParams, () =>
           handleObserve(
             this.sessions,
             req.params as ObserveParams,
@@ -341,7 +350,9 @@ export class ToolDispatcher {
               ? {
                   cdp: this.cdp,
                   tabsApi: chromeTabsCaptureApi,
-                  conditionalSurfaceProbe: !this.hasHoverLatch(),
+                  conditionalSurfaceProbe: !this.hasHoverLatchForRequest(
+                    req.params as ObserveParams,
+                  ),
                   hoverProbeBypassOverlay: bypassOverlay,
                 }
               : undefined,
@@ -354,31 +365,40 @@ export class ToolDispatcher {
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
         );
       case "tool.navigate":
-        return handleNavigate(
-          this.sessions,
-          req.params as NavigateParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as NavigateParams, () =>
+          handleNavigate(
+            this.sessions,
+            req.params as NavigateParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.navigate_back":
-        return handleNavigateBack(
-          this.sessions,
-          req.params as NavigateBackParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as NavigateBackParams, () =>
+          handleNavigateBack(
+            this.sessions,
+            req.params as NavigateBackParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.navigate_forward":
-        return handleNavigateForward(
-          this.sessions,
-          req.params as NavigateForwardParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as NavigateForwardParams, () =>
+          handleNavigateForward(
+            this.sessions,
+            req.params as NavigateForwardParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.reload":
-        return handleReload(
-          this.sessions,
-          req.params as ReloadParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as ReloadParams, () =>
+          handleReload(
+            this.sessions,
+            req.params as ReloadParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.click":
         return this.withHoverReassert(
+          req.params as ClickParams,
           () =>
             handleClick(
               this.sessions,
@@ -403,30 +423,37 @@ export class ToolDispatcher {
                 cdp: this.cdp,
                 tabsApi: chromeTabsApi,
                 signal,
-                bypassOverlay: (tabId, enabled) => this.setHoverBypass(tabId, enabled),
+                bypassOverlay: (tabId, enabled) =>
+                  this.setHoverBypass((req.params as HoverParams).session_id, tabId, enabled),
                 keepOverlayBypassAfterHover: true,
               }
             : undefined,
         );
-        return this.rememberHover(result);
+        return this.rememberHover((req.params as HoverParams).session_id, result);
       }
       case "tool.fill":
-        return handleFill(
-          this.sessions,
-          req.params as FillParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as FillParams, () =>
+          handleFill(
+            this.sessions,
+            req.params as FillParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.press":
-        return handlePress(
-          this.sessions,
-          req.params as PressParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as PressParams, () =>
+          handlePress(
+            this.sessions,
+            req.params as PressParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.select":
-        return handleSelect(
-          this.sessions,
-          req.params as SelectParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        return this.withHoverReleaseForRequest(req.params as SelectParams, () =>
+          handleSelect(
+            this.sessions,
+            req.params as SelectParams,
+            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+          ),
         );
       case "tool.evaluate":
         return handleEvaluate(
@@ -500,11 +527,11 @@ export class ToolDispatcher {
     }
   }
 
-  private async setHoverBypass(tabId: number, enabled: boolean): Promise<void> {
+  private async setHoverBypass(sessionId: string, tabId: number, enabled: boolean): Promise<void> {
     if (enabled) {
       if (this.hoverBypassTabs.has(tabId)) return;
       await bypassOverlay(tabId, true);
-      this.hoverBypassTabs.add(tabId);
+      this.hoverBypassTabs.set(tabId, sessionId);
     } else {
       if (!this.hoverBypassTabs.has(tabId)) return;
       await bypassOverlay(tabId, false);
@@ -512,51 +539,84 @@ export class ToolDispatcher {
     }
   }
 
-  private rememberHover(result: HoverResult | RpcError): HoverResult | RpcError {
+  private rememberHover(sessionId: string, result: HoverResult | RpcError): HoverResult | RpcError {
     if (!isRpcError(result)) {
-      this.hoverLatches.set(result.tab_id, { x: result.x, y: result.y });
+      this.hoverLatches.set(result.tab_id, {
+        sessionId,
+        tabId: result.tab_id,
+        x: result.x,
+        y: result.y,
+      });
     }
     return result;
   }
 
-  private hasHoverLatch(): boolean {
-    return this.hoverLatches.size > 0;
+  private hasHoverLatchForRequest(params: { session_id: string; tab_id?: number }): boolean {
+    return this.hoverLatchesForRequest(params).length > 0;
   }
 
   private async withHoverReassert<T>(
+    params: { session_id: string; tab_id?: number },
     work: () => Promise<T>,
     options: { releaseAfter?: boolean } = {},
   ): Promise<T> {
-    await this.reassertHover();
+    await this.reassertHover(params);
     try {
       return await work();
     } finally {
       if (options.releaseAfter) {
-        await this.releaseHoverLatch();
+        await this.releaseHoverLatch(params.session_id, params.tab_id);
       }
     }
   }
 
-  private async reassertHover(): Promise<void> {
+  private async withHoverReleaseForRequest<T>(
+    params: { session_id: string; tab_id?: number },
+    work: () => Promise<T>,
+  ): Promise<T> {
+    await this.releaseHoverLatch(params.session_id, params.tab_id);
+    return work();
+  }
+
+  private hoverLatchesForRequest(params: { session_id: string; tab_id?: number }): HoverLatch[] {
+    return [...this.hoverLatches.values()].filter((latch) => {
+      if (latch.sessionId !== params.session_id) return false;
+      return params.tab_id === undefined || latch.tabId === params.tab_id;
+    });
+  }
+
+  private async reassertHover(params: { session_id: string; tab_id?: number }): Promise<void> {
     if (!this.cdp) return;
     await Promise.all(
-      [...this.hoverLatches.entries()].map(([tabId, point]) =>
-        this.cdp!.send(tabId, "Input.dispatchMouseEvent", {
+      this.hoverLatchesForRequest(params).map((latch) =>
+        this.cdp!.send(latch.tabId, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
-          x: point.x,
-          y: point.y,
+          x: latch.x,
+          y: latch.y,
         }).catch((err) => {
           console.debug("[bsk dispatcher] hover reassert failed", err);
-          this.hoverLatches.delete(tabId);
+          this.hoverLatches.delete(latch.tabId);
         }),
       ),
     );
   }
 
-  private async releaseHoverLatch(): Promise<void> {
-    const tabs = new Set([...this.hoverBypassTabs, ...this.hoverLatches.keys()]);
-    this.hoverBypassTabs.clear();
-    this.hoverLatches.clear();
+  private async releaseHoverLatch(sessionId?: string, tabId?: number): Promise<void> {
+    const matchesScope = (entrySessionId: string, entryTabId: number): boolean => {
+      if (sessionId !== undefined && entrySessionId !== sessionId) return false;
+      return tabId === undefined || entryTabId === tabId;
+    };
+    const tabs = new Set<number>();
+    for (const [bypassTabId, bypassSessionId] of this.hoverBypassTabs) {
+      if (!matchesScope(bypassSessionId, bypassTabId)) continue;
+      tabs.add(bypassTabId);
+      this.hoverBypassTabs.delete(bypassTabId);
+    }
+    for (const latch of this.hoverLatches.values()) {
+      if (!matchesScope(latch.sessionId, latch.tabId)) continue;
+      tabs.add(latch.tabId);
+      this.hoverLatches.delete(latch.tabId);
+    }
     await Promise.all([...tabs].map((tabId) => bypassOverlay(tabId, false)));
   }
 }

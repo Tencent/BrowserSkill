@@ -346,20 +346,23 @@ describe("ToolDispatcher", () => {
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
 
-    (dispatcher as unknown as { rememberHover: (result: unknown) => unknown }).rememberHover({
+    (
+      dispatcher as unknown as { rememberHover: (sessionId: string, result: unknown) => unknown }
+    ).rememberHover("aa11", {
       tab_id: 7,
       x: 10,
       y: 20,
     });
     const helpers = dispatcher as unknown as {
       withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
         work: () => Promise<T>,
         options?: { releaseAfter?: boolean },
       ) => Promise<T>;
-      setHoverBypass: (tabId: number, enabled: boolean) => Promise<void>;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
     };
 
-    await helpers.withHoverReassert(async () => {
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => {
       order.push("observe");
       return {};
     });
@@ -369,8 +372,9 @@ describe("ToolDispatcher", () => {
       expect.objectContaining({ enabled: false }),
     );
 
-    await helpers.setHoverBypass(7, true);
+    await helpers.setHoverBypass("aa11", 7, true);
     await helpers.withHoverReassert(
+      { session_id: "aa11", tab_id: 7 },
       async () => {
         order.push("click");
         return {};
@@ -383,6 +387,106 @@ describe("ToolDispatcher", () => {
       x: 10,
       y: 20,
     });
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+  });
+
+  it("does not reassert or disable hover latches from another session", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const { transport } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 1),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const cdp = {
+      send: vi.fn(async () => ({})),
+      detachSession: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+        options?: { releaseAfter?: boolean },
+      ) => Promise<T>;
+      releaseHoverLatch: (sessionId?: string, tabId?: number) => Promise<void>;
+    };
+
+    helpers.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    await helpers.setHoverBypass("aa11", 7, true);
+
+    await helpers.withHoverReassert({ session_id: "bb22", tab_id: 7 }, async () => ({}), {
+      releaseAfter: true,
+    });
+
+    expect(cdp.send).not.toHaveBeenCalled();
+    expect(chrome.tabs.sendMessage).not.toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+
+    await helpers.releaseHoverLatch("aa11", 7);
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+  });
+
+  it("releases the current session hover latch before navigation-style work", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const { transport } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 1),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReleaseForRequest: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+    helpers.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    await helpers.setHoverBypass("aa11", 7, true);
+
+    await helpers.withHoverReleaseForRequest({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+
     expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
       7,
       expect.objectContaining({ enabled: false }),
