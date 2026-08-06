@@ -1,5 +1,3 @@
-import type { TargetDescriptor } from "@/lib/describe-target";
-
 export interface HoverSurfaceDecision {
   related: boolean;
   reason?: string;
@@ -8,7 +6,6 @@ export interface HoverSurfaceDecision {
 
 export interface HoverSurfaceContext {
   triggerElement: Element;
-  triggerTarget: TargetDescriptor;
 }
 
 const HOVER_SURFACE_SELECTOR = [
@@ -26,6 +23,8 @@ const HOVER_SURFACE_SELECTOR = [
 
 const HOVER_SURFACE_WORD_RE =
   /\b(menu|dropdown|drop-down|popover|popper|popup|tooltip|flyout|submenu|context-menu|account-menu|user-menu|avatar-menu)\b/i;
+const HOVER_SURFACE_MAX_AXIS_GAP = 96;
+const HOVER_SURFACE_MAX_VIEWPORT_AREA_RATIO = 0.5;
 
 function elementTokenText(el: Element): string {
   return [
@@ -62,6 +61,33 @@ function closestHoverSurface(clickElement: Element): Element | null {
   return null;
 }
 
+function isPositionedFloatingElement(el: Element): boolean {
+  if (!(el instanceof HTMLElement)) return false;
+  const style = getComputedStyle(el);
+  if (!["absolute", "fixed"].includes(style.position)) return false;
+  if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") {
+    return false;
+  }
+  const rect = rectFor(el);
+  if (!rect) return false;
+  const viewportArea = window.innerWidth * window.innerHeight;
+  const area = rect.width * rect.height;
+  return (
+    area > 0 && (!viewportArea || area <= viewportArea * HOVER_SURFACE_MAX_VIEWPORT_AREA_RATIO)
+  );
+}
+
+function closestFloatingSurface(clickElement: Element): Element | null {
+  let node: Element | null = clickElement;
+  let depth = 0;
+  while (node && node !== document.body && node !== document.documentElement && depth < 10) {
+    if (isPositionedFloatingElement(node)) return node;
+    node = node.parentElement;
+    depth += 1;
+  }
+  return null;
+}
+
 function rectFor(el: Element): DOMRect | null {
   const rect = el.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
@@ -82,7 +108,7 @@ function isNearTrigger(surface: Element, trigger: Element): boolean {
     triggerRect.top - surfaceRect.bottom,
     surfaceRect.top - triggerRect.bottom,
   );
-  return horizontalGap <= 320 && verticalGap <= 320;
+  return horizontalGap <= HOVER_SURFACE_MAX_AXIS_GAP && verticalGap <= HOVER_SURFACE_MAX_AXIS_GAP;
 }
 
 export function decideHoverSurfaceRelation(
@@ -92,6 +118,15 @@ export function decideHoverSurfaceRelation(
   const clickSurface = closestHoverSurface(clickElement);
   if (clickSurface && isNearTrigger(clickSurface, context.triggerElement)) {
     return { related: true, reason: "click-inside-hover-surface", surface: clickSurface };
+  }
+
+  const floatingSurface = closestFloatingSurface(clickElement);
+  if (floatingSurface && isNearTrigger(floatingSurface, context.triggerElement)) {
+    return {
+      related: true,
+      reason: "click-inside-near-floating-surface",
+      surface: floatingSurface,
+    };
   }
 
   if (context.triggerElement.contains(clickElement) && clickElement !== context.triggerElement) {

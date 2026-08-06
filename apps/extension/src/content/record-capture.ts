@@ -73,7 +73,6 @@ type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
 
 const HOVER_BEFORE_CLICK_MAX_MS = 10_000;
 const HOVER_REPLACE_SCORE_MARGIN = 50;
-const RECORD_DEBUG_STORAGE_KEY = "bsk_record_debug";
 
 function eventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -144,26 +143,6 @@ function fillableValue(el: FillableElement): string {
     return el.value;
   }
   return el.textContent ?? "";
-}
-
-function recordDebug(message: string, data?: unknown): void {
-  try {
-    if (localStorage.getItem(RECORD_DEBUG_STORAGE_KEY) !== "1") return;
-    console.info("[bsk record]", message, data === undefined ? "" : JSON.stringify(data));
-  } catch {
-    // Recording must not depend on page storage or console availability.
-  }
-}
-
-function elementDebugSummary(el: Element): Record<string, string | undefined> {
-  return {
-    tag: el.tagName.toLowerCase(),
-    id: el.id || undefined,
-    class: typeof el.className === "string" ? el.className || undefined : undefined,
-    role: el.getAttribute("role") ?? undefined,
-    ariaLabel: el.getAttribute("aria-label") ?? undefined,
-    text: el.textContent?.replace(/\s+/g, " ").trim().slice(0, 80) || undefined,
-  };
 }
 
 function hoverTriggerAttrs(el: Element): Record<string, string | undefined> {
@@ -253,34 +232,13 @@ function evaluateHoverTriggerElement(
 }
 
 function hoverTargetFromEvent(target: EventTarget | null): PendingHover | null {
-  if (!(target instanceof Element)) {
-    recordDebug("hover ignored: event target is not an Element", { target });
-    return null;
-  }
+  if (!(target instanceof Element)) return null;
   const element = resolveHoverElement(target);
-  if (!element) {
-    recordDebug("hover ignored: no resolved hover element", { target });
-    return null;
-  }
+  if (!element) return null;
   const desc = describeTarget(element);
   const decision = evaluateHoverTriggerElement(element, desc);
-  if (!decision?.eligible) {
-    recordDebug("hover ignored: rejected by trigger policy", {
-      desc,
-      score: decision?.score ?? 0,
-      reasons: decision?.reasons ?? [],
-      element: elementDebugSummary(element),
-    });
-    return null;
-  }
+  if (!decision?.eligible) return null;
   const normalizedTarget = normalizeHoverTarget(element, desc, decision);
-  recordDebug("hover accepted", {
-    desc: normalizedTarget,
-    raw_desc: desc,
-    score: decision.score,
-    reasons: decision.reasons,
-    element: elementDebugSummary(element),
-  });
   return {
     element,
     target: normalizedTarget,
@@ -345,7 +303,6 @@ export function startRecordCapture(
   _requestId: string,
   sendStep: (step: RecordStepPayload) => void,
 ): RecordCaptureController {
-  recordDebug("record capture started", { page_url: location.href });
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
   };
@@ -439,34 +396,22 @@ export function startRecordCapture(
     }
     const clickElement = resolveClickableElement(clickTarget);
     if (clickElement === pendingHover.element) {
-      recordDebug("pending hover skipped: click resolved to same trigger", {
-        target: pendingHover.target,
-      });
       return;
     }
     const relationTarget = clickElement ?? clickTarget;
     if (!clickElement && pendingHover.element.contains(relationTarget)) {
-      recordDebug("pending hover skipped: anonymous click inside trigger", {
-        target: pendingHover.target,
-      });
       return;
     }
     const relation = decideHoverSurfaceRelation(
       {
         triggerElement: pendingHover.element,
-        triggerTarget: pendingHover.target,
       },
       relationTarget,
     );
     if (!relation.related) {
-      recordDebug("pending hover skipped: click outside hover surface", {
-        target: pendingHover.target,
-        reason: relation.reason,
-      });
       pendingHover = null;
       return;
     }
-    recordDebug("pending hover emitted before click", { target: pendingHover.target });
     emitStep({
       op: "hover",
       target: pendingHover.target,
@@ -481,33 +426,7 @@ export function startRecordCapture(
     if (!hover) return;
     const now = Date.now();
     if (pendingHover && !shouldReplacePendingHover(pendingHover, hover, now)) {
-      recordDebug("pending hover kept over later hover", {
-        current: {
-          target: pendingHover.target,
-          score: pendingHover.score,
-          reasons: pendingHover.reasons,
-        },
-        next: {
-          target: hover.target,
-          score: hover.score,
-          reasons: hover.reasons,
-        },
-      });
       return;
-    }
-    if (pendingHover) {
-      recordDebug("pending hover replaced", {
-        current: {
-          target: pendingHover.target,
-          score: pendingHover.score,
-          reasons: pendingHover.reasons,
-        },
-        next: {
-          target: hover.target,
-          score: hover.score,
-          reasons: hover.reasons,
-        },
-      });
     }
     pendingHover = hover;
   };
@@ -701,7 +620,6 @@ export function startRecordCapture(
 
   return {
     dispose() {
-      recordDebug("record capture disposed", { page_url: location.href });
       commitFillSession();
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("mouseover", onMouseOver, true);

@@ -470,6 +470,150 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it("records hover before clicking an unlabelled positioned floating surface", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <div style="position: absolute; top: 48px; left: 820px; width: 160px; height: 80px;">
+        <a href="/u/me">My profile</a>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-plain-floating-surface", (step) =>
+      steps.push(step),
+    );
+    const trigger = document.querySelector("button")!;
+    const surface = document.querySelector("div")!;
+    const link = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue({
+      x: 820,
+      y: 48,
+      top: 48,
+      left: 820,
+      right: 980,
+      bottom: 128,
+      width: 160,
+      height: 80,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+      const style = {
+        cursor: "",
+        display: "block",
+        pointerEvents: "auto",
+        position: el === surface ? "absolute" : "static",
+        visibility: "visible",
+      } as CSSStyleDeclaration;
+      return style;
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "Open user navigation menu" },
+    });
+  });
+
+  it("does not treat ordinary document-flow divs as hover surfaces", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <div>
+        <a href="/u/me">My profile</a>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-plain-flow-surface", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const link = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({
+      cursor: "",
+      display: "block",
+      pointerEvents: "auto",
+      position: "static",
+      visibility: "visible",
+    } as CSSStyleDeclaration);
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
+  });
+
+  it("does not treat unlabelled sticky containers as hover surfaces", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <div style="position: sticky; top: 48px; left: 820px; width: 160px; height: 80px;">
+        <a href="/u/me">My profile</a>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-sticky-surface", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const surface = document.querySelector("div")!;
+    const link = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue({
+      x: 820,
+      y: 48,
+      top: 48,
+      left: 820,
+      right: 980,
+      bottom: 128,
+      width: 160,
+      height: 80,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+      const style = {
+        cursor: "",
+        display: "block",
+        pointerEvents: "auto",
+        position: el === surface ? "sticky" : "static",
+        visibility: "visible",
+      } as CSSStyleDeclaration;
+      return style;
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
+  });
+
   it("does not record hover before clicking the same trigger", () => {
     document.body.innerHTML = `
       <button type="button" aria-label="Open user navigation menu">avatar</button>
