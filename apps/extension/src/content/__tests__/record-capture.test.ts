@@ -156,4 +156,353 @@ describe("record-capture semantic", () => {
       target: { name: "下一步", role: "button" },
     });
   });
+
+  it("records a hover trigger before clicking its revealed menu item", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <ul class="user-menu dropdown-menu">
+        <li><a href="/u/me">My profile</a></li>
+      </ul>
+    `;
+    const capture = startRecordCapture("rec-hover-menu", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "Open user navigation menu" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "link", name: "My profile" },
+    });
+  });
+
+  it("records hover for compact topbar image buttons before menu item clicks", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="image" style="position: absolute; top: 8px; left: 900px; width: 32px; height: 32px;">
+        <img alt="image" />
+      </button>
+      <ul class="user-menu dropdown-menu">
+        <li><a href="/u/me">My profile</a></li>
+      </ul>
+    `;
+    const capture = startRecordCapture("rec-hover-topbar", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "image" },
+    });
+  });
+
+  it("records hover when the revealed menu item is inside the hover root", () => {
+    document.body.innerHTML = `
+      <div class="user dropdown" role="button" aria-label="image">
+        <img alt="image" />
+        <ul>
+          <li><a href="/u/me">My profile</a></li>
+        </ul>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-contained-menu", (step) => steps.push(step));
+    const trigger = document.querySelector('[role="button"]')!;
+    const item = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "image" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "link", name: "My profile" },
+    });
+  });
+
+  it("does not let a revealed topbar menu link replace the pending hover trigger", () => {
+    document.body.innerHTML = `
+      <a href="/u/me" aria-label="image" style="position: absolute; top: 8px; left: 900px; width: 32px; height: 32px;">
+        <img alt="image" />
+      </a>
+      <ul class="user-menu dropdown-menu">
+        <li><a class="dropdown-item profile-link" href="/u/me">My profile</a></li>
+      </ul>
+    `;
+    const capture = startRecordCapture("rec-hover-topbar-link", (step) => steps.push(step));
+    const trigger = document.querySelector('a[aria-label="image"]')!;
+    const item = document.querySelector("ul a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(item, "getBoundingClientRect").mockReturnValue({
+      x: 820,
+      y: 72,
+      top: 72,
+      left: 820,
+      right: 916,
+      bottom: 104,
+      width: 96,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+      const style = {
+        cursor: el === item ? "pointer" : "",
+        pointerEvents: "auto",
+      } as CSSStyleDeclaration;
+      return style;
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "link", name: "image" },
+    });
+  });
+
+  it("keeps the first hover trigger over a later lower-score accepted hover", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu" aria-haspopup="menu" aria-expanded="false">
+        <img alt="image" />
+      </button>
+      <a class="account-menu" role="button" href="/u/me">My profile</a>
+    `;
+    const capture = startRecordCapture("rec-hover-latch", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const laterHover = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(laterHover, "getBoundingClientRect").mockReturnValue({
+      x: 820,
+      y: 72,
+      top: 72,
+      left: 820,
+      right: 916,
+      bottom: 104,
+      width: 96,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+      const style = {
+        cursor: el === laterHover ? "pointer" : "",
+        pointerEvents: "auto",
+      } as CSSStyleDeclaration;
+      return style;
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    laterHover.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    laterHover.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "Open user navigation menu" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "button", name: "My profile" },
+    });
+  });
+
+  it("records avatar div hover with a semantic image target", () => {
+    document.body.innerHTML = `
+      <div class="tg-avatar tg-avatar--img tg-avatar--shape-hexagon">
+        <img class="tg-avatar__image" />
+      </div>
+      <ul class="user-menu dropdown-menu">
+        <li><a href="/u/me">My profile</a></li>
+      </ul>
+    `;
+    const capture = startRecordCapture("rec-hover-avatar-div", (step) => steps.push(step));
+    const trigger = document.querySelector(".tg-avatar")!;
+    const image = document.querySelector("img")!;
+    const item = document.querySelector("a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(image, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({
+      cursor: "pointer",
+      pointerEvents: "auto",
+    } as CSSStyleDeclaration);
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    image.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    item.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { tag: "img", role: "img", name: "image" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { role: "link", name: "My profile" },
+    });
+  });
+
+  it("does not record hover before an unrelated page click", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+      <main>
+        <a href="/projects">Projects</a>
+      </main>
+    `;
+    const capture = startRecordCapture("rec-hover-unrelated-click", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const link = document.querySelector("main a")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
+    expect(steps[0]).toMatchObject({
+      op: "click",
+      target: { role: "link", name: "Projects" },
+    });
+  });
+
+  it("does not record hover before clicking the same trigger", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="Open user navigation menu">avatar</button>
+    `;
+    const capture = startRecordCapture("rec-hover-same-trigger", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
+      x: 900,
+      y: 8,
+      top: 8,
+      left: 900,
+      right: 932,
+      bottom: 40,
+      width: 32,
+      height: 32,
+      toJSON: () => ({}),
+    });
+
+    trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
+  });
+
+  it("does not record hover for ordinary controls without popup signals", () => {
+    const capture = startRecordCapture("rec-hover-noise", (step) => steps.push(step));
+    const button = document.querySelector("button")!;
+
+    button.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
+  });
 });

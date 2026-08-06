@@ -101,7 +101,7 @@ function twoHoverTriggerSnapshotReply() {
     "button",
     "class",
     "user-avatar",
-    "secondary-trigger",
+    "secondary-dropdown-trigger",
     "position",
     "static",
     "pointer-events",
@@ -123,7 +123,7 @@ function twoHoverTriggerSnapshotReply() {
             [],
             [],
             [i("class"), i("user-avatar")],
-            [i("class"), i("secondary-trigger")],
+            [i("class"), i("secondary-dropdown-trigger")],
           ],
         },
         layout: {

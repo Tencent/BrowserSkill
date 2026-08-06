@@ -1,9 +1,15 @@
 import {
   describeEventTarget,
   describeTarget,
+  resolveClickableElement,
   resolveHoverElement,
   type TargetDescriptor,
 } from "@/lib/describe-target";
+import {
+  evaluateHoverTrigger,
+  type HoverTriggerDecision,
+  type HoverTriggerRect,
+} from "@/lib/hover-trigger-policy";
 import {
   isRecordCancelMessage,
   isRecordStartMessage,
@@ -20,6 +26,7 @@ import {
   type RecordStopMessage,
 } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/trace-reducer";
+import { decideHoverSurfaceRelation } from "./record-hover-surface";
 
 const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
 const failedStepDeliveries = new Set<string>();
@@ -58,11 +65,15 @@ interface PendingHover {
   element: Element;
   target: TargetDescriptor;
   recordedAt: number;
+  score: number;
+  reasons: string[];
 }
 
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
 
 const HOVER_BEFORE_CLICK_MAX_MS = 10_000;
+const HOVER_REPLACE_SCORE_MARGIN = 50;
+const RECORD_DEBUG_STORAGE_KEY = "bsk_record_debug";
 
 function eventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -135,12 +146,160 @@ function fillableValue(el: FillableElement): string {
   return el.textContent ?? "";
 }
 
+function recordDebug(message: string, data?: unknown): void {
+  try {
+    if (localStorage.getItem(RECORD_DEBUG_STORAGE_KEY) !== "1") return;
+    console.info("[bsk record]", message, data === undefined ? "" : JSON.stringify(data));
+  } catch {
+    // Recording must not depend on page storage or console availability.
+  }
+}
+
+function elementDebugSummary(el: Element): Record<string, string | undefined> {
+  return {
+    tag: el.tagName.toLowerCase(),
+    id: el.id || undefined,
+    class: typeof el.className === "string" ? el.className || undefined : undefined,
+    role: el.getAttribute("role") ?? undefined,
+    ariaLabel: el.getAttribute("aria-label") ?? undefined,
+    text: el.textContent?.replace(/\s+/g, " ").trim().slice(0, 80) || undefined,
+  };
+}
+
+function hoverTriggerAttrs(el: Element): Record<string, string | undefined> {
+  return {
+    id: el.id || undefined,
+    class: typeof el.className === "string" ? el.className || undefined : undefined,
+    "data-testid": el.getAttribute("data-testid") ?? undefined,
+    "data-test": el.getAttribute("data-test") ?? undefined,
+    "data-cy": el.getAttribute("data-cy") ?? undefined,
+    "aria-label": el.getAttribute("aria-label") ?? undefined,
+    "aria-haspopup": el.getAttribute("aria-haspopup") ?? undefined,
+    "aria-controls": el.getAttribute("aria-controls") ?? undefined,
+    "aria-expanded": el.getAttribute("aria-expanded") ?? undefined,
+    "aria-hidden": el.getAttribute("aria-hidden") ?? undefined,
+    "aria-disabled": el.getAttribute("aria-disabled") ?? undefined,
+    contenteditable: el.getAttribute("contenteditable") ?? undefined,
+    disabled: el.hasAttribute("disabled") ? "" : undefined,
+    hidden: el.hasAttribute("hidden") ? "" : undefined,
+    inert: el.hasAttribute("inert") ? "" : undefined,
+    onclick: el.getAttribute("onclick") ?? undefined,
+    onmouseenter: el.getAttribute("onmouseenter") ?? undefined,
+    onmouseover: el.getAttribute("onmouseover") ?? undefined,
+    role: el.getAttribute("role") ?? undefined,
+    tabindex: el.getAttribute("tabindex") ?? undefined,
+    title: el.getAttribute("title") ?? undefined,
+  };
+}
+
+function hoverTriggerRect(el: Element): HoverTriggerRect {
+  const rect = el.getBoundingClientRect();
+  return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+}
+
+function hoverTriggerStyle(el: Element): { cursor?: string; pointerEvents?: string } {
+  if (!(el instanceof HTMLElement)) return {};
+  const style = getComputedStyle(el);
+  return { cursor: style.cursor, pointerEvents: style.pointerEvents };
+}
+
+function hasHoverGraphicDescendant(el: Element): boolean {
+  return el.querySelector("img,svg,use,path,i") !== null;
+}
+
+function isWeakHoverTarget(target: TargetDescriptor): boolean {
+  return !target.role && !target.name && target.tag === "div";
+}
+
+function looksLikeAvatarElement(el: Element): boolean {
+  const className = typeof el.className === "string" ? el.className : "";
+  return /\b(avatar|user-avatar)\b/i.test(className);
+}
+
+function normalizeHoverTarget(
+  el: Element,
+  desc: TargetDescriptor,
+  decision: HoverTriggerDecision,
+): TargetDescriptor {
+  if (desc.role === "img" && !desc.name && looksLikeAvatarElement(el)) {
+    return { ...desc, name: "image" };
+  }
+  if (
+    isWeakHoverTarget(desc) &&
+    (looksLikeAvatarElement(el) ||
+      (hasHoverGraphicDescendant(el) && decision.reasons.includes("icon-only")))
+  ) {
+    return { tag: "img", role: "img", name: "image" };
+  }
+  return desc;
+}
+
+function evaluateHoverTriggerElement(
+  el: Element,
+  desc: TargetDescriptor,
+): HoverTriggerDecision | null {
+  if (!(el instanceof HTMLElement)) return null;
+  const style = hoverTriggerStyle(el);
+  return evaluateHoverTrigger({
+    tag: el.tagName.toLowerCase(),
+    role: desc.role,
+    label: desc.name,
+    attrs: hoverTriggerAttrs(el),
+    rect: hoverTriggerRect(el),
+    cursor: style.cursor,
+    pointerEvents: style.pointerEvents,
+    hasGraphicDescendant: hasHoverGraphicDescendant(el),
+  });
+}
+
 function hoverTargetFromEvent(target: EventTarget | null): PendingHover | null {
-  if (!(target instanceof Element)) return null;
+  if (!(target instanceof Element)) {
+    recordDebug("hover ignored: event target is not an Element", { target });
+    return null;
+  }
   const element = resolveHoverElement(target);
-  if (!element) return null;
+  if (!element) {
+    recordDebug("hover ignored: no resolved hover element", { target });
+    return null;
+  }
   const desc = describeTarget(element);
-  return { element, target: desc, recordedAt: Date.now() };
+  const decision = evaluateHoverTriggerElement(element, desc);
+  if (!decision?.eligible) {
+    recordDebug("hover ignored: rejected by trigger policy", {
+      desc,
+      score: decision?.score ?? 0,
+      reasons: decision?.reasons ?? [],
+      element: elementDebugSummary(element),
+    });
+    return null;
+  }
+  const normalizedTarget = normalizeHoverTarget(element, desc, decision);
+  recordDebug("hover accepted", {
+    desc: normalizedTarget,
+    raw_desc: desc,
+    score: decision.score,
+    reasons: decision.reasons,
+    element: elementDebugSummary(element),
+  });
+  return {
+    element,
+    target: normalizedTarget,
+    recordedAt: Date.now(),
+    score: decision.score,
+    reasons: decision.reasons,
+  };
+}
+
+function shouldReplacePendingHover(
+  current: PendingHover,
+  next: PendingHover,
+  now: number,
+): boolean {
+  if (next.element === current.element) return false;
+  if (now - current.recordedAt > HOVER_BEFORE_CLICK_MAX_MS) return true;
+  if (current.element.contains(next.element)) return false;
+  if (next.element.contains(current.element)) return true;
+  return next.score >= current.score + HOVER_REPLACE_SCORE_MARGIN;
 }
 
 /** Clicks that only pick an autocomplete/suggestion value — not a semantic submit action. */
@@ -186,6 +345,7 @@ export function startRecordCapture(
   _requestId: string,
   sendStep: (step: RecordStepPayload) => void,
 ): RecordCaptureController {
+  recordDebug("record capture started", { page_url: location.href });
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
   };
@@ -277,7 +437,36 @@ export function startRecordCapture(
       pendingHover = null;
       return;
     }
-    if (pendingHover.element.contains(clickTarget)) return;
+    const clickElement = resolveClickableElement(clickTarget);
+    if (clickElement === pendingHover.element) {
+      recordDebug("pending hover skipped: click resolved to same trigger", {
+        target: pendingHover.target,
+      });
+      return;
+    }
+    const relationTarget = clickElement ?? clickTarget;
+    if (!clickElement && pendingHover.element.contains(relationTarget)) {
+      recordDebug("pending hover skipped: anonymous click inside trigger", {
+        target: pendingHover.target,
+      });
+      return;
+    }
+    const relation = decideHoverSurfaceRelation(
+      {
+        triggerElement: pendingHover.element,
+        triggerTarget: pendingHover.target,
+      },
+      relationTarget,
+    );
+    if (!relation.related) {
+      recordDebug("pending hover skipped: click outside hover surface", {
+        target: pendingHover.target,
+        reason: relation.reason,
+      });
+      pendingHover = null;
+      return;
+    }
+    recordDebug("pending hover emitted before click", { target: pendingHover.target });
     emitStep({
       op: "hover",
       target: pendingHover.target,
@@ -289,7 +478,37 @@ export function startRecordCapture(
     const target = eventTarget(event);
     if (isOverlayTarget(target)) return;
     const hover = hoverTargetFromEvent(target);
-    if (!hover || hover.element === pendingHover?.element) return;
+    if (!hover) return;
+    const now = Date.now();
+    if (pendingHover && !shouldReplacePendingHover(pendingHover, hover, now)) {
+      recordDebug("pending hover kept over later hover", {
+        current: {
+          target: pendingHover.target,
+          score: pendingHover.score,
+          reasons: pendingHover.reasons,
+        },
+        next: {
+          target: hover.target,
+          score: hover.score,
+          reasons: hover.reasons,
+        },
+      });
+      return;
+    }
+    if (pendingHover) {
+      recordDebug("pending hover replaced", {
+        current: {
+          target: pendingHover.target,
+          score: pendingHover.score,
+          reasons: pendingHover.reasons,
+        },
+        next: {
+          target: hover.target,
+          score: hover.score,
+          reasons: hover.reasons,
+        },
+      });
+    }
     pendingHover = hover;
   };
 
@@ -482,6 +701,7 @@ export function startRecordCapture(
 
   return {
     dispose() {
+      recordDebug("record capture disposed", { page_url: location.href });
       commitFillSession();
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("mouseover", onMouseOver, true);

@@ -5,6 +5,7 @@
 // `styles` columns are [position, pointer-events, cursor] in that order.
 
 import type { Rect, Viewport } from "@browser-skill/vom";
+import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
 import type { CdpRunner } from "../shared";
 
@@ -442,27 +443,6 @@ async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
     );
 }
 
-function isVisibleProbeNode(node: CapturedNode): boolean {
-  const rect = node.rect;
-  return (
-    !!rect &&
-    rect.w > 0 &&
-    rect.h > 0 &&
-    node.pointerEvents !== "none" &&
-    node.attrs.hidden === undefined &&
-    node.attrs.inert === undefined &&
-    (node.attrs["aria-hidden"] ?? "").toLowerCase() !== "true"
-  );
-}
-
-function isUnsafeHoverTrigger(node: CapturedNode): boolean {
-  const tag = node.tag.toLowerCase();
-  if (["input", "textarea", "select", "option"].includes(tag)) return true;
-  if ((node.attrs.contenteditable ?? "").toLowerCase() === "true") return true;
-  if (node.attrs.disabled !== undefined || node.attrs.inert !== undefined) return true;
-  return (node.attrs["aria-disabled"] ?? "").toLowerCase() === "true";
-}
-
 function capturedText(node: CapturedNode): string | undefined {
   const value =
     node.attrs["aria-label"] ?? node.attrs.title ?? node.attrs.alt ?? node.textContent ?? "";
@@ -484,41 +464,8 @@ function hasGraphicDescendant(
   return false;
 }
 
-function hasHoverPopupSignal(node: CapturedNode): boolean {
-  const attrs = node.attrs;
-  const haystack = [
-    attrs.id,
-    attrs.class,
-    attrs["data-testid"],
-    attrs["data-test"],
-    attrs["data-cy"],
-    attrs["aria-haspopup"],
-    attrs["aria-controls"],
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  return /(menu|dropdown|popover|popup|avatar|profile|account|user)/.test(haystack);
-}
-
 function roleOf(node: CapturedNode): string {
   return (node.attrs.role ?? "").toLowerCase();
-}
-
-function hasDirectInteractiveSignal(node: CapturedNode): boolean {
-  const tag = node.tag.toLowerCase();
-  const role = roleOf(node);
-  return (
-    ["button", "a", "summary"].includes(tag) ||
-    ["button", "link", "menuitem", "tab", "combobox"].includes(role) ||
-    node.attrs.tabindex !== undefined ||
-    node.cursor === "pointer" ||
-    node.attrs.onclick !== undefined ||
-    node.attrs.onmouseenter !== undefined ||
-    node.attrs.onmouseover !== undefined ||
-    node.attrs["aria-haspopup"] !== undefined ||
-    node.attrs["aria-expanded"] === "false"
-  );
 }
 
 function scoreHoverCandidate(
@@ -526,78 +473,36 @@ function scoreHoverCandidate(
   childrenByParentId: Map<number, CapturedNode[]>,
   cssHoverPoints: Array<{ x: number; y: number }>,
 ): HoverCandidate | null {
-  if (!isVisibleProbeNode(node) || isUnsafeHoverTrigger(node)) {
-    return null;
-  }
   const rect = node.rect;
   if (!rect) return null;
-  const area = rect.w * rect.h;
-  if (area <= 0 || area > 160_000) return null;
-
-  const reasons: string[] = [];
-  let score = 0;
-  const tag = node.tag.toLowerCase();
-  const role = roleOf(node);
   const label = capturedText(node);
-  const graphic = hasGraphicDescendant(node, childrenByParentId);
-  const directInteractive = hasDirectInteractiveSignal(node);
-  const popupSignal = hasHoverPopupSignal(node);
-  const compactTopbarIcon = !label && graphic && rect.y < 120 && rect.w <= 96 && rect.h <= 96;
-  if (!directInteractive && !popupSignal && !compactTopbarIcon) return null;
+  const cssHoverMatch = cssHoverPoints.some(
+    (point) =>
+      point.x >= rect.x &&
+      point.x <= rect.x + rect.w &&
+      point.y >= rect.y &&
+      point.y <= rect.y + rect.h,
+  );
+  const decision = evaluateHoverTrigger({
+    tag: node.tag,
+    role: roleOf(node),
+    label,
+    attrs: node.attrs,
+    rect,
+    cursor: node.cursor,
+    pointerEvents: node.pointerEvents,
+    hasGraphicDescendant: hasGraphicDescendant(node, childrenByParentId),
+    cssHoverMatch,
+  });
 
-  if (node.attrs["aria-haspopup"] !== undefined) {
-    score += 80;
-    reasons.push("aria-haspopup");
-  }
-  if ((node.attrs["aria-expanded"] ?? "").toLowerCase() === "false") {
-    score += 55;
-    reasons.push("collapsed");
-  }
-  if (popupSignal) {
-    score += 45;
-    reasons.push("popup-signal");
-  }
-  if (tag === "button" || role === "button") {
-    score += 30;
-    reasons.push("button");
-  }
-  if (node.cursor === "pointer") {
-    score += 25;
-    reasons.push("pointer");
-  }
-  if (!label && graphic) {
-    score += 40;
-    reasons.push("icon-only");
-  }
-  if (rect.y < 120) {
-    score += 25;
-    reasons.push("topbar");
-  }
-  if (rect.w <= 80 && rect.h <= 80) {
-    score += 20;
-    reasons.push("compact");
-  }
-  if (
-    cssHoverPoints.some(
-      (point) =>
-        point.x >= rect.x &&
-        point.x <= rect.x + rect.w &&
-        point.y >= rect.y &&
-        point.y <= rect.y + rect.h,
-    )
-  ) {
-    score += 40;
-    reasons.push("css-hover");
-  }
-
-  if (score < 45) return null;
+  if (!decision.eligible) return null;
   return {
     backendNodeId: node.backendNodeId,
     label,
     x: rect.x + rect.w / 2,
     y: rect.y + rect.h / 2,
-    score,
-    reasons,
+    score: decision.score,
+    reasons: decision.reasons,
   };
 }
 
