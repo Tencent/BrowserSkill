@@ -25,13 +25,13 @@ function mockRect(
   });
 }
 
-function mockHoverStyle(pointerElements: Element[]): void {
+function mockHoverStyle(pointerElements: Element[], positionedElements: Element[] = []): void {
   vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
     const style = {
       cursor: pointerElements.includes(el) ? "pointer" : "",
       display: "block",
       pointerEvents: "auto",
-      position: "static",
+      position: positionedElements.includes(el) ? "absolute" : "static",
       visibility: "visible",
     } as CSSStyleDeclaration;
     return style;
@@ -204,6 +204,7 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-menu", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".user-menu")!;
     const item = document.querySelector("a")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -216,6 +217,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 160, height: 80 });
 
     trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -244,6 +246,7 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-topbar", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".user-menu")!;
     const item = document.querySelector("a")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -256,6 +259,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 160, height: 80 });
 
     trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -280,18 +284,10 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-contained-menu", (step) => steps.push(step));
     const trigger = document.querySelector('[role="button"]')!;
+    const menu = document.querySelector("ul")!;
     const item = document.querySelector("a")!;
-    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
-      x: 900,
-      y: 8,
-      top: 8,
-      left: 900,
-      right: 932,
-      bottom: 40,
-      width: 32,
-      height: 32,
-      toJSON: () => ({}),
-    });
+    mockRect(trigger, { left: 900, top: 8, width: 32, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 160, height: 80 });
 
     trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     item.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
@@ -320,6 +316,7 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-topbar-link", (step) => steps.push(step));
     const trigger = document.querySelector('a[aria-label="image"]')!;
+    const menu = document.querySelector(".user-menu")!;
     const item = document.querySelector("ul a")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -343,6 +340,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 160, height: 80 });
     vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
       const style = {
         cursor: el === item ? "pointer" : "",
@@ -428,8 +426,10 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-menu-opener", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
     const item = document.querySelector("li")!;
     mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
     mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
     mockHoverStyle([item]);
 
@@ -458,8 +458,10 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-menu-div-action", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
     const item = document.querySelector(".tg-menu-item")!;
     mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
     mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
     mockHoverStyle([item]);
 
@@ -493,8 +495,10 @@ describe("record-capture semantic", () => {
         steps.push(step),
       );
       const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
       const item = document.querySelector(".tg-menu-item")!;
       mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+      mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
       mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
       mockHoverStyle([item]);
 
@@ -527,8 +531,10 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-infer-opener", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
     const item = document.querySelector(".tg-menu-item")!;
     mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
     mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
     mockHoverStyle([trigger, item]);
 
@@ -557,9 +563,11 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-false-submenu", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
     const item = document.querySelector("li")!;
     const itemInner = document.querySelector("li div")!;
     mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
     mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
     mockHoverStyle([item, itemInner]);
 
@@ -591,14 +599,18 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-cascade", (step) => steps.push(step));
     const trigger = document.querySelector("button[aria-label]")!;
+    const menu = document.querySelector(".create-menu")!;
+    const submenu = document.querySelector(".template-submenu")!;
     const nestedTrigger = document.querySelector("li")!;
     const finalAction = document.querySelector(".template-submenu button")!;
     mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
     mockRect(nestedTrigger, { left: 820, top: 48, width: 160, height: 32 });
-    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
     mockHoverStyle([nestedTrigger, finalAction]);
 
     mouseOver(trigger);
+    mockRect(submenu, { left: 984, top: 48, width: 160, height: 80 });
+    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
     mouseOver(nestedTrigger);
     click(finalAction);
     capture.dispose();
@@ -618,6 +630,468 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it("infers the full hover opener chain for nested menu actions", () => {
+    document.body.innerHTML = `
+      <button type="button">新建</button>
+      <div class="create-menu dropdown-menu">
+        <li tabindex="0" aria-expanded="false">文档C+D</li>
+      </div>
+      <div role="menu" class="format-submenu">
+        <span tabindex="0">Markdown</span>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-nested-infer", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
+    const submenu = document.querySelector(".format-submenu")!;
+    const nestedTrigger = document.querySelector("li")!;
+    const finalAction = document.querySelector("span")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
+    mockRect(nestedTrigger, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([trigger, nestedTrigger, finalAction]);
+
+    mouseOver(trigger);
+    mockRect(submenu, { left: 984, top: 48, width: 160, height: 80 });
+    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
+    mouseOver(nestedTrigger);
+    mouseOver(finalAction);
+    click(finalAction);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "hover",
+      target: { tag: "li", name: "文档C+D" },
+    });
+    expect(steps[2]).toMatchObject({
+      op: "click",
+      target: { tag: "span", name: "Markdown" },
+    });
+  });
+
+  it("uses the nested hover trigger label without descendant submenu text", () => {
+    document.body.innerHTML = `
+      <button type="button">新建</button>
+      <div class="create-menu dropdown-menu">
+        <li tabindex="0" aria-haspopup="menu">
+          <span>多维表格</span>
+          <div>
+            <span tabindex="0">表格视图</span>
+            <div tabindex="0">看板视图</div>
+            <span>甘特视图</span>
+            <span>日历视图</span>
+            <span>相册视图</span>
+            <span>架构视图</span>
+            <span>神奇表单</span>
+          </div>
+        </li>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-nested-compact-label", (step) =>
+      steps.push(step),
+    );
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
+    const nestedTrigger = document.querySelector("li")!;
+    const submenu = document.querySelector("li > div")!;
+    const finalAction = document.querySelector("li > div div")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 80 });
+    mockRect(nestedTrigger, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([trigger, nestedTrigger, finalAction], [submenu]);
+
+    mouseOver(trigger);
+    mockRect(submenu, { left: 984, top: 48, width: 180, height: 220 });
+    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
+    mouseOver(nestedTrigger);
+    mouseOver(finalAction);
+    click(finalAction);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "hover",
+      target: { tag: "li", name: "多维表格" },
+    });
+    expect(JSON.stringify(steps[1]?.target)).not.toContain("看板视图");
+    expect(steps[2]).toMatchObject({
+      op: "click",
+      target: { tag: "div", name: "看板视图" },
+    });
+  });
+
+  it("does not let a stale pass-through shortcut hover claim a later submenu", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T06:39:40.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button">新建</button>
+        <div class="create-menu dropdown-menu">
+          <li class="create-menu-item-doc" tabindex="0">
+            <span class="menu-item-label">文档</span>
+            <span class="text-font-tips">C+D</span>
+          </li>
+          <li class="create-menu-item-vika" tabindex="0" aria-haspopup="menu">
+            <div class="t-dropdown__item-content">
+              <span class="menu-item-label">多维表格</span>
+            </div>
+            <div class="t-dropdown__submenu-wrapper">
+              <span tabindex="0">看板视图</span>
+            </div>
+          </li>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-stale-shortcut", (step) => steps.push(step));
+      const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
+      const shortcut = document.querySelector(".text-font-tips")!;
+      const nestedTrigger = document.querySelector(".create-menu-item-vika")!;
+      const submenu = document.querySelector(".t-dropdown__submenu-wrapper")!;
+      const finalAction = document.querySelector(".t-dropdown__submenu-wrapper span")!;
+      mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+      mockRect(menu, { left: 820, top: 48, width: 180, height: 160 });
+      mockRect(shortcut, { left: 950, top: 56, width: 29, height: 22 });
+      mockRect(nestedTrigger, { left: 820, top: 92, width: 160, height: 32 });
+      mockHoverStyle([trigger, shortcut, nestedTrigger, finalAction], [submenu]);
+
+      mouseOver(trigger);
+      mouseOver(shortcut);
+      mockRect(submenu, { left: 984, top: 92, width: 160, height: 80 });
+      mockRect(finalAction, { left: 984, top: 92, width: 136, height: 32 });
+      mouseOver(nestedTrigger);
+      vi.runOnlyPendingTimers();
+      mouseOver(finalAction);
+      click(finalAction);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "hover",
+        target: { tag: "li", name: "多维表格" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("C+D");
+      expect(steps[2]).toMatchObject({
+        op: "click",
+        target: { tag: "span", name: "看板视图" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let an item inside a newly opened menu claim the parent surface", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T07:12:08.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button">新建</button>
+        <div class="create-menu dropdown-menu">
+          <li class="create-menu-item-doc" tabindex="0">文档C+D</li>
+          <li class="create-menu-item-vika" tabindex="0" aria-haspopup="menu">
+            <span>多维表格</span>
+          </li>
+        </div>
+        <div class="t-dropdown__submenu-wrapper">
+          <span tabindex="0">看板视图</span>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-parent-surface-owner", (step) =>
+        steps.push(step),
+      );
+      const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
+      const passThrough = document.querySelector(".create-menu-item-doc")!;
+      const nestedTrigger = document.querySelector(".create-menu-item-vika")!;
+      const submenu = document.querySelector(".t-dropdown__submenu-wrapper")!;
+      const finalAction = document.querySelector(".t-dropdown__submenu-wrapper span")!;
+      mockRect(trigger, { left: 42, top: 72, width: 60, height: 32 });
+      mockRect(passThrough, { left: 17, top: 113, width: 184, height: 34 });
+      mockRect(nestedTrigger, { left: 17, top: 228, width: 184, height: 34 });
+      mockHoverStyle([trigger, passThrough, nestedTrigger, finalAction]);
+
+      mouseOver(trigger);
+      mockRect(menu, { left: 8, top: 104, width: 201, height: 439 });
+      mouseOver(passThrough);
+      vi.runOnlyPendingTimers();
+      mockRect(submenu, { left: 201, top: 213, width: 114, height: 267 });
+      mockRect(finalAction, { left: 209, top: 257, width: 97, height: 34 });
+      mouseOver(nestedTrigger);
+      vi.runOnlyPendingTimers();
+      mouseOver(finalAction);
+      click(finalAction);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "hover",
+        target: { tag: "li", name: "多维表格" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("文档C+D");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("infers an unowned existing parent surface when a nested submenu is opened", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T07:28:10.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button">新建</button>
+        <div class="create-menu dropdown-menu">
+          <li class="create-menu-item-doc" tabindex="0">文档C+D</li>
+          <li class="create-menu-item-vika" tabindex="0" aria-haspopup="menu">
+            <div class="t-dropdown__item-content">
+              <span class="menu-item-label">多维表格</span>
+            </div>
+          </li>
+        </div>
+        <div class="t-dropdown__submenu-wrapper">
+          <span tabindex="0">看板视图</span>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-existing-parent-surface", (step) =>
+        steps.push(step),
+      );
+      const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
+      const passThrough = document.querySelector(".create-menu-item-doc")!;
+      const nestedTrigger = document.querySelector(".create-menu-item-vika")!;
+      const submenu = document.querySelector(".t-dropdown__submenu-wrapper")!;
+      const finalAction = document.querySelector(".t-dropdown__submenu-wrapper span")!;
+      mockRect(trigger, { left: 42, top: 72, width: 60, height: 32 });
+      mockRect(menu, { left: 8, top: 104, width: 201, height: 439 });
+      mockRect(passThrough, { left: 17, top: 113, width: 184, height: 34 });
+      mockRect(nestedTrigger, { left: 17, top: 228, width: 184, height: 34 });
+      mockHoverStyle([trigger, passThrough, nestedTrigger, finalAction]);
+
+      mouseOver(passThrough);
+      mouseOver(trigger);
+      vi.runOnlyPendingTimers();
+      mockRect(submenu, { left: 201, top: 213, width: 114, height: 267 });
+      mockRect(finalAction, { left: 209, top: 257, width: 97, height: 34 });
+      mouseOver(nestedTrigger);
+      vi.runOnlyPendingTimers();
+      mouseOver(finalAction);
+      click(finalAction);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "hover",
+        target: { tag: "li", name: "多维表格" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("文档C+D");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("assigns a side submenu to the vertically aligned hover trigger", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T06:55:38.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button">新建</button>
+        <div class="create-menu dropdown-menu">
+          <li class="create-menu-item-doc" tabindex="0">
+            <span class="menu-item-label">文档</span>
+            <span class="text-font-tips">C+D</span>
+          </li>
+          <li class="create-menu-item-vika" tabindex="0" aria-haspopup="menu">
+            <div class="t-dropdown__item-content">
+              <span class="menu-item-label">多维表格</span>
+            </div>
+          </li>
+        </div>
+        <div class="t-dropdown__submenu-wrapper">
+          <li class="create-submenu-item-vika-kanban" tabindex="0">
+            <span>看板视图</span>
+          </li>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-side-submenu-alignment", (step) =>
+        steps.push(step),
+      );
+      const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
+      const passThrough = document.querySelector(".create-menu-item-doc")!;
+      const nestedTrigger = document.querySelector(".create-menu-item-vika")!;
+      const submenu = document.querySelector(".t-dropdown__submenu-wrapper")!;
+      const finalAction = document.querySelector(".t-dropdown__submenu-wrapper span")!;
+      mockRect(trigger, { left: 42, top: 72, width: 60, height: 32 });
+      mockRect(menu, { left: 8, top: 104, width: 201, height: 439 });
+      mockRect(passThrough, { left: 17, top: 113, width: 184, height: 34 });
+      mockRect(nestedTrigger, { left: 17, top: 228, width: 184, height: 34 });
+      mockHoverStyle([trigger, passThrough, nestedTrigger, finalAction]);
+
+      mouseOver(trigger);
+      mouseOver(passThrough);
+      mockRect(submenu, { left: 201, top: 213, width: 114, height: 267 });
+      mockRect(finalAction, { left: 209, top: 257, width: 97, height: 34 });
+      mouseOver(nestedTrigger);
+      mouseOver(finalAction);
+      vi.runOnlyPendingTimers();
+      click(finalAction);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "hover",
+        target: { tag: "li", name: "多维表格" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("文档C+D");
+      expect(steps[2]).toMatchObject({
+        op: "click",
+        target: { tag: "span", name: "看板视图" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("outputs only one parent path for noisy nested menu hover movement", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T07:02:36.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button">新建</button>
+        <div class="create-menu dropdown-menu">
+          <li class="create-menu-item-doc" tabindex="0">
+            <span class="menu-item-label">文档</span>
+            <span class="text-font-tips">C+D</span>
+          </li>
+          <li class="create-menu-item-vika" tabindex="0" aria-haspopup="menu">
+            <div class="t-dropdown__item-content" tabindex="0">
+              <span class="menu-item-label">多维表格</span>
+            </div>
+          </li>
+        </div>
+        <div class="t-dropdown__submenu-wrapper">
+          <div class="create-submenu-item-vika-kanban" tabindex="0">
+            <div class="create-submenu-item-label" tabindex="0">
+              <span>表格视图</span>
+            </div>
+          </div>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-noisy-nested-path", (step) => steps.push(step));
+      const trigger = document.querySelector("button")!;
+      const menu = document.querySelector(".create-menu")!;
+      const passThrough = document.querySelector(".create-menu-item-doc")!;
+      const nestedTrigger = document.querySelector(".create-menu-item-vika")!;
+      const nestedInner = document.querySelector(".t-dropdown__item-content")!;
+      const submenu = document.querySelector(".t-dropdown__submenu-wrapper")!;
+      const finalItem = document.querySelector(".create-submenu-item-vika-kanban")!;
+      const finalHoverItem = document.querySelector(".create-submenu-item-label")!;
+      const finalAction = document.querySelector(".create-submenu-item-vika-kanban")!;
+      mockRect(trigger, { left: 42, top: 72, width: 60, height: 32 });
+      mockRect(menu, { left: 8, top: 104, width: 201, height: 439 });
+      mockRect(passThrough, { left: 17, top: 113, width: 184, height: 34 });
+      mockRect(nestedTrigger, { left: 17, top: 228, width: 184, height: 34 });
+      mockRect(nestedInner, { left: 25, top: 234, width: 168, height: 22 });
+      mockHoverStyle([
+        trigger,
+        passThrough,
+        nestedTrigger,
+        nestedInner,
+        finalItem,
+        finalHoverItem,
+        finalAction,
+      ]);
+
+      mouseOver(trigger);
+      mouseOver(nestedTrigger);
+      mouseOver(nestedInner);
+      mockRect(submenu, { left: 201, top: 213, width: 114, height: 267 });
+      mockRect(finalItem, { left: 209, top: 257, width: 97, height: 34 });
+      mockRect(finalHoverItem, { left: 209, top: 257, width: 97, height: 34 });
+      mockRect(finalAction, { left: 209, top: 257, width: 97, height: 34 });
+      mouseOver(passThrough);
+      mouseOver(nestedInner);
+      mouseOver(finalHoverItem);
+      vi.runOnlyPendingTimers();
+      click(finalAction);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "hover",
+        target: { name: "多维表格" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("文档C+D");
+      expect(JSON.stringify(steps)).not.toContain('"表格视图","tag":"div"');
+      expect(steps.filter((step) => step.op === "hover")).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not infer sibling items in the same surface as hover openers", () => {
+    document.body.innerHTML = `
+      <button type="button">新建</button>
+      <div class="create-menu dropdown-menu">
+        <li tabindex="0" aria-expanded="false">文档C+D</li>
+        <span tabindex="0">Markdown</span>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-same-surface-action", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".create-menu")!;
+    const category = document.querySelector("li")!;
+    const finalAction = document.querySelector("span")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(menu, { left: 820, top: 48, width: 320, height: 80 });
+    mockRect(category, { left: 820, top: 48, width: 160, height: 32 });
+    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
+    mockHoverStyle([trigger, category, finalAction]);
+
+    mouseOver(trigger);
+    mouseOver(category);
+    mouseOver(finalAction);
+    click(finalAction);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { tag: "span", name: "Markdown" },
+    });
+  });
+
   it("records avatar div hover with a semantic image target", () => {
     document.body.innerHTML = `
       <div class="tg-avatar tg-avatar--img tg-avatar--shape-hexagon">
@@ -630,6 +1104,7 @@ describe("record-capture semantic", () => {
     const capture = startRecordCapture("rec-hover-avatar-div", (step) => steps.push(step));
     const trigger = document.querySelector(".tg-avatar")!;
     const image = document.querySelector("img")!;
+    const menu = document.querySelector(".user-menu")!;
     const item = document.querySelector("a")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -653,6 +1128,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 160, height: 80 });
     vi.spyOn(window, "getComputedStyle").mockReturnValue({
       cursor: "pointer",
       pointerEvents: "auto",
@@ -717,6 +1193,7 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-fill-surface", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".user-menu")!;
     const input = document.querySelector("input")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -729,6 +1206,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 96 });
 
     trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     input.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
@@ -762,6 +1240,7 @@ describe("record-capture semantic", () => {
     `;
     const capture = startRecordCapture("rec-hover-select-surface", (step) => steps.push(step));
     const trigger = document.querySelector("button")!;
+    const menu = document.querySelector(".user-menu")!;
     const select = document.querySelector("select")!;
     vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({
       x: 900,
@@ -774,6 +1253,7 @@ describe("record-capture semantic", () => {
       height: 32,
       toJSON: () => ({}),
     });
+    mockRect(menu, { left: 820, top: 48, width: 180, height: 96 });
 
     trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
     select.value = "away";
