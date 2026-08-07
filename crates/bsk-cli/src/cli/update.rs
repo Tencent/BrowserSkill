@@ -5,6 +5,11 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::process::{Command, Stdio};
+
 use anyhow::{Context, Result, bail};
 use clap::Args;
 use flate2::read::GzDecoder;
@@ -246,20 +251,33 @@ fn run(args: UpdateArgs, format: Format) -> Result<()> {
         InstallAction::Replaced => "replaced",
         InstallAction::Staged => "staged",
     };
+    let (status, message) = match action {
+        InstallAction::Replaced => (
+            "updated",
+            format!(
+                "updated bsk from {} to {}",
+                candidate.current, candidate.latest
+            ),
+        ),
+        InstallAction::Staged => (
+            "staged",
+            format!(
+                "staged bsk {} for replacement after this command exits",
+                candidate.latest
+            ),
+        ),
+    };
 
     render_report(
         format,
         &UpdateReport {
-            status: "updated",
+            status,
             current_version: candidate.current.to_string(),
             latest_version: Some(candidate.latest.to_string()),
             release_url: candidate.release_url,
             asset_url: Some(candidate.asset.url),
             install_action: Some(action_label),
-            message: format!(
-                "updated bsk from {} to {}",
-                candidate.current, candidate.latest
-            ),
+            message,
         },
     )
 }
@@ -335,7 +353,7 @@ fn install_candidate_with_client(
         crate::daemon::start::run_stop().context("stop bsk daemon before update")?;
     }
 
-    let action = replace_binary_at_path(&target, &binary)?;
+    let action = replace_binary_for_update(&target, &binary, daemon_was_running)?;
 
     if daemon_was_running && matches!(action, InstallAction::Replaced) {
         crate::daemon::start::run_start(StartArgs::default())
@@ -502,9 +520,7 @@ fn render_report(format: Format, report: &UpdateReport) -> Result<()> {
                 println!("release: {release_url}");
             }
             if matches!(report.install_action, Some("staged")) {
-                println!(
-                    "restart your terminal and run `bsk --version` to verify the staged update"
-                );
+                println!("the detached update helper will apply the replacement after exit");
             }
         }
         Format::Json => {
@@ -525,13 +541,22 @@ pub fn extract_bsk_binary(archive_bytes: &[u8], kind: ArchiveKind) -> Result<Vec
 }
 
 pub fn replace_binary_at_path(target: &Path, binary: &[u8]) -> Result<InstallAction> {
+    replace_binary_for_update(target, binary, false)
+}
+
+fn replace_binary_for_update(
+    target: &Path,
+    binary: &[u8],
+    restart_daemon: bool,
+) -> Result<InstallAction> {
     #[cfg(windows)]
     {
-        stage_windows_replacement(target, binary)
+        stage_windows_replacement(target, binary, restart_daemon)
     }
 
     #[cfg(not(windows))]
     {
+        let _ = restart_daemon;
         replace_binary_atomically(target, binary)
     }
 }
@@ -574,15 +599,35 @@ fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<InstallActi
 }
 
 #[cfg(windows)]
-fn stage_windows_replacement(target: &Path, binary: &[u8]) -> Result<InstallAction> {
+fn stage_windows_replacement(
+    target: &Path,
+    binary: &[u8],
+    restart_daemon: bool,
+) -> Result<InstallAction> {
     let paths = staged_replacement_paths(target, std::process::id())?;
     std::fs::write(&paths.binary_path, binary)
         .with_context(|| format!("write {}", paths.binary_path.display()))?;
     std::fs::write(
         &paths.script_path,
-        windows_replacement_script(target, &paths.binary_path),
+        windows_replacement_script(target, &paths.binary_path, restart_daemon),
     )
     .with_context(|| format!("write {}", paths.script_path.display()))?;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let command = format!("\"{}\"", paths.script_path.display());
+    if let Err(err) = Command::new("cmd.exe")
+        .args(["/D", "/S", "/C"])
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        let _ = std::fs::remove_file(&paths.binary_path);
+        let _ = std::fs::remove_file(&paths.script_path);
+        return Err(err).context("launch detached Windows update helper");
+    }
     Ok(InstallAction::Staged)
 }
 
@@ -599,19 +644,26 @@ pub fn staged_replacement_paths(target: &Path, pid: u32) -> Result<StagedReplace
     })
 }
 
-#[cfg(windows)]
-fn windows_replacement_script(target: &Path, staged_binary: &Path) -> String {
+#[cfg(any(windows, test))]
+fn windows_replacement_script(target: &Path, staged_binary: &Path, restart_daemon: bool) -> String {
+    let target = target.display().to_string().replace('%', "%%");
+    let staged_binary = staged_binary.display().to_string().replace('%', "%%");
+    let restart = if restart_daemon {
+        format!("start \"\" /B \"{target}\" daemon start >nul 2>nul\r\n")
+    } else {
+        String::new()
+    };
     format!(
         "@echo off\r\n\
          setlocal\r\n\
          :retry\r\n\
-         move /Y \"{}\" \"{}\" >nul 2>nul\r\n\
+         move /Y \"{staged_binary}\" \"{target}\" >nul 2>nul\r\n\
          if errorlevel 1 (\r\n\
            timeout /t 1 /nobreak >nul\r\n\
            goto retry\r\n\
-         )\r\n",
-        staged_binary.display(),
-        target.display()
+         )\r\n\
+         {restart}\
+         del /F /Q \"%~f0\" >nul 2>nul\r\n"
     )
 }
 
@@ -796,6 +848,32 @@ mod tests {
             paths.script_path,
             std::path::Path::new("/tmp/bsk.exe.update-42.cmd")
         );
+    }
+
+    #[test]
+    fn windows_replacement_script_retries_restarts_and_cleans_itself() {
+        let script = windows_replacement_script(
+            Path::new(r"C:\Program Files\bsk.exe"),
+            Path::new(r"C:\Program Files\bsk.exe.update-42"),
+            true,
+        );
+
+        assert!(script.contains(":retry"));
+        assert!(script.contains("move /Y"));
+        assert!(script.contains(r#"start "" /B "C:\Program Files\bsk.exe" daemon start"#));
+        assert!(script.contains(r#"del /F /Q "%~f0""#));
+    }
+
+    #[test]
+    fn windows_replacement_script_omits_restart_when_daemon_was_not_running() {
+        let script = windows_replacement_script(
+            Path::new(r"C:\bsk.exe"),
+            Path::new(r"C:\bsk.exe.update-42"),
+            false,
+        );
+
+        assert!(!script.contains("daemon start"));
+        assert!(script.contains(r#"del /F /Q "%~f0""#));
     }
 
     #[test]
