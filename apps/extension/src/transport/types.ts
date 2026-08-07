@@ -314,8 +314,21 @@ export interface SnapshotResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
-export type ObserveParams = SnapshotParams;
-export type ObserveResult = SnapshotResult;
+export interface ObserveParams extends SnapshotParams {
+  debug_surfaces?: boolean;
+}
+
+export interface ObserveResult extends SnapshotResult {
+  debug?: {
+    surface_probes?: Array<{
+      trigger_backend_node_id: number;
+      trigger_point?: { x: number; y: number };
+      trigger_action: string;
+      sub_items: string[];
+      confidence?: string;
+    }>;
+  };
+}
 
 export interface GetHtmlParams {
   session_id: string;
@@ -402,6 +415,25 @@ export interface ClickParams {
 }
 
 export interface ClickResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  x: number;
+  y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface HoverParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  modifiers?: KeyModifier[];
+  settle_ms?: number;
+  timeout_ms?: number;
+}
+
+export interface HoverResult {
   tab_id: number;
   used_ref?: string;
   used_selector?: string;
@@ -669,6 +701,11 @@ export type DraftTraceStep =
       page_url?: string;
     }
   | {
+      op: "hover";
+      target: TargetDescriptor;
+      page_url?: string;
+    }
+  | {
       op: "fill";
       target: TargetDescriptor;
       value: string;
@@ -701,6 +738,7 @@ export type DraftTraceStep =
 export type Step =
   | ({ op: "navigate" } & StepCommon & { to: string })
   | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
+  | ({ op: "hover" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "fill" } & StepCommon & {
         target: TargetDescriptor;
         value: string;

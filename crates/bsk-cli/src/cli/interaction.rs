@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, PressParams,
-    PressResult, SelectParams, SelectResult,
+    ClickParams, ClickResult, FillParams, FillResult, HoverParams, HoverResult, KeyModifier,
+    MouseButton, PressParams, PressResult, SelectParams, SelectResult,
 };
 use clap::{Args, ValueEnum};
 
@@ -181,6 +181,91 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
                 format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
             println!(
                 "click ok tab={} target={target} at=({}, {})",
+                reply.tab_id, reply.x, reply.y
+            );
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bsk hover
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Args)]
+pub struct HoverArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector. Optional when `--ref`/`--selector` is used.
+    pub target: Option<String>,
+
+    /// Force-treat the value as a snapshot ref (overrides positional detection).
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    /// Force-treat the value as a CSS selector.
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    #[arg(long)]
+    pub session: String,
+
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+
+    /// Comma-separated modifiers (`alt,ctrl,shift,meta`).
+    #[arg(long, default_value = "")]
+    pub modifiers: String,
+
+    /// Wait after moving the mouse so hover-triggered UI can settle.
+    #[arg(long = "settle", default_value = "200ms", value_parser = parse_timeout_ms)]
+    pub settle: u32,
+
+    #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+}
+
+pub fn dispatch_hover(args: HoverArgs, format: Format) -> Result<(), CliError> {
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    let (ref_, selector) = split_target(
+        args.target.clone(),
+        args.ref_.clone(),
+        args.selector.clone(),
+    )?;
+    let modifiers = parse_modifiers(&args.modifiers)
+        .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    let params = HoverParams {
+        session_id: args.session.clone(),
+        ref_,
+        selector,
+        tab_id: args.tab_id,
+        modifiers: if modifiers.is_empty() {
+            None
+        } else {
+            Some(modifiers)
+        },
+        settle_ms: Some(args.settle),
+        timeout_ms: Some(args.timeout),
+    };
+    let reply: HoverResult = call(
+        info.sock_path,
+        Method::ToolHover,
+        params,
+        "hover-1",
+        args.timeout,
+    )?;
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply)
+                    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            let target =
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+            println!(
+                "hover ok tab={} target={target} at=({}, {})",
                 reply.tab_id, reply.x, reply.y
             );
             print_dialog_summaries(&reply.dialogs);

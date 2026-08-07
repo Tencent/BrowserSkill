@@ -8,6 +8,16 @@
     "text"
   ],
   "properties": {
+    "debug": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObserveDebug"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "dialogs": {
       "type": "array",
       "items": {
@@ -103,6 +113,73 @@
         "prompt",
         "beforeunload"
       ]
+    },
+    "ObserveDebug": {
+      "type": "object",
+      "properties": {
+        "surface_probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SurfaceProbeDebug"
+          }
+        }
+      }
+    },
+    "SurfaceProbeDebug": {
+      "type": "object",
+      "required": [
+        "sub_items",
+        "trigger_action",
+        "trigger_backend_node_id"
+      ],
+      "properties": {
+        "confidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sub_items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "trigger_action": {
+          "type": "string"
+        },
+        "trigger_backend_node_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "trigger_point": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SurfaceProbePoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SurfaceProbePoint": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      }
     }
   }
 }

@@ -7,6 +7,11 @@
     "session_id"
   ],
   "properties": {
+    "debug_surfaces": {
+      "description": "Include implementation diagnostics for conditional surface probes.",
+      "default": false,
+      "type": "boolean"
+    },
     "max_depth": {
       "description": "Cap the depth of the rendered VOM tree.",
       "type": [

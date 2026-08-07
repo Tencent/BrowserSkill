@@ -188,6 +188,24 @@ fn parses_click_count_alias() {
 }
 
 #[test]
+fn parses_hover_with_settle() {
+    let cli = parse(&[
+        "bsk",
+        "hover",
+        "@e1",
+        "--session",
+        "s1",
+        "--settle",
+        "300ms",
+    ]);
+    let Command::Hover(args) = cli.command else {
+        panic!("expected hover command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e1"));
+    assert_eq!(args.settle, 300);
+}
+
+#[test]
 fn rejects_zero_click_count() {
     assert!(
         Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s1", "--count", "0"]).is_err()

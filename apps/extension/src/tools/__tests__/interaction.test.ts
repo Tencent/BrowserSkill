@@ -4,6 +4,7 @@ import type { CdpRunner } from "@/tools/shared";
 import {
   handleClick,
   handleFill,
+  handleHover,
   handlePress,
   handleSelect,
   modifiersBitfield,
@@ -432,6 +433,50 @@ describe("handleClick", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.filter((c) => c.method === "Input.dispatchMouseEvent")).toHaveLength(1);
+  });
+});
+
+describe("handleHover", () => {
+  it("keeps overlay bypass enabled after a successful hover when requested", async () => {
+    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Runtime.evaluate": (params: unknown) => {
+        const expr = String((params as { expression?: string })?.expression ?? "");
+        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
+          return { result: { value: { overlayHostPresent: true, overlayHostConnected: true } } };
+        }
+        if (expr.includes("hitIndex")) {
+          return {
+            result: {
+              value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
+            },
+          };
+        }
+        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
+      },
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+
+    const res = await handleHover(
+      sm,
+      { session_id: "aa11", ref: "@e3", settle_ms: 0 },
+      {
+        cdp: fake.cdp,
+        tabsApi: fake.tabsApi,
+        bypassOverlay,
+        keepOverlayBypassAfterHover: true,
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
+    expect(bypassOverlay).toHaveBeenCalledTimes(1);
+    expect(bypassOverlay).toHaveBeenCalledWith(4, true);
   });
 });
 

@@ -197,7 +197,7 @@ function shouldRender(node: VomNode): boolean {
   return cleaned(node.name) !== undefined;
 }
 
-function shouldReference(node: VomNode): boolean {
+export function isVomReferenceNode(node: VomNode): boolean {
   return INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node);
 }
 
@@ -342,7 +342,7 @@ function isAncestorOf(
   return false;
 }
 
-function applyRecovery(nodes: VomNode[]): VomNode[] {
+export function applyVomInteractionRecovery(nodes: VomNode[]): VomNode[] {
   const parentMap = buildParentMap(nodes);
   const children = buildChildren(nodes);
   const recoveredIds = new Set<number>();
@@ -350,7 +350,7 @@ function applyRecovery(nodes: VomNode[]): VomNode[] {
   const recoveredNameById = new Map<number, string>();
 
   for (const node of nodes) {
-    if (shouldReference(node)) continue;
+    if (isVomReferenceNode(node)) continue;
     const role = recoveredRole(node, children);
     if (!role || !passesRecoveryGuards(node, children)) continue;
     recoveredIds.add(node.id);
@@ -397,7 +397,7 @@ function buildChildren(nodes: VomNode[]): Map<number | null, VomNode[]> {
 function duplicateReferenceNames(nodes: VomNode[]): Set<string> {
   const counts = new Map<string, number>();
   for (const node of nodes) {
-    if (!shouldReference(node)) continue;
+    if (!isVomReferenceNode(node)) continue;
     const name = cleaned(node.name);
     if (!name) continue;
     const key = normalizeContextKey(name);
@@ -427,7 +427,7 @@ function contextLabel(node: VomNode, targetName: string): string | undefined {
 }
 
 function weakLabelContext(node: VomNode, targetName: string): string | undefined {
-  if (shouldReference(node)) return undefined;
+  if (isVomReferenceNode(node)) return undefined;
   return weakContextText(
     cleaned(node.name) ?? cleaned(node.text) ?? cleaned(node.nearbyText),
     targetName,
@@ -509,7 +509,7 @@ function collectWeakLabelsFromSubtree(
   state: RenderState,
   labels: string[],
 ): void {
-  if (shouldReference(node)) return;
+  if (isVomReferenceNode(node)) return;
   const label = weakLabelContext(node, nodeName);
   if (label) {
     labels.push(label);
@@ -637,7 +637,9 @@ function renderNodeLine(
   if (surface && surface.subItems.length > 0) {
     const items = surface.subItems.slice(0, MAX_SURFACE_ITEMS).join(" | ");
     const suffix = surface.subItems.length > MAX_SURFACE_ITEMS ? " | …" : "";
-    line += ` [${surface.triggerAction}: ${items}${suffix}]`;
+    const action =
+      surface.triggerAction === "hover" ? "hover first" : `${surface.triggerAction} first`;
+    line += ` [${action}: ${items}${suffix}]`;
   }
 
   return line;
@@ -664,7 +666,7 @@ function descendantTextCoveredByName(node: VomNode, state: RenderState): boolean
   const texts: string[] = [];
   while (stack.length > 0) {
     const child = stack.pop() as VomNode;
-    if (shouldReference(child)) return false;
+    if (isVomReferenceNode(child)) return false;
     const text = cleaned(child.name) ?? cleaned(child.text) ?? cleaned(child.value);
     if (text) texts.push(text);
     stack.push(...(state.children.get(child.id) ?? []));
@@ -748,7 +750,7 @@ function renderTree(
       continue;
     }
 
-    const ref = shouldReference(node) ? `e${state.nextRef}` : undefined;
+    const ref = isVomReferenceNode(node) ? `e${state.nextRef}` : undefined;
     const context = ref ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
     const line = renderNodeLine(node, depth, ref, context, surface);
@@ -913,7 +915,7 @@ function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {
-    if (!shouldReference(target)) continue;
+    if (!isVomReferenceNode(target)) continue;
     const blocked = candidates.some((candidate) =>
       isBlockedByRegion(target, candidate.node, parentMap, candidate.viewportCoverage),
     );
@@ -968,7 +970,7 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
 }
 
 export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult {
-  const nodes = applyRecovery(scene.nodes);
+  const nodes = applyVomInteractionRecovery(scene.nodes);
   const renderScene = { ...scene, nodes };
   const layer = detectBlockingLayer(nodes, scene.viewport);
   if (layer) return renderDoubleLayer(renderScene, layer, options);

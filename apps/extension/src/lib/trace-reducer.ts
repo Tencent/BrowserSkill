@@ -139,6 +139,13 @@ function toV2Step(
         },
         effectForNavigation(step.navigated_to, urlToId),
       );
+    case "hover":
+      return {
+        op: "hover",
+        id,
+        page,
+        target: step.target,
+      };
     case "fill":
       return {
         op: "fill",

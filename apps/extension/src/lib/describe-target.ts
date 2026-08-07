@@ -228,6 +228,20 @@ export function resolveClickableElement(target: Element): Element | null {
   return null;
 }
 
+export function resolveHoverElement(target: Element): Element | null {
+  const clickable = resolveClickableElement(target);
+  if (clickable) return clickable;
+
+  let node: Element | null = target;
+  let depth = 0;
+  while (node && node !== document.body && node !== document.documentElement && depth < 8) {
+    if (looksClickable(node)) return node;
+    node = node.parentElement;
+    depth += 1;
+  }
+  return null;
+}
+
 /**
  * Teachable clicks: the LLM must get a label it can later find via snapshot
  * (visible name), or at least a form `name_attr` for checkbox/radio.
