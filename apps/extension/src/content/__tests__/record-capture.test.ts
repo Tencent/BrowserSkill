@@ -1150,6 +1150,107 @@ describe("record-capture semantic", () => {
     });
   });
 
+  it("does not let unrelated topbar hovers or menu pass-through items own an avatar menu", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T08:08:45.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button" aria-label="Star">Star</button>
+        <div class="tg-avatar tg-avatar--img tg-avatar--shape-hexagon">
+          <img class="tg-avatar__image" />
+        </div>
+        <ul class="user-menu dropdown-menu">
+          <li><a href="/u/me">My profile</a></li>
+          <li><a href="/dashboard/groups">My groups</a></li>
+        </ul>
+      `;
+      const star = document.querySelector("button")!;
+      const avatar = document.querySelector(".tg-avatar")!;
+      const image = document.querySelector("img")!;
+      const menu = document.querySelector(".user-menu")!;
+      const profile = document.querySelector('a[href="/u/me"]')!;
+      const groups = document.querySelector('a[href="/dashboard/groups"]')!;
+      let menuRect = { left: 0, top: 0, width: 0, height: 0 };
+      let profileRect = { left: 0, top: 0, width: 0, height: 0 };
+      let groupsRect = { left: 0, top: 0, width: 0, height: 0 };
+      mockRect(star, { left: 760, top: 8, width: 60, height: 32 });
+      mockRect(avatar, { left: 900, top: 8, width: 32, height: 32 });
+      mockRect(image, { left: 900, top: 8, width: 32, height: 32 });
+      vi.spyOn(menu, "getBoundingClientRect").mockImplementation(
+        () =>
+          ({
+            x: menuRect.left,
+            y: menuRect.top,
+            top: menuRect.top,
+            left: menuRect.left,
+            right: menuRect.left + menuRect.width,
+            bottom: menuRect.top + menuRect.height,
+            width: menuRect.width,
+            height: menuRect.height,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      vi.spyOn(profile, "getBoundingClientRect").mockImplementation(
+        () =>
+          ({
+            x: profileRect.left,
+            y: profileRect.top,
+            top: profileRect.top,
+            left: profileRect.left,
+            right: profileRect.left + profileRect.width,
+            bottom: profileRect.top + profileRect.height,
+            width: profileRect.width,
+            height: profileRect.height,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      vi.spyOn(groups, "getBoundingClientRect").mockImplementation(
+        () =>
+          ({
+            x: groupsRect.left,
+            y: groupsRect.top,
+            top: groupsRect.top,
+            left: groupsRect.left,
+            right: groupsRect.left + groupsRect.width,
+            bottom: groupsRect.top + groupsRect.height,
+            width: groupsRect.width,
+            height: groupsRect.height,
+            toJSON: () => ({}),
+          }) as DOMRect,
+      );
+      mockHoverStyle([star, avatar, image, profile, groups]);
+      const capture = startRecordCapture("rec-hover-avatar-menu-pass-through", (step) =>
+        steps.push(step),
+      );
+
+      mouseOver(star);
+      mouseOver(avatar);
+      mouseOver(image);
+      menuRect = { left: 820, top: 48, width: 160, height: 96 };
+      profileRect = { left: 830, top: 56, width: 120, height: 28 };
+      groupsRect = { left: 830, top: 88, width: 120, height: 28 };
+      vi.runOnlyPendingTimers();
+      mouseOver(profile);
+      mouseOver(groups);
+      click(groups);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { tag: "img", role: "img", name: "image" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "click",
+        target: { role: "link", name: "My groups" },
+      });
+      expect(JSON.stringify(steps)).not.toContain("Star");
+      expect(JSON.stringify(steps)).not.toContain("My profile");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not record hover before an unrelated page click", () => {
     document.body.innerHTML = `
       <button type="button" aria-label="Open user navigation menu">avatar</button>

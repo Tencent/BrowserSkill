@@ -27,9 +27,9 @@ const HOVER_SURFACE_SELECTOR = [
 ].join(",");
 
 const HOVER_SURFACE_WORD_RE =
-  /(^|[^a-z0-9])(menu|dropdown|drop-down|popover|popper|popup|tooltip|flyout|submenu|context-menu|account-menu|user-menu|avatar-menu)(?=[^a-z0-9]|$)/i;
+  /(^|[^a-z0-9])(dropdown-menu|drop-down-menu|menu-list|popover__(popper|content|content-body)|popover-content|popper|popup|flyout|submenu|submenu-wrapper|context-menu|account-menu|user-menu|avatar-menu)(?=[^a-z0-9]|$)/i;
 const HOVER_SURFACE_ITEM_RE =
-  /(^|[^a-z0-9])((dropdown|menu|submenu|context-menu)-?item|item-(text|label|content)|item__?(text|label|content))(?=[^a-z0-9]|$)/i;
+  /(^|[^a-z0-9])((dropdown|menu|submenu|context-menu)(-|__?)?(item|link)|item-(text|label|content)|item__?(text|label|content))(?=[^a-z0-9]|$)/i;
 const HOVER_SURFACE_MAX_AXIS_GAP = 96;
 const HOVER_SURFACE_MAX_DIAGONAL_GAP = 16;
 const HOVER_SURFACE_MAX_VIEWPORT_AREA_RATIO = 0.5;
@@ -53,10 +53,6 @@ export function isRecognizedHoverSurfaceElement(el: Element): boolean {
   const tokenText = elementTokenText(el);
   if (HOVER_SURFACE_WORD_RE.test(tokenText) && !HOVER_SURFACE_ITEM_RE.test(tokenText)) {
     return true;
-  }
-  const tag = el.tagName.toLowerCase();
-  if ((tag === "ul" || tag === "ol") && el.querySelector("a,button,[role='menuitem']")) {
-    return HOVER_SURFACE_WORD_RE.test(elementTokenText(el.parentElement ?? el));
   }
   return false;
 }
@@ -84,7 +80,7 @@ export function closestRecognizedHoverSurface(element: Element): Element | null 
 export function isPositionedFloatingElement(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false;
   const style = getComputedStyle(el);
-  if (!["absolute", "fixed"].includes(style.position)) return false;
+  if (style.position !== "absolute") return false;
   if (style.pointerEvents === "none" || style.visibility === "hidden" || style.display === "none") {
     return false;
   }
@@ -149,10 +145,10 @@ function rectFor(el: Element): DOMRect | null {
   return rect;
 }
 
-function isNearTrigger(surface: Element, trigger: Element): boolean {
+function surfaceRelationMetrics(surface: Element, trigger: Element) {
   const surfaceRect = rectFor(surface);
   const triggerRect = rectFor(trigger);
-  if (!surfaceRect || !triggerRect) return true;
+  if (!surfaceRect || !triggerRect) return null;
   const horizontalOverlap =
     Math.min(triggerRect.right, surfaceRect.right) - Math.max(triggerRect.left, surfaceRect.left);
   const verticalOverlap =
@@ -167,11 +163,52 @@ function isNearTrigger(surface: Element, trigger: Element): boolean {
     triggerRect.top - surfaceRect.bottom,
     surfaceRect.top - triggerRect.bottom,
   );
+  return {
+    surfaceRect,
+    triggerRect,
+    horizontalOverlap,
+    verticalOverlap,
+    horizontalGap,
+    verticalGap,
+  };
+}
+
+function isNearTrigger(surface: Element, trigger: Element): boolean {
+  const metrics = surfaceRelationMetrics(surface, trigger);
+  if (!metrics) return true;
+  const { horizontalOverlap, verticalOverlap, horizontalGap, verticalGap } = metrics;
   if (horizontalOverlap > 0 && verticalGap <= HOVER_SURFACE_MAX_AXIS_GAP) return true;
   if (verticalOverlap > 0 && horizontalGap <= HOVER_SURFACE_MAX_AXIS_GAP) return true;
   return (
     horizontalGap <= HOVER_SURFACE_MAX_DIAGONAL_GAP && verticalGap <= HOVER_SURFACE_MAX_DIAGONAL_GAP
   );
+}
+
+export function isLikelyHoverSurfaceOwner(trigger: Element, surface: Element): boolean {
+  const metrics = surfaceRelationMetrics(surface, trigger);
+  if (!metrics) return true;
+  const {
+    surfaceRect,
+    triggerRect,
+    horizontalOverlap,
+    verticalOverlap,
+    horizontalGap,
+    verticalGap,
+  } = metrics;
+  const opensVertically =
+    horizontalOverlap > 0 &&
+    verticalGap <= HOVER_SURFACE_MAX_AXIS_GAP &&
+    (triggerRect.bottom <= surfaceRect.top + 8 || surfaceRect.bottom <= triggerRect.top + 8);
+  const opensSideways =
+    verticalOverlap > 0 &&
+    horizontalGap <= HOVER_SURFACE_MAX_AXIS_GAP &&
+    (triggerRect.right <= surfaceRect.left + 8 || surfaceRect.right <= triggerRect.left + 8);
+  const opensFromCorner =
+    horizontalGap > 0 &&
+    verticalGap > 0 &&
+    horizontalGap <= HOVER_SURFACE_MAX_DIAGONAL_GAP &&
+    verticalGap <= HOVER_SURFACE_MAX_DIAGONAL_GAP;
+  return opensVertically || opensSideways || opensFromCorner;
 }
 
 export function decideHoverSurfaceRelation(

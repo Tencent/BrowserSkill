@@ -34,6 +34,7 @@ import {
   decideHoverSurfaceRelation,
   type HoverSurfaceState,
   isHoverSurfaceCandidateElement,
+  isLikelyHoverSurfaceOwner,
 } from "./record-hover-surface";
 
 const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
@@ -376,6 +377,8 @@ export function startRecordCapture(
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
   };
+  const hoverSurfaceStateMap = (states: HoverSurfaceState[]): Map<Element, string> =>
+    new Map(states.map((state) => [state.element, state.signature]));
   let fillSession: FillSession | null = null;
   let composing = false;
   let lastUrl = location.href;
@@ -383,7 +386,7 @@ export function startRecordCapture(
   let pendingHover: HoverCandidate | null = null;
   const recentHoverCandidates: HoverCandidate[] = [];
   const emittedHoverElements = new WeakSet<Element>();
-  let hoverSurfaceStates = new Map<Element, string>();
+  let hoverSurfaceStates = hoverSurfaceStateMap(collectHoverSurfaceStates());
   const hoverSurfaceNodes = new Map<Element, HoverSurfaceNode>();
   let generatedControlClick: Element | null = null;
   let navigationActionPending = false;
@@ -490,13 +493,58 @@ export function startRecordCapture(
     states: HoverSurfaceState[],
   ): HoverSurfaceState | undefined => smallestContaining(target, states, (state) => state.element);
 
+  const inferOwnerForSurface = (
+    surface: Element,
+    now: number,
+    before?: HoverCandidate,
+  ): HoverCandidate | undefined => {
+    for (let index = recentHoverCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = recentHoverCandidates[index];
+      if (!candidate) continue;
+      if (before && candidate.element === before.element) continue;
+      if (before && candidate.recordedAt > before.recordedAt) continue;
+      if (surface.contains(candidate.element)) continue;
+      if (now - candidate.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
+      if (isLikelyHoverSurfaceOwner(candidate.element, surface)) return candidate;
+    }
+    return undefined;
+  };
+
+  const nodeForUnownedSurface = (
+    surfaceState: HoverSurfaceState,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ): HoverSurfaceNode | undefined => {
+    const owner = inferOwnerForSurface(surfaceState.element, now);
+    if (!owner) return undefined;
+    const parent = parentSurfaceNodeForOwner(owner, currentStates, now);
+    const node: HoverSurfaceNode = {
+      element: surfaceState.element,
+      signature: surfaceState.signature,
+      owner,
+      ...(parent ? { parent } : {}),
+    };
+    hoverSurfaceNodes.set(surfaceState.element, node);
+    return node;
+  };
+
   const ownedSurfaceForAction = (target: Element): HoverSurfaceNode | undefined => {
     const closestSurface = closestHoverSurfaceCandidate(target);
     if (closestSurface) {
       const owned = hoverSurfaceNodes.get(closestSurface);
       if (owned) return owned;
     }
-    return ownedSurfaceContaining(target);
+    const ownedContaining = ownedSurfaceContaining(target);
+    if (ownedContaining) return ownedContaining;
+    const now = Date.now();
+    const currentStates = collectHoverSurfaceStates();
+    pruneGoneHoverSurfaces(currentStates);
+    const surfaceState = closestSurface
+      ? currentStates.find((state) => state.element === closestSurface)
+      : surfaceStateContaining(target, currentStates);
+    hoverSurfaceStates = hoverSurfaceStateMap(currentStates);
+    if (!surfaceState) return undefined;
+    return nodeForUnownedSurface(surfaceState, currentStates, now);
   };
 
   const pruneGoneHoverSurfaces = (currentStates: HoverSurfaceState[]) => {
@@ -504,23 +552,6 @@ export function startRecordCapture(
     for (const element of hoverSurfaceNodes.keys()) {
       if (!current.has(element)) hoverSurfaceNodes.delete(element);
     }
-  };
-
-  const inferOwnerForParentSurface = (
-    surface: Element,
-    childOwner: HoverCandidate,
-    now: number,
-  ): HoverCandidate | undefined => {
-    for (let index = recentHoverCandidates.length - 1; index >= 0; index -= 1) {
-      const candidate = recentHoverCandidates[index];
-      if (!candidate || candidate.element === childOwner.element) continue;
-      if (surface.contains(candidate.element)) continue;
-      if (candidate.recordedAt > childOwner.recordedAt) continue;
-      if (now - candidate.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
-      const relation = decideHoverSurfaceRelation({ triggerElement: candidate.element }, surface);
-      if (relation.related) return candidate;
-    }
-    return undefined;
   };
 
   const parentSurfaceNodeForOwner = (
@@ -532,7 +563,7 @@ export function startRecordCapture(
     if (ownedParent) return ownedParent;
     const parentState = surfaceStateContaining(owner.element, currentStates);
     if (!parentState) return undefined;
-    const parentOwner = inferOwnerForParentSurface(parentState.element, owner, now);
+    const parentOwner = inferOwnerForSurface(parentState.element, now, owner);
     if (!parentOwner) return undefined;
     const parentNode: HoverSurfaceNode = {
       element: parentState.element,
@@ -543,44 +574,49 @@ export function startRecordCapture(
     return parentNode;
   };
 
-  const bindOwnedHoverSurfaces = (
+  const createSurfaceNode = (
+    state: HoverSurfaceState,
     owner: HoverCandidate,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ): HoverSurfaceNode | undefined => {
+    const parent = parentSurfaceNodeForOwner(owner, currentStates, now);
+    if (parent?.element === state.element) return undefined;
+    if (now - owner.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) return undefined;
+    if (!isLikelyHoverSurfaceOwner(owner.element, state.element)) return undefined;
+    const node: HoverSurfaceNode = {
+      element: state.element,
+      signature: state.signature,
+      owner,
+      ...(parent ? { parent } : {}),
+    };
+    hoverSurfaceNodes.set(state.element, node);
+    return node;
+  };
+
+  const bindChangedHoverSurfaces = (
     previousStates: Map<Element, string>,
     currentStates: HoverSurfaceState[],
     now: number,
   ) => {
-    const parent = parentSurfaceNodeForOwner(owner, currentStates, now);
     for (const state of currentStates) {
       if (previousStates.get(state.element) === state.signature) continue;
-      if (state.element.contains(owner.element)) continue;
-      if (parent?.element === state.element) continue;
-      const relation = decideHoverSurfaceRelation({ triggerElement: owner.element }, state.element);
-      if (!relation.related || now - owner.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
-      hoverSurfaceNodes.set(state.element, {
-        element: state.element,
-        signature: state.signature,
-        owner,
-        ...(parent ? { parent } : {}),
-      });
+      const owner = inferOwnerForSurface(state.element, now);
+      if (!owner) continue;
+      createSurfaceNode(state, owner, currentStates, now);
     }
   };
 
-  const refreshCausedHoverSurfaces = (
-    owner: HoverCandidate,
-    previousStates = hoverSurfaceStates,
-  ) => {
+  const refreshHoverSurfaces = (previousStates = hoverSurfaceStates) => {
     const now = Date.now();
     const currentStates = collectHoverSurfaceStates();
     pruneGoneHoverSurfaces(currentStates);
-    bindOwnedHoverSurfaces(owner, previousStates, currentStates, now);
-    hoverSurfaceStates = new Map(currentStates.map((state) => [state.element, state.signature]));
+    bindChangedHoverSurfaces(previousStates, currentStates, now);
+    hoverSurfaceStates = hoverSurfaceStateMap(currentStates);
   };
 
-  const scheduleCausedHoverSurfaceRefresh = (
-    hover: HoverCandidate,
-    previousStates: Map<Element, string>,
-  ) => {
-    setTimeout(() => refreshCausedHoverSurfaces(hover, previousStates), 0);
+  const scheduleHoverSurfaceRefresh = (previousStates: Map<Element, string>) => {
+    setTimeout(() => refreshHoverSurfaces(previousStates), 0);
   };
 
   const emitHoverStep = (hover: HoverCandidate) => {
@@ -619,6 +655,21 @@ export function startRecordCapture(
     return chain;
   };
 
+  const containedHoverOwnerForAction = (
+    actionElement: Element,
+    now: number,
+  ): HoverCandidate | undefined => {
+    for (let index = recentHoverCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = recentHoverCandidates[index];
+      if (!candidate) continue;
+      if (candidate.element === actionElement) continue;
+      if (!candidate.element.contains(actionElement)) continue;
+      if (now - candidate.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
+      return candidate;
+    }
+    return undefined;
+  };
+
   const emitClick = (event: MouseEvent) => {
     // Only record clicks an LLM can re-identify (named interactive controls).
     const target = describeEventTarget(eventTarget(event));
@@ -635,7 +686,13 @@ export function startRecordCapture(
     if (!(actionTarget instanceof Element)) return;
     const actionElement = resolveClickableElement(actionTarget) ?? actionTarget;
     const surface = ownedSurfaceForAction(actionElement);
-    const hoverChain = surface ? surfaceOwnerChain(surface, actionElement, Date.now()) : [];
+    const now = Date.now();
+    const containedOwner = surface ? undefined : containedHoverOwnerForAction(actionElement, now);
+    const hoverChain = surface
+      ? surfaceOwnerChain(surface, actionElement, now)
+      : containedOwner
+        ? [containedOwner]
+        : [];
     if (hoverChain.length === 0) {
       pendingHover = null;
       return;
@@ -656,8 +713,8 @@ export function startRecordCapture(
     if (candidate) {
       const previousSurfaceStates = new Map(hoverSurfaceStates);
       rememberHoverCandidate(candidate);
-      refreshCausedHoverSurfaces(candidate, previousSurfaceStates);
-      scheduleCausedHoverSurfaceRefresh(candidate, previousSurfaceStates);
+      refreshHoverSurfaces(previousSurfaceStates);
+      scheduleHoverSurfaceRefresh(previousSurfaceStates);
     }
     const hover = candidate?.eligible ? candidate : null;
     if (pendingHover && target instanceof Element) {
