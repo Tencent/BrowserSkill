@@ -126,3 +126,202 @@ jobs:
           make_latest: false
           generate_release_notes: true
           files: dist/*.zip
+
+  publish-cws:
+    needs: [resolve, build-extension]
+    runs-on: ubuntu-latest
+    environment: chrome-web-store
+    permissions:
+      contents: read
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: extension-zip
+          path: dist
+
+      - name: Validate Chrome Web Store configuration
+        shell: bash
+        env:
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PUBLISHER_ID" ]; then
+            echo "::error::Repository variable CHROME_WEBSTORE_PUBLISHER_ID is not configured"
+            exit 1
+          fi
+          if [ -z "$EXTENSION_ID" ]; then
+            echo "::error::Repository variable CHROME_WEBSTORE_EXTENSION_ID is not configured"
+            exit 1
+          fi
+
+          ARCHIVE="$(find dist -maxdepth 1 -name '*.zip' -type f -print -quit)"
+          if [ -z "$ARCHIVE" ]; then
+            echo "::error::No extension zip found in the downloaded artifact"
+            exit 1
+          fi
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Authenticate with service account
+        id: cws-auth
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.CHROME_WEBSTORE_SERVICE_ACCOUNT_JSON }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { sign } from "node:crypto";
+          import { appendFileSync } from "node:fs";
+
+          const rawCredentials = process.env.SERVICE_ACCOUNT_JSON;
+          if (!rawCredentials) {
+            throw new Error(
+              "Repository secret CHROME_WEBSTORE_SERVICE_ACCOUNT_JSON is not configured",
+            );
+          }
+
+          let credentials;
+          try {
+            credentials = JSON.parse(rawCredentials);
+          } catch {
+            throw new Error(
+              "Repository secret CHROME_WEBSTORE_SERVICE_ACCOUNT_JSON is not valid JSON",
+            );
+          }
+          if (!credentials.client_email || !credentials.private_key) {
+            throw new Error(
+              "Service account JSON must contain client_email and private_key",
+            );
+          }
+
+          const encode = (value) =>
+            Buffer.from(JSON.stringify(value)).toString("base64url");
+          const issuedAt = Math.floor(Date.now() / 1000);
+          const header = {
+            alg: "RS256",
+            typ: "JWT",
+            kid: credentials.private_key_id,
+          };
+          const claim = {
+            iss: credentials.client_email,
+            scope: "https://www.googleapis.com/auth/chromewebstore",
+            aud: "https://oauth2.googleapis.com/token",
+            iat: issuedAt,
+            exp: issuedAt + 3600,
+          };
+          const unsignedJwt = `${encode(header)}.${encode(claim)}`;
+          const signature = sign(
+            "RSA-SHA256",
+            Buffer.from(unsignedJwt),
+            credentials.private_key,
+          ).toString("base64url");
+          const assertion = `${unsignedJwt}.${signature}`;
+
+          const response = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+              assertion,
+            }),
+          });
+          const responseText = await response.text();
+          if (!response.ok) {
+            throw new Error(
+              `Service account token exchange failed (${response.status}): ${responseText}`,
+            );
+          }
+
+          const tokenResponse = JSON.parse(responseText);
+          if (!tokenResponse.access_token) {
+            throw new Error("Service account token response has no access_token");
+          }
+
+          console.log(`::add-mask::${tokenResponse.access_token}`);
+          appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `access_token=${tokenResponse.access_token}\n`,
+          );
+          NODE
+
+      - name: Upload and publish Chrome Web Store extension
+        shell: bash
+        env:
+          ACCESS_TOKEN: ${{ steps.cws-auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          ITEM_NAME="publishers/${PUBLISHER_ID}/items/${EXTENSION_ID}"
+          API_ROOT="https://chromewebstore.googleapis.com"
+          UPLOAD_RESPONSE="$RUNNER_TEMP/cws-upload-response.json"
+          STATUS_RESPONSE="$RUNNER_TEMP/cws-status-response.json"
+          PUBLISH_RESPONSE="$RUNNER_TEMP/cws-publish-response.json"
+
+          HTTP_STATUS="$(curl --silent --show-error \
+            --output "$UPLOAD_RESPONSE" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer $ACCESS_TOKEN" \
+            --header "Content-Type: application/zip" \
+            --data-binary "@$ARCHIVE" \
+            "$API_ROOT/upload/v2/$ITEM_NAME:upload")"
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "::error::Chrome Web Store upload failed with HTTP $HTTP_STATUS"
+            jq . "$UPLOAD_RESPONSE" || cat "$UPLOAD_RESPONSE"
+            exit 1
+          fi
+
+          UPLOAD_STATE="$(jq -r '.uploadState // empty' "$UPLOAD_RESPONSE")"
+          echo "Chrome Web Store upload state: $UPLOAD_STATE"
+
+          if [ "$UPLOAD_STATE" = "IN_PROGRESS" ] || [ "$UPLOAD_STATE" = "UPLOAD_IN_PROGRESS" ]; then
+            for attempt in $(seq 1 30); do
+              sleep 5
+              HTTP_STATUS="$(curl --silent --show-error \
+                --output "$STATUS_RESPONSE" \
+                --write-out '%{http_code}' \
+                --header "Authorization: Bearer $ACCESS_TOKEN" \
+                "$API_ROOT/v2/$ITEM_NAME:fetchStatus")"
+              if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+                echo "::error::Chrome Web Store status check failed with HTTP $HTTP_STATUS"
+                jq . "$STATUS_RESPONSE" || cat "$STATUS_RESPONSE"
+                exit 1
+              fi
+
+              UPLOAD_STATE="$(jq -r '.lastAsyncUploadState // empty' "$STATUS_RESPONSE")"
+              echo "Upload status check $attempt/30: $UPLOAD_STATE"
+              if [ "$UPLOAD_STATE" = "SUCCEEDED" ]; then
+                break
+              fi
+              if [ "$UPLOAD_STATE" != "IN_PROGRESS" ] && [ "$UPLOAD_STATE" != "UPLOAD_IN_PROGRESS" ]; then
+                echo "::error::Chrome Web Store upload did not succeed: $UPLOAD_STATE"
+                jq . "$STATUS_RESPONSE"
+                exit 1
+              fi
+            done
+          fi
+
+          if [ "$UPLOAD_STATE" != "SUCCEEDED" ]; then
+            echo "::error::Chrome Web Store upload did not complete: $UPLOAD_STATE"
+            jq . "$UPLOAD_RESPONSE"
+            exit 1
+          fi
+
+          HTTP_STATUS="$(curl --silent --show-error \
+            --output "$PUBLISH_RESPONSE" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer $ACCESS_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{"publishType":"DEFAULT_PUBLISH"}' \
+            "$API_ROOT/v2/$ITEM_NAME:publish")"
+          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
+            echo "::error::Chrome Web Store publish failed with HTTP $HTTP_STATUS"
+            jq . "$PUBLISH_RESPONSE" || cat "$PUBLISH_RESPONSE"
+            exit 1
+          fi
+
+          echo "Chrome Web Store submission created successfully:"
+          jq '{itemId, state, warningInfo}' "$PUBLISH_RESPONSE"
