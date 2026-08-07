@@ -26,6 +26,7 @@ export interface HoverTriggerDecision {
 const HOVER_TRIGGER_MIN_SCORE = 45;
 const HOVER_POPUP_SIGNAL_RE =
   /(menu|dropdown|popover|popup|avatar|profile|account|user|more|ellipsis|caret)/;
+const HOVER_TEXT_ITEM_RE = /(^|[\s_-])(dropdown-item|menu-item|context-menu-item|option)($|[\s_-])/;
 
 function attr(signals: HoverTriggerSignals, name: string): string | undefined {
   return signals.attrs?.[name.toLowerCase()];
@@ -57,6 +58,14 @@ export function hasHoverPopupSignal(signals: HoverTriggerSignals): boolean {
     .join(" ")
     .toLowerCase();
   return HOVER_POPUP_SIGNAL_RE.test(haystack);
+}
+
+export function hasStrongHoverExpansionSignal(signals: HoverTriggerSignals): boolean {
+  return (
+    signals.cssHoverMatch === true ||
+    attr(signals, "aria-haspopup") !== undefined ||
+    (attr(signals, "aria-expanded") ?? "").toLowerCase() === "false"
+  );
 }
 
 export function hasDirectHoverInteractiveSignal(signals: HoverTriggerSignals): boolean {
@@ -104,7 +113,12 @@ export function evaluateHoverTrigger(signals: HoverTriggerSignals): HoverTrigger
   const directInteractive = hasDirectHoverInteractiveSignal(signals);
   const popupSignal = hasHoverPopupSignal(signals);
   const isTextNavigationItem =
-    (tag === "a" || role === "link" || role.startsWith("menuitem")) &&
+    (tag === "a" ||
+      tag === "li" ||
+      role === "link" ||
+      role === "option" ||
+      role.startsWith("menuitem") ||
+      HOVER_TEXT_ITEM_RE.test(attr(signals, "class") ?? "")) &&
     !graphic &&
     !!label &&
     label.toLowerCase() !== "image";
@@ -118,9 +132,7 @@ export function evaluateHoverTrigger(signals: HoverTriggerSignals): HoverTrigger
   const surfaceTriggerEvidence =
     (popupSignal && !isTextNavigationItem) ||
     compactTopbarIcon ||
-    signals.cssHoverMatch === true ||
-    attr(signals, "aria-haspopup") !== undefined ||
-    (attr(signals, "aria-expanded") ?? "").toLowerCase() === "false";
+    hasStrongHoverExpansionSignal(signals);
   if (!directInteractive || !surfaceTriggerEvidence) {
     return { eligible: false, score: 0, reasons: [] };
   }

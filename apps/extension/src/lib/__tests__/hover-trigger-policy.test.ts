@@ -77,6 +77,19 @@ describe("evaluateHoverTrigger", () => {
     expect(decision.eligible).toBe(false);
   });
 
+  it("rejects labelled dropdown list items as hover triggers", () => {
+    const decision = evaluateHoverTrigger({
+      tag: "li",
+      label: "文档C+D",
+      attrs: { class: "dropdown-item", tabindex: "0" },
+      rect: { x: 820, y: 48, w: 160, h: 32 },
+      cursor: "pointer",
+      pointerEvents: "auto",
+    });
+
+    expect(decision.eligible).toBe(false);
+  });
+
   it("rejects ordinary controls without hover popup signals", () => {
     const decision = evaluateHoverTrigger({
       tag: "button",

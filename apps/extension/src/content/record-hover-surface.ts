@@ -50,8 +50,8 @@ function isHoverSurfaceElement(el: Element): boolean {
   return false;
 }
 
-function closestHoverSurface(clickElement: Element): Element | null {
-  let node: Element | null = clickElement;
+export function closestRecognizedHoverSurface(element: Element): Element | null {
+  let node: Element | null = element;
   let depth = 0;
   while (node && node !== document.body && node !== document.documentElement && depth < 10) {
     if (isHoverSurfaceElement(node)) return node;
@@ -115,7 +115,7 @@ export function decideHoverSurfaceRelation(
   context: HoverSurfaceContext,
   clickElement: Element,
 ): HoverSurfaceDecision {
-  const clickSurface = closestHoverSurface(clickElement);
+  const clickSurface = closestRecognizedHoverSurface(clickElement);
   if (clickSurface && isNearTrigger(clickSurface, context.triggerElement)) {
     return { related: true, reason: "click-inside-hover-surface", surface: clickSurface };
   }

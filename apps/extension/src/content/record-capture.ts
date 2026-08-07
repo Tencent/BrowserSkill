@@ -9,6 +9,8 @@ import {
   evaluateHoverTrigger,
   type HoverTriggerDecision,
   type HoverTriggerRect,
+  hasDirectHoverInteractiveSignal,
+  hasStrongHoverExpansionSignal,
 } from "@/lib/hover-trigger-policy";
 import {
   isRecordCancelMessage,
@@ -26,7 +28,7 @@ import {
   type RecordStopMessage,
 } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/trace-reducer";
-import { decideHoverSurfaceRelation } from "./record-hover-surface";
+import { closestRecognizedHoverSurface, decideHoverSurfaceRelation } from "./record-hover-surface";
 
 const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
 const failedStepDeliveries = new Set<string>();
@@ -61,18 +63,21 @@ interface FillSession {
   lastValue: string;
 }
 
-interface PendingHover {
+interface HoverCandidate {
   element: Element;
   target: TargetDescriptor;
   recordedAt: number;
   score: number;
-  reasons: string[];
+  hasExpansionSignal: boolean;
+  eligible: boolean;
 }
 
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
 
 const HOVER_BEFORE_CLICK_MAX_MS = 10_000;
+const HOVER_SURFACE_CONTEXT_MAX_MS = 30_000;
 const HOVER_REPLACE_SCORE_MARGIN = 50;
+const HOVER_CANDIDATE_LIMIT = 24;
 
 function eventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -213,13 +218,10 @@ function normalizeHoverTarget(
   return desc;
 }
 
-function evaluateHoverTriggerElement(
-  el: Element,
-  desc: TargetDescriptor,
-): HoverTriggerDecision | null {
+function hoverTriggerSignals(el: Element, desc: TargetDescriptor) {
   if (!(el instanceof HTMLElement)) return null;
   const style = hoverTriggerStyle(el);
-  return evaluateHoverTrigger({
+  return {
     tag: el.tagName.toLowerCase(),
     role: desc.role,
     label: desc.name,
@@ -228,29 +230,35 @@ function evaluateHoverTriggerElement(
     cursor: style.cursor,
     pointerEvents: style.pointerEvents,
     hasGraphicDescendant: hasHoverGraphicDescendant(el),
-  });
+  };
 }
 
-function hoverTargetFromEvent(target: EventTarget | null): PendingHover | null {
+function hoverCandidateFromEvent(target: EventTarget | null): HoverCandidate | null {
   if (!(target instanceof Element)) return null;
   const element = resolveHoverElement(target);
   if (!element) return null;
   const desc = describeTarget(element);
-  const decision = evaluateHoverTriggerElement(element, desc);
-  if (!decision?.eligible) return null;
+  const signals = hoverTriggerSignals(element, desc);
+  if (!signals) return null;
+  const decision = evaluateHoverTrigger(signals);
+  const hasExpansionSignal = hasStrongHoverExpansionSignal(signals);
+  const hasDirectSignal = hasDirectHoverInteractiveSignal(signals);
+  if (!decision.eligible && !hasExpansionSignal && !hasDirectSignal) return null;
+  if (!decision.eligible && !desc.name && !desc.role) return null;
   const normalizedTarget = normalizeHoverTarget(element, desc, decision);
   return {
     element,
     target: normalizedTarget,
     recordedAt: Date.now(),
     score: decision.score,
-    reasons: decision.reasons,
+    hasExpansionSignal,
+    eligible: decision.eligible,
   };
 }
 
-function shouldReplacePendingHover(
-  current: PendingHover,
-  next: PendingHover,
+function shouldReplaceHoverCandidate(
+  current: HoverCandidate,
+  next: HoverCandidate,
   now: number,
 ): boolean {
   if (next.element === current.element) return false;
@@ -310,7 +318,9 @@ export function startRecordCapture(
   let composing = false;
   let lastUrl = location.href;
   let keyboardActivation: { target: EventTarget | null; recordedAt: number } | undefined;
-  let pendingHover: PendingHover | null = null;
+  let pendingHover: HoverCandidate | null = null;
+  const recentHoverCandidates: HoverCandidate[] = [];
+  const emittedHoverElements = new WeakSet<Element>();
   let generatedControlClick: Element | null = null;
   let navigationActionPending = false;
   let navigationActionVersion = 0;
@@ -376,6 +386,68 @@ export function startRecordCapture(
     });
   };
 
+  const rememberHoverCandidate = (hover: HoverCandidate) => {
+    const duplicate = recentHoverCandidates.findIndex(
+      (candidate) => candidate.element === hover.element,
+    );
+    if (duplicate >= 0) recentHoverCandidates.splice(duplicate, 1);
+    recentHoverCandidates.push(hover);
+    if (recentHoverCandidates.length > HOVER_CANDIDATE_LIMIT) {
+      recentHoverCandidates.splice(0, recentHoverCandidates.length - HOVER_CANDIDATE_LIMIT);
+    }
+  };
+
+  const actionIsOnHoverTriggerItself = (
+    hover: HoverCandidate,
+    actionElement: Element | null,
+    relationTarget: Element,
+  ): boolean => {
+    const target = actionElement ?? relationTarget;
+    if (target === hover.element) return true;
+    if (!hover.element.contains(target)) return false;
+    const surface = closestRecognizedHoverSurface(target);
+    return !surface || surface === hover.element || !hover.element.contains(surface);
+  };
+
+  const hoverRelatedToAction = (
+    hover: HoverCandidate,
+    relationTarget: Element,
+    now: number,
+  ): boolean => {
+    if (now - hover.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) return false;
+    return decideHoverSurfaceRelation({ triggerElement: hover.element }, relationTarget).related;
+  };
+
+  const emitHoverStep = (hover: HoverCandidate) => {
+    if (emittedHoverElements.has(hover.element)) return;
+    emitStep({
+      op: "hover",
+      target: hover.target,
+    });
+    emittedHoverElements.add(hover.element);
+  };
+
+  const findHoverForAction = (
+    actionElement: Element | null,
+    relationTarget: Element,
+    now: number,
+  ): HoverCandidate | null => {
+    const candidates = pendingHover
+      ? [
+          ...recentHoverCandidates.filter((hover) => hover.element !== pendingHover?.element),
+          pendingHover,
+        ]
+      : recentHoverCandidates;
+    for (let index = candidates.length - 1; index >= 0; index -= 1) {
+      const hover = candidates[index];
+      if (!hover) continue;
+      if (emittedHoverElements.has(hover.element)) continue;
+      if (actionIsOnHoverTriggerItself(hover, actionElement, relationTarget)) continue;
+      if (hoverRelatedToAction(hover, relationTarget, now)) return hover;
+    }
+    return null;
+  };
+
   const emitClick = (event: MouseEvent) => {
     // Only record clicks an LLM can re-identify (named interactive controls).
     const target = describeEventTarget(eventTarget(event));
@@ -388,51 +460,52 @@ export function startRecordCapture(
     });
   };
 
-  const emitPendingHoverBeforeAction = (actionTarget: EventTarget | null) => {
-    if (!pendingHover || !(actionTarget instanceof Element)) return;
-    if (Date.now() - pendingHover.recordedAt > HOVER_BEFORE_CLICK_MAX_MS) {
-      pendingHover = null;
-      return;
-    }
+  const emitHoverCandidateBeforeAction = (actionTarget: EventTarget | null) => {
+    if (!(actionTarget instanceof Element)) return;
     const actionElement = resolveClickableElement(actionTarget);
-    if (actionElement === pendingHover.element) {
-      return;
-    }
     const relationTarget = actionElement ?? actionTarget;
-    if (!actionElement && pendingHover.element.contains(relationTarget)) {
-      return;
-    }
-    const relation = decideHoverSurfaceRelation(
-      {
-        triggerElement: pendingHover.element,
-      },
-      relationTarget,
-    );
-    if (!relation.related) {
+    const hover = findHoverForAction(actionElement, relationTarget, Date.now());
+    if (!hover) {
       pendingHover = null;
       return;
     }
-    emitStep({
-      op: "hover",
-      target: pendingHover.target,
-    });
+    emitHoverStep(hover);
     pendingHover = null;
   };
 
   const onMouseOver = (event: MouseEvent) => {
     const target = eventTarget(event);
     if (isOverlayTarget(target)) return;
+    const now = Date.now();
     if (pendingHover && target instanceof Element && pendingHover.element.contains(target)) {
-      if (Date.now() - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
+      if (now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
       pendingHover = null;
     }
-    const hover = hoverTargetFromEvent(target);
+    const candidate = hoverCandidateFromEvent(target);
+    if (candidate) rememberHoverCandidate(candidate);
+    const hover = candidate?.eligible ? candidate : null;
+    if (pendingHover && target instanceof Element) {
+      const relation = decideHoverSurfaceRelation({ triggerElement: pendingHover.element }, target);
+      if (relation.related && now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) {
+        if (!hover || !hover.hasExpansionSignal) return;
+        if (
+          hover.element === pendingHover.element ||
+          pendingHover.element.contains(hover.element)
+        ) {
+          return;
+        }
+        emitHoverStep(pendingHover);
+        pendingHover = hover;
+        rememberHoverCandidate(hover);
+        return;
+      }
+    }
     if (!hover) return;
-    const now = Date.now();
-    if (pendingHover && !shouldReplacePendingHover(pendingHover, hover, now)) {
+    if (pendingHover && !shouldReplaceHoverCandidate(pendingHover, hover, now)) {
       return;
     }
     pendingHover = hover;
+    rememberHoverCandidate(hover);
   };
 
   const onClick = (event: MouseEvent) => {
@@ -464,7 +537,7 @@ export function startRecordCapture(
 
     const fillable = fillableFromTarget(target);
     if (fillable) {
-      emitPendingHoverBeforeAction(fillable);
+      emitHoverCandidateBeforeAction(fillable);
       ensureFillSession(fillable);
       return;
     }
@@ -472,7 +545,7 @@ export function startRecordCapture(
     if (target instanceof Element) {
       const nearbyFillable = nearbyFillableFromSearchChrome(target);
       if (nearbyFillable) {
-        emitPendingHoverBeforeAction(nearbyFillable);
+        emitHoverCandidateBeforeAction(nearbyFillable);
         ensureFillSession(nearbyFillable);
         return;
       }
@@ -492,7 +565,7 @@ export function startRecordCapture(
 
     commitFillSession();
     if (target instanceof Element && target.closest("select")) return;
-    emitPendingHoverBeforeAction(target);
+    emitHoverCandidateBeforeAction(target);
     emitClick(event);
   };
 
@@ -534,7 +607,7 @@ export function startRecordCapture(
     commitFillSession();
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
-      emitPendingHoverBeforeAction(target);
+      emitHoverCandidateBeforeAction(target);
       const values = Array.from(target.selectedOptions).map((opt) => opt.value);
       const labels = Array.from(target.selectedOptions).map((opt) =>
         (opt.label || opt.textContent || opt.value).trim(),
@@ -588,7 +661,7 @@ export function startRecordCapture(
     }
     const desc = describeEventTarget(target);
     if (!desc && !event.key) return;
-    emitPendingHoverBeforeAction(target);
+    emitHoverCandidateBeforeAction(target);
     emitStep({
       op: "press",
       key: event.key,

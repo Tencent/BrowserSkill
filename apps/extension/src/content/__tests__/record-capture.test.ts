@@ -8,6 +8,44 @@ vi.stubGlobal("chrome", {
   },
 });
 
+function mockRect(
+  el: Element,
+  rect: { left: number; top: number; width: number; height: number },
+): void {
+  vi.spyOn(el, "getBoundingClientRect").mockReturnValue({
+    x: rect.left,
+    y: rect.top,
+    top: rect.top,
+    left: rect.left,
+    right: rect.left + rect.width,
+    bottom: rect.top + rect.height,
+    width: rect.width,
+    height: rect.height,
+    toJSON: () => ({}),
+  });
+}
+
+function mockHoverStyle(pointerElements: Element[]): void {
+  vi.spyOn(window, "getComputedStyle").mockImplementation((el) => {
+    const style = {
+      cursor: pointerElements.includes(el) ? "pointer" : "",
+      display: "block",
+      pointerEvents: "auto",
+      position: "static",
+      visibility: "visible",
+    } as CSSStyleDeclaration;
+    return style;
+  });
+}
+
+function mouseOver(el: Element): void {
+  el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+}
+
+function click(el: Element): void {
+  el.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
+}
+
 describe("handleRecordContentMessage stop/cancel", () => {
   it("ignores STOP when no recording is active", () => {
     const dispose = vi.fn();
@@ -378,6 +416,205 @@ describe("record-capture semantic", () => {
     expect(steps[1]).toMatchObject({
       op: "click",
       target: { role: "button", name: "My profile" },
+    });
+  });
+
+  it("keeps the menu opener hover when moving over an accepted menu item", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="新建" aria-haspopup="menu">新建</button>
+      <ul class="create-menu dropdown-menu">
+        <li class="dropdown-item" tabindex="0">文档C+D</li>
+      </ul>
+    `;
+    const capture = startRecordCapture("rec-hover-menu-opener", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector("li")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([item]);
+
+    mouseOver(trigger);
+    mouseOver(item);
+    click(item);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { tag: "li", name: "文档C+D" },
+    });
+  });
+
+  it("does not latch a plain div action item inside a hover surface", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="新建" aria-haspopup="menu">新建</button>
+      <div class="create-menu dropdown-menu">
+        <div class="tg-menu-item" tabindex="0">文档C+D</div>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-menu-div-action", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector(".tg-menu-item")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([item]);
+
+    mouseOver(trigger);
+    mouseOver(item);
+    click(item);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { tag: "div", name: "文档C+D" },
+    });
+  });
+
+  it("keeps the opener hover when a surface action is clicked after the short latch window", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-07T03:43:36.000Z"));
+    try {
+      document.body.innerHTML = `
+        <button type="button" aria-label="新建" aria-haspopup="menu">新建</button>
+        <div class="create-menu dropdown-menu">
+          <div class="tg-menu-item" tabindex="0">文档C+D</div>
+        </div>
+      `;
+      const capture = startRecordCapture("rec-hover-menu-div-action-slow", (step) =>
+        steps.push(step),
+      );
+      const trigger = document.querySelector("button")!;
+      const item = document.querySelector(".tg-menu-item")!;
+      mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+      mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
+      mockHoverStyle([item]);
+
+      mouseOver(trigger);
+      vi.setSystemTime(new Date("2026-08-07T03:43:47.000Z"));
+      mouseOver(item);
+      click(item);
+      capture.dispose();
+
+      expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+      expect(steps[0]).toMatchObject({
+        op: "hover",
+        target: { role: "button", name: "新建" },
+      });
+      expect(steps[1]).toMatchObject({
+        op: "click",
+        target: { tag: "div", name: "文档C+D" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("infers a non-policy opener hover from the later surface action", () => {
+    document.body.innerHTML = `
+      <button type="button">新建</button>
+      <div class="create-menu dropdown-menu">
+        <div class="tg-menu-item" tabindex="0">文档C+D</div>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-infer-opener", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector(".tg-menu-item")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([trigger, item]);
+
+    mouseOver(trigger);
+    mouseOver(item);
+    click(item);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { tag: "div", name: "文档C+D" },
+    });
+  });
+
+  it("does not record a strong-looking surface item when clicking that item itself", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="新建" aria-haspopup="menu">新建</button>
+      <div class="create-menu dropdown-menu">
+        <li tabindex="0" aria-expanded="false"><div>文档C+D</div></li>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-false-submenu", (step) => steps.push(step));
+    const trigger = document.querySelector("button")!;
+    const item = document.querySelector("li")!;
+    const itemInner = document.querySelector("li div")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(item, { left: 820, top: 48, width: 160, height: 32 });
+    mockHoverStyle([item, itemInner]);
+
+    mouseOver(trigger);
+    mouseOver(item);
+    click(itemInner);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "click",
+      target: { tag: "div", name: "文档C+D" },
+    });
+  });
+
+  it("records cascaded hover triggers before clicking inside the final surface", () => {
+    document.body.innerHTML = `
+      <button type="button" aria-label="新建" aria-haspopup="menu">新建</button>
+      <ul class="create-menu dropdown-menu">
+        <li class="dropdown-item" tabindex="0" aria-haspopup="menu">更多模板</li>
+      </ul>
+      <div role="menu" class="template-submenu">
+        <button type="button">Blank doc</button>
+      </div>
+    `;
+    const capture = startRecordCapture("rec-hover-cascade", (step) => steps.push(step));
+    const trigger = document.querySelector("button[aria-label]")!;
+    const nestedTrigger = document.querySelector("li")!;
+    const finalAction = document.querySelector(".template-submenu button")!;
+    mockRect(trigger, { left: 900, top: 8, width: 60, height: 32 });
+    mockRect(nestedTrigger, { left: 820, top: 48, width: 160, height: 32 });
+    mockRect(finalAction, { left: 984, top: 48, width: 136, height: 32 });
+    mockHoverStyle([nestedTrigger, finalAction]);
+
+    mouseOver(trigger);
+    mouseOver(nestedTrigger);
+    click(finalAction);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["hover", "hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      target: { role: "button", name: "新建" },
+    });
+    expect(steps[1]).toMatchObject({
+      op: "hover",
+      target: { tag: "li", name: "更多模板" },
+    });
+    expect(steps[2]).toMatchObject({
+      op: "click",
+      target: { role: "button", name: "Blank doc" },
     });
   });
 
