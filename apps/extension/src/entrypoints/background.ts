@@ -22,6 +22,7 @@ import {
 } from "@/lib/overlay-bridge";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { SessionManager } from "@/session-manager/manager";
 import {
@@ -137,6 +138,13 @@ export default defineBackground(() => {
   // stale `true` does not keep waking us on every page load until the
   // first mutation (review M4/M5 round 3 m-R3-1).
   void sessionsLive.refresh();
+  const cleanupAfterDisconnect = createDisconnectCleanup({
+    manager: sessions,
+    sessionStopDeps: { cdp },
+    onSessionsChanged: () => {
+      void sessionsLive.syncFromManager();
+    },
+  });
   const dispatcher = new ToolDispatcher({
     transport,
     sessions,
@@ -267,7 +275,20 @@ export default defineBackground(() => {
 
   void (async () => {
     const connectionEnabled = await getConnectionEnabled();
-    await controller.attach(transport, detectBrowserMeta(), connectionEnabled);
+    await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
+      beforeDisconnect: async () => {
+        const report = await cleanupAfterDisconnect();
+        if (report.failures.length > 0) {
+          console.warn("[browser-skill] session cleanup before disconnect was incomplete", report);
+        }
+      },
+      onDisconnected: async () => {
+        const report = await cleanupAfterDisconnect();
+        if (report.failures.length > 0) {
+          console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
+        }
+      },
+    });
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
   });

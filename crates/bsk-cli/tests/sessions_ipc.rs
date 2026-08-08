@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-use support::{wait_for_browser_count, wait_for_no_sessions, wait_for_session_count};
+use support::{wait_for_browser_count, wait_for_no_sessions};
 
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
@@ -728,11 +728,10 @@ async fn browser_disconnect_purges_sessions() {
 
 #[tokio::test]
 async fn session_stop_self_heals_when_extension_reports_not_found() {
-    // After an extension SW restart the daemon still owns the session
-    // entry (Round 2 generation-guard) but the extension's
-    // SessionManager is reset and answers `not_found`. Stop must
-    // reconcile local state so `session.list` does not show an orphan
-    // (review M4/M5 round 3 I-R3-2).
+    // Legacy extension versions or unusual reconnect races can leave a
+    // daemon session after the extension's SessionManager resets and answers
+    // `not_found`. Stop must still reconcile local state so `session.list`
+    // does not show an orphan (review M4/M5 round 3 I-R3-2).
 
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;
@@ -826,14 +825,13 @@ async fn session_stop_self_heals_when_extension_reports_not_found() {
 }
 
 #[tokio::test]
-async fn reconnect_with_same_instance_id_does_not_clobber_new_browser() {
+async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_browser() {
     // Spawn a daemon, connect ext A, register a session bound to it,
     // then connect ext B reusing the same instance_id (mimics a SW
-    // restart / WS reconnect under MV3). When the OLD WS task tears
-    // down, the generation guard MUST keep the new entry + its
-    // session in the registry. Without the guard the stale cleanup
-    // path would call browsers.remove() + sessions.purge_browser()
-    // and the daemon would silently drop the live session.
+    // restart / WS reconnect under MV3). The extension now safely stops
+    // its local sessions before reconnecting, so the new handshake must
+    // purge the matching daemon rows. The generation guard must still keep
+    // the NEW browser registration when the old WS task later tears down.
 
     let (handle, _sock) = spawn_daemon().await;
     let mut ws_a = connect_ext(handle.ws_addr()).await;
@@ -854,14 +852,14 @@ async fn reconnect_with_same_instance_id_does_not_clobber_new_browser() {
     let _ = handshake_as_ext(&mut ws_b).await;
     // Registry now holds the newer generation under the same id.
     assert_eq!(state.browsers.len(), 1);
+    wait_for_no_sessions(&state).await;
 
     // Tear down ext A only; the cleanup path will run but must
     // observe that the registered generation no longer matches and
-    // leave the new entry + session alone.
+    // leave the new browser entry alone.
     let _ = ws_a.close(None).await;
     drop(ws_a);
     wait_for_browser_count(&state, 1).await;
-    wait_for_session_count(&state, 1).await;
 
     assert_eq!(
         state.browsers.len(),
@@ -870,8 +868,8 @@ async fn reconnect_with_same_instance_id_does_not_clobber_new_browser() {
     );
     assert_eq!(
         state.sessions.len(),
-        1,
-        "session must survive old browser cleanup"
+        0,
+        "stale sessions must not survive reconnect"
     );
 
     let _ = ws_b.close(None).await;
