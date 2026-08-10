@@ -94,6 +94,11 @@ pub enum Step {
         common: StepCommon,
         target: TargetDescriptor,
     },
+    Hover {
+        #[serde(flatten)]
+        common: StepCommon,
+        target: TargetDescriptor,
+    },
     Fill {
         #[serde(flatten)]
         common: StepCommon,

@@ -5,6 +5,7 @@
 // `styles` columns are [position, pointer-events, cursor] in that order.
 
 import type { Rect, Viewport } from "@browser-skill/vom";
+import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
 import type { CdpRunner } from "../shared";
 
@@ -45,9 +46,11 @@ export interface CapturedNode {
 export type CapturedIframeNodes = Map<number, CapturedNode[]>;
 
 export interface CapturedSurfaceProbe {
-  triggerLabel: string;
+  triggerBackendNodeId: number;
+  triggerPoint?: { x: number; y: number };
   triggerAction: "hover" | "focus" | string;
   subItems: string[];
+  confidence?: "high" | "medium" | "low";
 }
 
 export interface CapturedViewModel {
@@ -61,6 +64,7 @@ export interface CapturedViewModel {
 
 export interface CaptureViewModelOptions {
   conditionalSurfaceProbe?: boolean;
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
 }
 
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
@@ -225,11 +229,12 @@ interface RuntimeEvaluateReply {
 }
 
 interface HoverCandidate {
-  triggerSel: string;
-  affectedSub: string;
-  label: string;
+  backendNodeId: number;
+  label?: string;
   x: number;
   y: number;
+  score: number;
+  reasons: string[];
 }
 
 interface CdpDomNode {
@@ -322,17 +327,19 @@ function collectBackendIdsFromDomNode(node: CdpDomNode | undefined, out: Set<num
 }
 
 const MAX_HOVER_PROBE_MS = 2_000;
-const MAX_HOVER_TRIGGERS = 8;
-const HOVER_SETTLE_MS = 200;
+const MAX_HOVER_TRIGGERS = 6;
+const MAX_HOVER_SURFACES = 3;
+const HOVER_SETTLE_MS = 300;
+const MAX_HOVER_SUB_ITEMS = 12;
 
 function runtimeValue<T>(reply: RuntimeEvaluateReply): T | undefined {
   return reply.result?.value as T | undefined;
 }
 
-function hoverCssScanExpression(): string {
+function hoverCssTriggerScanExpression(): string {
   return `(() => {
     const visibilityProps = ["display", "visibility", "opacity", "maxHeight", "height", "overflow"];
-    const pairs = [];
+    const centres = [];
     const seenRules = new Set();
     for (const sheet of Array.from(document.styleSheets)) {
       let rules;
@@ -348,90 +355,73 @@ function hoverCssScanExpression(): string {
           const hoverIndex = part.indexOf(":hover");
           if (hoverIndex < 0) continue;
           const triggerSel = part.slice(0, hoverIndex).trim();
-          const affectedSub = part.slice(hoverIndex + 6).trim();
           if (!triggerSel) continue;
-          const key = triggerSel + "||" + affectedSub;
-          if (seenRules.has(key)) continue;
-          seenRules.add(key);
-          pairs.push({ triggerSel, affectedSub });
+          if (seenRules.has(triggerSel)) continue;
+          seenRules.add(triggerSel);
+          let elements;
+          try { elements = Array.from(document.querySelectorAll(triggerSel)); } catch { continue; }
+          for (const el of elements) {
+            if (!(el instanceof HTMLElement)) continue;
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none" || style.pointerEvents === "none") continue;
+            centres.push({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+            if (centres.length >= 24) return centres;
+          }
         }
       }
     }
-
-    const candidates = [];
-    const seenLabels = new Set();
-    const isUnsafeTrigger = (el) => {
-      if (!(el instanceof HTMLElement)) return true;
-      const tag = el.tagName.toLowerCase();
-      if (["input", "textarea", "select", "option"].includes(tag)) return true;
-      if (el.isContentEditable) return true;
-      if (el.hasAttribute("disabled") || el.hasAttribute("inert")) return true;
-      if ((el.getAttribute("aria-disabled") || "").toLowerCase() === "true") return true;
-      return false;
-    };
-    for (const pair of pairs) {
-      let elements;
-      try { elements = Array.from(document.querySelectorAll(pair.triggerSel)); } catch { continue; }
-      for (const el of elements) {
-        if (!(el instanceof Element)) continue;
-        if (isUnsafeTrigger(el)) continue;
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        if (rect.width <= 0 || rect.height <= 0 || style.visibility === "hidden" || style.display === "none" || style.pointerEvents === "none") continue;
-        const label = (el.textContent || "").replace(/\\s+/g, " ").trim();
-        if (!label || seenLabels.has(label)) continue;
-        seenLabels.add(label);
-        candidates.push({
-          triggerSel: pair.triggerSel,
-          affectedSub: pair.affectedSub,
-          label,
-          x: rect.left + rect.width / 2,
-          y: rect.top + rect.height / 2,
-        });
-        if (candidates.length >= ${MAX_HOVER_TRIGGERS}) return candidates;
-      }
-    }
-    return candidates;
+    return centres;
   })()`;
 }
 
-function hoverCollectExpression(candidate: HoverCandidate): string {
-  return `(() => {
-    const triggerSel = ${JSON.stringify(candidate.triggerSel)};
-    const rawAffectedSub = ${JSON.stringify(candidate.affectedSub)};
-    const x = ${JSON.stringify(candidate.x)};
-    const y = ${JSON.stringify(candidate.y)};
-    const hit = document.elementFromPoint(x, y);
-    const trigger = hit instanceof Element ? hit.closest(triggerSel) : null;
-    if (!trigger) return [];
+interface HoverRuntimeItem {
+  text: string;
+  role: string;
+  tag: string;
+  x: number;
+  y: number;
+}
 
-    const affectedSub = rawAffectedSub.replace(/^[>+~]\\s*/, "").trim();
-    let targets = [];
-    if (!affectedSub) {
-      targets = [trigger];
-    } else {
-      try { targets = Array.from(trigger.querySelectorAll(affectedSub)); } catch { targets = []; }
-    }
+function hoverStateExpression(): string {
+  return `(() => {
     const items = [];
     const seen = new Set();
-    const push = (value) => {
-      const text = String(value || "").replace(/\\s+/g, " ").trim();
+    const selectors = [
+      "a",
+      "button",
+      "[role='menuitem']",
+      "[role='menuitemcheckbox']",
+      "[role='menuitemradio']",
+      "[role='option']",
+      "[role='tab']",
+      "[role='link']",
+      "[role='button']"
+    ].join(",");
+    const push = (el) => {
+      if (!(el instanceof HTMLElement)) return;
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return;
+      const text = String(
+        el.getAttribute("aria-label") ||
+        el.getAttribute("title") ||
+        el.textContent ||
+        ""
+      ).replace(/\\s+/g, " ").trim();
       if (!text || seen.has(text)) return;
       seen.add(text);
-      items.push(text);
+      items.push({
+        text,
+        role: (el.getAttribute("role") || "").toLowerCase(),
+        tag: el.tagName.toLowerCase(),
+        x: rect.left,
+        y: rect.top,
+      });
     };
-    for (const target of targets) {
-      if (!(target instanceof Element)) continue;
-      const style = getComputedStyle(target);
-      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
-      const clickable = target.querySelectorAll('a, button, [role="menuitem"], [role="option"]');
-      if (clickable.length > 0) {
-        for (const child of Array.from(clickable)) push(child.textContent);
-      } else {
-        push(target.textContent);
-      }
-    }
-    return items.slice(0, 12);
+    for (const el of Array.from(document.querySelectorAll(selectors))) push(el);
+    return items.slice(0, 400);
   })()`;
 }
 
@@ -453,45 +443,217 @@ async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
     );
 }
 
-async function probeHoverSurfaces(cdp: CdpRunner, tabId: number): Promise<CapturedSurfaceProbe[]> {
+function capturedText(node: CapturedNode): string | undefined {
+  const value =
+    node.attrs["aria-label"] ?? node.attrs.title ?? node.attrs.alt ?? node.textContent ?? "";
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean || undefined;
+}
+
+function hasGraphicDescendant(
+  node: CapturedNode,
+  childrenByParentId: Map<number, CapturedNode[]>,
+  depth = 0,
+): boolean {
+  if (depth > 3) return false;
+  for (const child of childrenByParentId.get(node.backendNodeId) ?? []) {
+    const tag = child.tag.toLowerCase();
+    if (["img", "svg", "use", "path", "i"].includes(tag)) return true;
+    if (hasGraphicDescendant(child, childrenByParentId, depth + 1)) return true;
+  }
+  return false;
+}
+
+function roleOf(node: CapturedNode): string {
+  return (node.attrs.role ?? "").toLowerCase();
+}
+
+function scoreHoverCandidate(
+  node: CapturedNode,
+  childrenByParentId: Map<number, CapturedNode[]>,
+  cssHoverPoints: Array<{ x: number; y: number }>,
+): HoverCandidate | null {
+  const rect = node.rect;
+  if (!rect) return null;
+  const label = capturedText(node);
+  const cssHoverMatch = cssHoverPoints.some(
+    (point) =>
+      point.x >= rect.x &&
+      point.x <= rect.x + rect.w &&
+      point.y >= rect.y &&
+      point.y <= rect.y + rect.h,
+  );
+  const decision = evaluateHoverTrigger({
+    tag: node.tag,
+    role: roleOf(node),
+    label,
+    attrs: node.attrs,
+    rect,
+    cursor: node.cursor,
+    pointerEvents: node.pointerEvents,
+    hasGraphicDescendant: hasGraphicDescendant(node, childrenByParentId),
+    cssHoverMatch,
+  });
+
+  if (!decision.eligible) return null;
+  return {
+    backendNodeId: node.backendNodeId,
+    label,
+    x: rect.x + rect.w / 2,
+    y: rect.y + rect.h / 2,
+    score: decision.score,
+    reasons: decision.reasons,
+  };
+}
+
+function buildHoverCandidates(
+  nodes: CapturedNode[],
+  cssHoverPoints: Array<{ x: number; y: number }>,
+): HoverCandidate[] {
+  const childrenByParentId = new Map<number, CapturedNode[]>();
+  const parentByBackendId = new Map<number, number | null>();
+  for (const node of nodes) {
+    parentByBackendId.set(node.backendNodeId, node.parentBackendNodeId);
+    if (node.parentBackendNodeId === null) continue;
+    const children = childrenByParentId.get(node.parentBackendNodeId) ?? [];
+    children.push(node);
+    childrenByParentId.set(node.parentBackendNodeId, children);
+  }
+
+  const candidates = nodes
+    .map((node) => scoreHoverCandidate(node, childrenByParentId, cssHoverPoints))
+    .filter((candidate): candidate is HoverCandidate => candidate !== null)
+    .sort((a, b) => b.score - a.score);
+
+  const deduped: HoverCandidate[] = [];
+  const seen = new Set<number>();
+  for (const candidate of candidates) {
+    if (seen.has(candidate.backendNodeId)) continue;
+    if (deduped.some((existing) => sameHoverCluster(existing, candidate, parentByBackendId))) {
+      continue;
+    }
+    seen.add(candidate.backendNodeId);
+    deduped.push(candidate);
+    if (deduped.length >= MAX_HOVER_TRIGGERS) break;
+  }
+  return deduped;
+}
+
+function sameHoverCluster(
+  a: HoverCandidate,
+  b: HoverCandidate,
+  parentByBackendId: Map<number, number | null>,
+): boolean {
+  if (Math.hypot(a.x - b.x, a.y - b.y) <= 8) return true;
+  return (
+    isBackendAncestor(a.backendNodeId, b.backendNodeId, parentByBackendId) ||
+    isBackendAncestor(b.backendNodeId, a.backendNodeId, parentByBackendId)
+  );
+}
+
+function isBackendAncestor(
+  ancestorId: number,
+  nodeId: number,
+  parentByBackendId: Map<number, number | null>,
+): boolean {
+  let parentId = parentByBackendId.get(nodeId);
+  let guard = 0;
+  while (parentId !== null && parentId !== undefined && guard < parentByBackendId.size) {
+    if (parentId === ancestorId) return true;
+    parentId = parentByBackendId.get(parentId);
+    guard += 1;
+  }
+  return false;
+}
+
+function diffHoverItems(before: HoverRuntimeItem[], after: HoverRuntimeItem[]): string[] {
+  const beforeKeys = new Set(before.map((item) => item.text.toLowerCase()));
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of after) {
+    const text = item.text.replace(/\s+/g, " ").trim();
+    const key = text.toLowerCase();
+    if (!text || beforeKeys.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= MAX_HOVER_SUB_ITEMS) break;
+  }
+  return out;
+}
+
+function confidenceForHover(
+  candidate: HoverCandidate,
+  subItems: string[],
+): "high" | "medium" | "low" {
+  if (subItems.length >= 2 && candidate.score >= 80) return "high";
+  if (subItems.length >= 2 || candidate.score >= 80) return "medium";
+  return "low";
+}
+
+async function probeHoverSurfaces(
+  cdp: CdpRunner,
+  tabId: number,
+  nodes: CapturedNode[],
+  options: CaptureViewModelOptions,
+): Promise<CapturedSurfaceProbe[]> {
   const started = Date.now();
   try {
-    const scan = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-      expression: hoverCssScanExpression(),
+    const cssScan = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+      expression: hoverCssTriggerScanExpression(),
       returnByValue: true,
     });
-    const candidates = runtimeValue<HoverCandidate[]>(scan) ?? [];
+    const cssHoverPoints = runtimeValue<Array<{ x: number; y: number }>>(cssScan) ?? [];
+    const candidates = buildHoverCandidates(nodes, cssHoverPoints);
+    if (candidates.length === 0) return [];
+
     const results: CapturedSurfaceProbe[] = [];
-    const seen = new Set<string>();
-    for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
-      if (Date.now() - started > MAX_HOVER_PROBE_MS) break;
-      if (!candidate.label || seen.has(candidate.label)) continue;
-      try {
-        await cdp.send(tabId, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: candidate.x,
-          y: candidate.y,
-        });
-        await wait(HOVER_SETTLE_MS);
-        const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-          expression: hoverCollectExpression(candidate),
-          returnByValue: true,
-        });
-        const subItems = (runtimeValue<string[]>(collected) ?? [])
-          .map((item) => item.replace(/\s+/g, " ").trim())
-          .filter(Boolean);
-        if (subItems.length === 0) continue;
-        seen.add(candidate.label);
-        results.push({
-          triggerLabel: candidate.label,
-          triggerAction: "hover",
-          subItems,
-        });
-      } catch {
-        continue;
-      } finally {
-        await clearHover(cdp, tabId);
+    const seen = new Set<number>();
+    await options.hoverProbeBypassOverlay?.(tabId, true).catch(() => undefined);
+    try {
+      for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
+        if (Date.now() - started > MAX_HOVER_PROBE_MS) break;
+        if (results.length >= MAX_HOVER_SURFACES) break;
+        if (seen.has(candidate.backendNodeId)) continue;
+        try {
+          await clearHover(cdp, tabId);
+          await wait(HOVER_SETTLE_MS);
+          const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+            expression: hoverStateExpression(),
+            returnByValue: true,
+          });
+          const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
+
+          await cdp.send(tabId, "Input.dispatchMouseEvent", {
+            type: "mouseMoved",
+            x: candidate.x,
+            y: candidate.y,
+          });
+          await wait(HOVER_SETTLE_MS);
+          const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+            expression: hoverStateExpression(),
+            returnByValue: true,
+          });
+          const subItems = diffHoverItems(
+            baselineItems,
+            runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
+          );
+          if (subItems.length === 0) continue;
+          seen.add(candidate.backendNodeId);
+          results.push({
+            triggerBackendNodeId: candidate.backendNodeId,
+            triggerPoint: { x: candidate.x, y: candidate.y },
+            triggerAction: "hover",
+            subItems,
+            confidence: confidenceForHover(candidate, subItems),
+          });
+        } catch {
+          continue;
+        } finally {
+          await clearHover(cdp, tabId);
+        }
       }
+    } finally {
+      await options.hoverProbeBypassOverlay?.(tabId, false).catch(() => undefined);
     }
     return results;
   } catch (err) {
@@ -797,7 +959,9 @@ export async function captureViewModel(
 
   await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()]);
 
-  const surfaceProbes = options.conditionalSurfaceProbe ? await probeHoverSurfaces(cdp, tabId) : [];
+  const surfaceProbes = options.conditionalSurfaceProbe
+    ? await probeHoverSurfaces(cdp, tabId, nodes, options)
+    : [];
 
   return { nodes, viewport, iframeNodes, surfaceProbes, excludedBackendNodeIds };
 }

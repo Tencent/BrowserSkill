@@ -404,7 +404,7 @@ describe("renderVom single-layer page", () => {
       ],
     });
 
-    expect(out.text).toContain('@e1 button "Products" [hover: Shoes | Bags | Accessories]');
+    expect(out.text).toContain('@e1 button "Products" [hover first: Shoes | Bags | Accessories]');
     expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 2 }]);
   });
 

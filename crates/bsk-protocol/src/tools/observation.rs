@@ -74,6 +74,32 @@ pub struct ObserveParams {
     /// best-effort heuristic based on character count).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// Include implementation diagnostics for conditional surface probes.
+    #[serde(default)]
+    pub debug_surfaces: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SurfaceProbePoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SurfaceProbeDebug {
+    pub trigger_backend_node_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_point: Option<SurfaceProbePoint>,
+    pub trigger_action: String,
+    pub sub_items: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ObserveDebug {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surface_probes: Vec<SurfaceProbeDebug>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -92,6 +118,8 @@ pub struct ObserveResult {
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<ObserveDebug>,
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +308,7 @@ mod tests {
             tab_id: 42,
             truncated: false,
             dialogs: Vec::new(),
+            debug: None,
         };
         let v = serde_json::to_value(&r).unwrap();
         assert_eq!(v.get("ref_count").and_then(|v| v.as_u64()), Some(1));

@@ -1,4 +1,4 @@
-export { renderVom } from "./render";
+export { applyVomInteractionRecovery, isVomReferenceNode, renderVom } from "./render";
 export type {
   ActiveScopeBlock,
   BlockingLayer,

@@ -1,4 +1,17 @@
-import { describeEventTarget, describeTarget, type TargetDescriptor } from "@/lib/describe-target";
+import {
+  describeEventTarget,
+  describeTarget,
+  resolveClickableElement,
+  resolveHoverElement,
+  type TargetDescriptor,
+} from "@/lib/describe-target";
+import {
+  evaluateHoverTrigger,
+  type HoverTriggerDecision,
+  type HoverTriggerRect,
+  hasDirectHoverInteractiveSignal,
+  hasStrongHoverExpansionSignal,
+} from "@/lib/hover-trigger-policy";
 import {
   isRecordCancelMessage,
   isRecordStartMessage,
@@ -15,6 +28,14 @@ import {
   type RecordStopMessage,
 } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/trace-reducer";
+import {
+  closestHoverSurfaceCandidate,
+  collectHoverSurfaceStates,
+  decideHoverSurfaceRelation,
+  type HoverSurfaceState,
+  isHoverSurfaceCandidateElement,
+  isLikelyHoverSurfaceOwner,
+} from "./record-hover-surface";
 
 const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
 const failedStepDeliveries = new Set<string>();
@@ -49,7 +70,28 @@ interface FillSession {
   lastValue: string;
 }
 
+interface HoverCandidate {
+  element: Element;
+  target: TargetDescriptor;
+  recordedAt: number;
+  score: number;
+  eligible: boolean;
+}
+
+interface HoverSurfaceNode {
+  element: Element;
+  signature: string;
+  owner: HoverCandidate;
+  parent?: HoverSurfaceNode;
+}
+
 type FillableElement = HTMLInputElement | HTMLTextAreaElement | HTMLElement;
+
+const HOVER_BEFORE_CLICK_MAX_MS = 10_000;
+const HOVER_SURFACE_CONTEXT_MAX_MS = 30_000;
+const HOVER_REPLACE_SCORE_MARGIN = 50;
+const HOVER_CANDIDATE_LIMIT = 24;
+const HOVER_TRIGGER_LABEL_MAX = 48;
 
 function eventTarget(event: Event): EventTarget | null {
   return event.composedPath()[0] ?? event.target;
@@ -122,6 +164,173 @@ function fillableValue(el: FillableElement): string {
   return el.textContent ?? "";
 }
 
+function hoverTriggerAttrs(el: Element): Record<string, string | undefined> {
+  return {
+    id: el.id || undefined,
+    class: typeof el.className === "string" ? el.className || undefined : undefined,
+    "data-testid": el.getAttribute("data-testid") ?? undefined,
+    "data-test": el.getAttribute("data-test") ?? undefined,
+    "data-cy": el.getAttribute("data-cy") ?? undefined,
+    "aria-label": el.getAttribute("aria-label") ?? undefined,
+    "aria-haspopup": el.getAttribute("aria-haspopup") ?? undefined,
+    "aria-controls": el.getAttribute("aria-controls") ?? undefined,
+    "aria-expanded": el.getAttribute("aria-expanded") ?? undefined,
+    "aria-hidden": el.getAttribute("aria-hidden") ?? undefined,
+    "aria-disabled": el.getAttribute("aria-disabled") ?? undefined,
+    contenteditable: el.getAttribute("contenteditable") ?? undefined,
+    disabled: el.hasAttribute("disabled") ? "" : undefined,
+    hidden: el.hasAttribute("hidden") ? "" : undefined,
+    inert: el.hasAttribute("inert") ? "" : undefined,
+    onclick: el.getAttribute("onclick") ?? undefined,
+    onmouseenter: el.getAttribute("onmouseenter") ?? undefined,
+    onmouseover: el.getAttribute("onmouseover") ?? undefined,
+    role: el.getAttribute("role") ?? undefined,
+    tabindex: el.getAttribute("tabindex") ?? undefined,
+    title: el.getAttribute("title") ?? undefined,
+  };
+}
+
+function hoverTriggerRect(el: Element): HoverTriggerRect {
+  const rect = el.getBoundingClientRect();
+  return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
+}
+
+function hoverTriggerStyle(el: Element): { cursor?: string; pointerEvents?: string } {
+  if (!(el instanceof HTMLElement)) return {};
+  const style = getComputedStyle(el);
+  return { cursor: style.cursor, pointerEvents: style.pointerEvents };
+}
+
+function hasHoverGraphicDescendant(el: Element): boolean {
+  return el.querySelector("img,svg,use,path,i") !== null;
+}
+
+function normalizeLabelText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function truncateLabel(value: string, max = HOVER_TRIGGER_LABEL_MAX): string {
+  const normalized = normalizeLabelText(value);
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1)}…`;
+}
+
+function collectHoverTriggerLabelText(root: Element): string {
+  let text = "";
+  const visit = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += ` ${node.textContent ?? ""}`;
+      return;
+    }
+    if (!(node instanceof Element)) return;
+    if (node !== root && isHoverSurfaceCandidateElement(node)) {
+      return;
+    }
+    for (const child of node.childNodes) visit(child);
+  };
+  for (const child of root.childNodes) visit(child);
+  return normalizeLabelText(text);
+}
+
+function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDescriptor {
+  if (!desc.name) return desc;
+  const fullText = normalizeLabelText(el.textContent ?? "");
+  const compactName = collectHoverTriggerLabelText(el);
+  if (!compactName || compactName === desc.name) return desc;
+  const compactComparable = compactName.replace(/\s+/g, "");
+  const descComparable = desc.name.replace(/…$/, "").replace(/\s+/g, "");
+  const fullTextComparable = fullText.replace(/\s+/g, "");
+  if (
+    descComparable.startsWith(compactComparable) &&
+    fullTextComparable.startsWith(descComparable) &&
+    compactName.length < desc.name.length
+  ) {
+    return { ...desc, name: truncateLabel(compactName) };
+  }
+  return desc;
+}
+
+function isWeakHoverTarget(target: TargetDescriptor): boolean {
+  return !target.role && !target.name && target.tag === "div";
+}
+
+function looksLikeAvatarElement(el: Element): boolean {
+  const className = typeof el.className === "string" ? el.className : "";
+  return /\b(avatar|user-avatar)\b/i.test(className);
+}
+
+function normalizeHoverTarget(
+  el: Element,
+  desc: TargetDescriptor,
+  decision: HoverTriggerDecision,
+): TargetDescriptor {
+  if (desc.role === "img" && !desc.name && looksLikeAvatarElement(el)) {
+    return { ...desc, name: "image" };
+  }
+  if (
+    isWeakHoverTarget(desc) &&
+    (looksLikeAvatarElement(el) ||
+      (hasHoverGraphicDescendant(el) && decision.reasons.includes("icon-only")))
+  ) {
+    return { tag: "img", role: "img", name: "image" };
+  }
+  return desc;
+}
+
+function hoverTriggerSignals(el: Element, desc: TargetDescriptor) {
+  if (!(el instanceof HTMLElement)) return null;
+  const style = hoverTriggerStyle(el);
+  return {
+    tag: el.tagName.toLowerCase(),
+    role: desc.role,
+    label: desc.name,
+    attrs: hoverTriggerAttrs(el),
+    rect: hoverTriggerRect(el),
+    cursor: style.cursor,
+    pointerEvents: style.pointerEvents,
+    hasGraphicDescendant: hasHoverGraphicDescendant(el),
+  };
+}
+
+function hoverCandidateFromEvent(target: EventTarget | null): HoverCandidate | null {
+  if (!(target instanceof Element)) return null;
+  const element = resolveHoverElement(target);
+  if (!element) return null;
+  const desc = describeTarget(element);
+  const signals = hoverTriggerSignals(element, desc);
+  if (!signals) return null;
+  const decision = evaluateHoverTrigger(signals);
+  const hasExpansionSignal = hasStrongHoverExpansionSignal(signals);
+  const hasDirectSignal = hasDirectHoverInteractiveSignal(signals);
+  if (!decision.eligible && !hasExpansionSignal && !hasDirectSignal) return null;
+  if (!decision.eligible && !desc.name && !desc.role) return null;
+  const normalizedTarget = normalizeHoverTarget(
+    element,
+    compactHoverTargetName(element, desc),
+    decision,
+  );
+  const now = Date.now();
+  return {
+    element,
+    target: normalizedTarget,
+    recordedAt: now,
+    score: decision.score,
+    eligible: decision.eligible,
+  };
+}
+
+function shouldReplaceHoverCandidate(
+  current: HoverCandidate,
+  next: HoverCandidate,
+  now: number,
+): boolean {
+  if (next.element === current.element) return false;
+  if (now - current.recordedAt > HOVER_BEFORE_CLICK_MAX_MS) return true;
+  if (current.element.contains(next.element)) return false;
+  if (next.element.contains(current.element)) return true;
+  return next.score >= current.score + HOVER_REPLACE_SCORE_MARGIN;
+}
+
 /** Clicks that only pick an autocomplete/suggestion value — not a semantic submit action. */
 function isInputCompletionClick(target: EventTarget | null, session: FillSession | null): boolean {
   if (!session || !(target instanceof Element)) return false;
@@ -168,10 +377,17 @@ export function startRecordCapture(
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
   };
+  const hoverSurfaceStateMap = (states: HoverSurfaceState[]): Map<Element, string> =>
+    new Map(states.map((state) => [state.element, state.signature]));
   let fillSession: FillSession | null = null;
   let composing = false;
   let lastUrl = location.href;
   let keyboardActivation: { target: EventTarget | null; recordedAt: number } | undefined;
+  let pendingHover: HoverCandidate | null = null;
+  const recentHoverCandidates: HoverCandidate[] = [];
+  const emittedHoverElements = new WeakSet<Element>();
+  let hoverSurfaceStates = hoverSurfaceStateMap(collectHoverSurfaceStates());
+  const hoverSurfaceNodes = new Map<Element, HoverSurfaceNode>();
   let generatedControlClick: Element | null = null;
   let navigationActionPending = false;
   let navigationActionVersion = 0;
@@ -237,6 +453,223 @@ export function startRecordCapture(
     });
   };
 
+  const rememberHoverCandidate = (hover: HoverCandidate) => {
+    const duplicate = recentHoverCandidates.findIndex(
+      (candidate) => candidate.element === hover.element,
+    );
+    if (duplicate >= 0) recentHoverCandidates.splice(duplicate, 1);
+    recentHoverCandidates.push(hover);
+    if (recentHoverCandidates.length > HOVER_CANDIDATE_LIMIT) {
+      recentHoverCandidates.splice(0, recentHoverCandidates.length - HOVER_CANDIDATE_LIMIT);
+    }
+  };
+
+  const surfaceArea = (el: Element): number => {
+    const rect = el.getBoundingClientRect();
+    return rect.width * rect.height;
+  };
+
+  const smallestContaining = <T>(
+    target: Element,
+    items: Iterable<T>,
+    elementFor: (item: T) => Element,
+  ): T | undefined => {
+    let best: T | undefined;
+    for (const item of items) {
+      const element = elementFor(item);
+      if (!element.contains(target)) continue;
+      if (!best || surfaceArea(element) < surfaceArea(elementFor(best))) {
+        best = item;
+      }
+    }
+    return best;
+  };
+
+  const ownedSurfaceContaining = (target: Element): HoverSurfaceNode | undefined =>
+    smallestContaining(target, hoverSurfaceNodes.values(), (node) => node.element);
+
+  const surfaceStateContaining = (
+    target: Element,
+    states: HoverSurfaceState[],
+  ): HoverSurfaceState | undefined => smallestContaining(target, states, (state) => state.element);
+
+  const inferOwnerForSurface = (
+    surface: Element,
+    now: number,
+    before?: HoverCandidate,
+  ): HoverCandidate | undefined => {
+    for (let index = recentHoverCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = recentHoverCandidates[index];
+      if (!candidate) continue;
+      if (before && candidate.element === before.element) continue;
+      if (before && candidate.recordedAt > before.recordedAt) continue;
+      if (surface.contains(candidate.element)) continue;
+      if (now - candidate.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
+      if (isLikelyHoverSurfaceOwner(candidate.element, surface)) return candidate;
+    }
+    return undefined;
+  };
+
+  const nodeForUnownedSurface = (
+    surfaceState: HoverSurfaceState,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ): HoverSurfaceNode | undefined => {
+    const owner = inferOwnerForSurface(surfaceState.element, now);
+    if (!owner) return undefined;
+    const parent = parentSurfaceNodeForOwner(owner, currentStates, now);
+    const node: HoverSurfaceNode = {
+      element: surfaceState.element,
+      signature: surfaceState.signature,
+      owner,
+      ...(parent ? { parent } : {}),
+    };
+    hoverSurfaceNodes.set(surfaceState.element, node);
+    return node;
+  };
+
+  const ownedSurfaceForAction = (target: Element): HoverSurfaceNode | undefined => {
+    const closestSurface = closestHoverSurfaceCandidate(target);
+    if (closestSurface) {
+      const owned = hoverSurfaceNodes.get(closestSurface);
+      if (owned) return owned;
+    }
+    const ownedContaining = ownedSurfaceContaining(target);
+    if (ownedContaining) return ownedContaining;
+    const now = Date.now();
+    const currentStates = collectHoverSurfaceStates();
+    pruneGoneHoverSurfaces(currentStates);
+    const surfaceState = closestSurface
+      ? currentStates.find((state) => state.element === closestSurface)
+      : surfaceStateContaining(target, currentStates);
+    hoverSurfaceStates = hoverSurfaceStateMap(currentStates);
+    if (!surfaceState) return undefined;
+    return nodeForUnownedSurface(surfaceState, currentStates, now);
+  };
+
+  const pruneGoneHoverSurfaces = (currentStates: HoverSurfaceState[]) => {
+    const current = new Set(currentStates.map((state) => state.element));
+    for (const element of hoverSurfaceNodes.keys()) {
+      if (!current.has(element)) hoverSurfaceNodes.delete(element);
+    }
+  };
+
+  const parentSurfaceNodeForOwner = (
+    owner: HoverCandidate,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ): HoverSurfaceNode | undefined => {
+    const ownedParent = ownedSurfaceContaining(owner.element);
+    if (ownedParent) return ownedParent;
+    const parentState = surfaceStateContaining(owner.element, currentStates);
+    if (!parentState) return undefined;
+    const parentOwner = inferOwnerForSurface(parentState.element, now, owner);
+    if (!parentOwner) return undefined;
+    const parentNode: HoverSurfaceNode = {
+      element: parentState.element,
+      signature: parentState.signature,
+      owner: parentOwner,
+    };
+    hoverSurfaceNodes.set(parentState.element, parentNode);
+    return parentNode;
+  };
+
+  const createSurfaceNode = (
+    state: HoverSurfaceState,
+    owner: HoverCandidate,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ): HoverSurfaceNode | undefined => {
+    const parent = parentSurfaceNodeForOwner(owner, currentStates, now);
+    if (parent?.element === state.element) return undefined;
+    if (now - owner.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) return undefined;
+    if (!isLikelyHoverSurfaceOwner(owner.element, state.element)) return undefined;
+    const node: HoverSurfaceNode = {
+      element: state.element,
+      signature: state.signature,
+      owner,
+      ...(parent ? { parent } : {}),
+    };
+    hoverSurfaceNodes.set(state.element, node);
+    return node;
+  };
+
+  const bindChangedHoverSurfaces = (
+    previousStates: Map<Element, string>,
+    currentStates: HoverSurfaceState[],
+    now: number,
+  ) => {
+    for (const state of currentStates) {
+      if (previousStates.get(state.element) === state.signature) continue;
+      const owner = inferOwnerForSurface(state.element, now);
+      if (!owner) continue;
+      createSurfaceNode(state, owner, currentStates, now);
+    }
+  };
+
+  const refreshHoverSurfaces = (previousStates = hoverSurfaceStates) => {
+    const now = Date.now();
+    const currentStates = collectHoverSurfaceStates();
+    pruneGoneHoverSurfaces(currentStates);
+    bindChangedHoverSurfaces(previousStates, currentStates, now);
+    hoverSurfaceStates = hoverSurfaceStateMap(currentStates);
+  };
+
+  const scheduleHoverSurfaceRefresh = (previousStates: Map<Element, string>) => {
+    setTimeout(() => refreshHoverSurfaces(previousStates), 0);
+  };
+
+  const emitHoverStep = (hover: HoverCandidate) => {
+    if (emittedHoverElements.has(hover.element)) return;
+    emitStep({
+      op: "hover",
+      target: hover.target,
+    });
+    emittedHoverElements.add(hover.element);
+  };
+
+  const surfaceOwnerChain = (
+    surface: HoverSurfaceNode,
+    actionElement: Element,
+    now: number,
+  ): HoverCandidate[] => {
+    const chain: HoverCandidate[] = [];
+    const selected = new WeakSet<Element>();
+    const surfaces: HoverSurfaceNode[] = [];
+    let node: HoverSurfaceNode | undefined = surface;
+    while (node && surfaces.length < 4) {
+      surfaces.unshift(node);
+      node = node.parent;
+    }
+    for (const owned of surfaces) {
+      const owner = owned.owner;
+      if (owner.element === actionElement || actionElement.contains(owner.element)) {
+        continue;
+      }
+      if (selected.has(owner.element)) continue;
+      if (emittedHoverElements.has(owner.element)) continue;
+      if (now - owner.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
+      selected.add(owner.element);
+      chain.push(owner);
+    }
+    return chain;
+  };
+
+  const containedHoverOwnerForAction = (
+    actionElement: Element,
+    now: number,
+  ): HoverCandidate | undefined => {
+    for (let index = recentHoverCandidates.length - 1; index >= 0; index -= 1) {
+      const candidate = recentHoverCandidates[index];
+      if (!candidate) continue;
+      if (candidate.element === actionElement) continue;
+      if (!candidate.element.contains(actionElement)) continue;
+      if (now - candidate.recordedAt > HOVER_SURFACE_CONTEXT_MAX_MS) continue;
+      return candidate;
+    }
+    return undefined;
+  };
+
   const emitClick = (event: MouseEvent) => {
     // Only record clicks an LLM can re-identify (named interactive controls).
     const target = describeEventTarget(eventTarget(event));
@@ -247,6 +680,54 @@ export function startRecordCapture(
       target,
       expects_navigation: true,
     });
+  };
+
+  const emitHoverCandidateBeforeAction = (actionTarget: EventTarget | null) => {
+    if (!(actionTarget instanceof Element)) return;
+    const actionElement = resolveClickableElement(actionTarget) ?? actionTarget;
+    const surface = ownedSurfaceForAction(actionElement);
+    const now = Date.now();
+    const containedOwner = surface ? undefined : containedHoverOwnerForAction(actionElement, now);
+    const hoverChain = surface
+      ? surfaceOwnerChain(surface, actionElement, now)
+      : containedOwner
+        ? [containedOwner]
+        : [];
+    if (hoverChain.length === 0) {
+      pendingHover = null;
+      return;
+    }
+    for (const hover of hoverChain) emitHoverStep(hover);
+    pendingHover = null;
+  };
+
+  const onMouseOver = (event: MouseEvent) => {
+    const target = eventTarget(event);
+    if (isOverlayTarget(target)) return;
+    const now = Date.now();
+    if (pendingHover && target instanceof Element && pendingHover.element.contains(target)) {
+      if (now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) return;
+      pendingHover = null;
+    }
+    const candidate = hoverCandidateFromEvent(target);
+    if (candidate) {
+      const previousSurfaceStates = new Map(hoverSurfaceStates);
+      rememberHoverCandidate(candidate);
+      refreshHoverSurfaces(previousSurfaceStates);
+      scheduleHoverSurfaceRefresh(previousSurfaceStates);
+    }
+    const hover = candidate?.eligible ? candidate : null;
+    if (pendingHover && target instanceof Element) {
+      const relation = decideHoverSurfaceRelation({ triggerElement: pendingHover.element }, target);
+      if (relation.related && now - pendingHover.recordedAt <= HOVER_BEFORE_CLICK_MAX_MS) {
+        return;
+      }
+    }
+    if (!hover) return;
+    if (pendingHover && !shouldReplaceHoverCandidate(pendingHover, hover, now)) {
+      return;
+    }
+    pendingHover = hover;
   };
 
   const onClick = (event: MouseEvent) => {
@@ -278,6 +759,7 @@ export function startRecordCapture(
 
     const fillable = fillableFromTarget(target);
     if (fillable) {
+      emitHoverCandidateBeforeAction(fillable);
       ensureFillSession(fillable);
       return;
     }
@@ -285,6 +767,7 @@ export function startRecordCapture(
     if (target instanceof Element) {
       const nearbyFillable = nearbyFillableFromSearchChrome(target);
       if (nearbyFillable) {
+        emitHoverCandidateBeforeAction(nearbyFillable);
         ensureFillSession(nearbyFillable);
         return;
       }
@@ -304,6 +787,7 @@ export function startRecordCapture(
 
     commitFillSession();
     if (target instanceof Element && target.closest("select")) return;
+    emitHoverCandidateBeforeAction(target);
     emitClick(event);
   };
 
@@ -345,6 +829,7 @@ export function startRecordCapture(
     commitFillSession();
     const target = eventTarget(event);
     if (target instanceof HTMLSelectElement) {
+      emitHoverCandidateBeforeAction(target);
       const values = Array.from(target.selectedOptions).map((opt) => opt.value);
       const labels = Array.from(target.selectedOptions).map((opt) =>
         (opt.label || opt.textContent || opt.value).trim(),
@@ -398,6 +883,7 @@ export function startRecordCapture(
     }
     const desc = describeEventTarget(target);
     if (!desc && !event.key) return;
+    emitHoverCandidateBeforeAction(target);
     emitStep({
       op: "press",
       key: event.key,
@@ -408,6 +894,7 @@ export function startRecordCapture(
   };
 
   document.addEventListener("click", onClick, true);
+  document.addEventListener("mouseover", onMouseOver, true);
   document.addEventListener("focusin", onFocusIn, true);
   document.addEventListener("focusout", onFocusOut, true);
   document.addEventListener("input", onInput, true);
@@ -438,6 +925,7 @@ export function startRecordCapture(
     dispose() {
       commitFillSession();
       document.removeEventListener("click", onClick, true);
+      document.removeEventListener("mouseover", onMouseOver, true);
       document.removeEventListener("focusin", onFocusIn, true);
       document.removeEventListener("focusout", onFocusOut, true);
       document.removeEventListener("input", onInput, true);

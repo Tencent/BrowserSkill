@@ -70,6 +70,8 @@ pub enum Method {
     ToolReload,
     #[serde(rename = "tool.click")]
     ToolClick,
+    #[serde(rename = "tool.hover")]
+    ToolHover,
     #[serde(rename = "tool.fill")]
     ToolFill,
     #[serde(rename = "tool.press")]
@@ -161,7 +163,7 @@ impl Method {
 
             // Transient input — no committed browser action, but still page
             // input. It must be stopped by pending user interrupts.
-            Method::ToolObserve => MethodEffect::TransientInput,
+            Method::ToolHover | Method::ToolObserve => MethodEffect::TransientInput,
 
             // Passive reads — transparent.
             // `record_stop` / `record_await` observe / finish a recording
@@ -259,6 +261,7 @@ mod tests {
     fn is_mutating_classifies_read_only_tools_as_non_mutating() {
         assert!(!Method::ToolTabList.is_mutating());
         assert!(!Method::ToolSnapshot.is_mutating());
+        assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
@@ -321,6 +324,7 @@ mod tests {
     #[test]
     fn effect_classifies_observe_as_transient_input() {
         assert_eq!(Method::ToolSnapshot.effect(), MethodEffect::PassiveRead);
+        assert_eq!(Method::ToolHover.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolObserve.effect(), MethodEffect::TransientInput);
         assert_eq!(Method::ToolClick.effect(), MethodEffect::BrowserMutation);
         assert_eq!(Method::Cancel.effect(), MethodEffect::ControlPlane);
@@ -329,6 +333,7 @@ mod tests {
     #[test]
     fn interrupt_gate_includes_transient_input() {
         assert!(!Method::ToolSnapshot.requires_interrupt_gate());
+        assert!(Method::ToolHover.requires_interrupt_gate());
         assert!(Method::ToolObserve.requires_interrupt_gate());
         assert!(Method::ToolClick.requires_interrupt_gate());
         assert!(!Method::Cancel.requires_interrupt_gate());

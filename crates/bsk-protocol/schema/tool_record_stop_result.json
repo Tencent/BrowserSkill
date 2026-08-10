@@ -151,6 +151,46 @@
             "id",
             "op",
             "page",
+            "target"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffect"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "hover"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptor"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
             "target",
             "value"
           ],
