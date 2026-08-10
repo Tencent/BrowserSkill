@@ -15,6 +15,8 @@ import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   ClickParams,
   ClickResult,
+  DragParams,
+  DragResult,
   FillParams,
   FillResult,
   KeyModifier,
@@ -945,6 +947,229 @@ export async function handleSelect(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * handleDrag — mouse drag via CDP trusted events.
+ *
+ * Modes:
+ *  - ref/selector + dx/dy: press element centre, move delta, release.
+ *  - from_x/from_y + dx/dy: raw viewport-coordinate drag (cross-origin
+ *    iframe slider CAPTCHAs where DOM access is blocked).
+ *  - points: explicit absolute path [[x,y], ...]; press at first, move
+ *    through the rest, release at last.
+ *
+ * The mouseMoved path is interpolated with `steps` (default 30) and a
+ * small per-step jitter so the trajectory is not a perfect straight
+ * line — slider CAPTCHA backends fingerprint purely linear drags.
+ */
+export async function handleDrag(
+  manager: SessionManager,
+  params: DragParams,
+  deps: InteractionDeps = getDefaultDeps(),
+): Promise<DragResult | RpcError> {
+  if (!params) {
+    return { code: "invalid_params", message: "drag requires params" };
+  }
+  const ctxOrErr = lookupSession(manager, params, "drag");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  if (throwIfAborted(deps.signal)) {
+    return { code: "cancelled", message: "drag aborted" };
+  }
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "drag");
+  if (denied) return denied;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+
+  // --- Resolve start point -------------------------------------------
+  let fromX: number;
+  let fromY: number;
+  let usedRef: string | undefined;
+  let usedSelector: string | undefined;
+
+  const hasElementTarget = !!(params.ref || params.selector);
+  const hasCoordTarget = !!(params.from_x !== undefined && params.from_y !== undefined);
+  const hasPathTarget = !!(params.points && params.points.length >= 2);
+
+  if (hasElementTarget) {
+    const node = await resolveBackendNode(deps.cdp, ctx, target, params, "drag");
+    if (isRpcError(node)) return node;
+    try {
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const scrollErr = await scrollNodeIntoView(deps.cdp, target.tabId, node.backendNodeId);
+      if (scrollErr) return scrollErr;
+    } catch (err) {
+      return {
+        code: "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+    const centre = await nodeCentre(deps.cdp, target.tabId, node.backendNodeId);
+    if (isRpcError(centre)) return centre;
+    fromX = centre.x;
+    fromY = centre.y;
+    usedRef = node.usedRef;
+    usedSelector = node.usedSelector;
+  } else if (hasCoordTarget) {
+    fromX = params.from_x!;
+    fromY = params.from_y!;
+  } else if (hasPathTarget) {
+    fromX = params.points![0][0];
+    fromY = params.points![0][1];
+  } else {
+    return rpcError(
+      "invalid_params",
+      "drag_target_required",
+      "drag requires a ref/selector (+dx/dy), from_x/from_y (+dx/dy), or points[]",
+    );
+  }
+
+  if (throwIfAborted(deps.signal)) {
+    return { code: "cancelled", message: "drag aborted" };
+  }
+
+  // --- Build the point path ------------------------------------------
+  const button: MouseButton = params.button ?? "left";
+  const modifiers = modifiersBitfield(params.modifiers);
+  const steps = Math.max(1, params.steps ?? 30);
+  const stepDelayMs = params.step_delay_ms ?? 8;
+
+  let path: Array<{ x: number; y: number }>;
+  if (hasPathTarget) {
+    // Absolute path: keep caller's points verbatim (they are already
+    // explicit), but insert a move BEFORE the first press so hover
+    // state activates, matching handleClick's behaviour.
+    path = params.points!.map((pt: number[]) => ({ x: pt[0], y: pt[1] }));
+  } else {
+    const dx = params.dx ?? 0;
+    const dy = params.dy ?? 0;
+    const toX = fromX + dx;
+    const toY = fromY + dy;
+    path = [];
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      // Ease-in-out for the first/last few steps, straight in the middle.
+      const eased = t < 0.15 ? t / 0.15 * 0.5 : t > 0.85 ? 0.5 + (t - 0.85) / 0.15 * 0.5 : 0.5 + (t - 0.5);
+      const x = fromX + dx * eased + jitter(0.7);
+      const y = fromY + dy * eased + jitter(0.7);
+      path.push({ x, y });
+    }
+  }
+
+  // --- Dispatch -------------------------------------------------------
+  // The Agent Window overlay sits above the page and would swallow the
+  // trusted mouse events. Mirror handleClick: detect the overlay at the
+  // start point, temporarily hide it for the duration of the drag, and
+  // restore it afterwards.
+  let automationBypassEnabled = false;
+  try {
+    const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, fromX, fromY);
+    if (overlayBlocking && deps.bypassOverlay) {
+      await deps.bypassOverlay(target.tabId, true);
+      automationBypassEnabled = true;
+    }
+  } catch (err) {
+    console.debug("[bsk interaction] drag overlay bypass enable failed", err);
+  }
+  try {
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    // Move to start (hover) then press.
+    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: fromX,
+      y: fromY,
+      modifiers,
+    });
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "drag aborted" };
+    }
+    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x: fromX,
+      y: fromY,
+      button,
+      clickCount: 1,
+      modifiers,
+    });
+    // Interpolated moves.
+    for (const pt of path) {
+      if (throwIfAborted(deps.signal)) {
+        await safeMouseRelease(deps.cdp, target.tabId, pt.x, pt.y, button, modifiers);
+        return { code: "cancelled", message: "drag aborted" };
+      }
+      await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: pt.x,
+        y: pt.y,
+        modifiers,
+      });
+      if (stepDelayMs > 0) {
+        await delay(stepDelayMs);
+      }
+    }
+    // Release at final point.
+    const last = path[path.length - 1];
+    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x: last.x,
+      y: last.y,
+      button,
+      clickCount: 1,
+      modifiers,
+    });
+    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      tab_id: target.tabId,
+      used_ref: usedRef,
+      used_selector: usedSelector,
+      from_x: fromX,
+      from_y: fromY,
+      to_x: last.x,
+      to_y: last.y,
+      steps: path.length,
+    });
+  } catch (err) {
+    return {
+      code: "cdp_failed",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    if (automationBypassEnabled && deps.bypassOverlay) {
+      try {
+        await deps.bypassOverlay(target.tabId, false);
+      } catch (err) {
+        console.debug("[bsk interaction] drag overlay bypass disable failed", err);
+      }
+    }
+  }
+}
+
+function jitter(amplitude: number): number {
+  return (Math.random() * 2 - 1) * amplitude;
+}
+
+async function safeMouseRelease(
+  cdp: unknown,
+  tabId: number,
+  x: number,
+  y: number,
+  button: MouseButton,
+  modifiers: number,
+): Promise<void> {
+  try {
+    await (cdp as { send: (t: number, m: string, p: Record<string, unknown>) => Promise<unknown> }).send(
+      tabId,
+      "Input.dispatchMouseEvent",
+      { type: "mouseReleased", x, y, button, clickCount: 1, modifiers },
+    );
+  } catch {
+    // best effort
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export const __testing__ = {

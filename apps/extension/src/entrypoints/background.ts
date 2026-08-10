@@ -69,10 +69,18 @@ export default defineBackground(() => {
         generation: overlayGeneration,
       };
     }
+    // Automation-only deployments (BSK_NO_OVERLAY=1 at build time) never
+    // show the on-page control mask: the orange stop button is useless
+    // in a headless browser and its capture layer swallows CDP mouse
+    // events (breaking drag automation).
+    const mode: OverlayMode =
+      typeof __BSK_NO_OVERLAY__ !== "undefined" && __BSK_NO_OVERLAY__
+        ? "hidden"
+        : (controlModes.get(ctx.sessionId) ?? "control");
     return {
       type: OVERLAY_AGENT_STATE,
       sessionId: ctx.sessionId,
-      mode: controlModes.get(ctx.sessionId) ?? "control",
+      mode,
       generation: overlayGeneration,
     };
   }

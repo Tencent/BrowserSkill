@@ -10,8 +10,8 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, PressParams,
-    PressResult, SelectParams, SelectResult,
+    ClickParams, ClickResult, DragParams, DragResult, FillParams, FillResult, KeyModifier,
+    MouseButton, PressParams, PressResult, SelectParams, SelectResult,
 };
 use clap::{Args, ValueEnum};
 
@@ -474,6 +474,153 @@ fn interaction_ipc_timeout(timeout_ms: u32) -> Duration {
     Duration::from_millis(u64::from(timeout_ms))
         .checked_add(Duration::from_secs(15))
         .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
+}
+
+// ---------------------------------------------------------------------------
+// bsk drag
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Args)]
+pub struct DragArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector of the element to drag
+    /// from. Optional when using `--from-x/--from-y` or `--points`.
+    pub target: Option<String>,
+
+    /// Force-treat the value as a snapshot ref (overrides positional detection).
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    /// Force-treat the value as a CSS selector.
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    #[arg(long)]
+    pub session: String,
+
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+
+    /// Start X (viewport CSS px) for coordinate drags. Requires `--from-y`.
+    #[arg(long = "from-x")]
+    pub from_x: Option<f64>,
+
+    /// Start Y (viewport CSS px) for coordinate drags. Requires `--from-x`.
+    #[arg(long = "from-y")]
+    pub from_y: Option<f64>,
+
+    /// Horizontal delta in CSS px.
+    #[arg(long)]
+    pub dx: Option<f64>,
+
+    /// Vertical delta in CSS px.
+    #[arg(long)]
+    pub dy: Option<f64>,
+
+    /// Explicit viewport points `x,y` for absolute-path drags (repeatable).
+    #[arg(long = "point", value_name = "X,Y")]
+    pub points: Option<Vec<String>>,
+
+    /// Number of interpolation steps for delta drags (default 30).
+    #[arg(long, default_value_t = 30)]
+    pub steps: u32,
+
+    /// Per-step delay in ms (default 8).
+    #[arg(long = "step-delay-ms", default_value_t = 8)]
+    pub step_delay_ms: u32,
+
+    #[arg(long, value_enum, default_value_t = CliMouseButton::Left)]
+    pub button: CliMouseButton,
+
+    /// Comma-separated modifiers (`alt,ctrl,shift,meta`).
+    #[arg(long, default_value = "")]
+    pub modifiers: String,
+
+    #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+}
+
+pub fn dispatch_drag(args: DragArgs, format: Format) -> Result<(), CliError> {
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    // Coordinate / path drags don't need an element target.
+    let has_coord = args.from_x.is_some() || args.from_y.is_some();
+    let has_path = args.points.as_ref().map_or(false, |p| !p.is_empty());
+    let (ref_, selector) = if has_coord || has_path {
+        (None, None)
+    } else {
+        split_target(
+            args.target.clone(),
+            args.ref_.clone(),
+            args.selector.clone(),
+        )?
+    };
+    let modifiers = parse_modifiers(&args.modifiers)
+        .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    let points = args
+        .points
+        .as_ref()
+        .map(|pts| {
+            pts.iter()
+                .map(|p| {
+                    let (x, y) = p.split_once(',').ok_or_else(|| {
+                        CliError::Local(anyhow::anyhow!("--point must be X,Y (got '{p}')"))
+                    })?;
+                    let x: f64 = x.trim().parse().map_err(|_| {
+                        CliError::Local(anyhow::anyhow!("invalid X in --point '{p}'"))
+                    })?;
+                    let y: f64 = y.trim().parse().map_err(|_| {
+                        CliError::Local(anyhow::anyhow!("invalid Y in --point '{p}'"))
+                    })?;
+                    Ok(vec![x, y])
+                })
+                .collect::<Result<Vec<_>, CliError>>()
+        })
+        .transpose()?;
+    let params = DragParams {
+        session_id: args.session.clone(),
+        ref_,
+        selector,
+        tab_id: args.tab_id,
+        from_x: args.from_x,
+        from_y: args.from_y,
+        dx: args.dx,
+        dy: args.dy,
+        points,
+        steps: Some(args.steps),
+        step_delay_ms: Some(args.step_delay_ms),
+        button: Some(args.button.into()),
+        modifiers: if modifiers.is_empty() {
+            None
+        } else {
+            Some(modifiers)
+        },
+        timeout_ms: Some(args.timeout),
+    };
+    let reply: DragResult = call(
+        info.sock_path,
+        Method::ToolDrag,
+        params,
+        "drag-1",
+        args.timeout,
+    )?;
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply)
+                    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            let target =
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+            println!(
+                "drag ok tab={} target={target} from=({}, {}) to=({}, {}) steps={}",
+                reply.tab_id, reply.from_x, reply.from_y, reply.to_x, reply.to_y, reply.steps
+            );
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

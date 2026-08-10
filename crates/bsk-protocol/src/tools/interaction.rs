@@ -226,6 +226,94 @@ pub struct SelectResult {
     pub dialogs: Vec<JavaScriptDialogInfo>,
 }
 
+// ---------------------------------------------------------------------------
+// drag
+// ---------------------------------------------------------------------------
+
+/// Drag parameters. Supports three targeting modes:
+///
+/// 1. **Element drag** (`ref` / `selector` + `dx` / `dy`): press the
+///    element's centre, move by the given pixel delta (CSS pixels), then
+///    release. `steps` interpolates a human-like curved path (default 30).
+/// 2. **Coordinate drag** (`from_x` / `from_y` + `dx` / `dy`): raw
+///    viewport-coordinate drag, no element lookup. Useful for slider
+///    CAPTCHAs inside cross-origin iframes where DOM access is blocked.
+/// 3. **Absolute path** (`points`): explicit list of `[x, y]` viewport
+///    points; press at the first, move through the rest, release at the
+///    last.
+///
+/// The drag is dispatched through CDP `Input.dispatchMouseEvent`
+/// (`mousePressed` → `mouseMoved` × N → `mouseReleased`), so events are
+/// trusted (native `isTrusted=true`), which is what slider CAPTCHA
+/// services such as Aliyun `nc_1_nocaptcha` check for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DragParams {
+    pub session_id: String,
+    /// Optional `@e<N>` ref for element-targeted drags. Mutually
+    /// exclusive with `selector` / `from_x` / `points`.
+    #[serde(
+        rename = "ref",
+        alias = "ref_",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ref_: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Target tab. Defaults to the Agent Window's active tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    /// Start X (viewport CSS px) for coordinate drags. Requires `from_y`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_x: Option<f64>,
+    /// Start Y (viewport CSS px) for coordinate drags. Requires `from_x`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_y: Option<f64>,
+    /// Horizontal delta in CSS px (element & coordinate modes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dx: Option<f64>,
+    /// Vertical delta in CSS px (element & coordinate modes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dy: Option<f64>,
+    /// Explicit viewport points `[x, y]` for absolute-path drags.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub points: Option<Vec<Vec<f64>>>,
+    /// Number of interpolation steps for delta drags (default 30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub steps: Option<u32>,
+    /// Per-step delay in ms (default 8). Slightly randomises timing to
+    /// look human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_delay_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub button: Option<MouseButton>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modifiers: Option<Vec<KeyModifier>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct DragResult {
+    pub tab_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_selector: Option<String>,
+    /// Start point of the drag (viewport CSS px).
+    pub from_x: f64,
+    pub from_y: f64,
+    /// End point of the drag (viewport CSS px).
+    pub to_x: f64,
+    pub to_y: f64,
+    /// Number of mouseMoved steps actually dispatched.
+    pub steps: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

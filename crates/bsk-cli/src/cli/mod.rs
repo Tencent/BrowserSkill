@@ -39,7 +39,7 @@ use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
-use crate::cli::interaction::{ClickArgs, FillArgs, PressArgs, SelectArgs};
+use crate::cli::interaction::{ClickArgs, DragArgs, FillArgs, PressArgs, SelectArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
@@ -162,6 +162,9 @@ pub enum Command {
 
     /// Set `<select>` option values by `value` attribute.
     Select(SelectArgs),
+
+    /// Drag an element, a viewport coordinate, or an absolute path.
+    Drag(DragArgs),
 
     /// Evaluate a JavaScript expression inside the Agent Window.
     Evaluate(EvaluateArgs),
