@@ -31,6 +31,7 @@ import { attachDialogs, markDialogCursor } from "./dialogs";
 import {
   backendNodeToObject,
   boxCentre,
+  nodeBoundingRect,
   nodeCentre,
   quadCentre,
   scrollNodeIntoView,
@@ -1008,8 +1009,20 @@ export async function handleDrag(
     }
     const centre = await nodeCentre(deps.cdp, target.tabId, node.backendNodeId);
     if (isRpcError(centre)) return centre;
-    fromX = centre.x;
-    fromY = centre.y;
+    // Pick a START POINT inside the element's box, randomly biased
+    // toward the middle (40–60% of width/height) instead of the exact
+    // centre. Humans grab a slider thumb somewhere near its middle,
+    // never pixel-perfectly at the centroid — CAPTCHA backends treat a
+    // dead-centre press as a bot tell.
+    const bounds = await nodeBoundingRect(deps.cdp, target.tabId, node.backendNodeId);
+    let startX = centre.x;
+    let startY = centre.y;
+    if (!isRpcError(bounds)) {
+      startX = bounds.x + bounds.width * (0.4 + Math.random() * 0.2);
+      startY = bounds.y + bounds.height * (0.4 + Math.random() * 0.2);
+    }
+    fromX = startX;
+    fromY = startY;
     usedRef = node.usedRef;
     usedSelector = node.usedSelector;
   } else if (hasCoordTarget) {
@@ -1047,15 +1060,7 @@ export async function handleDrag(
     const dy = params.dy ?? 0;
     const toX = fromX + dx;
     const toY = fromY + dy;
-    path = [];
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      // Ease-in-out for the first/last few steps, straight in the middle.
-      const eased = t < 0.15 ? t / 0.15 * 0.5 : t > 0.85 ? 0.5 + (t - 0.85) / 0.15 * 0.5 : 0.5 + (t - 0.5);
-      const x = fromX + dx * eased + jitter(0.7);
-      const y = fromY + dy * eased + jitter(0.7);
-      path.push({ x, y });
-    }
+    path = buildHumanDragPath(fromX, fromY, toX, toY, steps);
   }
 
   // --- Dispatch -------------------------------------------------------
@@ -1147,6 +1152,64 @@ export async function handleDrag(
 
 function jitter(amplitude: number): number {
   return (Math.random() * 2 - 1) * amplitude;
+}
+
+/**
+ * Build a drag trajectory that mimics a human hand:
+ *
+ *  - ease-in-out along the main axis (slow start / slow stop),
+ *  - a smooth, bounded random-walk deviation PERPENDICULAR to the
+ *    travel direction (a few px either side), instead of a perfect
+ *    straight line — CAPTCHA backends fingerprint both dead-straight
+ *    and white-noise-jittered paths,
+ *  - the perpendicular offset is low-pass filtered (running average)
+ *    so it wobbles like a hand, not flickers like a signal.
+ *
+ * Bounds the deviation at ±3px so slider tracks that need near-linear
+ * motion (Aliyun `nc_1_nocaptcha`) still pass; `steps` keeps the
+ * per-step movement small.
+ */
+export function buildHumanDragPath(
+  fromX: number,
+  fromY: number,
+  toX: number,
+  toY: number,
+  steps: number,
+): Array<{ x: number; y: number }> {
+  const n = Math.max(2, steps);
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const dist = Math.hypot(dx, dy) || 1;
+  // Unit normal (perpendicular) to the travel direction.
+  const nx = -dy / dist;
+  const ny = dx / dist;
+  const maxDev = Math.min(3, Math.max(0.6, dist * 0.02)); // ±3px ceiling, scaled down for tiny drags
+
+  // Random-walk perpendicular offsets, smoothed by a 3-tap average.
+  const raw: number[] = [];
+  let wander = 0;
+  for (let i = 0; i < n; i++) {
+    wander += jitter(0.9); // per-step increment, small
+    wander = Math.max(-maxDev, Math.min(maxDev, wander));
+    raw.push(wander);
+  }
+  const offsets = raw.map((_, i) => {
+    const prev = raw[Math.max(0, i - 1)];
+    const next = raw[Math.min(n - 1, i + 1)];
+    return (prev + raw[i] + next) / 3;
+  });
+
+  const path: Array<{ x: number; y: number }> = [];
+  for (let i = 1; i <= n; i++) {
+    const t = i / n;
+    // Ease-in-out (smoothstep) along the travel axis.
+    const eased = t * t * (3 - 2 * t);
+    const baseX = fromX + dx * eased;
+    const baseY = fromY + dy * eased;
+    const off = offsets[i - 1];
+    path.push({ x: baseX + nx * off, y: baseY + ny * off });
+  }
+  return path;
 }
 
 async function safeMouseRelease(
