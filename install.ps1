@@ -51,26 +51,13 @@ function Get-PlatformTriple {
     }
 
     return @{
-        ArchId      = $archId
+        ArchId       = $archId
         TargetTriple = $windowsArch
+        PlatformKey  = "windows-$archId"
     }
 }
 
 # ── Version resolution ────────────────────────────────────────────────────────
-
-function Get-LatestVersion {
-    $versionJsonUrl = "${GitHub}/releases/latest/download/version.json"
-    Write-Log "fetching latest version from ${versionJsonUrl}"
-
-    try {
-        $version = (Invoke-RestMethod -Uri $versionJsonUrl).version
-        if (-not $version) { Write-Die "could not parse version from version.json" }
-        return $version
-    }
-    catch {
-        Write-Die "failed to fetch version.json: $_"
-    }
-}
 
 # ── PATH helpers ──────────────────────────────────────────────────────────────
 
@@ -132,16 +119,39 @@ function Main {
 
     if ($env:BSK_VERSION) {
         $version = $env:BSK_VERSION -replace '^v', ''
+        $tag = "cli-v${version}"
+        $manifestUrl = "${GitHub}/releases/download/${tag}/version.json"
         Write-Log "using pinned version ${version}"
+        # Best-effort manifest fetch for the checksum (missing manifest
+        # only skips verification; a mismatch is fatal below).
+        try { $manifest = Invoke-RestMethod -Uri $manifestUrl } catch { $manifest = $null }
     }
     else {
-        $version = Get-LatestVersion
+        $manifestUrl = "${GitHub}/releases/latest/download/version.json"
+        Write-Log "fetching latest version from ${manifestUrl}"
+        $manifest = Invoke-RestMethod -Uri $manifestUrl
+        $version = $manifest.version
+        if (-not $version) { Write-Die "could not parse version from version.json" }
+        $tag = "cli-v${version}"
         Write-Log "latest version is ${version}"
     }
 
-    $tag = "cli-v${version}"
     $archiveName = "bsk-v${version}-$($platform.TargetTriple).zip"
     $downloadUrl = "${GitHub}/releases/download/${tag}/${archiveName}"
+
+    $expectedSha = $null
+    $platformKey = $platform.PlatformKey
+    if ($manifest -and $manifest.assets) {
+        $expectedSha = $manifest.assets.$platformKey.sha256
+    }
+    if (-not $expectedSha) {
+        if (-not $manifest) {
+            Write-Log "warning: could not fetch version.json; skipping checksum verification"
+        }
+        else {
+            Write-Log "warning: no checksum published for $($platform.PlatformKey); skipping checksum verification"
+        }
+    }
 
     $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
@@ -151,6 +161,17 @@ function Main {
 
         Write-Log "downloading ${downloadUrl}"
         Invoke-WebRequest -Uri $downloadUrl -OutFile $archivePath -UseBasicParsing -ErrorAction Stop
+
+        if ($expectedSha) {
+            Write-Log "verifying checksum"
+            $actualSha = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash
+            if ($actualSha -ieq $expectedSha) {
+                Write-Log "checksum OK"
+            }
+            else {
+                Write-Die "checksum mismatch: expected $expectedSha, got $actualSha"
+            }
+        }
 
         Write-Log "extracting ${archiveName}"
         Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force
