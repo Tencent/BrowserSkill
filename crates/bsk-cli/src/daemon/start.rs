@@ -220,6 +220,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let state = Arc::new(DaemonState::new(cfg.clone()));
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
+        let update_check_task = spawn_update_check_task();
         let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
@@ -383,6 +384,8 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let _ = session_idle_task.await;
         browser_liveness_task.abort();
         let _ = browser_liveness_task.await;
+        update_check_task.abort();
+        let _ = update_check_task.await;
         ws_handle.shutdown.notify_waiters();
         let _ = ws_handle.task.await;
 
@@ -486,6 +489,68 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                         warn!(session = %session_id, error = %err, "failed to stop idle session");
                     }
                 }
+            }
+        }
+    })
+}
+
+/// Spawn the periodic update check owned by the production daemon.
+///
+/// The daemon is the only writer of `~/.bsk/update-check.json`; CLI
+/// commands only read it to print the "new version available" hint
+/// (see [`crate::cli::update::print_update_hint_from_cache`]). The first
+/// tick of `tokio::time::interval` is immediate, so the check runs right
+/// after startup and then every
+/// [`crate::cli::update::UPDATE_CHECK_INTERVAL`]. Each tick re-reads the
+/// cache and skips the network fetch while it is still fresh within
+/// [`crate::cli::update::DAEMON_REFRESH_WINDOW`] (25min — shorter than
+/// the 30min tick, so steady state really refreshes on every tick
+/// instead of every other one). The task
+/// loops forever; shutdown aborts it like the other background tasks, so
+/// it never delays daemon exit (an in-flight fetch is bounded by the
+/// update client's own timeout and detached on abort).
+pub(crate) fn spawn_update_check_task() -> tokio::task::JoinHandle<()> {
+    use crate::cli::update;
+
+    tokio::spawn(async move {
+        let cache_path = match paths::update_check_path() {
+            Ok(path) => path,
+            Err(err) => {
+                warn!(error = %err, "periodic update check disabled: cannot resolve cache path");
+                return;
+            }
+        };
+
+        let mut ticker = tokio::time::interval(update::UPDATE_CHECK_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+
+            let needs_refresh = match update::read_update_cache(&cache_path) {
+                Ok(cache) => update::cache_needs_refresh(
+                    cache.as_ref(),
+                    update::now_epoch_secs(),
+                    update::DAEMON_REFRESH_WINDOW,
+                ),
+                Err(err) => {
+                    warn!(error = %err, "update cache unreadable; will refresh it");
+                    true
+                }
+            };
+            if !needs_refresh {
+                debug!("update cache still fresh; skipping update check");
+                continue;
+            }
+
+            let result = {
+                let cache_path = cache_path.clone();
+                tokio::task::spawn_blocking(move || update::refresh_update_cache(&cache_path)).await
+            };
+            match result {
+                Ok(Ok(Some(hint))) => info!(%hint, "periodic update check found a new version"),
+                Ok(Ok(None)) => info!("periodic update check refreshed cache (already up to date)"),
+                Ok(Err(err)) => warn!(error = %err, "periodic update check failed"),
+                Err(err) => warn!(error = %err, "periodic update check task panicked"),
             }
         }
     })
