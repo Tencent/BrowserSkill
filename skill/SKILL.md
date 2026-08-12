@@ -108,6 +108,8 @@ Do **not** call `bsk get-html` or `bsk screenshot` first just to inspect a page.
 | `--quiet` | Suppress informational stderr |
 | `-v` / `-vv` | More verbose logging |
 
+Auto-update is **on by default** — the background daemon upgrades `bsk` itself when a new release is available (postponed while a session is active). Set `BSK_AUTO_UPDATE=off` to disable it and upgrade manually with `bsk update`.
+
 Command-specific flags (timeouts, `--tab-id`, `--wait-until`, …): **`bsk <cmd> --help`**
 
 ## CLI command reference (one line each)
