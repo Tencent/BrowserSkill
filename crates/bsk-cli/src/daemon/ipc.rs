@@ -42,8 +42,8 @@ use tracing::{debug, warn};
 use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
-    SessionId, StartSessionError, StopSessionError, snapshot_status_entries, start_session,
-    stop_session,
+    AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
+    start_session, stop_session,
 };
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
@@ -545,6 +545,8 @@ struct CliSessionStartParams {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default)]
+    pub focused: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +640,7 @@ async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result
             browser_instance_id: None,
             width: None,
             height: None,
+            focused: None,
         }
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
@@ -664,7 +667,10 @@ async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result
         &state.sessions,
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
-        window_size,
+        AgentWindowOptions {
+            size: window_size,
+            focused: params.focused,
+        },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
     )

@@ -17,7 +17,7 @@ use crate::cli::business_rpc;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_state;
-use crate::cli::session::{start_session, stop_session};
+use crate::cli::session::{SessionStartOptions, start_session, stop_session};
 
 /// Max wait for the user to click 结束 in the browser (24 hours).
 const RECORD_AWAIT_TIMEOUT_MS: u32 = 86_400_000;
@@ -85,7 +85,13 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     }
 
     let info = ensure_daemon().context("ensure daemon is running")?;
-    let session = start_session(info.sock_path.clone(), args.browser, None, None)?;
+    let session = start_session(
+        info.sock_path.clone(),
+        SessionStartOptions {
+            browser: args.browser,
+            ..SessionStartOptions::default()
+        },
+    )?;
 
     let start_params = RecordStartParams {
         session_id: session.session_id.clone(),

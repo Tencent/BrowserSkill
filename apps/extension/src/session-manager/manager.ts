@@ -25,6 +25,14 @@ export interface SessionManagerOptions {
   now?: () => number;
 }
 
+/** Options for starting a session's Agent Window. */
+export interface SessionStartOptions {
+  /** Optional Agent Window outer size in CSS pixels. */
+  size?: { width: number; height: number };
+  /** Defaults to true so existing clients keep visible Agent Windows. */
+  focused?: boolean;
+}
+
 /**
  * Owner of all live agent sessions inside the extension.
  *
@@ -128,18 +136,11 @@ export class SessionManager {
    * Returns the created window id so callers can echo it back to the
    * daemon in the `tool.session_start` reply.
    */
-  async start(
-    sessionId: string,
-    size?: { width: number; height: number },
-  ): Promise<SessionContext> {
+  async start(sessionId: string, opts: SessionStartOptions = {}): Promise<SessionContext> {
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
-    // Only pass `size` when given so the no-size call shape (and its
-    // chrome.windows.create payload) stays exactly as before.
-    const windowId = size
-      ? await this.agentWindow.create(AGENT_WINDOW_HOME, size)
-      : await this.agentWindow.create(AGENT_WINDOW_HOME);
+    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, opts);
     await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
     const ctx: SessionContext = {
       sessionId,

@@ -8,7 +8,7 @@
  */
 
 export interface AgentWindowApi {
-  create(url: string, size?: { width: number; height: number }): Promise<number>;
+  create(url: string, opts?: AgentWindowCreateOptions): Promise<number>;
   remove(windowId: number): Promise<void>;
   /**
    * Guarantee the Agent Window has an active, CDP-navigable tab.
@@ -18,16 +18,24 @@ export interface AgentWindowApi {
   ensureActiveTab(windowId: number, url: string): Promise<void>;
 }
 
+/** Creation hints for a new Agent Window. */
+export interface AgentWindowCreateOptions {
+  /** Optional outer size in CSS pixels. */
+  size?: { width: number; height: number };
+  /** Defaults to true so existing sessions keep visible Agent Windows. */
+  focused?: boolean;
+}
+
 /** Initial tab URL for every new session's Agent Window. */
 export const AGENT_WINDOW_HOME = "about:blank";
 
 export const chromeAgentWindowApi: AgentWindowApi = {
-  async create(url: string, size?: { width: number; height: number }): Promise<number> {
+  async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<number> {
     const win = await chrome.windows.create({
       type: "normal",
-      focused: true,
+      focused: opts.focused ?? true,
       url,
-      ...(size ? { width: size.width, height: size.height } : {}),
+      ...(opts.size ? { width: opts.size.width, height: opts.size.height } : {}),
     });
     if (typeof win?.id !== "number") {
       throw new Error("[bh] chrome.windows.create returned no window id");

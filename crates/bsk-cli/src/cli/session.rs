@@ -64,6 +64,10 @@ pub struct SessionStartArgs {
     /// `--width` and `--height` must be given to take effect.
     #[arg(long, value_parser = window_size)]
     pub height: Option<u32>,
+
+    /// Open the Agent Window in the background without stealing focus.
+    #[arg(long)]
+    pub no_focus: bool,
 }
 
 /// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
@@ -99,6 +103,8 @@ struct StartParams {
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focused: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,7 +179,15 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
-    let result = start_session(sock, args.browser, args.width, args.height);
+    let result = start_session(
+        sock,
+        SessionStartOptions {
+            browser: args.browser,
+            width: args.width,
+            height: args.height,
+            focused: args.no_focus.then_some(false),
+        },
+    );
     waited.store(true, Ordering::SeqCst);
     match result {
         Ok(reply) => match format {
@@ -197,20 +211,27 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     Ok(())
 }
 
+/// Options for [`start_session`]: browser selection plus Agent Window
+/// creation hints. `None` fields keep the extension-side defaults
+/// (focused window, browser-chosen size).
+#[derive(Debug, Default, Clone)]
+pub struct SessionStartOptions {
+    pub browser: Option<String>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub focused: Option<bool>,
+}
+
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
-pub fn start_session(
-    sock: PathBuf,
-    browser: Option<String>,
-    width: Option<u32>,
-    height: Option<u32>,
-) -> Result<StartReply, CliError> {
+pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
     call(
         sock,
         Method::SessionStart,
         Some(StartParams {
-            browser_instance_id: browser,
-            width,
-            height,
+            browser_instance_id: opts.browser,
+            width: opts.width,
+            height: opts.height,
+            focused: opts.focused,
         }),
         SESSION_START_IPC_TIMEOUT,
     )

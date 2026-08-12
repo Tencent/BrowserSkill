@@ -42,7 +42,7 @@ Every automation task **must** follow this lifecycle. Do **not** rely on idle ti
 3. bsk session stop <id>          → REQUIRED when done (even on error paths)
 ```
 
-Optional: `bsk session start --browser <instance-id-or-label>` when multiple browsers are connected (`bsk browsers` / error output lists them).
+Optional: `bsk session start --browser <instance-id-or-label>` when multiple browsers are connected (`bsk browsers` / error output lists them). Add `--no-focus` to open the Agent Window in the background without stealing focus from the user's current window.
 
 Emergency cleanup: `bsk session stop --all` or the Agent Window overlay **Stop all**.
 
@@ -129,6 +129,7 @@ Details and flags: **`bsk <cmd> --help`**
 | Command | Summary |
 |---------|---------|
 | `bsk session start` | Open Agent Window (`--width`/`--height` for initial size); prints **4-letter session id** |
+| `bsk session start --no-focus` | Open Agent Window in the background without stealing focus |
 | `bsk session stop <id>` | End session, close Agent Window, auto-return borrowed tabs |
 | `bsk session stop --all` | Stop every active session |
 | `bsk session list` | List active sessions |
