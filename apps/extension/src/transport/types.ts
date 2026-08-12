@@ -31,7 +31,8 @@ export type RpcErrorReason =
   | "single_select_value_count"
   | "tab_not_active"
   | "restricted_tab_url"
-  | "borrow_conflict";
+  | "borrow_conflict"
+  | "screenshot_capture_failed";
 
 export interface RpcErrorData {
   reason?: RpcErrorReason;
