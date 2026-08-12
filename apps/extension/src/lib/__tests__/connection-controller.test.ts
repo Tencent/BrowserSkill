@@ -214,7 +214,6 @@ describe("ConnectionController connectionEnabled", () => {
   });
 
   it("disconnects and retries when handshake fails while the socket is still open", async () => {
-    vi.useFakeTimers();
     const controller = new ConnectionController();
     const transport = makeMockTransport();
     await controller.attach(transport, { name: "Chrome", version: "120" }, true);
@@ -224,11 +223,15 @@ describe("ConnectionController connectionEnabled", () => {
       id: request.id,
       error: { code: "protocol_error", message: "bad handshake" },
     });
-    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledTimes(1));
-    expect(controller.snapshot().state).toBe("disconnected");
+    // The failure path disconnects once; that state change then drives
+    // recoverFromDisconnect(), which issues one more idempotent disconnect
+    // (cancelling the transport's auto-reconnect) before teardown + reconnect.
+    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledTimes(2));
 
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(transport.connect).toHaveBeenCalledTimes(2);
+    // Reconnection is owned by the recovery path, and a fresh handshake is
+    // attempted on the new connection.
+    await vi.waitFor(() => expect(transport.connect).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(transport.send.mock.calls.length).toBeGreaterThan(1));
   });
 
   it("binds each handshake to the connection that initiated it", async () => {
@@ -237,9 +240,13 @@ describe("ConnectionController connectionEnabled", () => {
     await controller.attach(transport, { name: "Chrome", version: "120" }, true);
     const first = transport.send.mock.calls[0]?.[0] as { id: string };
 
+    // Socket drops; the recovery path reconnects on its own and starts a new
+    // handshake bound to the new connection.
     transport.emitState("disconnected");
-    transport.emitState("connected");
-    const second = transport.send.mock.calls[1]?.[0] as { id: string };
+    await vi.waitFor(() => expect(transport.connect).toHaveBeenCalledTimes(2));
+    const second = transport.send.mock.calls[transport.send.mock.calls.length - 1]?.[0] as {
+      id: string;
+    };
     expect(second.id).not.toBe(first.id);
 
     transport.emitMessage({ id: first.id, result: handshake("1.0", "1.0") });
