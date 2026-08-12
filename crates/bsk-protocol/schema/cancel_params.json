@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CancelParams",
+  "type": "object",
+  "required": [
+    "rpc_id"
+  ],
+  "properties": {
+    "rpc_id": {
+      "type": "string"
+    }
+  }
+}

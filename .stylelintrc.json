@@ -1,0 +1,23 @@
+{
+  "extends": ["stylelint-config-standard"],
+  "rules": {
+    "import-notation": null,
+    "at-rule-no-unknown": [
+      true,
+      {
+        "ignoreAtRules": ["source", "custom-variant", "theme", "apply"]
+      }
+    ],
+    "at-rule-empty-line-before": [
+      "never",
+      {
+        "ignore": ["after-comment"]
+      }
+    ],
+    "custom-property-empty-line-before": null,
+    "declaration-empty-line-before": null,
+    "lightness-notation": null,
+    "hue-degree-notation": null,
+    "alpha-value-notation": null
+  }
+}

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust fmt, clippy, tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --workspace --locked
+
+  frontend:
+    name: Frontend lint, typecheck, tests, build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare extension types
+        run: pnpm --filter @browser-skill/extension exec wxt prepare
+
+      - name: Run lint checks
+        run: pnpm lint
+
+      - name: Compile extension TypeScript
+        run: pnpm --filter @browser-skill/extension compile
+
+      - name: Run extension tests
+        run: pnpm ext:test
+
+      - name: Build extension
+        run: pnpm ext:build
+
+  node-scripts:
+    name: Node script tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Run script tests
+        run: node --test scripts/*.test.mjs

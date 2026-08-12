@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStartParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "browser_instance_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "height": {
+      "description": "Optional Agent Window outer height in CSS pixels (100..=7680).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "width": {
+      "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@browser-skill/i18n",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./react": {
+      "import": "./src/react.tsx",
+      "default": "./src/react.tsx"
+    }
+  },
+  "peerDependencies": {
+    "react": "^19.0.0"
+  },
+  "dependencies": {
+    "i18next": "^24.2.2",
+    "i18next-browser-languagedetector": "^8.0.2",
+    "react-i18next": "^15.3.4"
+  }
+}

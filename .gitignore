@@ -1,0 +1,19 @@
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+.output/
+.wxt/
+.web-extension-id
+
+# Logs
+*.log
+
+# macOS
+.DS_Store
+
+# Environment
+.env.local
+.env.*.local

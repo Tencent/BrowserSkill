@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HandshakeResult",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "server",
+    "version"
+  ],
+  "properties": {
+    "min_compatible_peer": {
+      "description": "**Deprecated** — legacy app-semver floor. New peers should use `min_compatible_protocol`; this field is optional and ignored.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "min_compatible_protocol": {
+      "description": "Lowest peer protocol version this daemon accepts.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "protocol_version": {
+      "type": "string"
+    },
+    "server": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    }
+  }
+}

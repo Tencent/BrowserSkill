@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ReloadParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "hard": {
+      "description": "When `true`, bypass the HTTP cache (CDP `Page.reload(ignoreCache=true)`).",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "wait_until": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WaitUntil"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "WaitUntil": {
+      "description": "Page-lifecycle checkpoint a navigation should wait on.\n\nMapping to CDP `Page.lifecycleEvent` names: * `Load` → `load` * `DomContentLoaded` → `DOMContentLoaded` * `NetworkIdle` → `networkIdle` * `Commit` → `commit` (earliest event after the navigation actually commits to a new document)",
+      "type": "string",
+      "enum": [
+        "load",
+        "domcontentloaded",
+        "networkidle",
+        "commit"
+      ]
+    }
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStopResult",
+  "type": "object",
+  "properties": {
+    "return_failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ReturnFailure"
+      }
+    },
+    "returned_tab_ids": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "format": "int64"
+      }
+    }
+  },
+  "definitions": {
+    "ErrorCode": {
+      "description": "Stable daemon/extension error codes (§4.5).",
+      "type": "string",
+      "enum": [
+        "unknown_method",
+        "unsupported",
+        "invalid_params",
+        "not_found",
+        "permission_denied",
+        "timeout",
+        "cdp_failed",
+        "protocol_error",
+        "cancelled",
+        "user_aborted",
+        "version_too_old",
+        "multiple_browsers_online",
+        "no_browser_connected"
+      ]
+    },
+    "ReturnFailure": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "tab_id"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "tab_id": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    }
+  }
+}

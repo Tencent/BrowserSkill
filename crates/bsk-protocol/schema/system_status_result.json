@@ -1,0 +1,192 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatusResult",
+  "description": "`system.status` reply: daemon meta + connected browsers + live sessions.",
+  "type": "object",
+  "required": [
+    "browsers",
+    "daemon_version",
+    "pid",
+    "protocol_version",
+    "sessions",
+    "sock_path",
+    "uptime_secs",
+    "ws_port"
+  ],
+  "properties": {
+    "browsers": {
+      "description": "Snapshot of connected extension clients.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/BrowserStatusEntry"
+      }
+    },
+    "daemon_version": {
+      "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
+      "type": "string"
+    },
+    "pid": {
+      "description": "Daemon process id.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "protocol_version": {
+      "description": "Logical protocol revision (e.g. `\"1.0\"`).",
+      "type": "string"
+    },
+    "sessions": {
+      "description": "Snapshot of live sessions.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SessionStatusEntry"
+      }
+    },
+    "sock_path": {
+      "description": "Absolute path of the IPC socket / named pipe handle.",
+      "type": "string"
+    },
+    "uptime_secs": {
+      "description": "Daemon uptime in whole seconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "version_skew_browsers": {
+      "description": "Subset of `browsers` whose `protocol_version` differs from the daemon's (minor drift, same major). Entries mirror `BrowserStatusEntry.version_skew`.",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/VersionSkewEntry"
+      }
+    },
+    "ws_port": {
+      "description": "WS port the daemon listens on for extension clients.",
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "BrowserStatusEntry": {
+      "description": "Snapshot of a single connected extension (extension client view).",
+      "type": "object",
+      "required": [
+        "browser_name",
+        "browser_version",
+        "extension_version",
+        "instance_id",
+        "label",
+        "session_count"
+      ],
+      "properties": {
+        "browser_name": {
+          "type": "string"
+        },
+        "browser_version": {
+          "type": "string"
+        },
+        "connected_at_ms": {
+          "description": "Unix epoch milliseconds at which the extension completed the daemon handshake. Stable across reconnects only via the best-effort registry generation; clients should treat this as a rough \"online since\" hint, not a strong identity.",
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        },
+        "extension_protocol_version": {
+          "description": "Protocol version the extension advertised at handshake.",
+          "default": "",
+          "type": "string"
+        },
+        "extension_version": {
+          "type": "string"
+        },
+        "instance_id": {
+          "description": "Stable id assigned by the extension; matches `HandshakeParams::instance_id`.",
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "session_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "version_skew": {
+          "description": "`true` when the browser's `protocol_version` differs from the daemon's (same major, minor drift). Connection is still allowed.",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "SessionStatusEntry": {
+      "description": "Snapshot of a single live session.",
+      "type": "object",
+      "required": [
+        "browser_instance_id",
+        "created_at_ms",
+        "session_id"
+      ],
+      "properties": {
+        "agent_window_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "browser_instance_id": {
+          "type": "string"
+        },
+        "created_at_ms": {
+          "description": "Unix epoch milliseconds.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      }
+    },
+    "VersionSkewEntry": {
+      "description": "One entry per connected browser whose protocol version drifts from the daemon's (same major). Surfaced in `system.status` for `bsk status` / `bsk doctor` / popup \"warn but allow\" UX.",
+      "type": "object",
+      "required": [
+        "browser_name",
+        "client_version",
+        "instance_id",
+        "label",
+        "server_version"
+      ],
+      "properties": {
+        "browser_name": {
+          "type": "string"
+        },
+        "client_protocol_version": {
+          "description": "Extension `protocol_version` from handshake.",
+          "default": "",
+          "type": "string"
+        },
+        "client_version": {
+          "description": "Extension app semver at snapshot time (informational).",
+          "type": "string"
+        },
+        "instance_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "server_protocol_version": {
+          "description": "Daemon `protocol_version` at snapshot time.",
+          "default": "",
+          "type": "string"
+        },
+        "server_version": {
+          "description": "Daemon app semver at snapshot time (informational).",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

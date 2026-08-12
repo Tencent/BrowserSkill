@@ -1,0 +1,91 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "Disconnected",
+      "connecting": "Connecting…",
+      "connected": "Connected",
+      "version_skew": "Protocol mismatch",
+      "disabled": "Connection off"
+    },
+    "stateDetail": {
+      "disconnected": "Open BrowserSkill to connect.",
+      "connecting": "Connecting to BrowserSkill…",
+      "connected": "Ready for automation tasks.",
+      "version_skew": "Some features may be unavailable."
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "Action needed",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "BrowserSkill connection",
+    "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, daemon v{{daemonProtocol}}.",
+    "upgradeAvailable": "Upgradable",
+    "launcher": {
+      "title": "Quick actions"
+    },
+    "back": "Back",
+    "runtimeTitle": "Runtime",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "extension v{{version}}",
+    "extensionVersionHint": "Extension version",
+    "daemonVersionHint": "bsk version",
+    "protocolVersion": "protocol v{{version}}",
+    "extensionProtocol": "extension protocol v{{version}}",
+    "daemonProtocol": "daemon protocol v{{version}}",
+    "instanceTitle": "Instance ID",
+    "instanceDescription": "Unique connection identifier for this browser",
+    "copy": "Copy",
+    "copied": "Copied",
+    "copyInstanceId": "Copy instance ID",
+    "record": {
+      "sectionTitle": "Action recording",
+      "cardDesc": "Record your actions for Agent reference",
+      "sectionHint": "Generates a recording instruction — send it to your Agent to start recording your actions; the Agent can then use the recording to automate similar tasks.",
+      "topicLabel": "Topic (optional)",
+      "topicPlaceholder": "e.g. Publish an article",
+      "startUrlLabel": "Starting URL (optional)",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "Copy recording instructions",
+      "copied": "Copied",
+      "hintDisconnected": "Available when connected",
+      "promptTemplate": "Use BrowserSkill's `bsk` CLI to record the browser actions I'm about to demonstrate.\n\nSteps:\n1. Run: {{command}}\n2. Once you confirm it's started, I'll operate in the opened window myself.\n3. After I click Finish, read the returned trace.json and summarize the actions (pages + steps); don't re-run or \"verify\"."
+    }
+  },
+  "controlOverlay": {
+    "status": "Agent controlling",
+    "interrupt": "Interrupt",
+    "interrupting": "Interrupting…"
+  },
+  "borrowConfirmation": {
+    "title": "Allow tab borrow?",
+    "titleInactive": "Agent wants to borrow a tab",
+    "body": "An AI agent wants to move this tab into its workspace. You can deny or allow the borrow.",
+    "targetTab": "Target tab:",
+    "autoDeny": "Request expires in {{count}}s",
+    "deny": "Deny",
+    "allow": "Allow",
+    "notificationTitle": "BrowserSkill: Agent wants to borrow a tab",
+    "notificationBody": "Approve or deny the borrow of \"{{tabTitle}}\" in your browser."
+  },
+  "helpRequest": {
+    "title": "Agent needs your help",
+    "compactStatus": "Agent is still waiting for you to finish this step",
+    "noteLabel": "Optional note back to the agent",
+    "notePlaceholder": "Add a note for the agent (optional)",
+    "continue": "Done, return control",
+    "cancel": "Cancel request",
+    "collapse": "Collapse",
+    "expand": "Expand",
+    "dragHandle": "Drag to move",
+    "notificationTitle": "BrowserSkill: Agent needs your help"
+  },
+  "recordOverlay": {
+    "recording": "Recording your actions",
+    "finish": "Finish"
+  }
+}

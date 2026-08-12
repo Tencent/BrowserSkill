@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvaluateError",
+  "type": "object",
+  "required": [
+    "text"
+  ],
+  "properties": {
+    "column": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "line": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "text": {
+      "type": "string"
+    }
+  }
+}

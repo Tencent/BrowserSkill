@@ -1,0 +1,545 @@
+import { describe, expect, it, vi } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
+
+function fakeChromeEvent<TArgs extends unknown[]>() {
+  const listeners = new Set<(...args: TArgs) => void>();
+  return {
+    listeners,
+    addListener: vi.fn((cb: (...args: TArgs) => void) => listeners.add(cb)),
+    removeListener: vi.fn((cb: (...args: TArgs) => void) => listeners.delete(cb)),
+    fire: (...args: TArgs) => {
+      for (const cb of listeners) cb(...args);
+    },
+  };
+}
+
+function fakeApi() {
+  const onEvent = fakeChromeEvent<[chrome.debugger.Debuggee, string, unknown]>();
+  const onDetach = fakeChromeEvent<[chrome.debugger.Debuggee, string]>();
+  const api: CdpDebuggerApi = {
+    attach: vi.fn(async () => {}),
+    detach: vi.fn(async () => {}),
+    sendCommand: vi.fn(async () => ({ ok: true })),
+    // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+    onEvent: onEvent as any,
+    // biome-ignore lint/suspicious/noExplicitAny: minimal chrome.events.Event shim
+    onDetach: onDetach as any,
+  };
+  return { api, onEvent, onDetach };
+}
+
+describe("ChromiumCdp", () => {
+  it("coalesces concurrent attach calls for the same tab", async () => {
+    const { api } = fakeApi();
+    let releaseAttach!: () => void;
+    const attachGate = new Promise<void>((resolve) => {
+      releaseAttach = resolve;
+    });
+    (api.attach as ReturnType<typeof vi.fn>).mockImplementationOnce(async () => attachGate);
+    const cdp = new ChromiumCdp(api);
+
+    const first = cdp.ensureAttached(7);
+    const second = cdp.ensureAttached(7);
+    await Promise.resolve();
+    expect(api.attach).toHaveBeenCalledTimes(1);
+
+    releaseAttach();
+    await expect(Promise.all([first, second])).resolves.toEqual([undefined, undefined]);
+    expect(cdp.isAttached(7)).toBe(true);
+  });
+
+  it("attaches lazily on first send if not attached yet", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    const out = await cdp.send<{ ok: boolean }>(9, "DOM.getDocument");
+    expect(out).toEqual({ ok: true });
+    expect(api.attach).toHaveBeenCalledTimes(1);
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 9 }, "DOM.getDocument", {});
+  });
+
+  it("propagates attach failures as thrown Error", async () => {
+    const { api } = fakeApi();
+    (api.attach as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("Another debugger is already attached"),
+    );
+    const cdp = new ChromiumCdp(api);
+    await expect(cdp.ensureAttached(5)).rejects.toThrow(/already attached/);
+    expect(cdp.isAttached(5)).toBe(false);
+  });
+
+  it("rolls back the raw attach when a domain enable fails so the tab is not left stuck", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Page.enable") throw new Error("Page.enable rejected");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    // Raw attach succeeds, but Page.enable fails. Without the rollback
+    // the debugger would stay attached while `attachedTabs` omits the id,
+    // leaving the tab stuck on "Another debugger is already attached" for
+    // every later call until the extension is reloaded.
+    await expect(cdp.ensureAttached(42)).rejects.toThrow(/Page\.enable rejected/);
+    expect(cdp.isAttached(42)).toBe(false);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 42 });
+
+    // The rollback detached, so a fresh attach can succeed afterwards.
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockResolvedValue({});
+    await expect(cdp.ensureAttached(42)).resolves.toBeUndefined();
+    expect(cdp.isAttached(42)).toBe(true);
+  });
+
+  it("send() rejects on chrome.runtime.lastError-style failures", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "DOM.getDocument") {
+          throw "frame got detached";
+        }
+        return { ok: true };
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await expect(cdp.send(1, "DOM.getDocument")).rejects.toThrow("frame got detached");
+  });
+
+  it("auto-clears the attached cache on detach event", async () => {
+    const { api, onDetach } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(11);
+    expect(cdp.isAttached(11)).toBe(true);
+    onDetach.fire({ tabId: 11 }, "target_closed");
+    expect(cdp.isAttached(11)).toBe(false);
+  });
+
+  it("detach() is idempotent and never throws", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.detach(99); // not attached
+    expect(api.detach).not.toHaveBeenCalled();
+    await cdp.ensureAttached(7);
+    (api.detach as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("tab closed"));
+    await expect(cdp.detach(7)).resolves.toBeUndefined();
+    expect(cdp.isAttached(7)).toBe(false);
+  });
+
+  it("detachAll() iterates every cached tab", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(1);
+    await cdp.ensureAttached(2);
+    await cdp.detachAll();
+    expect(api.detach).toHaveBeenCalledTimes(2);
+    expect(cdp.isAttached(1)).toBe(false);
+    expect(cdp.isAttached(2)).toBe(false);
+  });
+
+  it("attach enables Page domain on first send", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.send(9, "DOM.getDocument");
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 9 }, "Page.enable", {});
+  });
+
+  it("enables console capture domains best-effort during attach", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Log.enable") throw new Error("restricted");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await expect(cdp.ensureAttached(12)).resolves.toBeUndefined();
+    expect(cdp.isAttached(12)).toBe(true);
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 12 }, "Runtime.enable", {});
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 12 }, "Log.enable", {});
+  });
+
+  it("retries console capture after a domain enable fails during attach", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Log.enable") throw new Error("restricted");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    // Attach is best-effort: Log.enable fails but attach still succeeds,
+    // leaving the tab unmarked so capture can be retried.
+    await cdp.ensureAttached(12);
+    const afterAttach = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Runtime.enable" || method === "Log.enable",
+    );
+    expect(afterAttach).toHaveLength(2);
+
+    // Before the fix the "attempted" flag was set before success, so this
+    // was a no-op and the tab silently returned no console output forever.
+    // Now it retries both domains.
+    await cdp.ensureConsoleCapture(12);
+    const afterRetry = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Runtime.enable" || method === "Log.enable",
+    );
+    expect(afterRetry).toHaveLength(4);
+  });
+
+  it("retries and surfaces Network.enable failures for explicit capture", async () => {
+    const { api } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Network.enable") throw new Error("network restricted");
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    await expect(cdp.ensureAttached(13)).resolves.toBeUndefined();
+    await expect(cdp.ensureNetworkCapture(13)).rejects.toThrow("network restricted");
+
+    const enableCalls = (api.sendCommand as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([, method]) => method === "Network.enable",
+    );
+    expect(enableCalls).toHaveLength(2);
+  });
+
+  it("records javascriptDialogOpening and auto-accepts", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(3);
+    const cursor = cdp.dialogCursor(3);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "alert",
+      message: "hello",
+      url: "https://example.com/",
+      hasBrowserHandler: false,
+    });
+    await Promise.resolve();
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
+      accept: true,
+    });
+    const dialogs = cdp.dialogsSince(3, cursor);
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0]).toMatchObject({
+      tab_id: 3,
+      type: "alert",
+      message: "hello",
+      handled: "accepted",
+      sequence: 1,
+    });
+  });
+
+  it("unblocks a pending send after dialog is handled", async () => {
+    const { api, onEvent } = fakeApi();
+    let releaseEvaluate!: () => void;
+    const evaluateGate = new Promise<void>((resolve) => {
+      releaseEvaluate = resolve;
+    });
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_target, method: string) => {
+        if (method === "Runtime.evaluate") {
+          await evaluateGate;
+          return { result: { value: 2 } };
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(5);
+    const pending = cdp.send(5, "Runtime.evaluate", { expression: "1+1" });
+    await Promise.resolve();
+    onEvent.fire({ tabId: 5 }, "Page.javascriptDialogOpening", {
+      type: "alert",
+      message: "blocked",
+      url: "https://example.com/",
+    });
+    releaseEvaluate();
+    await expect(pending).resolves.toEqual({ result: { value: 2 } });
+  });
+
+  it("clears dialog state on detach", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(11);
+    onEvent.fire({ tabId: 11 }, "Page.javascriptDialogOpening", {
+      type: "alert",
+      message: "x",
+      url: "https://example.com/",
+    });
+    await Promise.resolve();
+    expect(cdp.dialogsSince(11, 0)).toHaveLength(1);
+    await cdp.detach(11);
+    expect(cdp.dialogsSince(11, 0)).toHaveLength(0);
+  });
+
+  it("records Runtime console calls with bounded text and optional stack frames", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(21);
+    onEvent.fire({ tabId: 21 }, "Runtime.consoleAPICalled", {
+      type: "warn",
+      args: [{ value: "abcdefghi" }, { description: "Object { ok: true }" }],
+      timestamp: 1234.5,
+      stackTrace: {
+        callFrames: [
+          {
+            functionName: "render",
+            url: "https://example.test/app.js",
+            lineNumber: 4,
+            columnNumber: 8,
+          },
+        ],
+      },
+    });
+
+    const withoutStack = cdp.consoleEntriesSince(21, 0, 50, 5, false);
+    expect(withoutStack).toMatchObject({
+      next_since: 1,
+      truncated: true,
+      entries: [
+        {
+          sequence: 1,
+          kind: "console",
+          level: "warn",
+          text: "abcde",
+          url: "https://example.test/app.js",
+          line: 5,
+          column: 9,
+          truncated: true,
+        },
+      ],
+    });
+    expect(withoutStack.entries[0].stack_trace).toBeUndefined();
+
+    const withStack = cdp.consoleEntriesSince(21, 0, 50, 1000, true);
+    expect(withStack.entries[0].stack_trace).toEqual([
+      {
+        function_name: "render",
+        url: "https://example.test/app.js",
+        line: 5,
+        column: 9,
+      },
+    ]);
+  });
+
+  it("records exceptions and engine log entries", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(22);
+    onEvent.fire({ tabId: 22 }, "Runtime.exceptionThrown", {
+      timestamp: 2000,
+      exceptionDetails: {
+        text: "Uncaught",
+        url: "https://example.test/app.js",
+        lineNumber: 40,
+        columnNumber: 6,
+        exception: { description: "TypeError: boom\n    at render (app.js:41:7)" },
+      },
+    });
+    onEvent.fire({ tabId: 22 }, "Log.entryAdded", {
+      entry: {
+        level: "error",
+        text: "Failed to load resource: 404",
+        url: "https://example.test/missing.png",
+        lineNumber: 0,
+        timestamp: 2100,
+      },
+    });
+
+    const result = cdp.consoleEntriesSince(22, 0, 50, 1000, false);
+    expect(result.next_since).toBe(2);
+    expect(result.entries).toMatchObject([
+      {
+        sequence: 1,
+        kind: "exception",
+        level: "error",
+        text: "TypeError: boom",
+        url: "https://example.test/app.js",
+        line: 41,
+        column: 7,
+      },
+      {
+        sequence: 2,
+        kind: "log",
+        level: "error",
+        text: "Failed to load resource: 404",
+        url: "https://example.test/missing.png",
+      },
+    ]);
+  });
+
+  it("filters console entries by cursor and caps result size", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(23);
+    for (let i = 1; i <= 3; i += 1) {
+      onEvent.fire({ tabId: 23 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ value: `message ${i}` }],
+      });
+    }
+
+    const result = cdp.consoleEntriesSince(23, 1, 1, 1000, false);
+    expect(result).toMatchObject({
+      next_since: 2,
+      truncated: true,
+      entries: [{ sequence: 2, text: "message 2" }],
+    });
+    expect(cdp.consoleEntriesSince(23, undefined, 1, 1000, false)).toMatchObject({
+      next_since: 3,
+      truncated: true,
+      entries: [{ sequence: 3, text: "message 3" }],
+    });
+  });
+
+  it("reports dropped buffered entries only when they affect the cursor", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(25);
+    for (let i = 1; i <= 201; i += 1) {
+      onEvent.fire({ tabId: 25 }, "Runtime.consoleAPICalled", {
+        type: "log",
+        args: [{ value: `message ${i}` }],
+      });
+    }
+
+    expect(cdp.consoleEntriesSince(25, 0, 200, 1000, false).truncated).toBe(true);
+    expect(cdp.consoleEntriesSince(25, 200, 200, 1000, false)).toMatchObject({
+      next_since: 201,
+      truncated: false,
+      entries: [{ sequence: 201, text: "message 201" }],
+    });
+  });
+
+  it("clears console state on detach", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(24);
+    onEvent.fire({ tabId: 24 }, "Runtime.consoleAPICalled", {
+      type: "log",
+      args: [{ value: "x" }],
+    });
+    expect(cdp.consoleEntriesSince(24, 0, 50, 1000, false).entries).toHaveLength(1);
+    await cdp.detach(24);
+    expect(cdp.consoleEntriesSince(24, 0, 50, 1000, false).entries).toHaveLength(0);
+  });
+
+  it("isolates network request metadata by tab and consumes it", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(31);
+    await cdp.ensureAttached(32);
+
+    onEvent.fire({ tabId: 31 }, "Network.requestWillBeSent", {
+      requestId: "shared-id",
+      request: { url: "https://one.test/api", method: "GET" },
+      type: "Fetch",
+    });
+    onEvent.fire({ tabId: 32 }, "Network.requestWillBeSent", {
+      requestId: "shared-id",
+      request: { url: "https://two.test/script.js", method: "POST" },
+      type: "Script",
+    });
+    onEvent.fire({ tabId: 31 }, "Network.responseReceived", {
+      requestId: "shared-id",
+      response: { status: 204 },
+      type: "Fetch",
+    });
+    onEvent.fire({ tabId: 32 }, "Network.loadingFailed", {
+      requestId: "shared-id",
+      errorText: "net::ERR_FAILED",
+      type: "Script",
+    });
+    onEvent.fire({ tabId: 31 }, "Network.loadingFailed", {
+      requestId: "shared-id",
+      errorText: "net::ERR_ABORTED",
+    });
+
+    expect(cdp.networkEntriesSince(31, 0, 50, 1000).entries).toMatchObject([
+      {
+        kind: "response",
+        method: "GET",
+        url: "https://one.test/api",
+        status: 204,
+      },
+      {
+        kind: "failure",
+        url: undefined,
+        error_text: "net::ERR_ABORTED",
+      },
+    ]);
+    expect(cdp.networkEntriesSince(32, 0, 50, 1000).entries).toMatchObject([
+      {
+        kind: "failure",
+        method: "POST",
+        url: "https://two.test/script.js",
+        error_text: "net::ERR_FAILED",
+      },
+    ]);
+  });
+
+  it("bounds request metadata and clears it on detach", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(33);
+    const longUrl = `https://example.test/${"x".repeat(5000)}`;
+
+    onEvent.fire({ tabId: 33 }, "Network.requestWillBeSent", {
+      requestId: "long",
+      request: { url: longUrl, method: "GET" },
+    });
+    onEvent.fire({ tabId: 33 }, "Network.loadingFailed", {
+      requestId: "long",
+      errorText: "net::ERR_FAILED",
+    });
+    const bounded = cdp.networkEntriesSince(33, 0, 50, 10_000).entries[0];
+    expect(bounded.url).toHaveLength(4096);
+    expect(bounded.truncated).toBe(true);
+
+    onEvent.fire({ tabId: 33 }, "Network.requestWillBeSent", {
+      requestId: "long-method",
+      request: { url: "https://example.test/ok", method: "M".repeat(5000) },
+    });
+    onEvent.fire({ tabId: 33 }, "Network.responseReceived", {
+      requestId: "long-method",
+      response: { url: "https://example.test/ok", status: 200 },
+    });
+    const boundedResponse = cdp.networkEntriesSince(33, 1, 50, 10_000).entries[0];
+    expect(boundedResponse.method).toHaveLength(4096);
+    expect(boundedResponse.truncated).toBe(true);
+
+    onEvent.fire({ tabId: 33 }, "Network.requestWillBeSent", {
+      requestId: "stale",
+      request: { url: "https://example.test/stale", method: "GET" },
+    });
+    await cdp.detach(33);
+    await cdp.ensureAttached(33);
+    onEvent.fire({ tabId: 33 }, "Network.loadingFailed", {
+      requestId: "stale",
+      errorText: "net::ERR_ABORTED",
+    });
+    expect(cdp.networkEntriesSince(33, 0, 50, 1000).entries[0].url).toBeUndefined();
+  });
+
+  it("detachSession only detaches tabs no other session owns", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(1);
+    await cdp.ensureAttached(2);
+    cdp.trackSessionTab("aa11", 1);
+    cdp.trackSessionTab("bb22", 1);
+    cdp.trackSessionTab("aa11", 2);
+
+    await cdp.detachSession("aa11");
+    expect(api.detach).toHaveBeenCalledTimes(1);
+    expect(api.detach).toHaveBeenCalledWith({ tabId: 2 });
+    expect(cdp.isAttached(1)).toBe(true);
+    expect(cdp.isAttached(2)).toBe(false);
+
+    await cdp.detachSession("bb22");
+    expect(api.detach).toHaveBeenCalledTimes(2);
+    expect(api.detach).toHaveBeenLastCalledWith({ tabId: 1 });
+    expect(cdp.isAttached(1)).toBe(false);
+  });
+});

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabCloseResult",
+  "type": "object",
+  "required": [
+    "tab_id"
+  ],
+  "properties": {
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

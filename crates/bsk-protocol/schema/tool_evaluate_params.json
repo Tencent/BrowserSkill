@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EvaluateParams",
+  "type": "object",
+  "required": [
+    "expression",
+    "session_id"
+  ],
+  "properties": {
+    "await_promise": {
+      "description": "Await the expression when it resolves to a Promise (CDP `Runtime.evaluate(awaitPromise=...)`). Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "expression": {
+      "type": "string"
+    },
+    "return_by_value": {
+      "description": "Ask CDP to serialise the result by value (vs. returning a `RemoteObject` id we cannot use). Defaults to `true`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's currently active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the evaluation. Defaults to 30s.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  }
+}

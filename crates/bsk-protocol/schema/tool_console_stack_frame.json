@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConsoleStackFrame",
+  "type": "object",
+  "properties": {
+    "column": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "function_name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "line": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

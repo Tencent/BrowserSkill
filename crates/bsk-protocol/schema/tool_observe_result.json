@@ -1,0 +1,185 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ObserveResult",
+  "type": "object",
+  "required": [
+    "ref_count",
+    "tab_id",
+    "text"
+  ],
+  "properties": {
+    "debug": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObserveDebug"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "dialogs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      }
+    },
+    "ref_count": {
+      "description": "Number of `@e<N>` refs registered for this session by this observation. Equivalent to the size of the new ref-store map.",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "description": "Tab the observation was computed for.",
+      "type": "integer",
+      "format": "int64"
+    },
+    "text": {
+      "description": "Semantic VOM observation text. Refs are rendered as `@e<N>` so the agent can copy them into subsequent interaction tools.",
+      "type": "string"
+    },
+    "truncated": {
+      "description": "Whether the rendered tree was truncated because of `max_depth` / `max_tokens`. Agents may re-run with looser caps.",
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "JavaScriptDialogHandledAction": {
+      "description": "How the extension resolved the dialog so CDP could continue.",
+      "type": "string",
+      "enum": [
+        "accepted",
+        "dismissed"
+      ]
+    },
+    "JavaScriptDialogInfo": {
+      "description": "One observed + handled JavaScript dialog during a tool call.",
+      "type": "object",
+      "required": [
+        "handled",
+        "message",
+        "sequence",
+        "tab_id",
+        "type"
+      ],
+      "properties": {
+        "default_prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handled": {
+          "$ref": "#/definitions/JavaScriptDialogHandledAction"
+        },
+        "has_browser_handler": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "sequence": {
+          "description": "Monotonic per-tab sequence for ordering within a session.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tab_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "type": {
+          "$ref": "#/definitions/JavaScriptDialogType"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "JavaScriptDialogType": {
+      "description": "Native JS dialog kind reported by CDP.",
+      "type": "string",
+      "enum": [
+        "alert",
+        "confirm",
+        "prompt",
+        "beforeunload"
+      ]
+    },
+    "ObserveDebug": {
+      "type": "object",
+      "properties": {
+        "surface_probes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/SurfaceProbeDebug"
+          }
+        }
+      }
+    },
+    "SurfaceProbeDebug": {
+      "type": "object",
+      "required": [
+        "sub_items",
+        "trigger_action",
+        "trigger_backend_node_id"
+      ],
+      "properties": {
+        "confidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sub_items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "trigger_action": {
+          "type": "string"
+        },
+        "trigger_backend_node_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "trigger_point": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SurfaceProbePoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "SurfaceProbePoint": {
+      "type": "object",
+      "required": [
+        "x",
+        "y"
+      ],
+      "properties": {
+        "x": {
+          "type": "number",
+          "format": "double"
+        },
+        "y": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    }
+  }
+}

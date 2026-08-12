@@ -1,0 +1,37 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GetHtmlParams",
+  "description": "Parameters for `tool.get_html`. Either give a tab and (optionally) a snapshot ref to scope the dump to one subtree, or leave both empty to fall back to the Agent Window's active tab and the document root.\n\nThe wire field is `\"ref\"` (a Rust keyword); the Rust binding lives in [`Self::ref_`] and uses serde rename / alias so JSON stays clean.",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "max_bytes": {
+      "description": "Truncate the HTML to at most this many bytes. Optional; extension applies a sensible default (`524288` = 512 KiB) when omitted.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "ref": {
+      "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`. Accepts both `\"e3\"` and `\"@e3\"`. When given the extension calls `DOM.getOuterHTML({ backendNodeId })` for the matching node; otherwise it fetches the document element.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  }
+}

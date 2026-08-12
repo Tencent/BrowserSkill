@@ -1,0 +1,29 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabBorrowResult",
+  "type": "object",
+  "required": [
+    "agent_window_id",
+    "original_index",
+    "original_window_id",
+    "tab_id"
+  ],
+  "properties": {
+    "agent_window_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "original_index": {
+      "type": "integer",
+      "format": "int32"
+    },
+    "original_window_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

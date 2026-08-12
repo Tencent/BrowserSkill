@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequestHelpResult",
+  "type": "object",
+  "required": [
+    "outcome",
+    "tab_id"
+  ],
+  "properties": {
+    "completed_by": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HelpCompletedBy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "note": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "outcome": {
+      "$ref": "#/definitions/HelpOutcome"
+    },
+    "resolved_targets": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ResolvedTarget"
+      }
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  },
+  "definitions": {
+    "HelpCompletedBy": {
+      "type": "string",
+      "enum": [
+        "system"
+      ]
+    },
+    "HelpOutcome": {
+      "oneOf": [
+        {
+          "description": "User completed the step and clicked Done / return control.",
+          "type": "string",
+          "enum": [
+            "continued"
+          ]
+        },
+        {
+          "description": "User declined / aborted via the overlay's Cancel button.",
+          "type": "string",
+          "enum": [
+            "cancelled"
+          ]
+        },
+        {
+          "description": "The wait expired before the user acted.",
+          "type": "string",
+          "enum": [
+            "timed_out"
+          ]
+        },
+        {
+          "description": "Explicit success criteria matched while the user had control.",
+          "type": "string",
+          "enum": [
+            "completed"
+          ]
+        },
+        {
+          "description": "The page navigated while waiting (full reload or SPA URL change). Deprecated: navigation alone should not end a help request.",
+          "type": "string",
+          "enum": [
+            "navigated"
+          ]
+        },
+        {
+          "description": "request-help is disabled by configuration (`BSK_REQUEST_HELP=off`): the call returns immediately without ever showing the overlay.",
+          "type": "string",
+          "enum": [
+            "disabled"
+          ]
+        }
+      ]
+    },
+    "ResolvedTarget": {
+      "description": "Per-target resolution status echoed back so the agent can tell which `ref` / `selector` actually matched a live element.",
+      "type": "object",
+      "required": [
+        "matched"
+      ],
+      "properties": {
+        "matched": {
+          "type": "boolean"
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

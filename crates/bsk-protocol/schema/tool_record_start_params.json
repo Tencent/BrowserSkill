@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RecordStartParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "purpose": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

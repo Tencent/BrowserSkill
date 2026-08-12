@@ -1,0 +1,155 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RequestHelpParams",
+  "type": "object",
+  "required": [
+    "prompt",
+    "session_id"
+  ],
+  "properties": {
+    "completion_criteria": {
+      "description": "Optional explicit success detector. Navigation by itself is not a completion signal; these criteria must match before the tool can auto-complete without the user clicking Done.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HelpCompletionCriteria"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "prompt": {
+      "description": "Message shown to the user explaining what to do.",
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "targets": {
+      "description": "Optional components to scroll to + flash-highlight.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/HelpTarget"
+      }
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the wait. Defaults to 300000 (5 min), enforced daemon-side via the generic tool timeout.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "title": {
+      "description": "Optional custom title for the help overlay. Falls back to the extension's default localized title when omitted.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "HelpCompletionCondition": {
+      "type": "object",
+      "properties": {
+        "selector_exists": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector_missing": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_exists": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_missing": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url_contains": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url_matches": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "HelpCompletionCriteria": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/HelpCompletionCondition"
+          }
+        },
+        "any": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/HelpCompletionCondition"
+          }
+        },
+        "stable_for_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "HelpTarget": {
+      "description": "One component the user is asked to look at / interact with. Exactly one of `ref` / `selector` should be supplied (mirrors the click/fill convention). When neither matches a live element the overlay still shows the prompt and reports the miss via [`ResolvedTarget`].",
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}
