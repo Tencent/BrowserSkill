@@ -19,7 +19,10 @@ pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ARCHIVE_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often the daemon refreshes the update-check cache, and how long a
+/// cache entry counts as fresh. The daemon is the only writer; CLI
+/// commands only ever read the cache.
+pub(crate) const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
 #[derive(Debug, Clone)]
 pub struct UpdateManifest {
@@ -423,14 +426,30 @@ pub fn write_update_cache(path: &Path, cache: &UpdateCheckCache) -> Result<()> {
     Ok(())
 }
 
-fn now_epoch_secs() -> u64 {
+pub(crate) fn now_epoch_secs() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or(0)
 }
 
-fn refresh_update_cache(cache_path: &Path) -> Result<Option<String>> {
+/// Decide whether the update cache needs a network refresh: a missing
+/// cache always does, a present one only once it is no longer fresh.
+pub(crate) fn cache_needs_refresh(
+    cache: Option<&UpdateCheckCache>,
+    now_epoch_secs: u64,
+    interval: Duration,
+) -> bool {
+    match cache {
+        Some(cache) => !cache.is_fresh(now_epoch_secs, interval),
+        None => true,
+    }
+}
+
+/// Fetch the update manifest and rewrite the cache. Returns the update
+/// hint when a newer version exists. Blocking: call from a blocking
+/// context (the daemon wraps it in `spawn_blocking`).
+pub(crate) fn refresh_update_cache(cache_path: &Path) -> Result<Option<String>> {
     let manifest = fetch_manifest(&manifest_url())?;
     let platform = current_platform_key()?;
     let hint = update_hint_for_manifest(&manifest, env!("CARGO_PKG_VERSION"), platform)?;
@@ -444,7 +463,15 @@ fn refresh_update_cache(cache_path: &Path) -> Result<Option<String>> {
     Ok(hint)
 }
 
-pub fn maybe_spawn_background_check(flags: &super::GlobalFlags, command: &super::Command) {
+/// Print the cached "new version available" hint, if there is one.
+///
+/// Read-only by design: the daemon's periodic task owns refreshing
+/// `~/.bsk/update-check.json`, so a missing or stale cache just means
+/// "stay quiet" — this function never spawns threads or touches the
+/// network. (The old implementation spawned a detached refresh thread
+/// that the exiting CLI process almost always killed before it could
+/// write the cache, so the hint never fired.)
+pub fn print_update_hint_from_cache(flags: &super::GlobalFlags, command: &super::Command) {
     if flags.quiet
         || flags.json
         || matches!(
@@ -458,29 +485,29 @@ pub fn maybe_spawn_background_check(flags: &super::GlobalFlags, command: &super:
     let Ok(cache_path) = crate::daemon::paths::update_check_path() else {
         return;
     };
-    let now = now_epoch_secs();
-    match read_update_cache(&cache_path) {
-        Ok(Some(cache)) => {
-            if let Some(hint) = update_hint_for_cache(&cache, env!("CARGO_PKG_VERSION")) {
-                eprintln!("{hint}");
-            }
-            if cache.is_fresh(now, UPDATE_CHECK_INTERVAL) {
-                return;
-            }
-        }
+    match cached_update_hint(&cache_path, env!("CARGO_PKG_VERSION"), now_epoch_secs()) {
+        Ok(Some(hint)) => eprintln!("{hint}"),
         Ok(None) => {}
         Err(err) => {
             tracing::debug!(error = %err, "update cache read failed");
         }
     }
+}
 
-    let _ = std::thread::Builder::new()
-        .name("bsk-update-check".to_string())
-        .spawn(move || match refresh_update_cache(&cache_path) {
-            Ok(Some(hint)) => eprintln!("{hint}"),
-            Ok(None) => {}
-            Err(err) => tracing::debug!(error = %err, "background update check failed"),
-        });
+/// The hint to show for a cache file: only when the cache is present,
+/// fresh, and names a version newer than `current_version`.
+fn cached_update_hint(
+    cache_path: &Path,
+    current_version: &str,
+    now_epoch_secs: u64,
+) -> Result<Option<String>> {
+    let Some(cache) = read_update_cache(cache_path)? else {
+        return Ok(None);
+    };
+    if !cache.is_fresh(now_epoch_secs, UPDATE_CHECK_INTERVAL) {
+        return Ok(None);
+    }
+    Ok(update_hint_for_cache(&cache, current_version))
 }
 
 fn confirm_update(candidate: &UpdateCandidate) -> Result<bool> {
@@ -849,6 +876,77 @@ mod tests {
 
         write_update_cache(&path, &cache).unwrap();
         assert_eq!(read_update_cache(&path).unwrap(), Some(cache));
+    }
+
+    #[test]
+    fn update_check_interval_is_thirty_minutes() {
+        assert_eq!(UPDATE_CHECK_INTERVAL, Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn cache_needs_refresh_only_when_missing_or_stale() {
+        let fresh = UpdateCheckCache {
+            checked_at_epoch_secs: 1000,
+            latest_version: "0.2.0".to_string(),
+        };
+        let stale = UpdateCheckCache {
+            checked_at_epoch_secs: 100,
+            latest_version: "0.2.0".to_string(),
+        };
+        let now = 1000 + UPDATE_CHECK_INTERVAL.as_secs();
+
+        assert!(cache_needs_refresh(None, now, UPDATE_CHECK_INTERVAL));
+        assert!(!cache_needs_refresh(
+            Some(&fresh),
+            now,
+            UPDATE_CHECK_INTERVAL
+        ));
+        assert!(cache_needs_refresh(
+            Some(&stale),
+            now,
+            UPDATE_CHECK_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn cached_update_hint_only_for_fresh_newer_cache() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("update-check.json");
+        let now = now_epoch_secs();
+
+        // Missing cache -> no hint.
+        assert_eq!(cached_update_hint(&path, "0.1.7", now).unwrap(), None);
+
+        // Fresh cache with a newer version -> hint.
+        let fresh_newer = UpdateCheckCache {
+            checked_at_epoch_secs: now,
+            latest_version: "0.2.0".to_string(),
+        };
+        write_update_cache(&path, &fresh_newer).unwrap();
+        assert_eq!(
+            cached_update_hint(&path, "0.1.7", now).unwrap(),
+            Some("A new bsk version is available: 0.1.7 -> 0.2.0. Run `bsk update`.".to_string())
+        );
+
+        // Fresh cache without a newer version -> no hint.
+        let fresh_current = UpdateCheckCache {
+            checked_at_epoch_secs: now,
+            latest_version: "0.1.7".to_string(),
+        };
+        write_update_cache(&path, &fresh_current).unwrap();
+        assert_eq!(cached_update_hint(&path, "0.1.7", now).unwrap(), None);
+
+        // Stale cache, even with a newer version -> no hint.
+        let stale_newer = UpdateCheckCache {
+            checked_at_epoch_secs: now - UPDATE_CHECK_INTERVAL.as_secs() - 1,
+            latest_version: "0.2.0".to_string(),
+        };
+        write_update_cache(&path, &stale_newer).unwrap();
+        assert_eq!(cached_update_hint(&path, "0.1.7", now).unwrap(), None);
+
+        // Corrupt cache file -> error surfaced to the caller, no panic.
+        std::fs::write(&path, b"not json").unwrap();
+        assert!(cached_update_hint(&path, "0.1.7", now).is_err());
     }
 
     fn tar_gz_with_bsk(binary: &[u8]) -> Vec<u8> {
