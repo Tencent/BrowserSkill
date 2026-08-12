@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SnapshotInfo } from "@/lib/connection-controller";
+import { STORAGE_KEYS } from "@/lib/instance-id";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import { App } from "./App";
 import { useConnectionState } from "./use-connection-state";
@@ -242,5 +243,69 @@ describe("App", () => {
     const copyButton = screen.getByRole("button", { name: "复制录制指令" });
     expect(copyButton.getAttribute("disabled")).not.toBeNull();
     expect(screen.getByText("连接后可用")).toBeTruthy();
+  });
+});
+
+describe("control hints toggle", () => {
+  function stubChromeStorage(initial: Record<string, unknown> = {}) {
+    const store = { ...initial };
+    vi.stubGlobal("chrome", {
+      runtime: { lastError: undefined },
+      storage: {
+        local: {
+          get: (keys: string | string[], cb: (items: Record<string, unknown>) => void) => {
+            const items: Record<string, unknown> = {};
+            for (const k of Array.isArray(keys) ? keys : [keys]) {
+              if (k in store) items[k] = store[k];
+            }
+            cb(items);
+          },
+          set: (items: Record<string, unknown>, cb?: () => void) => {
+            Object.assign(store, items);
+            cb?.();
+          },
+        },
+        onChanged: {
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+        },
+      },
+    });
+    return store;
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the control hints toggle on when no preference is stored", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("reflects the stored hidden preference", async () => {
+    stubChromeStorage({ [STORAGE_KEYS.CONTROL_HINTS_HIDDEN]: true });
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("persists the hidden preference when the toggle is turned off", async () => {
+    const store = stubChromeStorage();
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    fireEvent.click(toggle);
+
+    expect(store[STORAGE_KEYS.CONTROL_HINTS_HIDDEN]).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
   });
 });

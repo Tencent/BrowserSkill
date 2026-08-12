@@ -32,6 +32,7 @@ import {
   isHelpCancelMessage,
   isHelpRequestMessage,
 } from "@/lib/help-bridge";
+import { getControlHintsHidden, STORAGE_KEYS } from "@/lib/instance-id";
 import {
   isOverlayAgentOverlayResetMessage,
   isOverlayAgentStateMessage,
@@ -75,6 +76,14 @@ export default defineContentScript({
     let activeAgentState: OverlayAgentStateMessage | null = null;
     let hostLossReported = false;
     let remountInProgress = false;
+
+    // Load the user's control-hints preference up front so an already-active
+    // Agent session does not flash the overlay before the stored value lands.
+    try {
+      overlays.setControlHintsHidden(await getControlHintsHidden());
+    } catch (err) {
+      console.debug("[bsk overlay] control-hints preference read failed", err);
+    }
 
     const captureSuppress = createCaptureSuppressController(() => overlayHost);
 
@@ -479,6 +488,19 @@ export default defineContentScript({
       if (event.persisted) void requestOverlayState();
     };
 
+    // Live-apply popup toggles of the control-hints preference.
+    const onStorageChange = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      areaName: string,
+    ) => {
+      if (areaName !== "local") return;
+      const change = changes[STORAGE_KEYS.CONTROL_HINTS_HIDDEN];
+      if (!change) return;
+      overlays.setControlHintsHidden(change.newValue === true);
+      renderAll();
+    };
+    chrome.storage.onChanged.addListener(onStorageChange);
+
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
     void requestOverlayState();
@@ -509,6 +531,7 @@ export default defineContentScript({
     ctx.onInvalidated(() => {
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
+      chrome.storage.onChanged.removeListener(onStorageChange);
       window.removeEventListener("pageshow", onPageShow);
       // Restore history hooks / remove capture listeners before the CS unloads.
       recordCapture?.dispose();

@@ -23,6 +23,8 @@
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill 连接",
+    "controlHintsToggleTitle": "控制提示",
+    "controlHintsToggleHint": "Agent 控制页面时显示提示条和橙色闪光。",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
     "upgradeAvailable": "可升级",
     "launcher": {

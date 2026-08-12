@@ -23,6 +23,8 @@
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill connection",
+    "controlHintsToggleTitle": "Control hints",
+    "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, daemon v{{daemonProtocol}}.",
     "upgradeAvailable": "Upgradable",
     "launcher": {

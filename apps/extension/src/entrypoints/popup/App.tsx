@@ -7,6 +7,7 @@ import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
+import { useControlHintsHidden } from "./use-control-hints-hidden";
 
 const STATE_LABEL_KEYS = {
   disconnected: "popup.stateLabel.disconnected",
@@ -32,6 +33,7 @@ function getLogoSrc() {
 export function App() {
   const { t } = useTranslation("extension");
   const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
+  const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
@@ -220,6 +222,42 @@ export function App() {
                 })}
               </p>
             )}
+          </section>
+
+          <section
+            className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
+            data-slot="popup-control-hints-card"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-sm font-medium">
+                  {t("popup.controlHintsToggleTitle")}
+                </span>
+                <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
+                  {t("popup.controlHintsToggleHint")}
+                </span>
+              </span>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={!controlHintsHidden}
+                aria-label={t("popup.controlHintsToggleTitle")}
+                data-slot="popup-control-hints-toggle"
+                className={cn(
+                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                  controlHintsHidden ? "bg-muted" : "bg-primary",
+                )}
+                onClick={() => setControlHintsHidden(!controlHintsHidden)}
+              >
+                <span
+                  className={cn(
+                    "pointer-events-none block size-4 rounded-full bg-background shadow-sm transition-transform",
+                    controlHintsHidden ? "translate-x-0.5" : "translate-x-4",
+                  )}
+                  aria-hidden
+                />
+              </button>
+            </div>
           </section>
 
           {snapshot.lastError && (

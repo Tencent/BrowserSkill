@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   getConnectionEnabled,
+  getControlHintsHidden,
   getLabel,
   getOrCreateInstanceId,
   STORAGE_KEYS,
   setConnectionEnabled,
+  setControlHintsHidden,
   setLabel,
 } from "../instance-id";
 
@@ -92,5 +94,27 @@ describe("instance-id", () => {
     await setConnectionEnabled(false, backend);
     expect(store[STORAGE_KEYS.CONNECTION_ENABLED]).toBe(false);
     expect(await getConnectionEnabled(backend)).toBe(false);
+  });
+
+  it("getControlHintsHidden returns false when storage is empty", async () => {
+    const { backend } = fakeStorage();
+    expect(await getControlHintsHidden(backend)).toBe(false);
+  });
+
+  it("getControlHintsHidden returns persisted boolean values", async () => {
+    const { backend } = fakeStorage({ [STORAGE_KEYS.CONTROL_HINTS_HIDDEN]: true });
+    expect(await getControlHintsHidden(backend)).toBe(true);
+  });
+
+  it("getControlHintsHidden treats non-boolean stored values as shown", async () => {
+    const { backend } = fakeStorage({ [STORAGE_KEYS.CONTROL_HINTS_HIDDEN]: "true" });
+    expect(await getControlHintsHidden(backend)).toBe(false);
+  });
+
+  it("setControlHintsHidden persists the value retrievable by getControlHintsHidden", async () => {
+    const { backend, store } = fakeStorage();
+    await setControlHintsHidden(true, backend);
+    expect(store[STORAGE_KEYS.CONTROL_HINTS_HIDDEN]).toBe(true);
+    expect(await getControlHintsHidden(backend)).toBe(true);
   });
 });
