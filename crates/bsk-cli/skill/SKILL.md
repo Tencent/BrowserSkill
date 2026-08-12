@@ -87,7 +87,7 @@ Start with `bsk observe` to understand page structure, text, controls, element r
 1. `bsk observe` — primary semantic VOM observation; may run bounded perception probes such as hover-surface discovery
 2. `bsk snapshot` — strict static accessibility tree fallback
 3. `bsk get-html` — when hidden DOM, metadata, or markup details are required
-4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
+4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab; use `--full-page` to capture the entire scrollable page.
 
 Do **not** call `bsk get-html` or `bsk screenshot` first just to inspect a page.
 
@@ -165,13 +165,13 @@ bsk emulate --session <id> --off
 | `bsk tab return <tab-id>` | Return a borrowed tab to its original window |
 
 ### Observation (require `--session` unless noted)
-
+### Observation (require `--session` unless noted)
 | Command | Summary |
 |---------|---------|
 | `bsk snapshot` | First-choice static page understanding: accessibility tree with `@eN` element refs |
 | `bsk observe` | Semantic VOM observation with bounded perception probes for conditional surfaces |
 | `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
-| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
+| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element, or `--full-page` for the entire scrollable page (`--out` path optional) |
 
 ### Navigation
 
@@ -193,6 +193,30 @@ bsk emulate --session <id> --off
 | `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
+| `bsk drag <ref-or-selector> --dx <px> --dy <px>` | Drag an element / slider; see below for coordinate & path modes |
+
+#### Drag (`bsk drag`) — sliders & drag-and-drop
+
+Three modes, all dispatch **trusted** CDP mouse events
+(`mousePressed` → interpolated `mouseMoved`×N → `mouseReleased`) so
+`isTrusted === true` events reach the page (slider CAPTCHAs ignore
+synthetic JS drags).
+
+| Mode | Example | When to use |
+|------|---------|-------------|
+| Element + delta | `bsk drag @e7 --dx 200 --dy 0` | Drag a page element by a fixed delta |
+| Coordinate + delta | `bsk drag --from-x 500 --from-y 300 --dx 150 --dy 0` | Slider in a **cross-origin iframe** (e.g. Aliyun `nc_1_nocaptcha`): DOM access is blocked, but viewport coordinates work |
+| Absolute path | `bsk drag --point 500,300 --point 550,305 --point 650,300` | Precise multi-stop trajectories (repeat `--point`) |
+
+Options: `--steps N` (default 30, interpolation points), `--step-delay-ms N`
+(default 8, per-step pause), `--button` (`left|middle|right`), `--modifiers`.
+Delta drags ease in/out and add tiny jitter so the trajectory isn't a
+perfect straight line — slider CAPTCHA backends fingerprint linear drags.
+
+```bash
+# Aliyun-style slider captcha (cross-origin iframe): drag by viewport coords
+bsk drag --from-x 635 --from-y 542 --dx 160 --dy 0 --steps 40 --session "$SID"
+```
 
 ### Scripting & timing
 

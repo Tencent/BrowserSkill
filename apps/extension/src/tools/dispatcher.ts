@@ -5,6 +5,7 @@ import type {
   ClickParams,
   ConsoleParams,
   EmulateParams,
+  DragParams,
   EvaluateParams,
   FillParams,
   GetHtmlParams,
@@ -35,7 +36,7 @@ import { handleConsole } from "./console";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
-import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
+import { handleClick, handleDrag, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
 import {
   handleNavigate,
   handleNavigateBack,
@@ -461,6 +462,12 @@ export class ToolDispatcher {
             this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
           ),
         );
+      case "tool.drag":
+        return handleDrag(
+          this.sessions,
+          req.params as DragParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        );
       case "tool.evaluate":
         return handleEvaluate(
           this.sessions,
@@ -528,7 +535,7 @@ export class ToolDispatcher {
       default:
         return {
           code: "unknown_method",
-          message: `${req.method} not implemented in extension`,
+          message: `${req.method} not implemented in extension [v2-DRAG]`,
         } satisfies RpcError;
     }
   }
@@ -670,6 +677,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.fill":
     case "tool.press":
     case "tool.select":
+    case "tool.drag":
     case "tool.evaluate":
     case "tool.observe":
     case "tool.request_help":

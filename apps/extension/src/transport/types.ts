@@ -29,6 +29,7 @@ export type RpcErrorReason =
   | "target_not_select"
   | "option_not_found"
   | "single_select_value_count"
+  | "drag_target_required"
   | "tab_not_active"
   | "restricted_tab_url"
   | "borrow_conflict";
@@ -288,6 +289,8 @@ export interface ScreenshotParams {
   tab_id?: number;
   /** `@eN` ref from the last `tool.snapshot`. */
   ref?: string;
+  /** When true, capture the full scrollable page instead of just the visible viewport. */
+  full_page?: boolean;
 }
 
 export interface ScreenshotResult {
@@ -486,6 +489,42 @@ export interface SelectParams {
   selector?: string;
   tab_id?: number;
   timeout_ms?: number;
+}
+
+export interface DragParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  /** Start X (viewport CSS px) for coordinate drags. Requires from_y. */
+  from_x?: number;
+  /** Start Y (viewport CSS px) for coordinate drags. Requires from_x. */
+  from_y?: number;
+  /** Horizontal delta in CSS px. */
+  dx?: number;
+  /** Vertical delta in CSS px. */
+  dy?: number;
+  /** Explicit viewport points [x, y] for absolute-path drags. */
+  points?: number[][];
+  /** Number of interpolation steps for delta drags (default 30). */
+  steps?: number;
+  /** Per-step delay in ms (default 8). */
+  step_delay_ms?: number;
+  button?: MouseButton;
+  modifiers?: KeyModifier[];
+  timeout_ms?: number;
+}
+
+export interface DragResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  from_x: number;
+  from_y: number;
+  to_x: number;
+  to_y: number;
+  steps: number;
+  dialogs?: JavaScriptDialogInfo[];
 }
 
 export interface SelectResult {

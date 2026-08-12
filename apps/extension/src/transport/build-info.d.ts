@@ -12,3 +12,11 @@ declare const __BSK_EXT_VERSION__: string;
  * setting the {@code BSK_DAEMON_WS_URL} environment variable.
  */
 declare const __BSK_DAEMON_WS_URL__: string;
+
+/**
+ * When true, the on-page "Agent 正在控制" control mask is never shown.
+ * Set {@code BSK_NO_OVERLAY=1} at build time for automation-only
+ * browsers: the orange stop button is useless there and its capture
+ * layer can swallow CDP mouse events.
+ */
+declare const __BSK_NO_OVERLAY__: boolean;

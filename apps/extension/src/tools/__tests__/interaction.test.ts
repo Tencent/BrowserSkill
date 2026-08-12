@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import {
+  buildHumanDragPath,
   handleClick,
   handleFill,
   handleHover,
@@ -1025,5 +1026,49 @@ describe("handleSelect", () => {
     );
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
+  });
+});
+
+describe("buildHumanDragPath", () => {
+  it("starts at the origin and ends at the destination", () => {
+    const path = buildHumanDragPath(100, 100, 200, 100, 30);
+    expect(path.length).toBe(30);
+    expect(path[0].x).toBeGreaterThanOrEqual(99);
+    expect(path[0].x).toBeLessThanOrEqual(101);
+    expect(path[0].y).toBeGreaterThanOrEqual(99);
+    expect(path[0].y).toBeLessThanOrEqual(101);
+    expect(path[29].x).toBeGreaterThanOrEqual(199);
+    expect(path[29].x).toBeLessThanOrEqual(201);
+    expect(path[29].y).toBeGreaterThanOrEqual(99);
+    expect(path[29].y).toBeLessThanOrEqual(101);
+  });
+
+  it("is not a perfect straight line: has bounded perpendicular wobble", () => {
+    // 200 runs; every intermediate y must deviate from the exact
+    // line y=100 by a few px, and at least one run must wobble > 0.5px.
+    let maxWobble = 0;
+    for (let run = 0; run < 200; run++) {
+      const path = buildHumanDragPath(100, 100, 300, 100, 40);
+      for (let i = 1; i < path.length - 1; i++) {
+        const dev = Math.abs(path[i].y - 100);
+        expect(dev).toBeLessThanOrEqual(3.01); // ±3px ceiling
+        if (dev > maxWobble) maxWobble = dev;
+      }
+    }
+    expect(maxWobble).toBeGreaterThan(0.5);
+  });
+
+  it("applies perpendicular wobble to vertical drags too", () => {
+    // Vertical drag from (100,100) to (100,300): the wobble axis is X.
+    let sawDeviation = false;
+    for (let run = 0; run < 100; run++) {
+      const path = buildHumanDragPath(100, 100, 100, 300, 30);
+      for (let i = 1; i < path.length - 1; i++) {
+        const dev = Math.abs(path[i].x - 100);
+        expect(dev).toBeLessThanOrEqual(3.01);
+        if (dev > 0.5) sawDeviation = true;
+      }
+    }
+    expect(sawDeviation).toBe(true);
   });
 });

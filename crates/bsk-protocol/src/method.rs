@@ -78,6 +78,8 @@ pub enum Method {
     ToolPress,
     #[serde(rename = "tool.select")]
     ToolSelect,
+    #[serde(rename = "tool.drag")]
+    ToolDrag,
     #[serde(rename = "tool.snapshot")]
     ToolSnapshot,
     #[serde(rename = "tool.observe")]
@@ -156,6 +158,7 @@ impl Method {
             | Method::ToolFill
             | Method::ToolPress
             | Method::ToolSelect
+            | Method::ToolDrag
             | Method::ToolEvaluate
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
@@ -286,6 +289,7 @@ mod tests {
         assert!(Method::ToolFill.is_mutating());
         assert!(Method::ToolPress.is_mutating());
         assert!(Method::ToolSelect.is_mutating());
+        assert!(Method::ToolDrag.is_mutating());
         assert!(Method::ToolEvaluate.is_mutating());
         assert!(Method::ToolRecordStart.is_mutating());
         assert!(Method::ToolWindowResize.is_mutating());
