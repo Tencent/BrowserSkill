@@ -502,7 +502,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 /// tick of `tokio::time::interval` is immediate, so the check runs right
 /// after startup and then every
 /// [`crate::cli::update::UPDATE_CHECK_INTERVAL`]. Each tick re-reads the
-/// cache and skips the network fetch while it is still fresh. The task
+/// cache and skips the network fetch while it is still fresh within
+/// [`crate::cli::update::DAEMON_REFRESH_WINDOW`] (25min — shorter than
+/// the 30min tick, so steady state really refreshes on every tick
+/// instead of every other one). The task
 /// loops forever; shutdown aborts it like the other background tasks, so
 /// it never delays daemon exit (an in-flight fetch is bounded by the
 /// update client's own timeout and detached on abort).
@@ -527,7 +530,7 @@ pub(crate) fn spawn_update_check_task() -> tokio::task::JoinHandle<()> {
                 Ok(cache) => update::cache_needs_refresh(
                     cache.as_ref(),
                     update::now_epoch_secs(),
-                    update::UPDATE_CHECK_INTERVAL,
+                    update::DAEMON_REFRESH_WINDOW,
                 ),
                 Err(err) => {
                     warn!(error = %err, "update cache unreadable; will refresh it");

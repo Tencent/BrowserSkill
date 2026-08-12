@@ -19,10 +19,21 @@ pub const DEFAULT_MANIFEST_URL: &str =
     "https://github.com/Tencent/BrowserSkill/releases/latest/download/version.json";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 const ARCHIVE_FETCH_TIMEOUT: Duration = Duration::from_secs(60);
-/// How often the daemon refreshes the update-check cache, and how long a
-/// cache entry counts as fresh. The daemon is the only writer; CLI
-/// commands only ever read the cache.
+/// How often the daemon ticks the update check, and how long a cache
+/// entry counts as fresh for the CLI hint. The daemon is the only
+/// writer; CLI commands only ever read the cache.
 pub(crate) const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
+
+/// Freshness window the daemon uses to decide whether a tick actually
+/// refreshes the cache. Deliberately shorter than the tick cadence
+/// ([`UPDATE_CHECK_INTERVAL`]): with an equal window, a cache refreshed
+/// just after tick N would still count as fresh at tick N+1 (age just
+/// under 30min), so steady state would only refetch every *other* tick.
+/// At 5/6 of the interval (25min) every 30-minute tick finds the cache
+/// stale and really refreshes it, while a daemon restarted with a
+/// younger-than-25min cache still skips its first tick.
+pub(crate) const DAEMON_REFRESH_WINDOW: Duration =
+    Duration::from_secs(UPDATE_CHECK_INTERVAL.as_secs() * 5 / 6);
 
 #[derive(Debug, Clone)]
 pub struct UpdateManifest {
@@ -905,6 +916,38 @@ mod tests {
             Some(&stale),
             now,
             UPDATE_CHECK_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn daemon_refresh_window_is_shorter_than_tick() {
+        // 25 minutes: 5/6 of the 30-minute tick.
+        assert_eq!(DAEMON_REFRESH_WINDOW, Duration::from_secs(1500));
+        assert!(DAEMON_REFRESH_WINDOW < UPDATE_CHECK_INTERVAL);
+    }
+
+    #[test]
+    fn daemon_refresh_window_refreshes_every_tick_in_steady_state() {
+        // A cache written just after tick N must count as stale at tick
+        // N+1 (30 minutes later), so every tick really refetches.
+        let cache = UpdateCheckCache {
+            checked_at_epoch_secs: 10_000,
+            latest_version: "0.2.0".to_string(),
+        };
+        let next_tick = 10_000 + UPDATE_CHECK_INTERVAL.as_secs();
+        assert!(cache_needs_refresh(
+            Some(&cache),
+            next_tick,
+            DAEMON_REFRESH_WINDOW
+        ));
+
+        // ... while a daemon restarted with a cache younger than the
+        // refresh window still skips the fetch.
+        let just_checked = 10_000 + Duration::from_secs(10 * 60).as_secs();
+        assert!(!cache_needs_refresh(
+            Some(&cache),
+            just_checked,
+            DAEMON_REFRESH_WINDOW
         ));
     }
 
