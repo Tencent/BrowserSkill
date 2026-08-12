@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { AgentWindowApi } from "../agent-window";
+import type { AgentWindowApi, AgentWindowCreateOptions } from "../agent-window";
 import { SessionManager } from "../manager";
 
 function fakeAgentWindow(): AgentWindowApi & {
@@ -8,7 +8,7 @@ function fakeAgentWindow(): AgentWindowApi & {
   ensureActiveTabMock: ReturnType<typeof vi.fn>;
 } {
   let nextId = 100;
-  const createMock = vi.fn(async (_url: string) => {
+  const createMock = vi.fn(async (_url: string, _opts?: AgentWindowCreateOptions) => {
     const id = nextId++;
     return id;
   });
@@ -30,7 +30,7 @@ describe("SessionManager", () => {
     const sm = new SessionManager({ agentWindow: aw, now: () => 1700000000000 });
     const ctx = await sm.start("aa11");
     expect(aw.createMock).toHaveBeenCalledOnce();
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank");
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {});
     expect(aw.ensureActiveTabMock).toHaveBeenCalledOnce();
     expect(aw.ensureActiveTabMock).toHaveBeenCalledWith(100, "about:blank");
     expect(ctx.sessionId).toBe("aa11");
@@ -42,9 +42,20 @@ describe("SessionManager", () => {
   it("forwards an optional window size when starting a session", async () => {
     const aw = fakeAgentWindow();
     const sm = new SessionManager({ agentWindow: aw });
-    const ctx = await sm.start("aa11", { width: 1280, height: 800 });
-    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { width: 1280, height: 800 });
+    const ctx = await sm.start("aa11", { size: { width: 1280, height: 800 } });
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
+      size: { width: 1280, height: 800 },
+    });
     expect(ctx.agentWindowId).toBe(100);
+  });
+
+  it("forwards an explicit unfocused start to the Agent Window", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await sm.start("aa11", { focused: false });
+
+    expect(aw.createMock).toHaveBeenCalledWith("about:blank", { focused: false });
   });
 
   it("indexes the session by sessionId and agent window id", async () => {

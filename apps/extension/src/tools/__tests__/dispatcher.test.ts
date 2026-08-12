@@ -69,6 +69,25 @@ describe("ToolDispatcher", () => {
     });
   });
 
+  it("forwards an unfocused session start to the Agent Window", async () => {
+    const { transport, deliver } = fakeTransport();
+    const create = vi.fn(async () => 4242);
+    const sessions = new SessionManager({
+      agentWindow: {
+        create,
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.session_start", { session_id: "aa11", focused: false }));
+    await flushMicrotasks();
+
+    expect(create).toHaveBeenCalledWith("about:blank", { focused: false });
+  });
+
   it("routes tool.session_stop and replies with empty result", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({

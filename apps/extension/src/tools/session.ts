@@ -50,6 +50,8 @@ export interface SessionStartParams {
   width?: number;
   /** Optional Agent Window outer height in CSS pixels (100..=7680). */
   height?: number;
+  /** Defaults to true so existing clients preserve visible Agent Windows. */
+  focused?: boolean;
 }
 
 export interface SessionStartResult {
@@ -99,7 +101,10 @@ export async function handleSessionStart(
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
-    const ctx = await manager.start(params.session_id, sizeOrErr);
+    const ctx = await manager.start(params.session_id, {
+      size: sizeOrErr,
+      focused: params.focused,
+    });
     return { agent_window_id: ctx.agentWindowId };
   } catch (err) {
     // chrome.windows.create / SessionManager failures are not CDP

@@ -390,6 +390,17 @@ pub enum StopSessionError {
 /// of live sessions.
 const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 
+/// Agent Window creation hints forwarded to the extension on
+/// `tool.session_start`. `None` fields keep the extension-side defaults
+/// (focused window, browser-chosen size).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AgentWindowOptions {
+    /// Optional outer size as `(width, height)` CSS pixels.
+    pub size: Option<(u32, u32)>,
+    /// Optional focus hint (`None` = extension default: focused).
+    pub focused: Option<bool>,
+}
+
 /// Ask the chosen browser to create a fresh Agent Window for a brand-new
 /// session id, registering the result on success.
 ///
@@ -401,8 +412,7 @@ pub async fn start_session(
     sessions: &Arc<SessionRegistry>,
     queues: &Arc<ToolQueueRegistry>,
     requested: Option<&str>,
-    // Optional Agent Window outer size as `(width, height)` CSS pixels.
-    window_size: Option<(u32, u32)>,
+    window: AgentWindowOptions,
     connect_wait: Duration,
     timeout_dur: Duration,
 ) -> Result<Session, StartSessionError> {
@@ -429,8 +439,9 @@ pub async fn start_session(
     let params = SessionStartParams {
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
-        width: window_size.map(|(width, _)| width),
-        height: window_size.map(|(_, height)| height),
+        width: window.size.map(|(width, _)| width),
+        height: window.size.map(|(_, height)| height),
+        focused: window.focused,
     };
     let rpc_id = next_rpc_id("sess-start");
     let request = RequestFrame {

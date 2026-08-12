@@ -107,7 +107,7 @@ describe("handleSessionStart window size", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11", width: 1280, height: 800 });
     expect(result).toEqual({ agent_window_id: 100 });
-    expect(aw.create).toHaveBeenCalledWith("about:blank", { width: 1280, height: 800 });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
   });
 
   it("creates the window without size when width/height are omitted", async () => {
@@ -115,7 +115,15 @@ describe("handleSessionStart window size", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11" });
     expect(result).toEqual({ agent_window_id: 100 });
-    expect(aw.create).toHaveBeenCalledWith("about:blank");
+    expect(aw.create).toHaveBeenCalledWith("about:blank", {});
+  });
+
+  it("forwards focused: false to the Agent Window", async () => {
+    const aw = fakeAgentWindow([100]);
+    const sm = new SessionManager({ agentWindow: aw });
+    const result = await handleSessionStart(sm, { session_id: "aa11", focused: false });
+    expect(result).toEqual({ agent_window_id: 100 });
+    expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
   });
 
   it("rejects a lone width without height", async () => {
