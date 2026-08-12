@@ -196,6 +196,71 @@ describe("handleScreenshot", () => {
     expect(res).toMatchObject({ code: "cdp_failed", message: /captureVisibleTab refused/ });
   });
 
+  it("falls back to CDP Page.captureScreenshot when captureVisibleTab fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const capture = vi.fn(async () => {
+      throw new Error("Failed to capture tab: image readback failed");
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_id).toBe(7);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(res.format).toBe("png");
+    expect(capture).toHaveBeenCalledTimes(1);
+    const fallbackCall = sent.find((c) => c.method === "Page.captureScreenshot");
+    expect(fallbackCall?.params).toEqual({ format: "png", fromSurface: true });
+  });
+
+  it("reports screenshot_capture_failed when both capture paths fail", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const capture = vi.fn(async () => {
+      throw new Error("Failed to capture tab: image readback failed");
+    });
+    const { cdp } = makeFakeCdp({
+      "Page.captureScreenshot": () => {
+        throw new Error("debugger detached");
+      },
+    });
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
+    );
+    expect(res).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "screenshot_capture_failed" },
+    });
+    const message = (res as { message?: string }).message ?? "";
+    expect(message).toContain("image readback failed");
+    expect(message).toContain("debugger detached");
+  });
+
+  it("falls back to CDP when captureVisibleTab returns and CDP yields data", async () => {
+    // Sanity: a successful primary path never touches CDP even when a
+    // runner is available.
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const capture = vi.fn(async () => `data:image/png;base64,${TINY_PNG}`);
+    const { cdp, sent } = makeFakeCdp({});
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      makeScreenshotDeps({ cdp, captureVisibleTab: capture }),
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.image_base64).toBe(TINY_PNG);
+    expect(sent.find((c) => c.method === "Page.captureScreenshot")).toBeUndefined();
+  });
+
   it("captures a clipped PNG when ref is given", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

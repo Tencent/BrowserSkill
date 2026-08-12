@@ -17,7 +17,7 @@ import {
   type CaptureSuppressSendToTab,
   withOverlaysHiddenForCapture,
 } from "@/lib/capture-suppress-bridge";
-import type { SessionManager } from "@/session-manager/manager";
+import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   GetHtmlParams,
   GetHtmlResult,
@@ -37,6 +37,7 @@ import {
   enforceToolTargetScope,
   isRpcError,
   lookupSession,
+  type ResolvedTargetTab,
   resolveCdpAccessibleTargetTab,
   type CdpRunner as SharedCdpRunner,
   normaliseRef as sharedNormaliseRef,
@@ -175,6 +176,57 @@ async function captureElementScreenshot(
   }
 }
 
+/**
+ * Full-tab PNG capture. The primary path is `chrome.tabs.captureVisibleTab`;
+ * when it rejects, fall back to CDP `Page.captureScreenshot` with
+ * `fromSurface: true`. `captureVisibleTab` reads back the window surface,
+ * which fails outright on some Windows/Chrome combinations (Chromium's
+ * FAILURE_REASON_READBACK_FAILED — "Failed to capture tab: image readback
+ * failed"); the CDP path captures through the renderer's BeginFrame
+ * pipeline instead, which does not depend on that readback.
+ *
+ * When both paths fail the returned error carries
+ * `data.reason = "screenshot_capture_failed"` and both underlying messages
+ * so the CLI can point the user at the browser-side cause.
+ */
+async function captureFullTabPng(
+  deps: ScreenshotDeps,
+  ctx: SessionContext,
+  target: ResolvedTargetTab,
+): Promise<string | RpcError> {
+  try {
+    const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
+    return stripDataUrlPrefix(dataUrl);
+  } catch (primaryErr) {
+    const cdp = deps.cdp;
+    if (!cdp) {
+      return {
+        code: "cdp_failed",
+        message: primaryErr instanceof Error ? primaryErr.message : String(primaryErr),
+      };
+    }
+    let fallbackMsg: string;
+    try {
+      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      await cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+      const shot = await cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
+        format: "png",
+        fromSurface: true,
+      });
+      if (shot.data) return shot.data;
+      fallbackMsg = "Page.captureScreenshot returned no data";
+    } catch (fallbackErr) {
+      fallbackMsg = fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr);
+    }
+    const primaryMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+    return rpcError(
+      "cdp_failed",
+      "screenshot_capture_failed",
+      `captureVisibleTab failed: ${primaryMsg}; CDP Page.captureScreenshot fallback failed: ${fallbackMsg}`,
+    );
+  }
+}
+
 export async function handleScreenshot(
   manager: SessionManager,
   params: ScreenshotParams,
@@ -228,27 +280,21 @@ export async function handleScreenshot(
     );
   }
 
-  try {
-    const dataUrl = await withOverlaysHiddenForCapture(
-      target.tabId,
-      () => deps.captureApi.captureVisibleTab(target.windowId, { format: "png" }),
-      deps.sendToTab,
-    );
-    const image_base64 = stripDataUrlPrefix(dataUrl);
-    const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
-    return withShotDialogs({
-      image_base64,
-      width: dims.width,
-      height: dims.height,
-      format: "png",
-      tab_id: target.tabId,
-    });
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
+  const captured = await withOverlaysHiddenForCapture(
+    target.tabId,
+    () => captureFullTabPng(deps, ctx, target),
+    deps.sendToTab,
+  );
+  if (isRpcError(captured)) return captured;
+  const image_base64 = captured;
+  const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
+  return withShotDialogs({
+    image_base64,
+    width: dims.width,
+    height: dims.height,
+    format: "png",
+    tab_id: target.tabId,
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ pub mod reason {
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
+    pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
 }
 
@@ -261,6 +262,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::CdpFailed, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
+            summary: "the browser could not capture the tab image",
+            hint: Some(
+                "both the visible-tab capture and the CDP compositor fallback failed inside the browser; this points at a browser-side rendering/readback issue — try reloading the tab, restarting the browser, or upgrading/downgrading Chrome",
+            ),
+            exit_code: base.exit_code,
+        },
         _ => base,
     }
 }
@@ -368,6 +376,20 @@ mod tests {
             "expected session-busy-specific hint"
         );
         assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn screenshot_capture_failed_overrides_cdp_failed_copy() {
+        let data = serde_json::json!({ "reason": reason::SCREENSHOT_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(info.summary, "the browser could not capture the tab image");
+        assert!(
+            info.hint.unwrap().contains("CDP compositor fallback"),
+            "expected screenshot-specific hint, got {:?}",
+            info.hint
+        );
+        // Still the browser/CDP failure bucket.
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]
