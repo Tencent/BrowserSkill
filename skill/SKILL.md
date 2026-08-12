@@ -175,6 +175,15 @@ bsk emulate --session <id> --off
 | `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
 | `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
 
+### Console & network debugging (read-only; require `--session`)
+
+| Command | Summary |
+|---------|---------|
+| `bsk console` | Buffered page console messages, JS exceptions, and browser log entries (`--include-stack` for stack traces) |
+| `bsk network` | Buffered network responses (status, method, URL, MIME/resource type) and failures (`net::ERR_*` reason) |
+
+Both capture from the moment the tab is attached and read a bounded per-tab buffer: `--since <seq>` pages from a cursor (`next_since` in the result), `--limit` (default 50, max 200), `--max-text-chars` (default 1000, max 4096), `--tab-id` to target a non-active tab. Both are strictly read-only — they never intercept or modify traffic, and request/response headers, bodies, and timings are not captured.
+
 ### Navigation
 
 | Command | Summary |
