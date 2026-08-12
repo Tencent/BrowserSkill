@@ -103,19 +103,34 @@ pub fn record_session_path() -> Result<PathBuf> {
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
 /// token so test homes and custom installs do not share a predictable
 /// per-username pipe.
+///
+/// The name is hash-only (`bsk-daemon-<hex>`): the hash already covers
+/// user + home, so uniqueness and per-user isolation are unchanged, and
+/// the pipe name never contains raw username characters. Usernames with
+/// apostrophes/spaces/non-ASCII characters (e.g. `z'z'f'l'g'y`) make
+/// NPFS misbehave — `CreateNamedPipeW` reports success yet clients get
+/// `ERROR_FILE_NOT_FOUND` opening the very same name (issue #75).
 #[cfg(windows)]
 pub fn pipe_name() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let user = env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
     let home = bsk_home()
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "unknown-home".to_string());
+    render_pipe_name(&user, &home)
+}
+
+/// Render the Windows named-pipe name for a user/home pair. Kept
+/// platform-agnostic so unit tests on any host can pin the output
+/// character set.
+#[cfg(any(windows, test))]
+fn render_pipe_name(user: &str, home: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
     let mut hasher = DefaultHasher::new();
     user.hash(&mut hasher);
     home.hash(&mut hasher);
-    format!(r"\\.\pipe\bsk-daemon-{user}-{:016x}", hasher.finish())
+    format!(r"\\.\pipe\bsk-daemon-{:016x}", hasher.finish())
 }
 
 #[cfg(test)]
@@ -173,5 +188,39 @@ mod tests {
                 home.join("record-session.json")
             );
         });
+    }
+
+    /// Issue #75: usernames with apostrophes/spaces/non-ASCII characters
+    /// must not leak into the pipe name — NPFS misbehaves on such names
+    /// (CreateNamedPipeW succeeds, yet clients opening the same name get
+    /// ERROR_FILE_NOT_FOUND). The name must be hash-only.
+    #[test]
+    fn pipe_name_uses_safe_charset_for_special_usernames() {
+        for user in ["z'z'f'l'g'y", "user name", "用户", "a\"b\\c", "plain"] {
+            let name = render_pipe_name(user, r"C:\Users\whatever\.bsk");
+            let suffix = name
+                .strip_prefix(r"\\.\pipe\bsk-daemon-")
+                .unwrap_or_else(|| panic!("unexpected pipe name shape: {name}"));
+            assert_eq!(
+                suffix.len(),
+                16,
+                "pipe name {name} must carry a 16-hex-char hash"
+            );
+            assert!(
+                suffix.chars().all(|c| c.is_ascii_hexdigit()),
+                "pipe name {name} must be hash-only (did user {user:?} leak?)"
+            );
+        }
+    }
+
+    /// The hash-only name stays unique per (user, home) and deterministic
+    /// across calls (daemon and CLI exchange it via daemon.json, but a
+    /// stable value keeps logs/diagnostics comparable).
+    #[test]
+    fn pipe_name_is_deterministic_and_scoped() {
+        let a = render_pipe_name("alice", r"C:\Users\alice\.bsk");
+        assert_eq!(a, render_pipe_name("alice", r"C:\Users\alice\.bsk"));
+        assert_ne!(a, render_pipe_name("bob", r"C:\Users\alice\.bsk"));
+        assert_ne!(a, render_pipe_name("alice", r"D:\alt-home\.bsk"));
     }
 }
