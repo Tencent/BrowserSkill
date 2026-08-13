@@ -308,4 +308,28 @@ describe("control hints toggle", () => {
     expect(store[STORAGE_KEYS.CONTROL_HINTS_HIDDEN]).toBe(true);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
   });
+
+  it("keeps the hint copy in an accessible info tooltip", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const info = await screen.findByRole("button", { name: "控制提示说明" });
+    expect(info).toBeTruthy();
+    const tooltip = screen.getByRole("tooltip");
+    expect(tooltip.textContent).toBe("Agent 控制页面时显示提示条和橙色闪光。");
+    // Hidden until the info button is hovered or focused.
+    expect(tooltip.className).toContain("opacity-0");
+  });
+
+  it("renders the hints switch smaller than the primary connection switch", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const hintsToggle = await screen.findByRole("switch", { name: "控制提示" });
+    const connectionToggle = screen.getByRole("switch", { name: "BrowserSkill 连接" });
+    expect(hintsToggle.className).toContain("h-4");
+    expect(connectionToggle.className).toContain("h-5");
+  });
 });

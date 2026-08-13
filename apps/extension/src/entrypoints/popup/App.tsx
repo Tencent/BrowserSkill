@@ -1,6 +1,12 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Badge, Button, cn, Input, Label } from "@browser-skill/ui";
-import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
+import {
+  RiArrowLeftLine,
+  RiArrowRightSLine,
+  RiCheckLine,
+  RiFileCopyLine,
+  RiInformationLine,
+} from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
@@ -229,12 +235,25 @@ export function App() {
             data-slot="popup-control-hints-card"
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-sm font-medium">
+              <span className="flex min-w-0 items-center gap-1">
+                <span className="truncate text-sm font-medium">
                   {t("popup.controlHintsToggleTitle")}
                 </span>
-                <span className="mt-0.5 block text-[11px] leading-snug text-muted-foreground">
-                  {t("popup.controlHintsToggleHint")}
+                <span className="group relative inline-flex shrink-0">
+                  <button
+                    type="button"
+                    aria-label={t("popup.controlHintsInfoLabel")}
+                    data-slot="popup-control-hints-info"
+                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  >
+                    <RiInformationLine className="size-3.5" aria-hidden />
+                  </button>
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                  >
+                    {t("popup.controlHintsToggleHint")}
+                  </span>
                 </span>
               </span>
               <button
@@ -244,15 +263,15 @@ export function App() {
                 aria-label={t("popup.controlHintsToggleTitle")}
                 data-slot="popup-control-hints-toggle"
                 className={cn(
-                  "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+                  "relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
                   controlHintsHidden ? "bg-muted" : "bg-primary",
                 )}
                 onClick={() => setControlHintsHidden(!controlHintsHidden)}
               >
                 <span
                   className={cn(
-                    "pointer-events-none block size-4 rounded-full bg-background shadow-sm transition-transform",
-                    controlHintsHidden ? "translate-x-0.5" : "translate-x-4",
+                    "pointer-events-none block size-3 rounded-full bg-background shadow-sm transition-transform",
+                    controlHintsHidden ? "translate-x-0.5" : "translate-x-3",
                   )}
                   aria-hidden
                 />
