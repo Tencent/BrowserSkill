@@ -3,7 +3,7 @@
  * service worker and a tab's content script.
  */
 
-import type { TargetDescriptor } from "./describe-target";
+import type { CaptureTargetDescriptor } from "./describe-target";
 
 export const RECORD_START = "bsk-record-start";
 export const RECORD_STEP = "bsk-record-step";
@@ -41,8 +41,8 @@ export interface RecordStartMessage {
 }
 
 export interface RecordStepPayload {
-  op: "click" | "hover" | "fill" | "press" | "select" | "navigate";
-  target?: TargetDescriptor;
+  op: "click" | "hover" | "fill" | "press" | "select" | "navigate" | "scroll";
+  target?: CaptureTargetDescriptor;
   value?: string;
   key?: string;
   modifiers?: Array<"alt" | "ctrl" | "meta" | "shift">;
@@ -50,12 +50,25 @@ export interface RecordStepPayload {
   labels?: string[];
   url?: string;
   redacted?: boolean;
+  commit?: "enter" | "suggestion" | "blur";
   /** Page URL when the step was captured. */
   page_url?: string;
+  /** Document geometry at capture time for background geometric matching. */
+  geometry?: {
+    rect: { x: number; y: number; w: number; h: number };
+    scrollX: number;
+    scrollY: number;
+    position: string;
+    tag: string;
+    ownerFrameBackendNodeId?: number | null;
+  };
   /** Capture-only hint; never persisted unless converted to navigated_to. */
   expects_navigation?: boolean;
   /** Whether an observed URL change was synchronously caused by the action. */
   navigation_caused_by_action?: boolean;
+  /** Raw webNavigation transition metadata for cause mapping. */
+  transitionType?: string;
+  transitionQualifiers?: string[];
 }
 
 export interface RecordStepMessage {

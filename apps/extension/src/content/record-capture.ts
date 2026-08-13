@@ -1,9 +1,9 @@
 import {
+  type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
   resolveClickableElement,
   resolveHoverElement,
-  type TargetDescriptor,
 } from "@/lib/describe-target";
 import {
   evaluateHoverTrigger,
@@ -39,17 +39,26 @@ import {
 
 const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
 const failedStepDeliveries = new Set<string>();
+const failedStepPayloads = new Map<string, RecordStepPayload[]>();
+const pendingStopFlushes = new Map<string, Promise<RecordStopAck>>();
 const knownRecordRequests = new Set<string>();
 
-function sendRecordStep(requestId: string, step: RecordStepPayload): void {
+function deliverRecordStep(requestId: string, step: RecordStepPayload): Promise<boolean> {
   const payload = { type: RECORD_STEP, requestId, step };
-  const pending = Promise.resolve(chrome.runtime.sendMessage(payload)).then(
+  return Promise.resolve(chrome.runtime.sendMessage(payload)).then(
     () => true,
     () => {
       failedStepDeliveries.add(requestId);
+      const failed = failedStepPayloads.get(requestId) ?? [];
+      failed.push(step);
+      failedStepPayloads.set(requestId, failed);
       return false;
     },
   );
+}
+
+function sendRecordStep(requestId: string, step: RecordStepPayload): void {
+  const pending = deliverRecordStep(requestId, step);
   const sends = pendingStepSends.get(requestId) ?? new Set<Promise<boolean>>();
   sends.add(pending);
   pendingStepSends.set(requestId, sends);
@@ -65,14 +74,15 @@ export interface RecordCaptureController {
 
 interface FillSession {
   element: FillableElement;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   baselineValue: string;
   lastValue: string;
+  pendingCommit?: "enter" | "suggestion" | "blur";
 }
 
 interface HoverCandidate {
   element: Element;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   recordedAt: number;
   score: number;
   eligible: boolean;
@@ -157,6 +167,28 @@ function nearbyFillableFromSearchChrome(target: Element): FillableElement | null
   return null;
 }
 
+function captureGeometry(el: Element): RecordStepPayload["geometry"] {
+  const rect = el.getBoundingClientRect();
+  const style = window.getComputedStyle(el);
+  return {
+    rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+    position: style.position,
+    tag: el.tagName.toLowerCase(),
+  };
+}
+
+function geometryForEventTarget(
+  target: EventTarget | null,
+): RecordStepPayload["geometry"] | undefined {
+  if (!(target instanceof Element)) return undefined;
+  const clickable = target.closest(
+    'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
+  );
+  return captureGeometry(clickable ?? target);
+}
+
 function fillableValue(el: FillableElement): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     return el.value;
@@ -232,7 +264,7 @@ function collectHoverTriggerLabelText(root: Element): string {
   return normalizeLabelText(text);
 }
 
-function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDescriptor {
+function compactHoverTargetName(el: Element, desc: CaptureTargetDescriptor): CaptureTargetDescriptor {
   if (!desc.name) return desc;
   const fullText = normalizeLabelText(el.textContent ?? "");
   const compactName = collectHoverTriggerLabelText(el);
@@ -250,7 +282,7 @@ function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDesc
   return desc;
 }
 
-function isWeakHoverTarget(target: TargetDescriptor): boolean {
+function isWeakHoverTarget(target: CaptureTargetDescriptor): boolean {
   return !target.role && !target.name && target.tag === "div";
 }
 
@@ -261,9 +293,9 @@ function looksLikeAvatarElement(el: Element): boolean {
 
 function normalizeHoverTarget(
   el: Element,
-  desc: TargetDescriptor,
+  desc: CaptureTargetDescriptor,
   decision: HoverTriggerDecision,
-): TargetDescriptor {
+): CaptureTargetDescriptor {
   if (desc.role === "img" && !desc.name && looksLikeAvatarElement(el)) {
     return { ...desc, name: "image" };
   }
@@ -277,7 +309,7 @@ function normalizeHoverTarget(
   return desc;
 }
 
-function hoverTriggerSignals(el: Element, desc: TargetDescriptor) {
+function hoverTriggerSignals(el: Element, desc: CaptureTargetDescriptor) {
   if (!(el instanceof HTMLElement)) return null;
   const style = hoverTriggerStyle(el);
   return {
@@ -411,14 +443,17 @@ export function startRecordCapture(
     emitStep({
       op: "fill",
       target: session.target,
+      geometry: captureGeometry(session.element),
       value,
+      commit: session.pendingCommit ?? "blur",
       ...(isPassword ? { redacted: true } : {}),
     });
   };
 
-  const commitFillSession = () => {
+  const commitFillSession = (commit: "enter" | "suggestion" | "blur" = "blur") => {
     if (!fillSession || composing) return;
     const session = fillSession;
+    session.pendingCommit = commit;
     fillSession = null;
     emitFill(session);
     committedValues.set(session.element, session.lastValue);
@@ -624,6 +659,7 @@ export function startRecordCapture(
     emitStep({
       op: "hover",
       target: hover.target,
+      geometry: captureGeometry(hover.element),
     });
     emittedHoverElements.add(hover.element);
   };
@@ -678,6 +714,7 @@ export function startRecordCapture(
     emitStep({
       op: "click",
       target,
+      geometry: geometryForEventTarget(eventTarget(event)),
       expects_navigation: true,
     });
   };
@@ -779,7 +816,7 @@ export function startRecordCapture(
       scheduleInputCompletionCommit(
         sessionElement,
         syncFillSessionValue,
-        commitFillSession,
+        () => commitFillSession("suggestion"),
         (el) => fillSession?.element === el,
       );
       return;
@@ -839,6 +876,7 @@ export function startRecordCapture(
       emitStep({
         op: "select",
         target: desc,
+        geometry: captureGeometry(target),
         values,
         labels,
         expects_navigation: true,
@@ -879,7 +917,7 @@ export function startRecordCapture(
       };
     }
     if (fillable) {
-      commitFillSession();
+      commitFillSession(event.key === "Enter" ? "enter" : "blur");
     }
     const desc = describeEventTarget(target);
     if (!desc && !event.key) return;
@@ -887,7 +925,7 @@ export function startRecordCapture(
     emitStep({
       op: "press",
       key: event.key,
-      ...(desc ? { target: desc } : {}),
+      ...(desc ? { target: desc, geometry: geometryForEventTarget(target) } : {}),
       ...(modifiers.length ? { modifiers } : {}),
       expects_navigation: event.key === "Enter",
     });
@@ -906,9 +944,12 @@ export function startRecordCapture(
   const urlObserver = new MutationObserver(() => emitNavigateIfChanged());
   urlObserver.observe(document, { subtree: true, childList: true });
   const onUrlEvent = () => emitNavigateIfChanged();
+  // Wrap: passing commitFillSession directly would forward the DOM event as
+  // the `commit` argument and stamp it onto the recorded fill step.
+  const onPageHide = () => commitFillSession();
   window.addEventListener("hashchange", onUrlEvent);
   window.addEventListener("popstate", onUrlEvent);
-  window.addEventListener("pagehide", commitFillSession);
+  window.addEventListener("pagehide", onPageHide);
 
   const originalPushState = history.pushState;
   const originalReplaceState = history.replaceState;
@@ -936,7 +977,7 @@ export function startRecordCapture(
       urlObserver.disconnect();
       window.removeEventListener("hashchange", onUrlEvent);
       window.removeEventListener("popstate", onUrlEvent);
-      window.removeEventListener("pagehide", commitFillSession);
+      window.removeEventListener("pagehide", onPageHide);
       history.pushState = originalPushState;
       history.replaceState = originalReplaceState;
     },
@@ -965,6 +1006,7 @@ export function handleRecordContentMessage(
     if (!knownRecordRequests.has(message.requestId)) {
       knownRecordRequests.add(message.requestId);
       failedStepDeliveries.delete(message.requestId);
+      failedStepPayloads.delete(message.requestId);
     }
     state.capture?.dispose();
     state.setCapture(
@@ -992,27 +1034,51 @@ export function handleRecordContentMessage(
       state.setActiveRequestId(null);
     };
     if (isRecordStopMessage(message) && sendResponse) {
+      const existingFlush = pendingStopFlushes.get(message.requestId);
+      if (existingFlush) {
+        void existingFlush.then(sendResponse);
+        return true;
+      }
+
+      const failedBeforeStop = [...(failedStepPayloads.get(message.requestId) ?? [])];
+      if (failedBeforeStop.length > 0) {
+        failedStepPayloads.delete(message.requestId);
+        failedStepDeliveries.delete(message.requestId);
+      }
       const pending = [...(pendingStepSends.get(message.requestId) ?? [])];
-      void Promise.all(pending).then((delivered) => {
-        finishStop();
-        const succeeded = delivered.every(Boolean) && !failedStepDeliveries.has(message.requestId);
+      const flush = Promise.all(pending).then(async (delivered): Promise<RecordStopAck> => {
+        const retried = await Promise.all(
+          failedBeforeStop.map((step) => deliverRecordStep(message.requestId, step)),
+        );
+        const succeeded =
+          delivered.every(Boolean) &&
+          retried.every(Boolean) &&
+          !failedStepDeliveries.has(message.requestId);
         if (succeeded) {
           failedStepDeliveries.delete(message.requestId);
+          failedStepPayloads.delete(message.requestId);
           knownRecordRequests.delete(message.requestId);
+          finishStop();
         }
-        sendResponse(
-          succeeded
-            ? { ok: true }
-            : {
-                ok: false,
-                error: "failed to deliver one or more recorded steps",
-              },
-        );
+        return succeeded
+          ? { ok: true }
+          : {
+              ok: false,
+              error: "failed to deliver one or more recorded steps",
+            };
+      });
+      pendingStopFlushes.set(message.requestId, flush);
+      void flush.then(sendResponse).finally(() => {
+        if (pendingStopFlushes.get(message.requestId) === flush) {
+          pendingStopFlushes.delete(message.requestId);
+        }
       });
       return true;
     }
     if (isRecordCancelMessage(message)) {
       failedStepDeliveries.delete(message.requestId);
+      failedStepPayloads.delete(message.requestId);
+      pendingStopFlushes.delete(message.requestId);
       knownRecordRequests.delete(message.requestId);
     }
     finishStop();

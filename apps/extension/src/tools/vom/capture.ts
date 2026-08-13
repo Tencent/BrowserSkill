@@ -25,6 +25,8 @@ export interface CapturedNode {
   rect: Rect | null;
   /** Frame-local viewport-relative CSS px before top-level translation/clipping. */
   localRect?: Rect | null;
+  /** Frame-local document-relative CSS px as reported by DOMSnapshot. */
+  documentRect?: Rect | null;
   paintOrder: number;
   position: string;
   pointerEvents: string;
@@ -788,6 +790,7 @@ function parseDocumentNodes(
 
     let rect: Rect | null = null;
     let localRect: Rect | null = null;
+    let documentRect: Rect | null = null;
     let paintOrder = 0;
     let position = "static";
     let pointerEvents = "auto";
@@ -796,11 +799,17 @@ function parseDocumentNodes(
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
       if (b && b.length >= 4 && b[2] > 0 && b[3] > 0) {
-        localRect = {
-          x: b[0] / dpr - context.scrollX,
-          y: b[1] / dpr - context.scrollY,
+        documentRect = {
+          x: b[0] / dpr,
+          y: b[1] / dpr,
           w: b[2] / dpr,
           h: b[3] / dpr,
+        };
+        localRect = {
+          x: documentRect.x - context.scrollX,
+          y: documentRect.y - context.scrollY,
+          w: documentRect.w,
+          h: documentRect.h,
         };
         rect = rectInTop(localRect, context);
       }
@@ -825,6 +834,7 @@ function parseDocumentNodes(
       attrs,
       rect,
       localRect,
+      documentRect,
       paintOrder,
       position,
       pointerEvents,

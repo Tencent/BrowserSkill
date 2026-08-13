@@ -4,6 +4,7 @@ import type {
   BlockingLayer,
   CondSurface,
   Rect,
+  RenderedRef,
   VomNode,
   VomOptions,
   VomResult,
@@ -606,6 +607,7 @@ function renderNodeLine(
   ref: string | undefined,
   context: string[] = [],
   surface: CondSurface | undefined = undefined,
+  redactValues = false,
 ): string {
   let line = `${"  ".repeat(depth)}${ref ? `@${ref} ` : ""}${node.role}`;
 
@@ -627,11 +629,12 @@ function renderNodeLine(
   }
   const placeholder = cleaned(node.placeholder);
   if (placeholder) line += ` placeholder=${JSON.stringify(placeholder)}`;
-  const value = node.sensitive
-    ? rawValue !== undefined
-      ? SENSITIVE_MASK
-      : undefined
-    : rawValue?.slice(0, MAX_VALUE_LENGTH);
+  const value =
+    node.sensitive || redactValues
+      ? rawValue !== undefined
+        ? SENSITIVE_MASK
+        : undefined
+      : rawValue?.slice(0, MAX_VALUE_LENGTH);
   if (value !== undefined) line += ` =${JSON.stringify(value)}`;
 
   if (surface && surface.subItems.length > 0) {
@@ -684,11 +687,12 @@ function shouldSkipRedundantChildren(node: VomNode, state: RenderState): boolean
 
 interface RenderState {
   lines: string[];
-  refs: Array<{ ref: string; backendNodeId: number }>;
+  refs: RenderedRef[];
   nextRef: number;
   tokens: number;
   maxDepth: number;
   maxTokens: number;
+  redactValues: boolean;
   truncated: boolean;
   stopped: boolean;
   children: Map<number | null, VomNode[]>;
@@ -753,7 +757,7 @@ function renderTree(
     const ref = isVomReferenceNode(node) ? `e${state.nextRef}` : undefined;
     const context = ref ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
-    const line = renderNodeLine(node, depth, ref, context, surface);
+    const line = renderNodeLine(node, depth, ref, context, surface, state.redactValues);
     const nextTokens = state.tokens + estimateTokens(line);
     if (nextTokens > state.maxTokens) {
       state.truncated = true;
@@ -764,7 +768,16 @@ function renderTree(
     state.lines.push(line);
     state.tokens = nextTokens;
     if (ref) {
-      state.refs.push({ ref, backendNodeId: node.id });
+      const lineIndex = state.lines.length - 1;
+      const refName = cleaned(node.name);
+      state.refs.push({
+        ref,
+        backendNodeId: node.id,
+        role: node.role,
+        ...(refName ? { name: refName } : {}),
+        ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+        line: lineIndex,
+      });
       state.nextRef += 1;
     }
 
@@ -793,6 +806,7 @@ function renderNodes(
     tokens: estimateTokens(initialLines.join("\n")),
     maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
     maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    redactValues: options.redactValues ?? false,
     truncated: false,
     stopped: false,
     children,

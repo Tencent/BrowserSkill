@@ -8,7 +8,6 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
-  renderVom,
   type VomNode,
   type VomScene,
 } from "@browser-skill/vom";
@@ -29,6 +28,7 @@ import type {
   SnapshotParams,
   SnapshotResult,
 } from "@/transport/types";
+import { captureVomObservation } from "./capture-vom-observation";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { nodeBoundingRect, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
@@ -44,12 +44,7 @@ import {
   type ToolEffect,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
-import {
-  type CapturedNode,
-  type CapturedViewModel,
-  captureViewModel,
-  collectOverlayExcludedBackendIds,
-} from "./vom/capture";
+import { type CapturedNode, type CapturedViewModel } from "./vom/capture";
 
 // ---------------------------------------------------------------------------
 // Shared helpers (legacy aliases — observation.ts kept exporting these
@@ -350,7 +345,18 @@ function isModalSignal(
 
 function isSensitive(capturedNode: CapturedNode | undefined): boolean {
   const attrs = capturedNode?.attrs ?? {};
-  return (attrs.type ?? "").toLowerCase() === "password";
+  const type = (attrs.type ?? "").toLowerCase();
+  if (type === "password") return true;
+  const autocomplete = (attrs.autocomplete ?? "").toLowerCase();
+  if (autocomplete.startsWith("cc-")) return true;
+  if (
+    autocomplete === "one-time-code" ||
+    autocomplete === "current-password" ||
+    autocomplete === "new-password"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 interface AxNodeSignals {
@@ -400,7 +406,13 @@ const AX_TEXT_STOP_ROLES = new Set([
   "columnheader",
   "rowheader",
 ]);
-const SENSITIVE_AX_INPUT_TYPES = new Set(["password", "credit-card"]);
+const SENSITIVE_AX_INPUT_TYPES = new Set([
+  "password",
+  "credit-card",
+  "one-time-code",
+  "current-password",
+  "new-password",
+]);
 
 function axPropertyString(axNode: CdpAxNode, name: string): string | undefined {
   const prop = axNode.properties?.find((item) => item.name === name);
@@ -1314,50 +1326,6 @@ export async function handleGetHtml(
   }
 }
 
-function emptyCapturedViewModel(viewport = { width: 0, height: 0 }): CapturedViewModel {
-  return { viewport, nodes: [], iframeNodes: new Map(), excludedBackendNodeIds: new Set() };
-}
-
-interface LayoutMetricsViewportReply {
-  cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
-  layoutViewport?: { clientWidth?: number; clientHeight?: number };
-}
-
-async function fallbackCapturedViewModel(
-  cdp: CdpRunner,
-  tabId: number,
-): Promise<CapturedViewModel> {
-  let viewport = { width: 0, height: 0 };
-  try {
-    const metrics = await cdp.send<LayoutMetricsViewportReply>(tabId, "Page.getLayoutMetrics", {});
-    const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
-    viewport = {
-      width: vpSrc.clientWidth ?? 0,
-      height: vpSrc.clientHeight ?? 0,
-    };
-  } catch {
-    // viewport stays zero-sized
-  }
-  const excludedBackendNodeIds = await collectOverlayExcludedBackendIds(cdp, tabId);
-  return { ...emptyCapturedViewModel(viewport), excludedBackendNodeIds };
-}
-
-async function captureForVom(
-  cdp: CdpRunner,
-  tabId: number,
-  conditionalSurfaceProbe: boolean,
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>,
-): Promise<CapturedViewModel> {
-  try {
-    return await captureViewModel(cdp, tabId, {
-      conditionalSurfaceProbe,
-      hoverProbeBypassOverlay,
-    });
-  } catch {
-    return fallbackCapturedViewModel(cdp, tabId);
-  }
-}
-
 async function handleVomObservation(
   manager: SessionManager,
   params: SnapshotParams | ObserveParams,
@@ -1383,27 +1351,14 @@ async function handleVomObservation(
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
-    await deps.cdp.send<unknown>(target.tabId, "Accessibility.enable", {});
-    const result = await deps.cdp.send<{ nodes: CdpAxNode[] }>(
-      target.tabId,
-      "Accessibility.getFullAXTree",
-      {},
-    );
-    const axNodes = result.nodes ?? [];
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
-    const captured = await captureForVom(
-      deps.cdp,
-      target.tabId,
-      effectiveConditionalSurfaceProbe,
-      deps.hoverProbeBypassOverlay,
-    );
-    const scene = buildVomScene(axNodes, captured, { pageUrl: target.url });
-    const rendered = renderVom(scene, {
+    const rendered = await captureVomObservation(deps.cdp, target.tabId, target.url, {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
+      conditionalSurfaceProbe: effectiveConditionalSurfaceProbe,
+      hoverProbeBypassOverlay: deps.hoverProbeBypassOverlay,
     });
     ctx.refStore.replace(
       rendered.refs.map(
@@ -1418,7 +1373,7 @@ async function handleVomObservation(
       ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
         ? {
             debug: {
-              surface_probes: (captured.surfaceProbes ?? []).map((probe) => ({
+              surface_probes: (rendered.surfaceProbes ?? []).map((probe) => ({
                 trigger_backend_node_id: probe.triggerBackendNodeId,
                 ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
                 trigger_action: probe.triggerAction,

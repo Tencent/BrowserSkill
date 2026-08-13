@@ -12,10 +12,40 @@ describe("recording-step-buffer", () => {
     expect(buffer.steps).toEqual([
       {
         op: "click",
-        target: { tag: "button", role: "button", name: "发布" },
+        target: { unmatched: true },
+        captureTarget: { tag: "button", role: "button", name: "发布" },
       },
     ]);
     expect(buffer.pendingNavigation).toBe(true);
+  });
+
+  it("keeps the hovered element description as a capture fallback", () => {
+    const buffer = { steps: [], pendingNavigation: false };
+    appendRecordedPayload(buffer, {
+      op: "hover",
+      target: { tag: "button", role: "button", name: "新建" },
+      geometry: {
+        rect: { x: 900, y: 8, w: 60, h: 32 },
+        scrollX: 0,
+        scrollY: 0,
+        position: "static",
+        tag: "button",
+      },
+    });
+    expect(buffer.steps).toEqual([
+      {
+        op: "hover",
+        target: { unmatched: true },
+        captureTarget: { tag: "button", role: "button", name: "新建" },
+        geometry: {
+          rect: { x: 900, y: 8, w: 60, h: 32 },
+          scrollX: 0,
+          scrollY: 0,
+          position: "static",
+          tag: "button",
+        },
+      },
+    ]);
   });
 
   it("annotates navigated_to on action-caused navigation instead of wait_for_navigation", () => {
@@ -71,10 +101,41 @@ describe("recording-step-buffer", () => {
       currentUrl: "https://example.com/a",
       pendingNavigation: false,
     };
-    observeRecordedNavigation(buffer, "https://example.com/b", false);
+    const result = observeRecordedNavigation(buffer, "https://example.com/b", false);
+    expect(result).toEqual({ kind: "appended", index: 0 });
     expect(buffer.steps[0]).toMatchObject({
       op: "navigate",
       url: "https://example.com/b",
     });
+  });
+
+  it("asks the recorder to coalesce redirect hops instead of emitting each one", () => {
+    const buffer = {
+      steps: [],
+      currentUrl: "https://passport.example/login",
+      pendingNavigation: false,
+    };
+    const hop1 = observeRecordedNavigation(
+      buffer,
+      "https://passport.example/callback",
+      false,
+      "link",
+      ["server_redirect"],
+    );
+    expect(hop1).toEqual({
+      kind: "coalesce_redirect",
+      url: "https://passport.example/callback",
+    });
+    expect(buffer.steps).toEqual([]);
+
+    const hop2 = observeRecordedNavigation(buffer, "https://app.example/dashboard", false, "link", [
+      "client_redirect",
+    ]);
+    expect(hop2).toEqual({
+      kind: "coalesce_redirect",
+      url: "https://app.example/dashboard",
+    });
+    expect(buffer.steps).toEqual([]);
+    expect(buffer.currentUrl).toBe("https://app.example/dashboard");
   });
 });

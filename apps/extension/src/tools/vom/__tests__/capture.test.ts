@@ -677,7 +677,7 @@ describe("captureViewModel", () => {
     expect(nodes.find((n) => n.backendNodeId === 11)?.cursor).toBe("auto");
   });
 
-  it("subtracts scroll offset to make rects viewport-relative", async () => {
+  it("preserves document rects while deriving viewport rects after scroll", async () => {
     const cdp = {
       send: vi.fn(async (_t: number, method: string) => {
         if (method === "DOMSnapshot.enable") return {};
@@ -691,11 +691,10 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
     const { nodes } = await captureViewModel(cdp, 4);
-    const div = nodes.find((n) => n.backendNodeId === 12);
-    // local rect preserves viewport-relative scroll math.
-    expect(div?.localRect?.y).toBe(-200);
-    // exported rect is clipped to the top-level viewport before VOM consumes it.
-    expect(div?.rect).toMatchObject({ y: 0, h: 600 });
+    const input = nodes.find((n) => n.backendNodeId === 13);
+    expect(input?.documentRect).toEqual({ x: 400, y: 300, w: 200, h: 40 });
+    expect(input?.localRect).toEqual({ x: 400, y: 100, w: 200, h: 40 });
+    expect(input?.rect).toEqual({ x: 400, y: 100, w: 200, h: 40 });
   });
 
   it("normalizes device-pixel bounds by devicePixelRatio", async () => {

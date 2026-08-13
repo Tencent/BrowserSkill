@@ -3,6 +3,8 @@
 // stay structural (interface, not class) so the same JSON parses on both
 // sides without extra adapters.
 
+import type { CaptureTargetDescriptor } from "@/lib/describe-target";
+
 export type RpcId = string;
 
 export type ErrorCode =
@@ -656,26 +658,50 @@ export interface EmulateResult {
 }
 
 // --------------------------------------------------------------------------
-// Semantic record payloads — mirror bsk-protocol record.rs (Trace v2)
+// Semantic record payloads — mirror bsk-protocol record.rs (Trace v3)
 // --------------------------------------------------------------------------
 
+export const TRACE_VERSION = 3;
+export const VOM_FORMAT_VERSION = 1;
+
 export interface TargetDescriptor {
+  ref?: string;
   role?: string;
   name?: string;
-  tag: string;
-  name_attr?: string;
-  placeholder?: string;
-  nearby_label?: string;
+  ctx?: string;
+  unmatched?: boolean;
 }
 
 export interface TraceEntry {
   start_url: string;
 }
 
-export interface PageRef {
+export interface RecorderInfo {
+  bsk: string;
+  vom: number;
+}
+
+export type StopReason = "user_finish" | "cli_stop";
+
+export interface TraceState {
   id: string;
   url: string;
   title?: string;
+  /** Wire-only: full page observation text. */
+  body?: string;
+  /** Disk-only: filename under the bundle `pages/` directory. */
+  page?: string;
+  truncated?: boolean;
+}
+
+export interface StepResult {
+  state: string;
+}
+
+export interface StepCommon {
+  id: number;
+  state: string;
+  result: StepResult;
 }
 
 export interface SelectedOption {
@@ -683,66 +709,140 @@ export interface SelectedOption {
   label?: string;
 }
 
-export interface StepEffect {
-  navigated_to: string;
+export type NavigationCause =
+  | "user_typed"
+  | "link"
+  | "form_submit"
+  | "reload"
+  | "history"
+  | "script"
+  | "browser";
+
+export type FillCommit = "enter" | "suggestion" | "blur";
+
+/** Geometry reported by the content script at capture time. */
+export interface CaptureGeometry {
+  rect: { x: number; y: number; w: number; h: number };
+  scrollX: number;
+  scrollY: number;
+  position: string;
+  tag: string;
+  ownerFrameBackendNodeId?: number | null;
 }
 
-export interface StepCommon {
-  id: number;
-  page: string;
-  effect?: StepEffect;
-}
-
-/** Capture/buffer draft before v2 reduction. */
+/** Capture/buffer draft before v3 reduction. */
 export type DraftTraceStep =
   | {
       op: "click";
       target: TargetDescriptor;
+      captureTarget?: CaptureTargetDescriptor;
+      geometry?: CaptureGeometry;
       navigated_to?: string;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
     }
   | {
       op: "hover";
       target: TargetDescriptor;
+      captureTarget?: CaptureTargetDescriptor;
+      geometry?: CaptureGeometry;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
     }
   | {
       op: "fill";
       target: TargetDescriptor;
+      captureTarget?: CaptureTargetDescriptor;
+      geometry?: CaptureGeometry;
       value: string;
+      commit?: FillCommit;
       redacted?: boolean;
+      navigated_to?: string;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
     }
   | {
       op: "press";
       key: string;
       target?: TargetDescriptor;
+      captureTarget?: CaptureTargetDescriptor;
+      geometry?: CaptureGeometry;
       modifiers?: KeyModifier[];
       navigated_to?: string;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
     }
   | {
       op: "select";
       target: TargetDescriptor;
+      captureTarget?: CaptureTargetDescriptor;
+      geometry?: CaptureGeometry;
       values: string[];
       labels?: string[];
       navigated_to?: string;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
+    }
+  | {
+      op: "scroll";
+      page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
     }
   | {
       op: "navigate";
       url: string;
+      cause?: NavigationCause;
       page_url?: string;
+      title?: string;
+      preStateId?: string;
+      postStateId?: string;
+      observationBody?: string;
+      observationHash?: string;
+      truncated?: boolean;
+      /** Raw webNavigation transition metadata for cause mapping. */
+      transitionType?: string;
+      transitionQualifiers?: string[];
     };
 
-/** Exported record-only step (trace v2). */
+/** Exported record-only step (trace v3). */
 export type Step =
-  | ({ op: "navigate" } & StepCommon & { to: string })
+  | ({ op: "navigate" } & StepCommon & { to: string; cause: NavigationCause })
   | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "hover" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "fill" } & StepCommon & {
         target: TargetDescriptor;
         value: string;
+        commit: FillCommit;
         redacted?: boolean;
       })
   | ({ op: "select" } & StepCommon & {
@@ -753,14 +853,18 @@ export type Step =
         key: string;
         modifiers?: KeyModifier[];
         target?: TargetDescriptor;
-      });
+      })
+  | ({ op: "scroll" } & StepCommon);
 
 export interface Trace {
+  version: number;
   recorded_at: string;
   started_at?: string;
   purpose?: string;
+  stopped_by: StopReason;
   entry: TraceEntry;
-  pages: PageRef[];
+  recorder: RecorderInfo;
+  states: TraceState[];
   steps: Step[];
 }
 
@@ -769,6 +873,8 @@ export interface RecordStartParams {
   tab_id?: number;
   url?: string;
   purpose?: string;
+  max_page_tokens?: number;
+  redact_values?: boolean;
 }
 
 export interface RecordStartResult {

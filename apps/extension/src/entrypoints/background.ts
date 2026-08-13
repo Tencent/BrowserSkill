@@ -172,6 +172,7 @@ export default defineBackground(() => {
   dispatcher.start();
   const recordDeps = {
     tabsApi: chrome.tabs,
+    cdp,
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
       chrome.tabs.sendMessage(tabId, msg),
     bypassOverlay: async (tabId: number, enabled: boolean) => {
@@ -188,7 +189,7 @@ export default defineBackground(() => {
   // Message listeners stay up (cheap; fire only for record message types).
   // Tab / webNavigation observation attaches lazily while a recording is
   // active — see ensureBrowserObservationListeners in tools/record.ts.
-  attachRecordStepListener();
+  attachRecordStepListener(recordDeps);
   attachRecordFinishListener(recordDeps);
   attachRecordQueryListener(recordDeps);
   if (typeof chrome.notifications?.onClicked?.addListener === "function") {

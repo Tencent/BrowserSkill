@@ -1034,7 +1034,7 @@ describe("buildVomScene", () => {
     expect(rendered).toContain('      @e2 textbox "验证码"');
   });
 
-  it("does not mark non-password inputs sensitive from password-like labels", () => {
+  it("marks current-password autocomplete as sensitive even for text inputs", () => {
     const axNodes: CdpAxNode[] = [
       {
         nodeId: "1",
@@ -1069,7 +1069,7 @@ describe("buildVomScene", () => {
     expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
       expect.objectContaining({
         id: 10,
-        sensitive: false,
+        sensitive: true,
       }),
     );
   });
@@ -1364,7 +1364,9 @@ describe("buildVomScene", () => {
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
-    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
+    expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
+      { ref: "e1", backendNodeId: 20 },
+    ]);
   });
 
   it("does not promote a clickable container that wraps a real interactive control", () => {
@@ -1508,7 +1510,9 @@ describe("buildVomScene", () => {
     expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
-    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
+    expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
+      { ref: "e1", backendNodeId: 20 },
+    ]);
   });
 
   it("builds active scope blocks from active aria-controls relationships", () => {

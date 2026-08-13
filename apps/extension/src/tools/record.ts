@@ -17,9 +17,26 @@ import {
   type RecordStartMessage,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import { DEFAULT_MAX_PAGE_TOKENS } from "@/lib/record-constants";
+import {
+  applyTargetMatching,
+  buildTraceV3,
+  cancelPendingSettles,
+  captureAndRegisterObservation,
+  clearPendingRedirectLanding,
+  createObservationState,
+  flushPendingRedirectLanding,
+  flushPendingSettles,
+  inferMissingPostStates,
+  type RecordingObservationState,
+  rememberStepOnPage,
+  scheduleDraftSettle,
+  scheduleRedirectLandingFlush,
+  settleUnsettledDrafts,
+} from "@/lib/record-observation";
 import { appendRecordedPayload, observeRecordedNavigation } from "@/lib/recording-step-buffer";
-import { reduceTraceSteps, resolveTraceStartUrl } from "@/lib/trace-reducer";
 import type { SessionManager } from "@/session-manager/manager";
+import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   DraftTraceStep,
   RecordAwaitParams,
@@ -29,6 +46,7 @@ import type {
   RecordStopParams,
   RecordStopResult,
   RpcError,
+  StopReason,
   Trace,
 } from "@/transport/types";
 import { handleNavigate } from "./navigation";
@@ -58,6 +76,33 @@ interface ActiveRecording {
   currentUrl?: string;
   pendingNavigation: boolean;
   pendingNavigationDeadline?: number;
+  observation: RecordingObservationState;
+  stoppedBy: StopReason;
+  maxPageTokens: number;
+  redactValues: boolean;
+  /** Tabs whose content capture acknowledged START and still need STOP. */
+  armedTabIds: Set<number>;
+  /** Rearms already sending START when finish begins. */
+  rearmCallbacks: Set<Promise<void>>;
+  /** Navigation callbacks tracked from event receipt through action enqueue. */
+  navigationCallbacks: Set<Promise<void>>;
+  /** Synchronous intake gate closed only after finish drains to stability. */
+  acceptingNavigation: boolean;
+  /**
+   * Serializes step appends with navigation observation so a click is always
+   * in `steps` before a same-turn `webNavigation` tries to annotate it.
+   */
+  actionQueue: Promise<void>;
+  /**
+   * CDP runner captured at `record_start`. The message listeners are attached
+   * once at service-worker startup, where no runner exists yet, so observation
+   * capture must go through the recording instead of the listener deps.
+   */
+  cdp?: CdpRunner;
+}
+
+function enqueueRecordingAction(recording: ActiveRecording, task: () => Promise<void>): void {
+  recording.actionQueue = recording.actionQueue.then(task, task).catch(() => {});
 }
 
 const recordings = new Map<string, ActiveRecording>();
@@ -77,6 +122,9 @@ function makeRequestId(tabId: number): string {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Recording producer version mirrored into trace.recorder.bsk. */
+export const BSK_TRACE_VERSION = EXTENSION_VERSION;
 
 /** Injectable http(s) landing page when `tool.record_start` omits `url`. */
 export const RECORD_DEFAULT_START_URL = "https://example.com/";
@@ -155,16 +203,44 @@ async function sendRecordStartWithAck(
 }
 
 function buildTrace(recording: ActiveRecording): Trace {
-  const { pages, steps } = reduceTraceSteps(recording.steps, recording.startUrl);
-  const startUrl = resolveTraceStartUrl(recording.steps, recording.startUrl, pages);
-  return {
+  return buildTraceV3({
+    obs: recording.observation,
+    steps: recording.steps,
+    startedAt: recording.startedAt,
     ...(recording.purpose ? { purpose: recording.purpose } : {}),
-    recorded_at: new Date().toISOString(),
-    started_at: recording.startedAt,
-    entry: { start_url: startUrl },
-    pages,
-    steps,
-  };
+    startUrl: recording.startUrl,
+    stoppedBy: recording.stoppedBy,
+    bskVersion: BSK_TRACE_VERSION,
+  });
+}
+
+async function processRecordedStep(
+  recording: ActiveRecording,
+  deps: RecordDeps,
+  draftIndex: number,
+): Promise<void> {
+  const cdp = recording.cdp ?? deps.cdp;
+  if (!cdp) return;
+  const draft = recording.steps[draftIndex];
+  if (!draft) return;
+  const stepId = draftIndex + 1;
+
+  if (draft.op === "navigate") {
+    draft.preStateId = recording.observation.lastSettled?.stateId;
+  } else {
+    applyTargetMatching(recording.observation, draft, stepId);
+  }
+  rememberStepOnPage(recording.observation, draft, stepId);
+
+  scheduleDraftSettle(
+    recording.observation,
+    draftIndex,
+    stepId,
+    cdp,
+    recording.tabId,
+    deps.tabsApi,
+    recording.steps,
+  );
 }
 
 export interface RecordDeps {
@@ -241,7 +317,7 @@ export function releaseBrowserObservationListenersIfIdle(): void {
   detachBrowserObservation = null;
 }
 
-export function attachRecordStepListener(): () => void {
+export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): () => void {
   const listener = (
     message: unknown,
     _sender: chrome.runtime.MessageSender,
@@ -250,7 +326,22 @@ export function attachRecordStepListener(): () => void {
     if (!isRecordStepMessage(message)) return false;
     for (const recording of recordings.values()) {
       if (recording.requestId !== message.requestId) continue;
-      appendRecordedPayload(recording, message.step);
+      enqueueRecordingAction(recording, async () => {
+        const cdp = recording.cdp ?? deps.cdp;
+        // Flush before appending so a coalesced OAuth navigate is ordered
+        // ahead of the click that landed on the destination page. The flush
+        // itself waits for that navigate's observation before returning.
+        await flushPendingRedirectLanding(
+          recording.observation,
+          recording.steps,
+          cdp,
+          recording.tabId,
+          deps.tabsApi,
+          { cancelled: () => recording.settled },
+        );
+        const draftIndex = appendRecordedPayload(recording, message.step);
+        if (draftIndex !== null) await processRecordedStep(recording, deps, draftIndex);
+      });
       return false;
     }
     return false;
@@ -277,7 +368,9 @@ export function attachRecordFinishListener(deps: RecordDeps = getDefaultDeps()):
 
 function findRecordingByTabId(tabId: number): ActiveRecording | null {
   for (const recording of recordings.values()) {
-    if (recording.tabId === tabId && !recording.settled) return recording;
+    if (!recording.settled && (recording.tabId === tabId || recording.armedTabIds.has(tabId))) {
+      return recording;
+    }
   }
   return null;
 }
@@ -330,29 +423,24 @@ async function stopRecordingOnAllAgentTabs(
   deps: RecordDeps,
 ): Promise<void> {
   const stopMsg: RecordStopMessage = { type: RECORD_STOP, requestId: recording.requestId };
-  let tabIds = [recording.tabId];
-  try {
-    const tabs = await deps.tabsApi.query({ windowId: recording.agentWindowId });
-    tabIds = [
-      ...new Set([
-        recording.tabId,
-        ...tabs.flatMap((tab) => (typeof tab.id === "number" ? [tab.id] : [])),
-      ]),
-    ];
-  } catch {
-    // Fall back to the current recording tab.
-  }
-
-  for (const tabId of tabIds) {
+  let failed = false;
+  for (const tabId of [...recording.armedTabIds]) {
+    try {
+      await deps.tabsApi.get(tabId);
+    } catch {
+      // A closed tab no longer has content capture to flush.
+      recording.armedTabIds.delete(tabId);
+      continue;
+    }
     try {
       const response = await deps.sendToTab(tabId, stopMsg);
-      if (tabId === recording.tabId && !isRecordStartAck(response)) {
+      if (!isRecordStartAck(response)) {
         throw new Error("content script did not confirm recorded steps");
       }
+      recording.armedTabIds.delete(tabId);
     } catch {
-      if (tabId === recording.tabId) {
-        throw new Error("failed to flush recorded steps");
-      }
+      failed = true;
+      continue;
     }
     if (deps.bypassOverlay) {
       try {
@@ -362,6 +450,9 @@ async function stopRecordingOnAllAgentTabs(
       }
     }
   }
+  if (failed || recording.armedTabIds.size > 0) {
+    throw new Error("failed to flush recorded steps");
+  }
 }
 
 async function rearmRecording(
@@ -369,27 +460,40 @@ async function rearmRecording(
   targetTabId: number,
   deps: RecordDeps,
 ): Promise<boolean> {
+  let resolveTracked!: () => void;
+  const tracked = new Promise<void>((resolve) => {
+    resolveTracked = resolve;
+  });
+  recording.rearmCallbacks.add(tracked);
+
   // Do NOT toggle automation-bypass here: each retry used to increment the
   // content-script counter, and a single stop decrement left the ControlOverlay
   // stuck with pointer-events:none (page usable, Interrupt dead). RecordOverlay
   // already hides the control chrome while activeRecord is set.
-  for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
-    const startMsg: RecordStartMessage = {
-      type: RECORD_START,
-      requestId: recording.requestId,
-      startedAtMs: recording.startedAtMs,
-    };
-    try {
-      await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab);
-      recording.tabId = targetTabId;
-      return true;
-    } catch {
-      if (attempt + 1 < RECORD_REARM_MAX_ATTEMPTS) {
-        await sleep(RECORD_REARM_RETRY_DELAY_MS);
+  try {
+    for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
+      if (recording.settled || recording.finishing) return false;
+      const startMsg: RecordStartMessage = {
+        type: RECORD_START,
+        requestId: recording.requestId,
+        startedAtMs: recording.startedAtMs,
+      };
+      try {
+        await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab);
+        recording.armedTabIds.add(targetTabId);
+        recording.tabId = targetTabId;
+        return true;
+      } catch {
+        if (attempt + 1 < RECORD_REARM_MAX_ATTEMPTS) {
+          await sleep(RECORD_REARM_RETRY_DELAY_MS);
+        }
       }
     }
+    return false;
+  } finally {
+    recording.rearmCallbacks.delete(tracked);
+    resolveTracked();
   }
-  return false;
 }
 
 function scheduleRearmForTab(tabId: number, deps: RecordDeps): void {
@@ -432,11 +536,86 @@ export function attachRecordTabListener(deps: RecordDeps = getDefaultDeps()): ()
 }
 
 export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps()): () => void {
-  const observeMainFrame = (tabId: number, url?: string, causedByAction?: boolean) => {
+  const observeMainFrame = (
+    tabId: number,
+    url?: string,
+    causedByAction?: boolean,
+    transitionType?: string,
+    transitionQualifiers?: string[],
+  ) => {
+    if (!url) return;
+    const direct = findRecordingByTabId(tabId);
+    const candidates = direct
+      ? direct.acceptingNavigation
+        ? [direct]
+        : []
+      : [...recordings.values()].filter(
+          (recording) => !recording.settled && recording.acceptingNavigation,
+        );
+    if (candidates.length === 0) return;
+
+    let resolveTracked!: () => void;
+    const tracked = new Promise<void>((resolve) => {
+      resolveTracked = resolve;
+    });
+    for (const candidate of candidates) candidate.navigationCallbacks.add(tracked);
+
     void (async () => {
-      const recording = await findRecordingForTab(tabId, deps);
-      if (recording && url) {
-        observeRecordedNavigation(recording, url, causedByAction);
+      try {
+        const recording = await findRecordingForTab(tabId, deps);
+        if (!recording || !recording.acceptingNavigation || !candidates.includes(recording)) {
+          return;
+        }
+        enqueueRecordingAction(recording, async () => {
+          const result = observeRecordedNavigation(
+            recording,
+            url,
+            causedByAction,
+            transitionType,
+            transitionQualifiers,
+          );
+          const cdp = recording.cdp ?? deps.cdp;
+          if (!cdp) return;
+
+          if (result.kind === "coalesce_redirect") {
+            scheduleRedirectLandingFlush(
+              recording.observation,
+              recording.steps,
+              cdp,
+              tabId,
+              deps.tabsApi,
+              result.url,
+              { cancelled: () => recording.settled },
+            );
+            return;
+          }
+
+          if (result.kind === "noop") return;
+
+          // A concrete navigation supersedes any in-flight redirect coalesce.
+          clearPendingRedirectLanding(recording.observation);
+
+          const draftIndex = result.index;
+          const lastDraft = recording.steps[draftIndex];
+          if (!lastDraft) return;
+
+          if (result.kind === "appended") {
+            lastDraft.preStateId = recording.observation.lastSettled?.stateId;
+            rememberStepOnPage(recording.observation, lastDraft, draftIndex + 1);
+          }
+          scheduleDraftSettle(
+            recording.observation,
+            draftIndex,
+            draftIndex + 1,
+            cdp,
+            tabId,
+            deps.tabsApi,
+            recording.steps,
+          );
+        });
+      } finally {
+        for (const candidate of candidates) candidate.navigationCallbacks.delete(tracked);
+        resolveTracked();
       }
     })();
   };
@@ -458,18 +637,13 @@ export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps
       details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
     ) => {
       if (details.frameId !== 0) return;
-      const causedByAction =
-        details.transitionType === "link" || details.transitionType === "form_submit"
-          ? true
-          : details.transitionType === "typed" ||
-              details.transitionType === "auto_bookmark" ||
-              details.transitionType === "generated" ||
-              details.transitionType === "keyword" ||
-              details.transitionType === "keyword_generated" ||
-              details.transitionType === "reload"
-            ? false
-            : undefined;
-      observeMainFrame(details.tabId, details.url, causedByAction);
+      observeMainFrame(
+        details.tabId,
+        details.url,
+        undefined,
+        details.transitionType,
+        details.transitionQualifiers,
+      );
     };
     chrome.webNavigation.onCompleted.addListener(completedListener);
     chrome.webNavigation.onCommitted?.addListener(committedListener);
@@ -485,6 +659,46 @@ export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps
   };
   chrome.tabs.onUpdated.addListener(listener);
   return () => chrome.tabs.onUpdated.removeListener(listener);
+}
+
+const MAX_FINISH_DRAIN_ROUNDS = 10;
+
+async function drainRecordingToStability(
+  recording: ActiveRecording,
+  deps: RecordDeps,
+): Promise<boolean> {
+  const cdp = recording.cdp ?? deps.cdp;
+  for (let round = 0; round < MAX_FINISH_DRAIN_ROUNDS; round += 1) {
+    await Promise.all([...recording.navigationCallbacks]);
+    const actionTail = recording.actionQueue;
+    await actionTail;
+    await flushPendingRedirectLanding(
+      recording.observation,
+      recording.steps,
+      cdp,
+      recording.tabId,
+      deps.tabsApi,
+      { cancelled: () => recording.settled },
+    );
+    await flushPendingSettles(recording.observation);
+    const redirectTail = recording.observation.redirectFlushQueue;
+    const settleTail = recording.observation.settleQueue;
+    await Promise.all([redirectTail, settleTail]);
+
+    if (
+      recording.navigationCallbacks.size === 0 &&
+      recording.actionQueue === actionTail &&
+      recording.observation.redirectFlushQueue === redirectTail &&
+      recording.observation.settleQueue === settleTail
+    ) {
+      // No event or promise continuation can interleave with this synchronous
+      // check-and-close, so work accepted before the cutoff is fully drained.
+      recording.acceptingNavigation = false;
+      return true;
+    }
+  }
+  console.warn("[bsk record] navigation/action queues did not stabilize at stop");
+  return false;
 }
 
 export function attachRecordQueryListener(deps: RecordDeps = getDefaultDeps()): () => void {
@@ -527,22 +741,48 @@ async function finishRecordingByRequest(
     if (recording.requestId !== requestId || recording.settled) continue;
     const match = await findRecordingForTab(tabId, deps);
     if (match !== recording) continue;
-    await finishRecording(sessionId, deps);
+    await finishRecording(sessionId, deps, "user_finish");
     return;
   }
 }
 
-async function finishRecording(sessionId: string, deps: RecordDeps): Promise<Trace | null> {
+async function finishRecording(
+  sessionId: string,
+  deps: RecordDeps,
+  stoppedBy: StopReason,
+): Promise<Trace | null> {
   const recording = recordings.get(sessionId);
-  if (!recording || recording.settled || recording.finishing) return null;
+  if (!recording || recording.settled) return null;
+  if (recording.finishing) return recording.finishPromise;
   recording.finishing = true;
+  recording.stoppedBy = stoppedBy;
 
   await clearRearmTimersForRecording(recording, deps);
+  await Promise.all([...recording.rearmCallbacks]);
   try {
+    // Disposing content capture may commit a final dirty fill. Flush content
+    // first so all resulting RECORD_STEP messages enter actionQueue before it
+    // and the observation queues are drained.
     await stopRecordingOnAllAgentTabs(recording, deps);
   } catch {
     recording.finishing = false;
     return null;
+  }
+  if (!(await drainRecordingToStability(recording, deps))) {
+    recording.finishing = false;
+    return null;
+  }
+  cancelPendingSettles(recording.observation);
+  inferMissingPostStates(recording.steps);
+  const cdp = recording.cdp ?? deps.cdp;
+  if (cdp) {
+    await settleUnsettledDrafts(
+      recording.observation,
+      cdp,
+      recording.tabId,
+      deps.tabsApi,
+      recording.steps,
+    );
   }
 
   recording.settled = true;
@@ -582,6 +822,8 @@ export async function handleRecordStart(
   });
   const navigateUrl = params.url ?? RECORD_DEFAULT_START_URL;
   const startedAtMs = Date.now();
+  const maxPageTokens = params.max_page_tokens;
+  const redactValues = params.redact_values ?? false;
   recordings.set(params.session_id, {
     requestId,
     tabId: target.tabId,
@@ -599,6 +841,16 @@ export async function handleRecordStart(
     currentUrl: navigateUrl,
     pendingNavigation: false,
     pendingNavigationDeadline: undefined,
+    observation: createObservationState({ maxPageTokens, redactValues }),
+    stoppedBy: "user_finish",
+    maxPageTokens: maxPageTokens ?? DEFAULT_MAX_PAGE_TOKENS,
+    redactValues,
+    armedTabIds: new Set(),
+    rearmCallbacks: new Set(),
+    navigationCallbacks: new Set(),
+    acceptingNavigation: true,
+    actionQueue: Promise.resolve(),
+    ...(deps.cdp ? { cdp: deps.cdp } : {}),
   });
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
@@ -722,6 +974,7 @@ export async function handleRecordStart(
 
   try {
     await sendRecordStartWithAck(target.tabId, startMsg, deps.sendToTab);
+    active.armedTabIds.add(target.tabId);
   } catch {
     await abortPending(true);
     return {
@@ -729,6 +982,23 @@ export async function handleRecordStart(
       message:
         "failed to start recording in content script — reload the BrowserSkill extension, then retry",
     };
+  }
+
+  if (deps.cdp) {
+    const activeRecording = recordings.get(params.session_id);
+    if (activeRecording) {
+      try {
+        await captureAndRegisterObservation(
+          activeRecording.observation,
+          deps.cdp,
+          target.tabId,
+          deps.tabsApi,
+          startUrl,
+        );
+      } catch {
+        // Proceed without initial observation; steps may be dropped by reducer.
+      }
+    }
   }
 
   {
@@ -755,7 +1025,7 @@ export async function handleRecordStop(
     };
   }
 
-  const trace = await finishRecording(params.session_id, deps);
+  const trace = await finishRecording(params.session_id, deps, "cli_stop");
   if (!trace) {
     return {
       code: "protocol_error",
