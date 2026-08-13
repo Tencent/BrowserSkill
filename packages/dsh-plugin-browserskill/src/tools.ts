@@ -81,7 +81,9 @@ function cmdline(deps: ToolDeps, args: string[]): string {
 
 /** Shared completed-card presenter: terminal card with the rendered text. */
 function presentTerminalResult(_args: never, result: ToolResult) {
-  const block = result.content.length === 1 ? result.content[0] : undefined;
+  // Multi-block results (e.g. screenshot text + image) still project their
+  // text block onto the terminal card.
+  const block = result.content.find((b) => b.type === "text");
   if (block === undefined || block.type !== "text") return undefined;
   if (result.isError) return undefined;
   return { card: "terminal" as const, output: block.text, exitCode: 0 };

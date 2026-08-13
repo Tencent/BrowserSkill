@@ -524,4 +524,17 @@ describe("presentation", () => {
     } as never) as { card: string; output: string; exitCode: number };
     expect(view).toMatchObject({ card: "terminal", output: "clicked", exitCode: 0 });
   });
+
+  it("projects the text block of multi-block results (screenshot text + image)", () => {
+    const { tools } = setup({});
+    const screenshot = tools.get("browser_screenshot");
+    const view = screenshot?.presentResult?.({}, {
+      content: [
+        { type: "text", text: "[session s1] screenshot of tab 7" },
+        { type: "image", attachment: { attachmentId: "a1" } },
+      ],
+      isError: false,
+    } as never) as { card: string; output: string };
+    expect(view).toMatchObject({ card: "terminal", output: "[session s1] screenshot of tab 7" });
+  });
 });
