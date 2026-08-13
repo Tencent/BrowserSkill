@@ -44,6 +44,7 @@ export interface EmulateCdpRunner {
 export interface EmulateDeps {
   cdp: EmulateCdpRunner;
   tabsApi: ChromeTabsApi;
+  signal?: AbortSignal;
 }
 
 function defaultEmulateDeps(): EmulateDeps {
@@ -210,11 +211,13 @@ export async function handleEmulate(
   params: EmulateParams,
   deps: EmulateDeps = defaultEmulateDeps(),
 ): Promise<EmulateResult | RpcError> {
+  if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
   const ctxOrErr = lookupSession(manager, params, "emulate");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
   const target = await resolveTargetTab(manager, ctx, params?.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
+  if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
   const denied = enforceAgentWindow(ctx, target, "emulate");
   if (denied) return denied;
 
@@ -223,9 +226,16 @@ export async function handleEmulate(
       return invalidParams("emulate off cannot be combined with overrides");
     }
     try {
+      if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       await deps.cdp.clearDeviceMetricsOverride(target.tabId);
+      if (deps.signal?.aborted) {
+        return { code: "cancelled", message: "emulate aborted after clearing device metrics" };
+      }
       await deps.cdp.setTouchEmulationEnabled(target.tabId, false);
+      if (deps.signal?.aborted) {
+        return { code: "cancelled", message: "emulate aborted after clearing touch emulation" };
+      }
       // An empty userAgent string clears the override (CDP convention).
       await deps.cdp.setUserAgentOverride(target.tabId, { userAgent: "" });
     } catch (err) {
@@ -246,6 +256,7 @@ export async function handleEmulate(
   // values; the merged state is what gets applied (and echoed back).
   const merged = mergeEmulateOverrides(tabEmulationStates.get(target.tabId), overrides);
   try {
+    if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     if (merged.width !== undefined && merged.height !== undefined) {
       await deps.cdp.setDeviceMetricsOverride(target.tabId, {
@@ -254,6 +265,9 @@ export async function handleEmulate(
         deviceScaleFactor: merged.device_scale_factor ?? 0,
         mobile: merged.mobile ?? false,
       });
+      if (deps.signal?.aborted) {
+        return { code: "cancelled", message: "emulate aborted after applying device metrics" };
+      }
     }
     if (merged.user_agent !== undefined) {
       await deps.cdp.setUserAgentOverride(target.tabId, {
@@ -263,6 +277,9 @@ export async function handleEmulate(
           ? { userAgentMetadata: toCdpUserAgentMetadata(merged.user_agent_metadata) }
           : {}),
       });
+      if (deps.signal?.aborted) {
+        return { code: "cancelled", message: "emulate aborted after applying user agent" };
+      }
     }
     if (merged.touch !== undefined || merged.max_touch_points !== undefined) {
       await deps.cdp.setTouchEmulationEnabled(

@@ -75,6 +75,52 @@ describe("SessionManager", () => {
     await expect(sm.start("aa11")).rejects.toThrow(/already exists/);
   });
 
+  it("removes a newly created Agent Window when startup is aborted", async () => {
+    const aw = fakeAgentWindow();
+    let resolveCreate: (windowId: number) => void = () => {};
+    aw.createMock.mockImplementationOnce(
+      () =>
+        new Promise<number>((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const sm = new SessionManager({ agentWindow: aw });
+    const controller = new AbortController();
+    const pending = sm.start("aa11", { signal: controller.signal });
+
+    controller.abort();
+    resolveCreate(777);
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(aw.removeMock).toHaveBeenCalledWith(777);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("removes an incomplete Agent Window when active-tab setup fails", async () => {
+    const aw = fakeAgentWindow();
+    aw.ensureActiveTabMock.mockRejectedValueOnce(new Error("tab setup failed"));
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await expect(sm.start("aa11")).rejects.toThrow("tab setup failed");
+
+    expect(aw.removeMock).toHaveBeenCalledWith(100);
+    expect(sm.has("aa11")).toBe(false);
+  });
+
+  it("surfaces the orphan Agent Window id when startup cleanup fails", async () => {
+    const aw = fakeAgentWindow();
+    aw.ensureActiveTabMock.mockRejectedValueOnce(new Error("tab setup failed"));
+    aw.removeMock.mockRejectedValueOnce(new Error("window removal denied"));
+    const sm = new SessionManager({ agentWindow: aw });
+
+    await expect(sm.start("aa11")).rejects.toMatchObject({
+      name: "SessionStartCleanupError",
+      windowId: 100,
+      message: expect.stringMatching(/cleanup of Agent Window 100 failed.*window removal denied/),
+    });
+    expect(sm.has("aa11")).toBe(false);
+  });
+
   it("stop() closes the Agent Window and forgets the session", async () => {
     const aw = fakeAgentWindow();
     const sm = new SessionManager({ agentWindow: aw });

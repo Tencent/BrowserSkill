@@ -125,11 +125,10 @@ export interface DispatcherDeps {
  * `AbortController` keyed by its wire `id` in
  * [`inflightAbortControllers`]. When the daemon pushes a `cancel`
  * request the dispatcher trips the matching controller; tool
- * handlers that already accept a `signal` (waits, navigation,
- * interaction, evaluate, tabs) react in line, and the dispatcher
- * additionally races the in-flight invocation against the abort
- * promise so handlers without explicit signal plumbing still respond
- * promptly with `cancelled`.
+ * handlers observe that signal between awaited operations. The
+ * original RPC remains pending until its handler has stopped or
+ * completed compensation; only the separate cancel acknowledgement
+ * takes the fast path.
  */
 export class ToolDispatcher {
   private readonly transport: Transport;
@@ -221,7 +220,7 @@ export class ToolDispatcher {
     try {
       const sessionId = sessionIdForBrowserControlMethod(req);
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
-      const result = await Promise.race([this.invoke(req, ac.signal), abortPromise(ac.signal)]);
+      const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
         body = { id: req.id, error: result };
       } else {
@@ -286,7 +285,7 @@ export class ToolDispatcher {
   private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
     switch (req.method) {
       case "tool.session_start":
-        return handleSessionStart(this.sessions, req.params as SessionStartParams);
+        return handleSessionStart(this.sessions, req.params as SessionStartParams, { signal });
       case "tool.session_stop": {
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
@@ -294,29 +293,36 @@ export class ToolDispatcher {
         });
       }
       case "tool.tab_list":
-        return handleTabList(this.sessions, req.params as TabListParams);
+        return handleTabList(this.sessions, req.params as TabListParams, chromeTabsApi, signal);
       case "tool.tab_create":
-        return handleTabCreate(this.sessions, req.params as TabCreateParams);
+        return handleTabCreate(this.sessions, req.params as TabCreateParams, { signal });
       case "tool.tab_close":
-        return this.withHoverReleaseForRequest(req.params as TabCloseParams, () =>
-          handleTabClose(this.sessions, req.params as TabCloseParams),
+        return this.withHoverReleaseForRequest(
+          req.params as TabCloseParams,
+          () => handleTabClose(this.sessions, req.params as TabCloseParams, { signal }),
+          signal,
         );
       case "tool.tab_select":
-        return handleTabSelect(this.sessions, req.params as TabSelectParams);
+        return handleTabSelect(this.sessions, req.params as TabSelectParams, { signal });
       case "tool.tab_borrow":
         return handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
         });
       case "tool.tab_return":
-        return handleTabReturn(this.sessions, req.params as TabReturnParams);
+        return handleTabReturn(this.sessions, req.params as TabReturnParams, { signal });
       case "tool.window_resize":
-        return handleWindowResize(this.sessions, req.params as WindowResizeParams);
+        return handleWindowResize(
+          this.sessions,
+          req.params as WindowResizeParams,
+          undefined,
+          signal,
+        );
       case "tool.emulate":
         return handleEmulate(
           this.sessions,
           req.params as EmulateParams,
-          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
       case "tool.screenshot":
         return handleScreenshot(
@@ -325,43 +331,57 @@ export class ToolDispatcher {
           this.cdp
             ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi, captureApi: chromeTabsCaptureApi }
             : undefined,
+          signal,
         );
       case "tool.console":
         return handleConsole(
           this.sessions,
           req.params as ConsoleParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+          signal,
         );
       case "tool.network":
         return handleNetwork(
           this.sessions,
           req.params as NetworkParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi } : undefined,
+          signal,
         );
       case "tool.snapshot":
-        return this.withHoverReassert(req.params as SnapshotParams, () =>
-          handleSnapshot(
-            this.sessions,
-            req.params as SnapshotParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
-          ),
+        return this.withHoverReassert(
+          req.params as SnapshotParams,
+          () =>
+            handleSnapshot(
+              this.sessions,
+              req.params as SnapshotParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+              signal,
+            ),
+          {},
+          signal,
         );
       case "tool.observe": {
         const params = req.params as ObserveParams;
         const hoverScope = await this.resolveHoverLatchScope(params);
-        return this.withHoverReassert(params, () =>
-          handleObserve(
-            this.sessions,
-            params,
-            this.cdp
-              ? {
-                  cdp: this.cdp,
-                  tabsApi: chromeTabsCaptureApi,
-                  conditionalSurfaceProbe: !this.hasHoverLatchForScope(hoverScope),
-                  hoverProbeBypassOverlay: bypassOverlay,
-                }
-              : undefined,
-          ),
+        throwIfDispatchAborted(signal);
+        return this.withHoverReassert(
+          params,
+          () =>
+            handleObserve(
+              this.sessions,
+              params,
+              this.cdp
+                ? {
+                    cdp: this.cdp,
+                    tabsApi: chromeTabsCaptureApi,
+                    conditionalSurfaceProbe: !this.hasHoverLatchForScope(hoverScope),
+                    hoverProbeBypassOverlay: bypassOverlay,
+                  }
+                : undefined,
+              signal,
+            ),
+          {},
+          signal,
         );
       }
       case "tool.get_html":
@@ -369,38 +389,51 @@ export class ToolDispatcher {
           this.sessions,
           req.params as GetHtmlParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsCaptureApi } : undefined,
+          signal,
         );
       case "tool.navigate":
-        return this.withHoverReleaseForRequest(req.params as NavigateParams, () =>
-          handleNavigate(
-            this.sessions,
-            req.params as NavigateParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as NavigateParams,
+          () =>
+            handleNavigate(
+              this.sessions,
+              req.params as NavigateParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.navigate_back":
-        return this.withHoverReleaseForRequest(req.params as NavigateBackParams, () =>
-          handleNavigateBack(
-            this.sessions,
-            req.params as NavigateBackParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as NavigateBackParams,
+          () =>
+            handleNavigateBack(
+              this.sessions,
+              req.params as NavigateBackParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.navigate_forward":
-        return this.withHoverReleaseForRequest(req.params as NavigateForwardParams, () =>
-          handleNavigateForward(
-            this.sessions,
-            req.params as NavigateForwardParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as NavigateForwardParams,
+          () =>
+            handleNavigateForward(
+              this.sessions,
+              req.params as NavigateForwardParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.reload":
-        return this.withHoverReleaseForRequest(req.params as ReloadParams, () =>
-          handleReload(
-            this.sessions,
-            req.params as ReloadParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as ReloadParams,
+          () =>
+            handleReload(
+              this.sessions,
+              req.params as ReloadParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.click":
         return this.withHoverReassert(
@@ -419,6 +452,7 @@ export class ToolDispatcher {
                 : undefined,
             ),
           { releaseAfter: true },
+          signal,
         );
       case "tool.hover": {
         const result = await handleHover(
@@ -438,28 +472,37 @@ export class ToolDispatcher {
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
       case "tool.fill":
-        return this.withHoverReleaseForRequest(req.params as FillParams, () =>
-          handleFill(
-            this.sessions,
-            req.params as FillParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as FillParams,
+          () =>
+            handleFill(
+              this.sessions,
+              req.params as FillParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.press":
-        return this.withHoverReleaseForRequest(req.params as PressParams, () =>
-          handlePress(
-            this.sessions,
-            req.params as PressParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as PressParams,
+          () =>
+            handlePress(
+              this.sessions,
+              req.params as PressParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.select":
-        return this.withHoverReleaseForRequest(req.params as SelectParams, () =>
-          handleSelect(
-            this.sessions,
-            req.params as SelectParams,
-            this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
-          ),
+        return this.withHoverReleaseForRequest(
+          req.params as SelectParams,
+          () =>
+            handleSelect(
+              this.sessions,
+              req.params as SelectParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
         );
       case "tool.evaluate":
         return handleEvaluate(
@@ -566,9 +609,13 @@ export class ToolDispatcher {
     params: { session_id: string; tab_id?: number },
     work: () => Promise<T>,
     options: { releaseAfter?: boolean } = {},
+    signal?: AbortSignal,
   ): Promise<T> {
+    throwIfDispatchAborted(signal);
     const scope = await this.resolveHoverLatchScope(params);
+    throwIfDispatchAborted(signal);
     await this.reassertHover(scope);
+    throwIfDispatchAborted(signal);
     try {
       return await work();
     } finally {
@@ -581,9 +628,13 @@ export class ToolDispatcher {
   private async withHoverReleaseForRequest<T>(
     params: { session_id: string; tab_id?: number },
     work: () => Promise<T>,
+    signal?: AbortSignal,
   ): Promise<T> {
+    throwIfDispatchAborted(signal);
     const scope = await this.resolveHoverLatchScope(params);
+    throwIfDispatchAborted(signal);
     await this.releaseHoverLatch(scope.session_id, scope.tab_id);
+    throwIfDispatchAborted(signal);
     return work();
   }
 
@@ -693,41 +744,14 @@ async function bypassOverlay(tabId: number, enabled: boolean): Promise<void> {
   }
 }
 
-/**
- * Resolves never; rejects with `AbortLikeError` as soon as the signal
- * fires (or immediately if it is already aborted). Used by the
- * dispatcher to race the tool invocation so handlers without explicit
- * signal plumbing still surface a `cancelled` reply promptly.
- */
-function abortPromise(signal: AbortSignal): Promise<never> {
-  return new Promise<never>((_, reject) => {
-    if (signal.aborted) {
-      reject(new AbortLikeError());
-      return;
-    }
-    signal.addEventListener(
-      "abort",
-      () => {
-        reject(new AbortLikeError());
-      },
-      { once: true },
-    );
-  });
-}
-
-/**
- * Sentinel error class so [`isAbortLikeError`] can recognise our own
- * race-rejection without confusing it with a real CDP failure.
- */
-class AbortLikeError extends Error {
-  constructor() {
-    super("rpc aborted by daemon cancel");
-    this.name = "BhAbortError";
-  }
+function throwIfDispatchAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  const error = new Error("rpc aborted by daemon cancel");
+  error.name = "AbortError";
+  throw error;
 }
 
 function isAbortLikeError(err: unknown): boolean {
-  if (err instanceof AbortLikeError) return true;
   if (err instanceof DOMException && err.name === "AbortError") return true;
   if (typeof err === "object" && err !== null && (err as { name?: string }).name === "AbortError") {
     return true;
