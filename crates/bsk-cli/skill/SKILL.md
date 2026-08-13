@@ -265,19 +265,26 @@ retry — complete the task autonomously or stop gracefully.
 
 ### Recording — `bsk record`
 
-Capture the user's own actions in the Agent Window to a `trace.json`, for later LLM-driven automation:
+Capture the user's own actions in the Agent Window to a **trace v3 bundle**, for later LLM-driven automation:
 
 ```bash
-bsk record start --browser <instance-id-or-label> [--url https://…] [--purpose "publish a wiki doc"] [--output trace.json]
+bsk record start --browser <instance-id-or-label> \
+  [--url https://…] [--purpose "publish a wiki doc"] \
+  [--max-page-tokens 3000] [--redact-values] \
+  [--output trace]
 # `--url` is optional; default https://example.com/ when omitted (must be http(s)).
-# Blocks until the user clicks Finish in the recording panel, then writes ./trace.json and closes the window.
+# Blocks until the user clicks Finish in the recording panel, then writes:
+#   trace/trace.json    — action chain + state index (version 3)
+#   trace/pages/        — one `.vom.txt` observe snapshot per settled page state
 
-bsk record stop [--output trace.json]   # terminal fallback if the browser panel is unavailable
+bsk record stop [--output trace]   # terminal fallback if the browser panel is unavailable
 ```
 
-- The trace is a **record-only action log** (a `pages[]` dictionary + `navigate`/`click`/`fill`/`select`/`press` steps with `target` descriptors). It records *what the user did*; deciding which inputs are variable is left to the executing agent.
+- **Bundle layout:** `--output` is a directory (default `./trace`) containing `trace.json` and `pages/`. `trace.json` lists `states[]` (page observation ids) and `steps[]` (each step binds `state` = observe snapshot *before* the action and `result.state` = snapshot *after* settle). Page bodies live in `pages/sN.vom.txt` using the same VOM format as `bsk observe`.
+- Each `states[]` entry is one **settled page observation** (captured after recording start, navigation landing, or action settle — not on a timer).
+- `target.ref` values like `@e12` exist **only inside** the bundle for disambiguation; do **not** copy `@eN` refs into SKILL.md or agent runbooks — use visible names from the observation text instead.
 - `--purpose` is optional context metadata; it does **not** change what gets captured.
-- There is **no** `bsk replay` — to redo a flow, read the trace and reuse the existing `session` / `snapshot` / `@eN` / `click` / `fill` tools. Follow **Stop when the goal is met**.
+- `--redact-values` masks all form values in page files as `[filled]` / `[empty]`.
 - Do **not** record on banking/SSO/password-manager pages; passwords are redacted but traces may still contain sensitive text.
 
 ## Error handling

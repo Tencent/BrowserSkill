@@ -6,20 +6,20 @@
       "disconnected": "Disconnected",
       "connecting": "Connecting…",
       "connected": "Connected",
-      "version_skew": "Protocol mismatch",
+      "version_skew": "Version mismatch",
       "disabled": "Connection off"
     },
     "stateDetail": {
       "disconnected": "Open BrowserSkill to connect.",
       "connecting": "Connecting to BrowserSkill…",
       "connected": "Ready for automation tasks.",
-      "version_skew": "Some features may be unavailable."
+      "version_skew": "bsk and the browser extension differ in version. You can continue using them, but updating is recommended."
     },
     "stateBadge": {
       "disconnected": "Standby",
       "connecting": "Igniting",
       "connected": "Ready",
-      "version_skew": "Action needed",
+      "version_skew": "Update recommended",
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill connection",
@@ -27,6 +27,7 @@
     "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "controlHintsInfoLabel": "About control hints",
     "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, daemon v{{daemonProtocol}}.",
+    "versionIncompatibleError": "bsk and the BrowserSkill extension are incompatible. Update both, reload the extension, then run bsk daemon restart.",
     "upgradeAvailable": "Upgradable",
     "launcher": {
       "title": "Quick actions"

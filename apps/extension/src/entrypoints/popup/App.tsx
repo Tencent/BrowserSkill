@@ -83,6 +83,9 @@ export function App() {
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
+  const errorMessage = snapshot.lastError?.includes("version_too_old")
+    ? t("popup.versionIncompatibleError")
+    : snapshot.lastError;
 
   const copyInstanceId = async () => {
     if (!snapshot.instanceId || !navigator.clipboard?.writeText) return;
@@ -252,12 +255,12 @@ export function App() {
             </div>
           </section>
 
-          {snapshot.lastError && (
+          {errorMessage && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"
             >
-              {snapshot.lastError}
+              {errorMessage}
             </div>
           )}
 

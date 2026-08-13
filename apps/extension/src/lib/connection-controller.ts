@@ -313,6 +313,15 @@ export type HandshakeVerdict =
   | { kind: "version_skew" }
   | { kind: "rejected"; reason: string };
 
+const UPDATE_BOTH_VERSION_MESSAGE =
+  "The installed bsk CLI and BrowserSkill extension are incompatible. Update both, reload the extension, then run `bsk daemon restart`.";
+const UPDATE_BSK_VERSION_MESSAGE =
+  "The installed bsk CLI is out of date for this BrowserSkill extension. Update bsk, then run `bsk daemon restart`.";
+const UPDATE_EXTENSION_VERSION_MESSAGE =
+  "This BrowserSkill extension is out of date for the installed bsk CLI. Update and reload the extension, then try again.";
+const INVALID_VERSION_MESSAGE =
+  "BrowserSkill could not verify version compatibility. Update bsk and the BrowserSkill extension, reload the extension, then run `bsk daemon restart`.";
+
 /**
  * Symmetric extension-side **protocol** compat check.
  *
@@ -339,19 +348,19 @@ export function computeConnectedState(
   if (daemonMajor === null || ourMajor === null || daemonMajor !== ourMajor) {
     return {
       kind: "rejected",
-      reason: `protocol-major mismatch (daemon protocol v${handshake.protocol_version}, extension protocol v${PROTOCOL_VERSION})`,
+      reason: UPDATE_BOTH_VERSION_MESSAGE,
     };
   }
   if (compareProtocol(handshake.protocol_version, localMinCompatibleProtocol) === null) {
     return {
       kind: "rejected",
-      reason: `daemon protocol v${handshake.protocol_version} is unparseable`,
+      reason: INVALID_VERSION_MESSAGE,
     };
   }
   if (compareProtocol(handshake.protocol_version, localMinCompatibleProtocol)! < 0) {
     return {
       kind: "rejected",
-      reason: `daemon protocol v${handshake.protocol_version} below extension min_compatible_protocol ${localMinCompatibleProtocol}`,
+      reason: UPDATE_BSK_VERSION_MESSAGE,
     };
   }
   const peerFloor = handshake.min_compatible_protocol;
@@ -359,13 +368,13 @@ export function computeConnectedState(
     if (compareProtocol(PROTOCOL_VERSION, peerFloor) === null) {
       return {
         kind: "rejected",
-        reason: `daemon min_compatible_protocol ${peerFloor} is unparseable`,
+        reason: INVALID_VERSION_MESSAGE,
       };
     }
     if (compareProtocol(PROTOCOL_VERSION, peerFloor)! < 0) {
       return {
         kind: "rejected",
-        reason: `extension protocol v${PROTOCOL_VERSION} below daemon min_compatible_protocol ${peerFloor}`,
+        reason: UPDATE_EXTENSION_VERSION_MESSAGE,
       };
     }
   }

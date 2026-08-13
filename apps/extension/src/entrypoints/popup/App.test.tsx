@@ -100,6 +100,24 @@ describe("App", () => {
     expect(screen.queryByText("录制你的操作，供 Agent 参考")).toBeNull();
   });
 
+  it("renders localized copy for a version failure instead of protocol details", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        lastError:
+          "[handshake] daemon rejected handshake: version_too_old — peer protocol 1.0 is below local min_compatible_protocol 1.1",
+      },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    const error = screen.getByText(/bsk 与 BrowserSkill 扩展版本不兼容/);
+    expect(error.textContent).not.toContain("min_compatible_protocol");
+  });
+
   it("shows single-line compact metadata and copies the instance id", async () => {
     mockUseConnectionState.mockReturnValue({
       snapshot: {

@@ -6,20 +6,20 @@
       "disconnected": "未连接",
       "connecting": "连接中…",
       "connected": "已连接",
-      "version_skew": "协议不一致",
+      "version_skew": "版本不一致",
       "disabled": "连接已关闭"
     },
     "stateDetail": {
       "disconnected": "请先打开 BrowserSkill。",
       "connecting": "正在连接 BrowserSkill…",
       "connected": "可接收自动化任务。",
-      "version_skew": "部分能力可能不可用。"
+      "version_skew": "bsk 与浏览器扩展版本不同，当前仍可使用，建议更新至最新版本。"
     },
     "stateBadge": {
       "disconnected": "Standby",
       "connecting": "Igniting",
       "connected": "Ready",
-      "version_skew": "Action needed",
+      "version_skew": "建议更新",
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill 连接",
@@ -27,6 +27,7 @@
     "controlHintsToggleHint": "Agent 控制页面时显示提示条和橙色闪光。",
     "controlHintsInfoLabel": "控制提示说明",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，daemon 协议 v{{daemonProtocol}}。",
+    "versionIncompatibleError": "bsk 与 BrowserSkill 扩展版本不兼容。请将两者更新至最新版本，重新加载扩展后，再运行 bsk daemon restart。",
     "upgradeAvailable": "可升级",
     "launcher": {
       "title": "快捷功能"
