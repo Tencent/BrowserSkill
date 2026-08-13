@@ -1,5 +1,5 @@
 import { useTranslation } from "@browser-skill/i18n/react";
-import { Badge, Button, cn, Input, Label } from "@browser-skill/ui";
+import { Badge, Button, Input, Label } from "@browser-skill/ui";
 import {
   RiArrowLeftLine,
   RiArrowRightSLine,
@@ -12,6 +12,7 @@ import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
+import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
 
@@ -195,26 +196,12 @@ export function App() {
                 >
                   {t(STATE_BADGE_KEYS[statusState])}
                 </Badge>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={snapshot.connectionEnabled}
+                <Switch
+                  checked={snapshot.connectionEnabled}
+                  onCheckedChange={setConnectionEnabled}
                   aria-label={t("popup.connectionToggleTitle")}
                   data-slot="popup-connection-toggle"
-                  className={cn(
-                    "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                    snapshot.connectionEnabled ? "bg-primary" : "bg-muted",
-                  )}
-                  onClick={() => setConnectionEnabled(!snapshot.connectionEnabled)}
-                >
-                  <span
-                    className={cn(
-                      "pointer-events-none block size-4 rounded-full bg-background shadow-sm transition-transform",
-                      snapshot.connectionEnabled ? "translate-x-4" : "translate-x-0.5",
-                    )}
-                    aria-hidden
-                  />
-                </button>
+                />
               </div>
             </div>
             {isSkewed && (
@@ -256,26 +243,12 @@ export function App() {
                   </span>
                 </span>
               </span>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={!controlHintsHidden}
+              <Switch
+                checked={!controlHintsHidden}
+                onCheckedChange={(shown) => setControlHintsHidden(!shown)}
                 aria-label={t("popup.controlHintsToggleTitle")}
                 data-slot="popup-control-hints-toggle"
-                className={cn(
-                  "relative inline-flex h-4 w-7 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-                  controlHintsHidden ? "bg-muted" : "bg-primary",
-                )}
-                onClick={() => setControlHintsHidden(!controlHintsHidden)}
-              >
-                <span
-                  className={cn(
-                    "pointer-events-none block size-3 rounded-full bg-background shadow-sm transition-transform",
-                    controlHintsHidden ? "translate-x-0.5" : "translate-x-3",
-                  )}
-                  aria-hidden
-                />
-              </button>
+              />
             </div>
           </section>
 

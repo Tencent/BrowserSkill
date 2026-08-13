@@ -322,14 +322,17 @@ describe("control hints toggle", () => {
     expect(tooltip.className).toContain("opacity-0");
   });
 
-  it("renders the hints switch smaller than the primary connection switch", async () => {
+  it("uses the same switch component and size for both settings rows", async () => {
     stubChromeStorage();
 
     render(<App />);
 
     const hintsToggle = await screen.findByRole("switch", { name: "控制提示" });
     const connectionToggle = screen.getByRole("switch", { name: "BrowserSkill 连接" });
-    expect(hintsToggle.className).toContain("h-4");
-    expect(connectionToggle.className).toContain("h-5");
+    // One shared Switch component, one size — hierarchy comes from copy and
+    // the info icon, not control size. Both rows default to checked, so the
+    // class strings must be identical.
+    expect(hintsToggle.className).toContain("h-5 w-9");
+    expect(hintsToggle.className).toBe(connectionToggle.className);
   });
 });
