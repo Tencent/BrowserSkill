@@ -9,7 +9,7 @@
     "ext:dev": "pnpm --filter @browser-skill/extension dev",
     "ext:test": "pnpm --filter @browser-skill/extension test",
     "vom:test": "pnpm --filter @browser-skill/vom test",
-    "lint": "biome check . && stylelint \"**/*.css\"",
+    "lint": "biome check . && stylelint \"**/*.css\" && pnpm --filter dsh-plugin-browserskill typecheck && pnpm --filter dsh-plugin-browserskill test",
     "format": "biome format --write ."
   },
   "devDependencies": {
