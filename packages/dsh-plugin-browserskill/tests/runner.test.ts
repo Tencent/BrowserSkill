@@ -109,6 +109,7 @@ describe("parseBskJson", () => {
         exitCode: 3,
       });
       expect((error as Error).message).toContain("no browser connected");
+      expect((error as Error).message).toContain("hint: open Chrome");
     }
   });
 

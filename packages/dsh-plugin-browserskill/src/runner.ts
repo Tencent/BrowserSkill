@@ -177,7 +177,10 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     }
     const message =
       parsed?.message ?? (result.stderr.trim() || body || `bsk ${commandLabel} failed`);
-    throw new BskError(`bsk ${commandLabel} failed: ${message}`, {
+    // Surface the envelope's actionable hint in the model-facing message; a
+    // hint the model cannot see cannot be followed.
+    const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
       hint: parsed?.hint,
       exitCode: result.code,
