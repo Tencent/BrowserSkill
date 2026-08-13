@@ -179,6 +179,7 @@ function makeWindowsApi(
     get: ReturnType<typeof vi.fn>;
     lastFocused: ReturnType<typeof vi.fn>;
     create: ReturnType<typeof vi.fn>;
+    remove: ReturnType<typeof vi.fn>;
   };
 } {
   const get = vi.fn(async (windowId: number) => {
@@ -197,7 +198,13 @@ function makeWindowsApi(
     const id = opts?.createWindowId ?? 999;
     return { id } as chrome.windows.Window;
   });
-  return { api: { get, getLastFocused: lastFocused, create }, spies: { get, lastFocused, create } };
+  const remove = vi.fn(async (windowId: number) => {
+    state.windowsClosed.add(windowId);
+  });
+  return {
+    api: { get, getLastFocused: lastFocused, create, remove },
+    spies: { get, lastFocused, create, remove },
+  };
 }
 
 describe("handleTabCreate", () => {
@@ -599,6 +606,86 @@ describe("handleTabReturn", () => {
     expect(res.returned_to_window_id).toBe(777);
     expect(res.fallback).toBe(true);
     expect(winSpies.create).toHaveBeenCalledOnce();
+  });
+
+  it("closes a newly created fallback window when cancellation wins before the move", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set([200]),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi, spies: winSpies } = makeWindowsApi(state, {
+      lastFocused: 100,
+      createWindowId: 777,
+    });
+    let resolveCreate: (window: chrome.windows.Window) => void = () => {};
+    winSpies.create.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    const controller = new AbortController();
+
+    const pending = handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, windows: windowsApi, signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(winSpies.create).toHaveBeenCalledOnce());
+    controller.abort();
+    resolveCreate({ id: 777 } as chrome.windows.Window);
+
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    expect(winSpies.remove).toHaveBeenCalledWith(777);
+    expect(spies.move).not.toHaveBeenCalled();
+    expect(ctx.borrowedTabs.has(7)).toBe(true);
+  });
+
+  it("surfaces the fallback window id when cancellation cleanup fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set([200]),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi, spies: winSpies } = makeWindowsApi(state, {
+      lastFocused: 100,
+      createWindowId: 777,
+    });
+    let resolveCreate: (window: chrome.windows.Window) => void = () => {};
+    winSpies.create.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveCreate = resolve;
+        }),
+    );
+    winSpies.remove.mockRejectedValueOnce(new Error("window removal denied"));
+    const controller = new AbortController();
+
+    const pending = handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      { tabs: api, windows: windowsApi, signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(winSpies.create).toHaveBeenCalledOnce());
+    controller.abort();
+    resolveCreate({ id: 777 } as chrome.windows.Window);
+
+    await expect(pending).resolves.toMatchObject({
+      code: "protocol_error",
+      data: { reason: "cleanup_failed", resource_type: "window", resource_id: 777 },
+      message: expect.stringMatching(/fallback window 777.*window removal denied/),
+    });
+    expect(spies.move).not.toHaveBeenCalled();
+    expect(ctx.borrowedTabs.has(7)).toBe(true);
   });
 
   it("falls back to a new window when getLastFocused only returns the Agent Window", async () => {

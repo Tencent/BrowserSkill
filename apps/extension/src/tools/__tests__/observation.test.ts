@@ -2457,6 +2457,64 @@ describe("handleSnapshot", () => {
     expect(ctx.refStore.resolve("e1")).toBeNull();
   });
 
+  it("keeps the previous RefStore when cancellation lands during DOM capture", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 999, { tabId: 4 });
+    const controller = new AbortController();
+    let resolveCapture: (value: unknown) => void = () => {};
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") {
+        return {
+          nodes: [
+            {
+              nodeId: "new",
+              role: { type: "role", value: "button" },
+              name: { type: "computedString", value: "New" },
+              backendDOMNodeId: 123,
+            },
+          ],
+        };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+      }
+      if (method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return new Promise((resolve) => {
+          resolveCapture = resolve;
+        });
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+    const deps = {
+      cdp: {
+        send: send as unknown as <T = unknown>(
+          tabId: number,
+          method: string,
+          params?: object,
+        ) => Promise<T>,
+        trackSessionTab: vi.fn(),
+      },
+      tabsApi: {
+        get: vi.fn(),
+        query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+      },
+    };
+
+    const pending = handleSnapshot(sm, { session_id: "aa11" }, deps, controller.signal);
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledWith(4, "DOMSnapshot.captureSnapshot", expect.any(Object)),
+    );
+    controller.abort();
+    resolveCapture({ strings: [], documents: [] });
+
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    expect(ctx.refStore.resolve("e1", { tabId: 4 })).toBe(999);
+    expect(ctx.refStore.resolve("e2")).toBeNull();
+  });
+
   it("surfaces CDP failures as cdp_failed", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");

@@ -32,7 +32,8 @@ export type RpcErrorReason =
   | "tab_not_active"
   | "restricted_tab_url"
   | "borrow_conflict"
-  | "screenshot_capture_failed";
+  | "screenshot_capture_failed"
+  | "cleanup_failed";
 
 export interface RpcErrorData {
   reason?: RpcErrorReason;

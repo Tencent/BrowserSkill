@@ -37,17 +37,22 @@ export async function handleNetwork(
   manager: SessionManager,
   params: NetworkParams,
   deps: NetworkDeps = defaultNetworkDeps(),
+  signal?: AbortSignal,
 ): Promise<NetworkResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "network aborted" };
   const ctxOrErr = lookupSession(manager, params, "network");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const bounds = parseBufferedReadBounds(params);
   if (isRpcError(bounds)) return bounds;
   const target = await resolveTargetTab(manager, ctxOrErr, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
+  if (signal?.aborted) return { code: "cancelled", message: "network aborted" };
 
   try {
+    if (signal?.aborted) return { code: "cancelled", message: "network aborted" };
     deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     await deps.cdp.ensureNetworkCapture(target.tabId);
+    if (signal?.aborted) return { code: "cancelled", message: "network aborted" };
     return deps.cdp.networkEntriesSince(
       target.tabId,
       bounds.since,

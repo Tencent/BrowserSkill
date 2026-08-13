@@ -60,6 +60,7 @@ function makeApis(
     }),
     getLastFocused: vi.fn(async () => ({ id: 500 }) as chrome.windows.Window),
     create: vi.fn(async () => ({ id: 999 }) as chrome.windows.Window),
+    remove: vi.fn(async () => {}),
   };
   return { tabs, windows };
 }

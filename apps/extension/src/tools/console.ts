@@ -27,19 +27,23 @@ export async function handleConsole(
   manager: SessionManager,
   params: ConsoleParams,
   deps: ConsoleDeps = defaultConsoleDeps(),
+  signal?: AbortSignal,
 ): Promise<ConsoleResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
   const ctxOrErr = lookupSession(manager, params, "console");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const bounds = parseBufferedReadBounds(params);
   if (isRpcError(bounds)) return bounds;
   const target = await resolveTargetTab(manager, ctxOrErr, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
+  if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
   if (!deps.cdp.ensureConsoleCapture || !deps.cdp.consoleEntriesSince) {
     return { code: "cdp_failed", message: "console capture requires CDP console support" };
   }
 
   try {
     await deps.cdp.ensureConsoleCapture(target.tabId);
+    if (signal?.aborted) return { code: "cancelled", message: "console aborted" };
     deps.cdp.trackSessionTab?.(ctxOrErr.sessionId, target.tabId);
     return deps.cdp.consoleEntriesSince(
       target.tabId,

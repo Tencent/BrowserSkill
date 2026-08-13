@@ -583,11 +583,11 @@ async fn cancel_for_unknown_rpc_id_returns_false() {
 }
 
 #[tokio::test]
-async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
-    // With session busy fast-fail, a second tool RPC submitted while
-    // the worker is occupied returns `session_busy` immediately
-    // instead of queuing behind the slow call. Cancel still unblocks
-    // the in-flight RPC through the existing forwarded-cancel path.
+async fn cancel_keeps_session_busy_until_delayed_extension_cleanup_finishes() {
+    // A forwarded cancel is acknowledged immediately, but the extension
+    // deliberately delays the original RPC's final response to model
+    // handler-side compensation. The daemon must keep the session busy
+    // throughout that delay and release it only after cleanup settles.
     use std::sync::atomic::{AtomicUsize, Ordering as AOrdering};
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;
@@ -596,6 +596,10 @@ async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
     let ws = Arc::new(tokio::sync::Mutex::new(ws));
     let snapshots_seen = Arc::new(AtomicUsize::new(0));
     let snapshots_seen_clone = Arc::clone(&snapshots_seen);
+    let cleanup_started = Arc::new(tokio::sync::Notify::new());
+    let cleanup_started_clone = Arc::clone(&cleanup_started);
+    let cleanup_release = Arc::new(tokio::sync::Notify::new());
+    let cleanup_release_clone = Arc::clone(&cleanup_release);
     let ws_clone = Arc::clone(&ws);
     let responder = tokio::spawn(async move {
         let mut pending_snapshot: Option<String> = None;
@@ -636,6 +640,16 @@ async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
                         snapshots_seen_clone.fetch_add(1, AOrdering::SeqCst);
                         pending_snapshot = Some(req.id);
                     }
+                    Method::ToolTabList => {
+                        let reply = ResponseFrame {
+                            id: req.id,
+                            body: ResponseBody::Ok(json!({ "tabs": [] })),
+                        };
+                        let mut g = ws_clone.lock().await;
+                        g.send(Message::Text(serde_json::to_string(&reply).unwrap()))
+                            .await
+                            .unwrap();
+                    }
                     Method::Cancel => {
                         let target = req
                             .params
@@ -647,6 +661,8 @@ async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
                         if let (Some(target), Some(snap)) = (target, snapshot_id)
                             && target == snap
                         {
+                            cleanup_started_clone.notify_one();
+                            cleanup_release_clone.notified().await;
                             let reply = ResponseFrame {
                                 id: snap,
                                 body: ResponseBody::Err(RpcError {
@@ -753,6 +769,33 @@ async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
         .expect("cancel slow rpc succeeds");
     assert!(cancel_slow.cancelled);
 
+    cleanup_started.notified().await;
+    let busy_after_cancel = tokio::time::timeout(
+        Duration::from_millis(200),
+        busy_ipc.call_with_id::<_, serde_json::Value>(
+            "snap-busy-after-cancel".into(),
+            Method::ToolSnapshot,
+            Some(json!({"session_id": session_id.clone()})),
+            Duration::from_secs(10),
+        ),
+    )
+    .await
+    .expect("post-cancel RPC should fast-fail while cleanup is pending")
+    .unwrap();
+    let busy_after_cancel_err =
+        busy_after_cancel.expect_err("session must remain busy during delayed compensation");
+    assert_eq!(busy_after_cancel_err.code, ErrorCode::Timeout);
+    assert_eq!(
+        busy_after_cancel_err
+            .data
+            .as_ref()
+            .and_then(|d| d.get("reason"))
+            .and_then(|v| v.as_str()),
+        Some(bsk::rpc_reason::SESSION_BUSY)
+    );
+
+    cleanup_release.notify_one();
+
     let slow_outcome = tokio::time::timeout(Duration::from_secs(5), slow_handle)
         .await
         .expect("slow snapshot did not resolve")
@@ -760,6 +803,18 @@ async fn concurrent_tool_call_returns_session_busy_while_slow_rpc_inflight() {
         .unwrap();
     let slow_err = slow_outcome.expect_err("slow snapshot must surface cancelled");
     assert_eq!(slow_err.code, ErrorCode::Cancelled);
+
+    let after_cleanup: serde_json::Value = busy_ipc
+        .call(
+            "tabs-after-cleanup",
+            Method::ToolTabList,
+            Some(json!({"session_id": session_id})),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .expect("session queue should reopen after extension cleanup");
+    assert_eq!(after_cleanup, json!({ "tabs": [] }));
 
     assert_eq!(
         snapshots_seen.load(AOrdering::SeqCst),

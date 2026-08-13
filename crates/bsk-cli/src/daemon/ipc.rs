@@ -443,10 +443,10 @@ async fn handle_wait_ms(
 ///    * **Queued** — the worker's pre-flight observes the cancelled
 ///      token and short-circuits with `cancelled` before any WS
 ///      frame leaves the daemon (review C2 fix).
-///    * **Forwarded** — the worker's `tokio::select!` returns
-///      `cancelled` immediately, AND we additionally push a WS-side
-///      `cancel { rpc_id: ws_rpc_id }` frame so the extension's
-///      dispatcher can trip its `AbortController`.
+///    * **Forwarded** — we push a WS-side `cancel { rpc_id: ws_rpc_id }`
+///      frame so the extension's dispatcher can trip its
+///      `AbortController`; the worker keeps the session busy until the
+///      extension returns its final result or the cleanup timeout expires.
 ///
 /// Returns `{ cancelled }` reflecting whether either surface
 /// matched. The RPC itself never errors — a cancelled tool surfaces

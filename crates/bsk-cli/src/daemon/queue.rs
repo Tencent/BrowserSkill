@@ -58,6 +58,11 @@ pub const QUEUE_CAPACITY: usize = 64;
 /// so tests can default it.
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Once a forwarded request is cancelled, keep the session queue busy while
+/// the extension finishes handler-side compensation. This is deliberately
+/// bounded so a wedged extension cannot pin the session forever.
+pub const CANCEL_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Job submitted into a session queue. Carries everything the worker
 /// needs to forward one RPC and one oneshot to deliver the answer.
 pub struct ToolJob {
@@ -70,9 +75,9 @@ pub struct ToolJob {
     /// the queued/forwarded state machine; the worker checks it on
     /// pre-flight (so a cancel arriving while the job was still
     /// queued short-circuits without ever touching the extension)
-    /// and selects on `cancel.cancelled()` while awaiting the WS
-    /// response (so a cancel arriving mid-flight unblocks the worker
-    /// the same way the WS-side cancel frame already did).
+    /// and observes `cancel.cancelled()` while awaiting the WS response.
+    /// A forwarded cancel keeps the worker busy until the extension's
+    /// final response arrives or the bounded cleanup timeout expires.
     ///
     /// `None` for daemon-internal callers that do not flow through an
     /// IPC request id (e.g. `session.stop`'s queued teardown call —
@@ -571,19 +576,40 @@ async fn forward_one(
             None
         }
     };
-    let waited = await_with_optional_cancel(job.timeout, waiter, cancel_token.as_ref()).await;
+    let waited = await_with_optional_cancel(
+        job.timeout,
+        CANCEL_CLEANUP_TIMEOUT,
+        waiter,
+        cancel_token.as_ref(),
+    )
+    .await;
     let response = match waited {
         WaitOutcome::Response(resp) => resp,
-        WaitOutcome::Cancelled => {
-            // Drop the WS waiter so a late extension reply is dropped
-            // cleanly (otherwise pending.resolve would log a stale
-            // entry). The CLI caller will get a synthesised
-            // `cancelled` here even if the extension never answers.
-            client.pending.lock().unwrap().cancel(&rpc_id);
+        WaitOutcome::CancelledAfterResponse(resp) => {
+            // Cancellation wins the external verdict, but only after the
+            // extension's original RPC has settled. Preserve any non-cancel
+            // error so compensation failures remain explicit instead of
+            // being hidden behind a generic cancelled result.
+            if let ResponseBody::Err(err) = resp.body
+                && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+            {
+                return Err(err);
+            }
             return Err(cancelled_error(
                 job.inflight.as_deref(),
-                "tool dispatch cancelled mid-flight",
+                "tool dispatch cancelled after extension cleanup",
             ));
+        }
+        WaitOutcome::CleanupTimeout => {
+            client.pending.lock().unwrap().cancel(&rpc_id);
+            return Err(RpcError {
+                code: ErrorCode::Timeout,
+                message: format!(
+                    "cancelled tool did not finish cleanup within {:?}",
+                    CANCEL_CLEANUP_TIMEOUT
+                ),
+                data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+            });
         }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
@@ -611,47 +637,42 @@ async fn forward_one(
 #[derive(Debug)]
 enum WaitOutcome {
     Response(bsk_protocol::ResponseFrame),
-    Cancelled,
+    CancelledAfterResponse(bsk_protocol::ResponseFrame),
+    CleanupTimeout,
     WaiterClosed,
     Timeout,
 }
 
 async fn await_with_optional_cancel(
     timeout: Duration,
-    waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
+    cleanup_timeout: Duration,
+    mut waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
     cancel: Option<&super::abort::AbortToken>,
 ) -> WaitOutcome {
     match cancel {
-        // Cancel wins if both ready: when a cancel notification and
-        // the extension's response are both observable on the same
-        // tokio tick, `biased;` polls `token.cancelled()` first and
-        // resolves the whole `select!` to `WaitOutcome::Cancelled`.
-        // The already-arrived tool result is intentionally dropped.
-        //
-        // This extends design §4.6 — which only specifies "CLI sends
-        // `cancel` on SIGINT and waits for the extension's
-        // `cancelled` reply (≤ 2s before forced exit)" — by pinning
-        // the same-tick race to a single, observable verdict.
-        // Without `biased;`, an extension racing a fast successful
-        // reply against a cancel notification could occasionally
-        // resolve as `ok` even though the caller had already moved on
-        // to compensation logic, leaving the agent trusting state the
-        // daemon had just been asked to roll back. Picking
-        // cancel-wins keeps the external observation rule simple
-        // ("once a cancel is in flight, the in-flight RPC's verdict
-        // is `cancelled`") and matches what the CLI / agent already
-        // assumes after firing SIGINT. Round 3 M1 / round 4 M2
-        // nail-down.
-        Some(token) => tokio::select! {
-            biased;
-            _ = token.cancelled() => WaitOutcome::Cancelled,
-            outcome = tokio::time::timeout(timeout, waiter) => match outcome {
-                Ok(Ok(resp)) => WaitOutcome::Response(resp),
-                Ok(Err(_)) => WaitOutcome::WaiterClosed,
-                Err(_) => WaitOutcome::Timeout,
-            },
-        },
-        None => match tokio::time::timeout(timeout, waiter).await {
+        Some(token) => {
+            let deadline = tokio::time::sleep(timeout);
+            tokio::pin!(deadline);
+            tokio::select! {
+                // Cancel keeps same-tick priority, but it no longer drops the
+                // waiter. The worker remains busy until the extension replies
+                // after compensation or the cleanup deadline expires.
+                biased;
+                _ = token.cancelled() => {
+                    match tokio::time::timeout(cleanup_timeout, &mut waiter).await {
+                        Ok(Ok(resp)) => WaitOutcome::CancelledAfterResponse(resp),
+                        Ok(Err(_)) => WaitOutcome::WaiterClosed,
+                        Err(_) => WaitOutcome::CleanupTimeout,
+                    }
+                },
+                outcome = &mut waiter => match outcome {
+                    Ok(resp) => WaitOutcome::Response(resp),
+                    Err(_) => WaitOutcome::WaiterClosed,
+                },
+                _ = &mut deadline => WaitOutcome::Timeout,
+            }
+        }
+        None => match tokio::time::timeout(timeout, &mut waiter).await {
             Ok(Ok(resp)) => WaitOutcome::Response(resp),
             Ok(Err(_)) => WaitOutcome::WaiterClosed,
             Err(_) => WaitOutcome::Timeout,
@@ -733,10 +754,16 @@ mod await_with_optional_cancel_tests {
         let (tx, rx) = oneshot::channel();
         tx.send(dummy_response()).unwrap();
 
-        let outcome = await_with_optional_cancel(Duration::from_secs(10), rx, Some(&token)).await;
+        let outcome = await_with_optional_cancel(
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+            rx,
+            Some(&token),
+        )
+        .await;
         assert!(
-            matches!(outcome, WaitOutcome::Cancelled),
-            "expected Cancelled when both arms are ready under biased; (got something else)"
+            matches!(outcome, WaitOutcome::CancelledAfterResponse(_)),
+            "expected cancellation to win while retaining the ready response"
         );
     }
 
@@ -749,7 +776,13 @@ mod await_with_optional_cancel_tests {
         let (tx, rx) = oneshot::channel();
         tx.send(dummy_response()).unwrap();
 
-        let outcome = await_with_optional_cancel(Duration::from_secs(10), rx, Some(&token)).await;
+        let outcome = await_with_optional_cancel(
+            Duration::from_secs(10),
+            Duration::from_secs(1),
+            rx,
+            Some(&token),
+        )
+        .await;
         match outcome {
             WaitOutcome::Response(frame) => {
                 assert!(matches!(frame.body, ResponseBody::Ok(_)));
@@ -762,8 +795,49 @@ mod await_with_optional_cancel_tests {
     async fn no_cancel_token_still_returns_response() {
         let (tx, rx) = oneshot::channel();
         tx.send(dummy_response()).unwrap();
-        let outcome = await_with_optional_cancel(Duration::from_secs(10), rx, None).await;
+        let outcome =
+            await_with_optional_cancel(Duration::from_secs(10), Duration::from_secs(1), rx, None)
+                .await;
         assert!(matches!(outcome, WaitOutcome::Response(_)));
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_stays_pending_until_cleanup_response_arrives() {
+        let token = AbortToken::new();
+        let (tx, rx) = oneshot::channel();
+        token.cancel();
+        let pending = tokio::spawn(async move {
+            await_with_optional_cancel(
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                rx,
+                Some(&token),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!pending.is_finished());
+        tx.send(dummy_response()).unwrap();
+        assert!(matches!(
+            pending.await.unwrap(),
+            WaitOutcome::CancelledAfterResponse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_releases_after_cleanup_timeout() {
+        let token = AbortToken::new();
+        let (_tx, rx) = oneshot::channel();
+        token.cancel();
+        let outcome = await_with_optional_cancel(
+            Duration::from_secs(10),
+            Duration::from_millis(10),
+            rx,
+            Some(&token),
+        )
+        .await;
+        assert!(matches!(outcome, WaitOutcome::CleanupTimeout));
     }
 }
 
