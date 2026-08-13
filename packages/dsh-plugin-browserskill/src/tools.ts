@@ -160,6 +160,8 @@ export function registerTools(deps: ToolDeps): void {
         if ((args.width === undefined) !== (args.height === undefined)) {
           throw new Error("width and height must be given together");
         }
+        // Check the cap BEFORE spawning so a rejected start never leaks a session.
+        registry.assertCapacity();
         const startArgs = ["session", "start"];
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));

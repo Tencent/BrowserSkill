@@ -23,14 +23,22 @@ export class SessionRegistry {
    * @throws when the configured concurrency cap is already reached.
    */
   add(session: TrackedSession): void {
-    if (!this.sessions.has(session.sessionId) && this.sessions.size >= this.maxSessions) {
+    if (!this.sessions.has(session.sessionId)) this.assertCapacity();
+    this.sessions.set(session.sessionId, session);
+    this.currentId = session.sessionId;
+  }
+
+  /**
+   * Throw when starting another session would exceed the concurrency cap.
+   * Call BEFORE spawning a new session so a rejected start never leaks one.
+   */
+  assertCapacity(): void {
+    if (this.sessions.size >= this.maxSessions) {
       throw new Error(
         `session limit reached (${this.maxSessions} concurrent sessions); ` +
           "stop one with browser_session_stop before starting another",
       );
     }
-    this.sessions.set(session.sessionId, session);
-    this.currentId = session.sessionId;
   }
 
   /** Forget a stopped session; falls back to the most recent remaining one. */

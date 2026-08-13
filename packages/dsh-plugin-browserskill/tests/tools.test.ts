@@ -226,8 +226,8 @@ describe("multi-session behavior", () => {
     await expect(snapshot?.execute({}, makeExec())).rejects.toThrow(/browser_session_start/);
   });
 
-  it("enforces the configured session cap", async () => {
-    const { tools } = setup(
+  it("enforces the configured session cap before spawning", async () => {
+    const { tools, calls } = setup(
       { "session start": seq([START_REPLY("s1"), START_REPLY("s2")]) },
       {},
       1,
@@ -235,6 +235,8 @@ describe("multi-session behavior", () => {
     await startSession(tools);
     const start = tools.get("browser_session_start");
     await expect(start?.execute({}, makeExec())).rejects.toThrow(/session limit/);
+    // A rejected start must not spawn another bsk session (no leaked session).
+    expect(calls.filter((c) => c.args.join(" ").startsWith("session start"))).toHaveLength(1);
   });
 });
 
