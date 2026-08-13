@@ -141,9 +141,9 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
             exit_code: 2,
         },
         ErrorCode::VersionTooOld => RenderInfo {
-            summary: "peer version is too old to communicate with this build",
+            summary: "the installed bsk CLI and BrowserSkill extension are incompatible",
             hint: Some(
-                "upgrade both bsk CLI and the browser-skill extension so both sides satisfy `min_compatible_protocol`",
+                "update bsk and the BrowserSkill extension, reload the extension, then run `bsk daemon restart`",
             ),
             exit_code: 5,
         },
@@ -157,7 +157,7 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
         ErrorCode::NoBrowserConnected => RenderInfo {
             summary: "no browser is connected to the daemon",
             hint: Some(
-                "open the browser-skill extension in your browser and wait for the popup to show \"connected\"",
+                "open the BrowserSkill extension and wait for it to show \"connected\"; if the extension is already open, update and reload it, then run `bsk daemon restart`",
             ),
             exit_code: 1,
         },
@@ -308,6 +308,30 @@ mod tests {
         // errors (exit 1).
         assert_eq!(exit_code_for(ErrorCode::UnknownMethod), 5);
         assert_eq!(exit_code_for(ErrorCode::VersionTooOld), 5);
+    }
+
+    #[test]
+    fn version_error_names_the_components_and_gives_update_steps() {
+        let info = info_for(ErrorCode::VersionTooOld);
+        assert!(info.summary.contains("bsk CLI"));
+        assert!(info.summary.contains("BrowserSkill extension"));
+        let hint = info
+            .hint
+            .expect("version mismatch should have a repair hint");
+        assert!(hint.contains("update bsk"));
+        assert!(hint.contains("reload the extension"));
+        assert!(hint.contains("bsk daemon restart"));
+        assert!(!hint.contains("min_compatible_protocol"));
+    }
+
+    #[test]
+    fn no_browser_hint_explains_version_mismatch_recovery() {
+        let hint = info_for(ErrorCode::NoBrowserConnected)
+            .hint
+            .expect("no browser should have a repair hint");
+        assert!(hint.contains("extension is already open"));
+        assert!(hint.contains("update"));
+        assert!(hint.contains("bsk daemon restart"));
     }
 
     /// Every code must carry a non-empty summary; an empty `summary`

@@ -786,7 +786,19 @@ async fn handle_session_stop(state: &Arc<DaemonState>, params: Value) -> Result<
     }
 }
 
+/// Marks a `session.stop` rejected because another teardown already owns the
+/// session, so callers that race on purpose (`bsk record`) can tell it apart
+/// from a browser that stopped responding.
+pub const STOP_IN_PROGRESS_REASON: &str = "session_stop_in_progress";
+
 fn map_stop_error(err: StopSessionError) -> RpcError {
+    if matches!(err, StopSessionError::Stopping) {
+        return RpcError {
+            code: ErrorCode::Timeout,
+            message: err.to_string(),
+            data: Some(serde_json::json!({ "reason": STOP_IN_PROGRESS_REASON })),
+        };
+    }
     let code = match &err {
         StopSessionError::NotFound => ErrorCode::NotFound,
         StopSessionError::Stopping => ErrorCode::Timeout,
