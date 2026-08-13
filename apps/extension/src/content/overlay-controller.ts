@@ -18,6 +18,12 @@ export interface OverlayState {
    * so 「Agent 正在控制」does not flash between RecordOverlay and teardown.
    */
   suppressControlAfterRecord: boolean;
+  /**
+   * User preference (chrome.storage, toggled from the popup): hide the
+   * control hints — status pill, orange glow, and the input blocker that
+   * comes with them. Not session state; survives overlay resets.
+   */
+  controlHintsHidden: boolean;
 }
 
 type MutableOverlayState = Omit<OverlayState, "controlVisible">;
@@ -36,6 +42,7 @@ export class OverlayController {
     controlMode: "hidden",
     automationBypassCount: 0,
     suppressControlAfterRecord: false,
+    controlHintsHidden: false,
   };
 
   snapshot(): OverlayState {
@@ -129,6 +136,10 @@ export class OverlayController {
     }
   }
 
+  setControlHintsHidden(hidden: boolean): void {
+    this.state.controlHintsHidden = hidden;
+  }
+
   resetAgentOverlays(sessionId: string): HelpRequestData | null {
     if (this.state.activeSessionId && this.state.activeSessionId !== sessionId) {
       return null;
@@ -152,6 +163,7 @@ export class OverlayController {
 export function shouldShowAgentControlOverlay(state: OverlayState): boolean {
   return (
     state.controlVisible &&
+    !state.controlHintsHidden &&
     !state.suppressControlAfterRecord &&
     state.activeHelp === null &&
     state.activeRecord === null

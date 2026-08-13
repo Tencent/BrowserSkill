@@ -130,4 +130,31 @@ describe("OverlayController", () => {
     expect(controller.snapshot().controlVisible).toBe(true);
     expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(true);
   });
+
+  it("hides the control overlay when the user hides control hints", () => {
+    const controller = new OverlayController();
+    controller.activateAgentSession("sess-1");
+    expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(true);
+
+    controller.setControlHintsHidden(true);
+    expect(controller.snapshot().controlHintsHidden).toBe(true);
+    // The session still owns the tab — only the chrome is hidden.
+    expect(controller.snapshot().controlVisible).toBe(true);
+    expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(false);
+
+    controller.setControlHintsHidden(false);
+    expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(true);
+  });
+
+  it("keeps the control-hints preference across session overlay resets", () => {
+    const controller = new OverlayController();
+    controller.activateAgentSession("sess-1");
+    controller.setControlHintsHidden(true);
+
+    controller.resetAgentOverlays("sess-1");
+    expect(controller.snapshot().controlHintsHidden).toBe(true);
+
+    controller.activateAgentSession("sess-2");
+    expect(shouldShowAgentControlOverlay(controller.snapshot())).toBe(false);
+  });
 });

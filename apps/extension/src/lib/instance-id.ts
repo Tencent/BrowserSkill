@@ -1,6 +1,7 @@
 const STORAGE_KEY = "bsk_instance_id";
 const LABEL_STORAGE_KEY = "bh_label";
 const CONNECTION_ENABLED_KEY = "bh_connection_enabled";
+const CONTROL_HINTS_HIDDEN_KEY = "bsk_control_hints_hidden";
 
 export interface StorageBackend {
   get(keys: string | string[]): Promise<Record<string, unknown>>;
@@ -105,8 +106,30 @@ export async function setConnectionEnabled(
   await storage.set({ [CONNECTION_ENABLED_KEY]: enabled });
 }
 
+/**
+ * User preference for the in-page control hints (status pill + orange glow
+ * shown while the Agent controls a tab). Defaults to shown when unset or
+ * non-boolean; when hidden the whole control overlay — including its input
+ * blocker — is skipped so the page looks and behaves normally.
+ */
+export async function getControlHintsHidden(
+  storage: StorageBackend = defaultStorage(),
+): Promise<boolean> {
+  const items = await storage.get(CONTROL_HINTS_HIDDEN_KEY);
+  const raw = items[CONTROL_HINTS_HIDDEN_KEY];
+  return typeof raw === "boolean" ? raw : false;
+}
+
+export async function setControlHintsHidden(
+  hidden: boolean,
+  storage: StorageBackend = defaultStorage(),
+): Promise<void> {
+  await storage.set({ [CONTROL_HINTS_HIDDEN_KEY]: hidden });
+}
+
 export const STORAGE_KEYS = {
   INSTANCE_ID: STORAGE_KEY,
   LABEL: LABEL_STORAGE_KEY,
   CONNECTION_ENABLED: CONNECTION_ENABLED_KEY,
+  CONTROL_HINTS_HIDDEN: CONTROL_HINTS_HIDDEN_KEY,
 } as const;
