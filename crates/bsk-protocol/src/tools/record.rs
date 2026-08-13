@@ -1,35 +1,33 @@
 //! Semantic user-action recording (`tool.record_start` / `stop` / `await`).
 //!
-//! Trace v2 is a **record-only** log of user actions: what was clicked, filled,
-//! selected, and where navigation occurred. No LLM runs during recording, so
-//! variable-vs-constant classification is **not** stored — executing agents
-//! infer that at run time from raw values and control names.
+//! Trace v3 is a **state-action-state** chain: each step binds to page
+//! observations (VOM) captured before and after the action.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::interaction::KeyModifier;
 
+pub const TRACE_VERSION: u32 = 3;
+pub const VOM_FORMAT_VERSION: u32 = 1;
+
 // ---------------------------------------------------------------------------
 // Target
 // ---------------------------------------------------------------------------
 
-/// Stable semantic handle for an interacted element.
-///
-/// `name` and `nearby_label` are **untrusted page text**.
+/// Stable semantic handle for an interacted element within a page observation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TargetDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
+    pub element_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub tag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name_attr: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placeholder: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nearby_label: Option<String>,
+    pub ctx: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unmatched: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -42,14 +40,53 @@ pub struct TraceEntry {
     pub start_url: String,
 }
 
-/// Page context dictionary entry — referenced by steps via `page` id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct PageRef {
+pub struct RecorderInfo {
+    pub bsk: String,
+    pub vom: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    UserFinish,
+    CliStop,
+}
+
+/// Page observation dictionary entry — referenced by steps via `state` / `result.state`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TraceState {
     pub id: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Wire-only: full page observation (front matter + VOM body + annotations).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Disk-only: filename under the bundle `pages/` directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StepResult {
+    pub state: String,
+}
+
+/// Fields shared by every step variant (flattened in JSON).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct StepCommon {
+    pub id: u32,
+    /// Observation id immediately before this action.
+    pub state: String,
+    pub result: StepResult,
+}
+
+// ---------------------------------------------------------------------------
+// Step op-specific payloads
+// ---------------------------------------------------------------------------
 
 /// One selected option (`select` op).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -59,26 +96,25 @@ pub struct SelectedOption {
     pub label: Option<String>,
 }
 
-/// Observed navigation after a step (objective fact only).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct StepEffect {
-    /// Reference into `pages[]` for the destination page.
-    pub navigated_to: String,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigationCause {
+    UserTyped,
+    Link,
+    FormSubmit,
+    Reload,
+    History,
+    Script,
+    Browser,
 }
 
-/// Fields shared by every step variant (flattened in JSON).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct StepCommon {
-    pub id: u32,
-    /// Reference into `pages[]`.
-    pub page: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effect: Option<StepEffect>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FillCommit {
+    Enter,
+    Suggestion,
+    Blur,
 }
-
-// ---------------------------------------------------------------------------
-// Step op-specific payloads
-// ---------------------------------------------------------------------------
 
 /// One recorded user action — discriminated union by `op`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -88,6 +124,7 @@ pub enum Step {
         #[serde(flatten)]
         common: StepCommon,
         to: String,
+        cause: NavigationCause,
     },
     Click {
         #[serde(flatten)]
@@ -104,13 +141,15 @@ pub enum Step {
         common: StepCommon,
         target: TargetDescriptor,
         value: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        redacted: Option<bool>,
+        commit: FillCommit,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        redacted: bool,
     },
     Select {
         #[serde(flatten)]
         common: StepCommon,
         target: TargetDescriptor,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         selection: Vec<SelectedOption>,
     },
     Press {
@@ -122,6 +161,10 @@ pub enum Step {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<TargetDescriptor>,
     },
+    Scroll {
+        #[serde(flatten)]
+        common: StepCommon,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -131,15 +174,16 @@ pub enum Step {
 /// Persisted user-action trace exported by `tool.record_stop` / `await`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Trace {
-    /// RFC 3339 timestamp when recording stopped.
-    pub recorded_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<String>,
-    /// Optional user-provided goal from `--purpose` (metadata only).
+    pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    pub recorded_at: String,
+    pub stopped_by: StopReason,
     pub entry: TraceEntry,
-    pub pages: Vec<PageRef>,
+    pub recorder: RecorderInfo,
+    pub states: Vec<TraceState>,
     pub steps: Vec<Step>,
 }
 
@@ -156,6 +200,10 @@ pub struct RecordStartParams {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_page_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact_values: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -195,81 +243,79 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_common(id: u32) -> StepCommon {
+    fn sample_common(id: u32, state: &str, result_state: &str) -> StepCommon {
         StepCommon {
             id,
-            page: "p1".into(),
-            effect: None,
+            state: state.into(),
+            result: StepResult {
+                state: result_state.into(),
+            },
         }
     }
 
     fn sample_target() -> TargetDescriptor {
         TargetDescriptor {
+            element_ref: Some("e21".into()),
             role: Some("button".into()),
             name: Some("发布".into()),
-            tag: "button".into(),
-            name_attr: None,
-            placeholder: None,
-            nearby_label: None,
+            ctx: Some("金桔柠檬 6 号".into()),
+            unmatched: false,
         }
     }
 
     fn sample_trace() -> Trace {
         Trace {
-            recorded_at: "2026-07-17T09:01:10Z".into(),
-            started_at: Some("2026-07-17T09:00:00Z".into()),
-            purpose: Some("发布一篇文章".into()),
+            version: TRACE_VERSION,
+            purpose: Some("把草稿商品发布上架".into()),
+            started_at: Some("2026-08-10T02:10:41.080Z".into()),
+            recorded_at: "2026-08-10T02:12:55.360Z".into(),
+            stopped_by: StopReason::UserFinish,
             entry: TraceEntry {
-                start_url: "https://x.com/editor".into(),
+                start_url: "https://example.com/".into(),
             },
-            pages: vec![
-                PageRef {
-                    id: "p1".into(),
-                    url: "https://x.com/editor".into(),
-                    title: Some("写文章".into()),
+            recorder: RecorderInfo {
+                bsk: "0.1.10".into(),
+                vom: VOM_FORMAT_VERSION,
+            },
+            states: vec![
+                TraceState {
+                    id: "s1".into(),
+                    url: "https://example.com/".into(),
+                    title: Some("Example Domain".into()),
+                    body: None,
+                    page: Some("s1.vom.txt".into()),
+                    truncated: false,
                 },
-                PageRef {
-                    id: "p2".into(),
-                    url: "https://x.com/p/99".into(),
-                    title: None,
+                TraceState {
+                    id: "s2".into(),
+                    url: "https://shop.example.com/products?status=draft".into(),
+                    title: Some("商品管理".into()),
+                    body: None,
+                    page: Some("s2.vom.txt".into()),
+                    truncated: false,
                 },
             ],
             steps: vec![
-                Step::Fill {
-                    common: sample_common(1),
-                    target: TargetDescriptor {
-                        role: Some("textbox".into()),
-                        name: Some("标题".into()),
-                        tag: "input".into(),
-                        name_attr: None,
-                        placeholder: None,
-                        nearby_label: None,
-                    },
-                    value: "我的第一篇文章".into(),
-                    redacted: None,
+                Step::Navigate {
+                    common: sample_common(1, "s1", "s2"),
+                    to: "https://shop.example.com/products?status=draft".into(),
+                    cause: NavigationCause::UserTyped,
                 },
-                Step::Select {
-                    common: sample_common(3),
+                Step::Fill {
+                    common: sample_common(2, "s2", "s2"),
                     target: TargetDescriptor {
-                        role: Some("combobox".into()),
-                        name: Some("分类".into()),
-                        tag: "select".into(),
-                        name_attr: None,
-                        placeholder: None,
-                        nearby_label: None,
+                        element_ref: Some("e12".into()),
+                        role: Some("textbox".into()),
+                        name: Some("搜索商品".into()),
+                        ctx: None,
+                        unmatched: false,
                     },
-                    selection: vec![SelectedOption {
-                        value: "tech".into(),
-                        label: Some("技术分享".into()),
-                    }],
+                    value: "金桔柠檬".into(),
+                    commit: FillCommit::Enter,
+                    redacted: false,
                 },
                 Step::Click {
-                    common: StepCommon {
-                        effect: Some(StepEffect {
-                            navigated_to: "p2".into(),
-                        }),
-                        ..sample_common(4)
-                    },
+                    common: sample_common(3, "s2", "s2"),
                     target: sample_target(),
                 },
             ],
@@ -279,35 +325,37 @@ mod tests {
     #[test]
     fn step_click_round_trips() {
         let step = Step::Click {
-            common: sample_common(1),
+            common: sample_common(1, "s1", "s2"),
             target: sample_target(),
         };
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v.get("op").and_then(|v| v.as_str()), Some("click"));
-        assert_eq!(v.get("page").and_then(|v| v.as_str()), Some("p1"));
-        assert!(v.get("key").is_none());
+        assert_eq!(v.get("state").and_then(|v| v.as_str()), Some("s1"));
+        assert_eq!(v["result"]["state"], "s2");
+        assert_eq!(v["target"]["ref"], "e21");
         let round: Step = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
 
     #[test]
-    fn step_fill_with_raw_value_round_trips() {
+    fn step_fill_with_commit_round_trips() {
         let step = Step::Fill {
-            common: sample_common(2),
+            common: sample_common(2, "s2", "s3"),
             target: TargetDescriptor {
+                element_ref: Some("e12".into()),
                 role: Some("textbox".into()),
-                name: Some("服务名称".into()),
-                tag: "input".into(),
-                name_attr: Some("serviceName".into()),
-                placeholder: None,
-                nearby_label: None,
+                name: Some("搜索商品".into()),
+                ctx: None,
+                unmatched: false,
             },
-            value: "my-svc".into(),
-            redacted: None,
+            value: "browser skill".into(),
+            commit: FillCommit::Enter,
+            redacted: false,
         };
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["op"], "fill");
-        assert_eq!(v["value"], "my-svc");
+        assert_eq!(v["commit"], "enter");
+        assert!(v.get("redacted").is_none());
         let round: Step = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
@@ -315,17 +363,17 @@ mod tests {
     #[test]
     fn step_fill_password_is_redacted() {
         let step = Step::Fill {
-            common: sample_common(1),
+            common: sample_common(1, "s1", "s1"),
             target: TargetDescriptor {
+                element_ref: Some("e3".into()),
                 role: Some("textbox".into()),
                 name: Some("密码".into()),
-                tag: "input".into(),
-                name_attr: None,
-                placeholder: None,
-                nearby_label: None,
+                ctx: None,
+                unmatched: false,
             },
             value: "***".into(),
-            redacted: Some(true),
+            commit: FillCommit::Blur,
+            redacted: true,
         };
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["value"], "***");
@@ -333,131 +381,102 @@ mod tests {
     }
 
     #[test]
-    fn step_select_uses_object_array() {
-        let step = Step::Select {
-            common: sample_common(3),
-            target: TargetDescriptor {
-                role: Some("combobox".into()),
-                name: Some("分类".into()),
-                tag: "select".into(),
-                name_attr: None,
-                placeholder: None,
-                nearby_label: None,
-            },
-            selection: vec![SelectedOption {
-                value: "tech".into(),
-                label: Some("技术分享".into()),
-            }],
-        };
-        let v = serde_json::to_value(&step).unwrap();
-        assert_eq!(v["selection"][0]["value"], "tech");
-        assert_eq!(v["selection"][0]["label"], "技术分享");
-        let round: Step = serde_json::from_value(v).unwrap();
-        assert_eq!(round, step);
-    }
-
-    #[test]
-    fn step_navigate_round_trips() {
+    fn step_navigate_with_cause_round_trips() {
         let step = Step::Navigate {
-            common: sample_common(1),
+            common: sample_common(1, "s1", "s2"),
             to: "https://example.com".into(),
+            cause: NavigationCause::UserTyped,
         };
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["op"], "navigate");
-        assert_eq!(v["to"], "https://example.com");
+        assert_eq!(v["cause"], "user_typed");
         let round: Step = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
 
     #[test]
-    fn step_press_with_modifiers_round_trips() {
-        let step = Step::Press {
-            common: StepCommon {
-                effect: Some(StepEffect {
-                    navigated_to: "p2".into(),
-                }),
-                ..sample_common(2)
-            },
-            key: "Enter".into(),
-            modifiers: Some(vec![KeyModifier::Ctrl, KeyModifier::Shift]),
-            target: Some(sample_target()),
-        };
-        let v = serde_json::to_value(&step).unwrap();
-        assert_eq!(v["key"], "Enter");
-        assert_eq!(v["modifiers"], json!(["ctrl", "shift"]));
-        assert_eq!(v["effect"]["navigated_to"], "p2");
-        let round: Step = serde_json::from_value(v).unwrap();
-        assert_eq!(round, step);
-    }
-
-    #[test]
-    fn trace_record_only_round_trips() {
+    fn trace_v3_round_trips() {
         let trace = sample_trace();
         let v = serde_json::to_value(&trace).unwrap();
-        assert!(v.get("version").is_none());
-        assert_eq!(
-            v.get("purpose").and_then(|v| v.as_str()),
-            Some("发布一篇文章")
-        );
-        assert!(v.get("parameters").is_none());
-        assert!(v.get("site").is_none());
-        assert!(v.get("goal").is_none());
-        assert_eq!(
-            v.get("entry")
-                .and_then(|e| e.get("start_url"))
-                .and_then(|u| u.as_str()),
-            Some("https://x.com/editor")
-        );
+        assert_eq!(v.get("version").and_then(|v| v.as_u64()), Some(3));
+        assert!(v.get("pages").is_none());
+        assert_eq!(v["recorder"]["vom"], 1);
+        assert_eq!(v["states"].as_array().unwrap().len(), 2);
         let round: Trace = serde_json::from_value(v).unwrap();
         assert_eq!(round, trace);
     }
 
     #[test]
-    fn discriminated_union_click_ignores_extra_key_field() {
-        let bad = json!({
-            "op": "click",
-            "id": 1,
-            "page": "p1",
-            "target": { "tag": "button", "name": "OK" },
-            "key": "Enter"
-        });
-        let step: Step = serde_json::from_value(bad).unwrap();
-        assert!(matches!(step, Step::Click { .. }));
+    fn default_fields_are_omitted() {
+        let step = Step::Click {
+            common: sample_common(1, "s1", "s1"),
+            target: TargetDescriptor {
+                element_ref: Some("e1".into()),
+                role: Some("button".into()),
+                name: Some("OK".into()),
+                ctx: None,
+                unmatched: false,
+            },
+        };
         let v = serde_json::to_value(&step).unwrap();
-        assert!(v.get("key").is_none());
+        assert!(v.get("unmatched").is_none());
+        assert!(v["target"].get("ctx").is_none());
+        assert!(v["target"].get("unmatched").is_none());
+    }
+
+    #[test]
+    fn unmatched_target_serializes_flag() {
+        let step = Step::Click {
+            common: sample_common(1, "s1", "s2"),
+            target: TargetDescriptor {
+                element_ref: None,
+                role: Some("button".into()),
+                name: Some("发布".into()),
+                ctx: None,
+                unmatched: true,
+            },
+        };
+        let v = serde_json::to_value(&step).unwrap();
+        assert_eq!(v["target"]["unmatched"], true);
+        assert!(v["target"].get("ref").is_none());
     }
 
     #[test]
     fn extension_trace_deserializes() {
         let v = json!({
+            "version": 3,
             "recorded_at": "2026-07-21T08:00:00Z",
             "started_at": "2026-07-21T07:59:00Z",
             "purpose": "demo",
+            "stopped_by": "user_finish",
             "entry": { "start_url": "https://example.com/editor" },
-            "pages": [
-                { "id": "p1", "url": "https://example.com/editor" },
-                { "id": "p2", "url": "https://example.com/p/99" }
+            "recorder": { "bsk": "0.1.10", "vom": 1 },
+            "states": [
+                { "id": "s1", "url": "https://example.com/editor", "page": "s1.vom.txt" },
+                { "id": "s2", "url": "https://example.com/p/99", "page": "s2.vom.txt" }
             ],
             "steps": [
                 {
                     "op": "fill",
                     "id": 1,
-                    "page": "p1",
-                    "target": { "tag": "input", "role": "textbox", "name": "标题" },
-                    "value": "hello"
+                    "state": "s1",
+                    "result": { "state": "s1" },
+                    "target": { "ref": "e1", "role": "textbox", "name": "标题" },
+                    "value": "hello",
+                    "commit": "blur"
                 },
                 {
                     "op": "click",
                     "id": 2,
-                    "page": "p1",
-                    "target": { "tag": "button", "role": "button", "name": "发布" },
-                    "effect": { "navigated_to": "p2" }
+                    "state": "s1",
+                    "result": { "state": "s2" },
+                    "target": { "ref": "e2", "role": "button", "name": "发布" }
                 }
             ]
         });
         let trace: Trace = serde_json::from_value(v).unwrap();
-        assert_eq!(trace.entry.start_url, "https://example.com/editor");
-        assert_eq!(trace.pages.len(), 2);
+        assert_eq!(trace.version, 3);
+        assert_eq!(trace.states.len(), 2);
         assert_eq!(trace.steps.len(), 2);
     }
 }

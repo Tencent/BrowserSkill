@@ -11,6 +11,14 @@
     }
   },
   "definitions": {
+    "FillCommit": {
+      "type": "string",
+      "enum": [
+        "enter",
+        "suggestion",
+        "blur"
+      ]
+    },
     "KeyModifier": {
       "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
       "type": "string",
@@ -21,25 +29,32 @@
         "shift"
       ]
     },
-    "PageRef": {
-      "description": "Page context dictionary entry — referenced by steps via `page` id.",
+    "NavigationCause": {
+      "type": "string",
+      "enum": [
+        "user_typed",
+        "link",
+        "form_submit",
+        "reload",
+        "history",
+        "script",
+        "browser"
+      ]
+    },
+    "RecorderInfo": {
       "type": "object",
       "required": [
-        "id",
-        "url"
+        "bsk",
+        "vom"
       ],
       "properties": {
-        "id": {
+        "bsk": {
           "type": "string"
         },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "url": {
-          "type": "string"
+        "vom": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -68,21 +83,16 @@
           "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
+            "cause",
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "to"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "cause": {
+              "$ref": "#/definitions/NavigationCause"
             },
             "id": {
               "type": "integer",
@@ -95,8 +105,11 @@
                 "navigate"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "to": {
@@ -110,20 +123,11 @@
           "required": [
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -135,8 +139,11 @@
                 "click"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
@@ -150,20 +157,11 @@
           "required": [
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -175,8 +173,11 @@
                 "hover"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
@@ -188,22 +189,17 @@
           "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
+            "commit",
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target",
             "value"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "commit": {
+              "$ref": "#/definitions/FillCommit"
             },
             "id": {
               "type": "integer",
@@ -216,15 +212,15 @@
                 "fill"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
-            },
             "redacted": {
-              "type": [
-                "boolean",
-                "null"
-              ]
+              "type": "boolean"
+            },
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
             },
             "target": {
               "$ref": "#/definitions/TargetDescriptor"
@@ -240,21 +236,11 @@
           "required": [
             "id",
             "op",
-            "page",
-            "selection",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -266,15 +252,18 @@
                 "select"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
+            "result": {
+              "$ref": "#/definitions/StepResult"
             },
             "selection": {
               "type": "array",
               "items": {
                 "$ref": "#/definitions/SelectedOption"
               }
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
             },
             "target": {
               "$ref": "#/definitions/TargetDescriptor"
@@ -288,19 +277,10 @@
             "id",
             "key",
             "op",
-            "page"
+            "result",
+            "state"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffect"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -324,8 +304,11 @@
                 "press"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
@@ -339,48 +322,74 @@
               ]
             }
           }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "scroll"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResult"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            }
+          }
         }
       ]
     },
-    "StepEffect": {
-      "description": "Observed navigation after a step (objective fact only).",
+    "StepResult": {
       "type": "object",
       "required": [
-        "navigated_to"
+        "state"
       ],
       "properties": {
-        "navigated_to": {
-          "description": "Reference into `pages[]` for the destination page.",
+        "state": {
           "type": "string"
         }
       }
     },
+    "StopReason": {
+      "type": "string",
+      "enum": [
+        "user_finish",
+        "cli_stop"
+      ]
+    },
     "TargetDescriptor": {
-      "description": "Stable semantic handle for an interacted element.\n\n`name` and `nearby_label` are **untrusted page text**.",
+      "description": "Stable semantic handle for an interacted element within a page observation.",
       "type": "object",
-      "required": [
-        "tag"
-      ],
       "properties": {
+        "ctx": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": [
             "string",
             "null"
           ]
         },
-        "name_attr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nearby_label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "placeholder": {
+        "ref": {
           "type": [
             "string",
             "null"
@@ -392,8 +401,8 @@
             "null"
           ]
         },
-        "tag": {
-          "type": "string"
+        "unmatched": {
+          "type": "boolean"
         }
       }
     },
@@ -402,30 +411,28 @@
       "type": "object",
       "required": [
         "entry",
-        "pages",
         "recorded_at",
-        "steps"
+        "recorder",
+        "states",
+        "steps",
+        "stopped_by",
+        "version"
       ],
       "properties": {
         "entry": {
           "$ref": "#/definitions/TraceEntry"
         },
-        "pages": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/PageRef"
-          }
-        },
         "purpose": {
-          "description": "Optional user-provided goal from `--purpose` (metadata only).",
           "type": [
             "string",
             "null"
           ]
         },
         "recorded_at": {
-          "description": "RFC 3339 timestamp when recording stopped.",
           "type": "string"
+        },
+        "recorder": {
+          "$ref": "#/definitions/RecorderInfo"
         },
         "started_at": {
           "type": [
@@ -433,11 +440,25 @@
             "null"
           ]
         },
+        "states": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TraceState"
+          }
+        },
         "steps": {
           "type": "array",
           "items": {
             "$ref": "#/definitions/Step"
           }
+        },
+        "stopped_by": {
+          "$ref": "#/definitions/StopReason"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -449,6 +470,45 @@
       ],
       "properties": {
         "start_url": {
+          "type": "string"
+        }
+      }
+    },
+    "TraceState": {
+      "description": "Page observation dictionary entry — referenced by steps via `state` / `result.state`.",
+      "type": "object",
+      "required": [
+        "id",
+        "url"
+      ],
+      "properties": {
+        "body": {
+          "description": "Wire-only: full page observation (front matter + VOM body + annotations).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "page": {
+          "description": "Disk-only: filename under the bundle `pages/` directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "url": {
           "type": "string"
         }
       }

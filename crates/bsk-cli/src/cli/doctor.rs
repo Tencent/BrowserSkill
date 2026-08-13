@@ -480,7 +480,7 @@ mod m2_tests {
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
             daemon_version: env!("CARGO_PKG_VERSION").into(),
-            protocol_version: "1.0".into(),
+            protocol_version: "1.1".into(),
             pid: 1,
             uptime_secs: 0,
             ws_port: 0,
@@ -545,7 +545,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: false,
-                extension_protocol_version: "1.0".into(),
+                extension_protocol_version: "1.1".into(),
             }],
             Vec::new(),
         );
@@ -566,7 +566,7 @@ mod m2_tests {
                 session_count: 0,
                 connected_at_ms: 1,
                 version_skew: true,
-                extension_protocol_version: "1.1".into(),
+                extension_protocol_version: "1.2".into(),
             }],
             vec![VersionSkewEntry {
                 instance_id: "alpha".into(),
@@ -574,8 +574,8 @@ mod m2_tests {
                 label: "Personal".into(),
                 server_version: env!("CARGO_PKG_VERSION").into(),
                 client_version: "0.0.9".into(),
-                server_protocol_version: "1.0".into(),
-                client_protocol_version: "1.1".into(),
+                server_protocol_version: "1.1".into(),
+                client_protocol_version: "1.2".into(),
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));

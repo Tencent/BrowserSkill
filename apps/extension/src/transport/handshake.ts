@@ -7,7 +7,7 @@ import type {
   ResponseFrame,
 } from "./types";
 
-export const PROTOCOL_VERSION = "1.0";
+export const PROTOCOL_VERSION = "1.1";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).
@@ -18,7 +18,7 @@ export const EXTENSION_VERSION: string =
  * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
  * Must stay in sync with daemon `MIN_COMPATIBLE_PROTOCOL`.
  */
-export const MIN_COMPATIBLE_PROTOCOL = "1.0";
+export const MIN_COMPATIBLE_PROTOCOL = "1.1";
 /**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.

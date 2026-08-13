@@ -6,9 +6,23 @@
     "session_id"
   ],
   "properties": {
+    "max_page_tokens": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
     "purpose": {
       "type": [
         "string",
+        "null"
+      ]
+    },
+    "redact_values": {
+      "type": [
+        "boolean",
         "null"
       ]
     },
