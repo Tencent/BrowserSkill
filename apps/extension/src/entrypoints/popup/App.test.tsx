@@ -218,6 +218,13 @@ describe("App", () => {
     expect(copied).toContain("--browser 03c3e47f");
     expect(copied).toContain('--purpose "发布 wiki 文档"');
     expect(copied).not.toMatch(/bsk record start[^\n]*--url/);
+    expect(copied).toContain("./trace");
+    expect(copied).toContain("trace.json");
+    expect(copied).toContain("pages/");
+    expect(copied).toContain("总结我做了什么");
+    expect(copied).not.toContain("不要重跑");
+    expect(copied).not.toContain("pages + steps");
+    expect(copied).not.toContain("@eN");
     // Button label stays static; a transient toast confirms the copy.
     expect(copyButton.textContent).toContain("复制录制指令");
     await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已复制"));

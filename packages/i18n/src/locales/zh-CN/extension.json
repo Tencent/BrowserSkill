@@ -49,7 +49,7 @@
     "record": {
       "sectionTitle": "操作录制",
       "cardDesc": "录制你的操作，供 Agent 参考",
-      "sectionHint": "生成一段录制指令，发给 Agent 后可以启动插件录制用户操作，之后 Agent 可以参考录制结果自动完成同类任务。",
+      "sectionHint": "生成一段录制指令，发给 Agent 后可以启动插件录制用户操作，之后 Agent 可以参考写出的 trace 目录包自动完成同类任务。",
       "topicLabel": "操作主题（可选）",
       "topicPlaceholder": "例如：发布一篇文章",
       "startUrlLabel": "起始网址（可选）",
@@ -57,7 +57,7 @@
       "copyButton": "复制录制指令",
       "copied": "已复制",
       "hintDisconnected": "连接后可用",
-      "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取返回的 trace.json 并总结操作（pages + steps），不要重跑或“验证”。"
+      "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取写出的 `./trace` 目录包（`trace.json` + `pages/`），总结我做了什么。"
     }
   },
   "controlOverlay": {
