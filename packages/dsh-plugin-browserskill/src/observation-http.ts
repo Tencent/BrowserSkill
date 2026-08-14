@@ -5,9 +5,10 @@
  * the event allowlist lives in dsh-api-remotes), so the plugin serves its
  * observation channel through the documented `webServer` route seam instead:
  *
- *   GET  /bsk-observation/state      → { sessions: SessionObservation[] }
+ *   GET  /bsk-observation/state      → { sessions, available }
  *   GET  /bsk-observation/events     → SSE stream of ObservationEvent
  *   POST /bsk-observation/interrupt  → body {sessionId?} → {interrupted: boolean}
+ *   GET  /bsk-observation/thumbnail/<attachmentId> → image bytes
  *
  * Routes exist only when a webServer service is mounted (web composition);
  * headless deployments skip registration entirely.
@@ -110,6 +111,28 @@ export function registerObservationRoutes(
           }
           sendJson(res, 200, { interrupted: observation.interrupt(sessionId) });
         });
+      },
+    }),
+    webServer.register({
+      kind: "prefix",
+      path: `${ROUTE_BASE}/thumbnail/`,
+      handler: async (req, res) => {
+        if (req.method !== "GET") {
+          sendJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
+        const attachmentId = pathname.slice(`${ROUTE_BASE}/thumbnail/`.length);
+        const frame = await observation.readThumbnail(attachmentId);
+        if (frame === undefined) {
+          sendJson(res, 404, { error: "unknown thumbnail" });
+          return;
+        }
+        res.writeHead(200, {
+          "content-type": frame.mediaType,
+          "cache-control": "no-cache",
+        });
+        res.end(Buffer.from(frame.data));
       },
     }),
   ];

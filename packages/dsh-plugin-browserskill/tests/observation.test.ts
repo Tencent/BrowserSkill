@@ -124,7 +124,20 @@ function setup(opts: {
   const attachments =
     "attachments" in opts
       ? opts.attachments
-      : { saveImage: async () => ({ attachmentId: "att-1" }) };
+      : {
+          saveImage: async (input: { data: Uint8Array; name?: string }) => ({
+            attachmentId: "att-1",
+            mediaType: "image/png",
+            bytes: input.data.byteLength,
+            width: 4,
+            height: 4,
+            name: input.name,
+          }),
+          readImage: async (ref: { attachmentId: unknown }) => ({
+            data: new Uint8Array([1, 2, 3]),
+            attachment: ref,
+          }),
+        };
   const service = new ObservationService({
     ctx: fakeCtx(attachments),
     runner,
@@ -458,6 +471,22 @@ describe("availability and dead sessions", () => {
     expect(service.getState()[0].lastError).toBeUndefined();
     service.endAction("s1", "fill failed");
     expect(service.getState()[0].lastError).toBe("fill failed");
+    service.dispose();
+  });
+});
+
+describe("thumbnail read-back", () => {
+  it("serves captured frames through readThumbnail and 404s unknown ids", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner();
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId !== undefined);
+    const frame = await service.readThumbnail("att-1");
+    expect(frame?.mediaType).toBe("image/png");
+    expect([...(frame?.data ?? [])]).toEqual([1, 2, 3]);
+    expect(await service.readThumbnail("nope")).toBeUndefined();
     service.dispose();
   });
 });

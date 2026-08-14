@@ -40,25 +40,14 @@ async function loadSessionImage(
 }
 
 /**
- * Thumbnail loader for the overlay: the observation overlay is root-scoped,
- * so borrow the current (or first) bound session for the authorized
- * attachment read. Without any bound session the frame simply fails and the
- * overlay keeps the previous one.
+ * Thumbnail loader for the overlay: frames are plugin-owned runtime data
+ * (never referenced by a session log, so the session-authorized RPC refuses
+ * them), served by the host over the plugin's own route.
  */
-function overlayImageLoader(sessions: ISessions): (attachmentId: string) => Promise<string> {
-  return async (attachmentId) => {
-    const list = sessions.list.getSnapshot();
-    const sessionId = list.current ?? list.ids[0];
-    if (sessionId === undefined) throw new Error("no bound session for attachment read");
-    const session = sessions.binding(sessionId)?.session;
-    if (session === undefined) throw new Error(`session "${String(sessionId)}" is not bound`);
-    const result = await session.readAttachment(attachmentId as ImageAttachmentRef["attachmentId"]);
-    if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`);
-    const bytes = Uint8Array.from(result.value.data);
-    return URL.createObjectURL(
-      new Blob([bytes.buffer as ArrayBuffer], { type: result.value.attachment.mediaType }),
-    );
-  };
+async function overlayImageLoader(attachmentId: string): Promise<string> {
+  const res = await fetch(`/bsk-observation/thumbnail/${encodeURIComponent(attachmentId)}`);
+  if (!res.ok) throw new Error(`thumbnail fetch failed: ${res.status}`);
+  return URL.createObjectURL(await res.blob());
 }
 
 /**
@@ -81,7 +70,7 @@ export function apply(ctx: ClientContext): void {
   const store = new ObservationClientStore({
     fetchFn: (url, init) => fetch(url, init),
     eventSourceFactory: (url) => new EventSource(url) as unknown as EventSourceLike,
-    loadImage: overlayImageLoader(sessions),
+    loadImage: overlayImageLoader,
   });
   ctx.slots.inject("shell.overlay", () =>
     ctx.slots.register({ name: "shell.overlay", id: "bsk-observation" }, () =>

@@ -58,7 +58,20 @@ interface AttachmentLike {
     data: Uint8Array;
     mediaType: string;
     name?: string;
-  }): Promise<{ attachmentId: unknown }>;
+  }): Promise<ImageAttachmentRefLike>;
+  readImage(
+    ref: ImageAttachmentRefLike,
+  ): Promise<{ data: Uint8Array; attachment: ImageAttachmentRefLike }>;
+}
+
+/** The attachment reference fields the store verifies reads against. */
+export interface ImageAttachmentRefLike {
+  attachmentId: unknown;
+  mediaType: string;
+  bytes: number;
+  width: number;
+  height: number;
+  name?: string;
 }
 
 /** Injectable clock/scheduler bits for tests. */
@@ -89,6 +102,8 @@ export class ObservationService {
   private readonly captureInFlight = new Set<string>();
   private readonly captureFailures = new Map<string, number>();
   private readonly lastActivity = new Map<string, number>();
+  /** attachmentId → full reference (the store requires it for verified reads). */
+  private readonly thumbRefs = new Map<string, ImageAttachmentRefLike>();
   /** Consecutive capture failures across ALL sessions (daemon-level signal). */
   private globalFailures = 0;
   private available = true;
@@ -223,6 +238,27 @@ export class ObservationService {
     return this.deps.runner.killFor(target) > 0;
   }
 
+  /**
+   * Read one captured thumbnail back through the store's verified path.
+   * Powers the plugin's own HTTP thumbnail route — frames are plugin-owned
+   * runtime data, never referenced by any session log, so the
+   * session-authorized client RPC cannot serve them.
+   */
+  async readThumbnail(
+    attachmentId: string,
+  ): Promise<{ data: Uint8Array; mediaType: string } | undefined> {
+    const ref = this.thumbRefs.get(attachmentId);
+    if (ref === undefined) return undefined;
+    const attachments = this.deps.ctx.get("attachments") as AttachmentLike | undefined;
+    if (attachments === undefined) return undefined;
+    try {
+      const stored = await attachments.readImage(ref);
+      return { data: stored.data, mediaType: ref.mediaType };
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Tear down all state and timers (plugin dispose). */
   dispose(): void {
     this.disposed = true;
@@ -231,6 +267,7 @@ export class ObservationService {
     this.captureInFlight.clear();
     this.captureFailures.clear();
     this.lastActivity.clear();
+    this.thumbRefs.clear();
     this.observations.clear();
     this.emit({ type: "reset" });
     this.listeners.clear();
@@ -320,6 +357,7 @@ export class ObservationService {
       this.captureFailures.delete(sessionId);
       this.globalFailures = 0;
       this.setAvailable(true);
+      this.thumbRefs.set(String(ref.attachmentId), ref);
       this.put({ ...entry, thumbnailAttachmentId: String(ref.attachmentId) });
     } catch {
       // Silent by design: keep the previous frame, count toward backoff.
