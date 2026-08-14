@@ -75,7 +75,9 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
 
 When the plugin runs inside the dsh Web UI, an **observation overlay** floats over the app
 (registered into the `shell.overlay` seat): a breathing thumbnail per owned session plus its
-current action and elapsed time.
+current action and elapsed time. The card docks at the top-right of the content area (clear of
+the composer and the shell's header controls) and follows the shell's own visual language —
+shared `ui-primitives` controls and `--dsw-alias-*` semantic tokens throughout.
 
 - **Lifecycle**: hidden while the plugin owns no sessions; appears on the first
   `browser_session_start`; disappears when all sessions stop (or the plugin unloads).
