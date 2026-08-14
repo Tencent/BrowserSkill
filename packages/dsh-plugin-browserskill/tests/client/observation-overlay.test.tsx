@@ -109,11 +109,11 @@ describe("ObservationOverlay", () => {
     const h = makeHarness([BUSY]);
     render(<ObservationOverlay store={h.store} />);
     const button = await screen.findByRole("button", { name: /Interrupt the current/ });
-    fireEvent.pointerEnter(button);
+    fireEvent.mouseOver(button);
     await screen.findByRole("tooltip");
-    fireEvent.pointerLeave(button);
+    fireEvent.mouseLeave(button);
     fireEvent.click(button);
-    fireEvent.pointerEnter(button);
+    fireEvent.mouseOver(button);
     expect(screen.queryByRole("tooltip")).toBeNull();
   });
 

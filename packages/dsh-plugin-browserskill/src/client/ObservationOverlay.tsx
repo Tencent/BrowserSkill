@@ -1,10 +1,20 @@
 // Observation overlay: the default in-app carrier for live session watching.
-// Expanded = draggable/resizable floating card (bottom-right); collapsed = a
-// status capsule; "pop out" upgrades the same content to a native Document
-// PiP window (user gesture required by the browser). Multi-session renders a
-// meeting-style strip under the focus view. Pure client state — position,
-// size, collapse, and the pin live for the page lifetime only.
+// Expanded = draggable/resizable floating card (top-right, out of the
+// composer's way); collapsed = a status capsule; "pop out" upgrades the same
+// content to a native Document PiP window (user gesture required by the
+// browser). Multi-session renders a meeting-style strip under the focus view.
+// Visuals ride dsh's shared primitives and --dsw-alias-* tokens throughout,
+// so the card reads as a native part of the shell, not a foreign widget.
 
+import {
+  Button,
+  IconChevronDownOutline14,
+  IconRightUpOutline16,
+  IconStopFill16,
+  IconWarningOutline16,
+  StateDot,
+  Tooltip,
+} from "@deepseek-ai/dsh-client-ui-primitives";
 import {
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -82,6 +92,21 @@ export function statusOf(obs: SessionObservation): "active" | "idle" | "error" {
   return obs.action === "idle" ? "idle" : "active";
 }
 
+function dotStateOf(
+  state: "active" | "idle" | "error" | "dead",
+): "done" | "ongoing" | "error" | "warning" {
+  switch (state) {
+    case "active":
+      return "ongoing";
+    case "error":
+      return "error";
+    case "dead":
+      return "warning";
+    default:
+      return "done";
+  }
+}
+
 /** One strip item: mini frame, id, status dot, hover interrupt, pin toggle. */
 function StripItem(props: {
   store: ObservationClientStore;
@@ -122,11 +147,20 @@ function StripItem(props: {
           )}
         </span>
         <span className={css["strip-id"]}>{obs.sessionId}</span>
-        <span className={css.dot} data-state={state === "dead" ? "idle" : state} aria-hidden />
+        <StateDot state={dotStateOf(state)} />
         {pinned ? (
-          <span className={css["pin-badge"]} aria-label="pinned">
-            📌
-          </span>
+          <svg
+            className={css["pin-badge"]}
+            width="9"
+            height="9"
+            viewBox="0 0 10 10"
+            aria-label="pinned"
+          >
+            <path
+              d="M6.5 0.8 9.2 3.5 8.3 4.4 7.9 4 6.2 6.9 6.6 8.7 6 9.4 3.4 5.4 1 7.9 0.6 7.3 2.5 6 3.1 6.6 5.9 2.1 5.5 1.7Z"
+              fill="currentColor"
+            />
+          </svg>
         ) : null}
       </button>
       {hover && !pinned && obs.dead !== true ? (
@@ -140,7 +174,7 @@ function StripItem(props: {
             void store.interrupt(obs.sessionId);
           }}
         >
-          ■
+          <IconStopFill16 size={8} />
         </button>
       ) : null}
     </div>
@@ -175,7 +209,7 @@ function OverlayBody(props: {
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
-  const [hintOpen, setHintOpen] = useState(false);
+  // One-time semantics hint: a shared Tooltip that retires after first use.
   const [hintSeen, setHintSeen] = useState(false);
 
   const thumbId = focus?.thumbnailAttachmentId;
@@ -193,7 +227,6 @@ function OverlayBody(props: {
   const onInterrupt = (): void => {
     if (!canInterrupt || focus === undefined) return;
     setHintSeen(true);
-    setHintOpen(false);
     setInterrupting(true);
     void store.interrupt(focus.sessionId).finally(() => setInterrupting(false));
   };
@@ -213,7 +246,7 @@ function OverlayBody(props: {
         onPointerDown={onHeaderPointerDown}
         role="presentation"
       >
-        <span className={css.dot} data-state={state} aria-hidden />
+        <StateDot state={state === "error" ? "error" : state === "active" ? "ongoing" : "done"} />
         <span className={css["status-text"]}>{statusText}</span>
         {onCollapse !== undefined ? (
           <button
@@ -222,7 +255,7 @@ function OverlayBody(props: {
             aria-label="Collapse"
             onClick={onCollapse}
           >
-            —
+            <IconChevronDownOutline14 />
           </button>
         ) : null}
       </div>
@@ -245,7 +278,7 @@ function OverlayBody(props: {
         )}
         {thumb?.status === "error" ? (
           <span className={css.badge} aria-label="thumbnail failed">
-            !
+            <IconWarningOutline16 size={12} />
           </span>
         ) : null}
       </div>
@@ -264,36 +297,36 @@ function OverlayBody(props: {
         </div>
       ) : null}
       <div className={css.actions}>
-        <span className={css["interrupt-wrap"]}>
-          <button
-            type="button"
-            className={css.interrupt}
-            disabled={!canInterrupt}
-            aria-label="Interrupt the current browser action"
-            onPointerEnter={() => {
-              if (!hintSeen) setHintOpen(true);
-            }}
-            onPointerLeave={() => setHintOpen(false)}
-            onClick={onInterrupt}
-          >
-            {interrupting ? "Interrupting…" : "Interrupt"}
-          </button>
-          {hintOpen && !hintSeen ? (
-            <span className={css.hint} role="tooltip">
-              Interrupt stops only the current browser action — the agent run continues (use the
-              chat Stop button to halt the run).
-            </span>
-          ) : null}
-        </span>
+        <Tooltip
+          label="Interrupt stops only the current browser action — the agent run continues (use the chat Stop button to halt the run)."
+          side="top"
+          maxWidth={240}
+          disabled={hintSeen}
+        >
+          <span className={css["interrupt-wrap"]}>
+            <Button
+              variant="outline"
+              size="sm"
+              className={css.interrupt}
+              icon={<IconStopFill16 />}
+              disabled={!canInterrupt}
+              aria-label="Interrupt the current browser action"
+              onClick={onInterrupt}
+            >
+              {interrupting ? "Interrupting…" : "Interrupt"}
+            </Button>
+          </span>
+        </Tooltip>
         {onPopOut !== undefined ? (
-          <button
-            type="button"
-            className={css.popout}
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<IconRightUpOutline16 />}
             aria-label="Pop out into a mini window"
             onClick={onPopOut}
           >
             Pop out
-          </button>
+          </Button>
         ) : null}
       </div>
     </div>
@@ -375,7 +408,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     )?.getBoundingClientRect();
     const base = {
       x: rect?.left ?? pos?.x ?? viewport().w - size.w - EDGE_MARGIN,
-      y: rect?.top ?? pos?.y ?? viewport().h - size.h - EDGE_MARGIN,
+      y: rect?.top ?? pos?.y ?? EDGE_MARGIN,
       w: rect?.width ?? size.w,
       h: rect?.height ?? size.h,
     };
@@ -427,7 +460,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
         aria-label="Expand browser observation overlay"
         onClick={() => setCollapsed(false)}
       >
-        <span className={css.dot} data-state={state} aria-hidden />
+        <StateDot state={dotStateOf(state)} />
         <span className={css["capsule-text"]}>
           {snapshot.sessions.length} session{snapshot.sessions.length === 1 ? "" : "s"}
           {focus !== undefined && focus.action !== "idle"
@@ -441,7 +474,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   const style: React.CSSProperties =
     pos !== null
       ? { left: pos.x, top: pos.y, width: size.w, height: size.h }
-      : { right: EDGE_MARGIN, bottom: EDGE_MARGIN, width: size.w, height: size.h };
+      : { right: EDGE_MARGIN, top: EDGE_MARGIN, width: size.w, height: size.h };
   return (
     <div className={css.card} style={style} data-obs-card data-testid="obs-card">
       {body}
