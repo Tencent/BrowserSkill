@@ -132,20 +132,23 @@ describe("ScreenshotToolView", () => {
 });
 
 describe("client plugin registration", () => {
-  it("registers only the browser_screenshot keyed toolview", () => {
-    const registrations: { name: string; key?: string }[] = [];
+  it("registers the browser_screenshot toolview and the shell observation overlay", () => {
+    const registrations: { name: string; key?: string; id?: string }[] = [];
     const sessions = { binding: () => undefined };
     const ctx = {
       get: (key: string) => (key === "sessions" ? sessions : undefined),
       slots: {
         inject: (_name: string, fn: () => unknown) => fn(),
-        register: (slot: { name: string; key?: string }, view: unknown) => {
+        register: (slot: { name: string; key?: string; id?: string }, view: unknown) => {
           registrations.push(slot);
           expect(typeof view).toBe("function");
         },
       },
     };
     apply(ctx as never);
-    expect(registrations).toEqual([{ name: "tool.call.toolview", key: "browser_screenshot" }]);
+    expect(registrations).toEqual([
+      { name: "tool.call.toolview", key: "browser_screenshot" },
+      { name: "shell.overlay", id: "bsk-observation" },
+    ]);
   });
 });

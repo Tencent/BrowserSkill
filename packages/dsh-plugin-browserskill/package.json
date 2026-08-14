@@ -28,7 +28,8 @@
       "platform": "web",
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
-        "@deepseek-ai/dsh-client-ui-tool"
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-client-ui-layout"
       ]
     }
   },
@@ -75,6 +76,7 @@
     "@deepseek-ai/dsh-attachment": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-attachment": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-primitives": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-tool": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
@@ -83,6 +85,7 @@
     "@testing-library/react": "^16.1.0",
     "@types/node": "^22.10.0",
     "@types/react": "~18.3.1",
+    "@types/react-dom": "^18.3.0",
     "happy-dom": "^15.11.7",
     "lightningcss": "^1.30.0",
     "react": "^18.2.0",
