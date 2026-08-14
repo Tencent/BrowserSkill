@@ -103,7 +103,16 @@ export function armLazyTools(ctx: Context, registerSuite: () => () => void): () 
   const disposers: (() => void)[] = [];
   const ensureSuite = (): void => {
     if (suiteDisposer !== undefined) return;
-    suiteDisposer = registerSuite();
+    try {
+      suiteDisposer = registerSuite();
+    } catch (error) {
+      // A failed reveal must not strand the plugin: stay hidden, log, retry on
+      // the next trigger instead of latching a half-registered suite.
+      suiteDisposer = undefined;
+      console.warn(
+        `[dsh-plugin-browserskill] lazy tool registration failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   };
 
   // Live trigger: a successful model invocation of skill/browser-skill.

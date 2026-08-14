@@ -82,7 +82,16 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
         # observationEnabled: true     # live PiP/overlay observation (below)
         # thumbnailIntervalMs: 1500    # frame cadence while a session is active
         # idleIntervalMs: 8000         # idle cadence / recent-activity window
+        # lazyTools: true              # reveal browser_* tools only after the skill is invoked
 ```
+
+- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the eleven
+  `browser_*` tool schemas stay OUT of the system prompt (zero schema tokens) until the
+  `browser-skill` skill is actually invoked — the skill catalog entry is the only
+  advertisement. One successful invocation (model tool call, or a `/browser-skill` user
+  gesture) registers the whole suite for the rest of the process; repeated invocations are
+  no-ops, and sessions resumed with a past invocation in their durable log reveal the suite
+  on entry. Set `false` for the legacy always-on registration.
 
 ## Observation overlay (PiP mini-window)
 

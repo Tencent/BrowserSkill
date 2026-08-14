@@ -11,7 +11,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
-import { defineTool, type ToolResult, type ToolRunContext } from "@deepseek-ai/dsh-tools";
+import {
+  defineTool,
+  type ToolDefinition,
+  type ToolResult,
+  type ToolRunContext,
+} from "@deepseek-ai/dsh-tools";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
 import type { KeyedExecutor } from "./queue";
@@ -145,22 +150,18 @@ function abortError(): Error {
 
 /** Register the full browser tool suite; returns the combined unregister disposer. */
 export function registerTools(deps: ToolDeps): () => void {
-  // Track every registration through a prototype-preserving overlay so the
-  // lazy-injection path can dispose the whole suite in one call.
+  const { ctx, registry } = deps;
+  // Track every registration without touching the cordis context itself
+  // (contexts are fiber-owned; the lazy path registers from a listener fiber).
   const disposers: (() => void)[] = [];
-  const ctx = Object.create(deps.ctx) as ToolDeps["ctx"];
-  const toolsOverlay = Object.create(deps.ctx.tools) as ToolDeps["ctx"]["tools"];
-  const originalRegister = deps.ctx.tools.register;
-  toolsOverlay.register = (definition: Parameters<typeof originalRegister>[0]) => {
-    const dispose = originalRegister.call(deps.ctx.tools, definition);
+  const register = (definition: ToolDefinition): (() => void) => {
+    const dispose = ctx.tools.register(definition);
     // Test doubles occasionally return the registry map instead of a disposer.
     if (typeof dispose === "function") disposers.push(dispose);
     return dispose;
   };
-  ctx.tools = toolsOverlay;
-  const { registry } = deps;
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_session_start",
       description:
@@ -305,7 +306,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_session_stop",
       description:
@@ -339,7 +340,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_session_list",
       description:
@@ -404,7 +405,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_navigate",
       description:
@@ -485,7 +486,7 @@ export function registerTools(deps: ToolDeps): () => void {
         "carry @eN refs for browser_click / browser_fill. Prefer browser_observe for a richer semantic view."
       : "Produce a semantic VOM observation of the session's active tab (roles, states, perception " +
         "probes) with @eN refs for browser_click / browser_fill. Read-only: never submits input.";
-    ctx.tools.register(
+    register(
       defineTool({
         name,
         description,
@@ -551,7 +552,7 @@ export function registerTools(deps: ToolDeps): () => void {
   registerObservationTool("snapshot");
   registerObservationTool("observe");
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_click",
       description:
@@ -615,7 +616,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_fill",
       description:
@@ -672,7 +673,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_press",
       description:
@@ -742,7 +743,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_screenshot",
       description:
@@ -868,7 +869,7 @@ export function registerTools(deps: ToolDeps): () => void {
     }),
   );
 
-  ctx.tools.register(
+  register(
     defineTool({
       name: "browser_emulate",
       description:
