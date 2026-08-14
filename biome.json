@@ -39,6 +39,7 @@
       "**",
       "!**/node_modules/**",
       "!**/dist/**",
+      "!packages/dsh-plugin-browserskill/lib/**",
       "!**/target/**",
       "!**/.wxt/**",
       "!**/.output/**",

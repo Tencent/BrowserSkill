@@ -69,6 +69,15 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
 - **UI cards**: calls render as terminal cards (command line as title, output as the completed
   card). Screenshots additionally attach the image itself when the host mounts an attachment store
   and the active model route declares image input; otherwise the PNG path is returned.
+- **Web UI toolview (browser half)**: the package is dual-face. `dsh.client` (platform `web`) ships
+  `lib/client.js`, which registers a keyed `tool.call.toolview` view for `browser_screenshot`. The
+  custom view keeps the terminal block (command + output) and, when the settled result carries an
+  image block, resolves the durable attachment through the client session's authorized
+  `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
+  Every other `browser_*` tool keeps the stock terminal card. The bundle follows the dsh client
+  contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, platform modules
+  (`react`, `dsh-client-ui-*`) external, everything else inlined, CSS Modules compiled by
+  lightningcss.
 - **Errors**: non-zero bsk exits surface the CLI's JSON error envelope (`code`, `message`, `hint`)
   so the model gets the daemon's actionable guidance.
 - **Long-running work** (e.g. `bsk record`) is not backgrounded via `ctx.jobs` yet — tracked as a
