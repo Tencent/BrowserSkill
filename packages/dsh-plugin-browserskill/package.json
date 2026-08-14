@@ -36,7 +36,7 @@
   "scripts": {
     "build": "node scripts/build-client-css.mjs && tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "pnpm run build:css && vitest run",
     "build:css": "node scripts/build-client-css.mjs"
   },
   "peerDependencies": {
