@@ -31,13 +31,17 @@ export interface SessionObservation {
   thumbnailAttachmentId?: string;
   /** Summary of the most recent failed action (drives the red status dot). */
   lastError?: string;
+  /**
+   * The daemon reports this session as gone (e.g. daemon restart): the strip
+   * greys it out until it is stopped/removed. No more frames are requested.
+   */
+  dead?: boolean;
 }
 
 /** Incremental event carried to subscribers (SSE on the wire). */
-export interface ObservationEvent {
-  type: "upsert" | "remove" | "reset";
-  session?: SessionObservation;
-}
+export type ObservationEvent =
+  | { type: "upsert" | "remove" | "reset"; session?: SessionObservation }
+  | { type: "availability"; available: boolean };
 
 export interface ObservationOptions {
   enabled: boolean;
@@ -84,6 +88,9 @@ export class ObservationService {
   private readonly captureInFlight = new Set<string>();
   private readonly captureFailures = new Map<string, number>();
   private readonly lastActivity = new Map<string, number>();
+  /** Consecutive capture failures across ALL sessions (daemon-level signal). */
+  private globalFailures = 0;
+  private available = true;
   private disposed = false;
 
   constructor(
@@ -103,6 +110,17 @@ export class ObservationService {
   /** All current entries (client initial/resync snapshot). */
   getState(): SessionObservation[] {
     return [...this.observations.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Whether the browser side looks reachable (drives the "browser unavailable" state). */
+  isAvailable(): boolean {
+    return this.available;
+  }
+
+  private setAvailable(available: boolean): void {
+    if (this.available === available) return;
+    this.available = available;
+    this.emit({ type: "availability", available });
   }
 
   /** Subscribe to incremental changes; returns an unsubscribe function. */
@@ -156,10 +174,13 @@ export class ObservationService {
   beginAction(sessionId: string, action: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const entry = this.observations.get(sessionId);
-    if (entry === undefined) return;
+    if (entry === undefined || entry.dead === true) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
-    this.put({ ...entry, action, since: now });
+    // A fresh action clears the previous error marker (red dot means "last action failed").
+    const next: SessionObservation = { ...entry, action, since: now };
+    delete next.lastError;
+    this.put(next);
   }
 
   /**
@@ -169,15 +190,13 @@ export class ObservationService {
   endAction(sessionId: string, error?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
     const entry = this.observations.get(sessionId);
-    if (entry === undefined) return;
+    if (entry === undefined || entry.dead === true) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
-    this.put({
-      ...entry,
-      action: "idle",
-      since: now,
-      ...(error !== undefined ? { lastError: error } : {}),
-    });
+    const next: SessionObservation = { ...entry, action: "idle", since: now };
+    if (error !== undefined) next.lastError = error;
+    else delete next.lastError;
+    this.put(next);
     this.scheduleCapture(sessionId, 0);
   }
 
@@ -230,7 +249,8 @@ export class ObservationService {
   /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */
   private scheduleCapture(sessionId: string, delayMs?: number): void {
     if (!this.deps.options.enabled || this.disposed) return;
-    if (!this.observations.has(sessionId)) return;
+    const entry = this.observations.get(sessionId);
+    if (entry === undefined || entry.dead === true) return;
     this.cancelCapture(sessionId);
     const now = this.scheduler.now();
     const lastSeen = this.lastActivity.get(sessionId) ?? 0;
@@ -255,7 +275,9 @@ export class ObservationService {
    * Failures keep the previous frame and back off silently.
    */
   private async capture(sessionId: string): Promise<void> {
-    if (this.disposed || !this.observations.has(sessionId)) return;
+    if (this.disposed) return;
+    const current = this.observations.get(sessionId);
+    if (current === undefined || current.dead === true) return;
     if (this.captureInFlight.has(sessionId)) return;
     const attachments = this.deps.ctx.get("attachments") as AttachmentLike | undefined;
     if (attachments === undefined) {
@@ -269,7 +291,19 @@ export class ObservationService {
         ["screenshot", "--session", sessionId, "--out", outPath],
         { timeoutMs: 15_000, tag: `observation:${sessionId}` },
       );
-      if (result.code !== 0) throw new Error(`screenshot exited ${result.code}`);
+      if (result.code !== 0) {
+        let code: string | undefined;
+        try {
+          code = (JSON.parse(result.stdout) as { code?: string }).code;
+        } catch {
+          code = undefined;
+        }
+        if (code === "session_not_found") {
+          this.markDead(sessionId);
+          return;
+        }
+        throw new Error(`screenshot exited ${result.code}`);
+      }
       const reply = JSON.parse(result.stdout) as { path?: string };
       const data = await readFile(reply.path ?? outPath);
       const ref = await attachments.saveImage({
@@ -280,14 +314,25 @@ export class ObservationService {
       const entry = this.observations.get(sessionId);
       if (entry === undefined) return;
       this.captureFailures.delete(sessionId);
+      this.globalFailures = 0;
+      this.setAvailable(true);
       this.put({ ...entry, thumbnailAttachmentId: String(ref.attachmentId) });
     } catch {
       // Silent by design: keep the previous frame, count toward backoff.
       this.captureFailures.set(sessionId, (this.captureFailures.get(sessionId) ?? 0) + 1);
+      this.globalFailures += 1;
+      if (this.globalFailures >= FAILURE_BACKOFF_THRESHOLD) this.setAvailable(false);
     } finally {
       this.captureInFlight.delete(sessionId);
       if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId);
     }
+  }
+  /** Mark a session dead: grey it out, stop asking for frames, keep the entry for the strip. */
+  private markDead(sessionId: string): void {
+    const entry = this.observations.get(sessionId);
+    if (entry === undefined || entry.dead === true) return;
+    this.cancelCapture(sessionId);
+    this.put({ ...entry, dead: true, action: "idle" });
   }
 }
 

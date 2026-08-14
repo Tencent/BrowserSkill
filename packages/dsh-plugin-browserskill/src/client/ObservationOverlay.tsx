@@ -1,8 +1,9 @@
 // Observation overlay: the default in-app carrier for live session watching.
 // Expanded = draggable/resizable floating card (bottom-right); collapsed = a
 // status capsule; "pop out" upgrades the same content to a native Document
-// PiP window (user gesture required by the browser). Pure client state —
-// position/size/collapse live for the page lifetime only.
+// PiP window (user gesture required by the browser). Multi-session renders a
+// meeting-style strip under the focus view. Pure client state — position,
+// size, collapse, and the pin live for the page lifetime only.
 
 import {
   type PointerEvent as ReactPointerEvent,
@@ -64,10 +65,16 @@ function formatElapsed(sinceMs: number, nowMs: number): string {
   return `${mm}:${ss}`;
 }
 
-/** Focus = most recently active session (action or latest state change). */
+/**
+ * Auto-follow focus: the most recently touched session, but never yank focus
+ * to a session whose latest action failed (errors flag the strip item, they
+ * do not steal the stage) or one already reported dead.
+ */
 export function focusOf(sessions: readonly SessionObservation[]): SessionObservation | undefined {
   if (sessions.length === 0) return undefined;
-  return sessions.reduce((a, b) => (a.since >= b.since ? a : b));
+  const byRecency = [...sessions].sort((a, b) => b.since - a.since);
+  const healthy = byRecency.find((s) => s.lastError === undefined && s.dead !== true);
+  return healthy ?? byRecency[0];
 }
 
 export function statusOf(obs: SessionObservation): "active" | "idle" | "error" {
@@ -75,17 +82,98 @@ export function statusOf(obs: SessionObservation): "active" | "idle" | "error" {
   return obs.action === "idle" ? "idle" : "active";
 }
 
+/** One strip item: mini frame, id, status dot, hover interrupt, pin toggle. */
+function StripItem(props: {
+  store: ObservationClientStore;
+  obs: SessionObservation;
+  pinned: boolean;
+  focused: boolean;
+  onTogglePin: (sessionId: string) => void;
+}) {
+  const { store, obs, pinned, focused, onTogglePin } = props;
+  const [hover, setHover] = useState(false);
+  const thumbId = obs.thumbnailAttachmentId;
+  useEffect(() => {
+    store.ensureThumbnail(thumbId);
+  }, [store, thumbId]);
+  const thumb = thumbId !== undefined ? store.getSnapshot().thumbnails[thumbId] : undefined;
+  const state = obs.dead === true ? "dead" : statusOf(obs);
+  return (
+    <div
+      className={css["strip-item"]}
+      data-state={state}
+      data-focused={focused || undefined}
+      data-pinned={pinned || undefined}
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+    >
+      <button
+        type="button"
+        className={css["strip-main"]}
+        aria-label={`${pinned ? "Unpin" : "Pin"} session ${obs.sessionId}`}
+        aria-pressed={pinned}
+        onClick={() => onTogglePin(obs.sessionId)}
+      >
+        <span className={css["strip-thumb"]}>
+          {thumb?.status === "ready" && thumb.url !== undefined ? (
+            <img src={thumb.url} alt="" />
+          ) : (
+            <span className={css["strip-thumb-empty"]} />
+          )}
+        </span>
+        <span className={css["strip-id"]}>{obs.sessionId}</span>
+        <span className={css.dot} data-state={state === "dead" ? "idle" : state} aria-hidden />
+        {pinned ? (
+          <span className={css["pin-badge"]} aria-label="pinned">
+            📌
+          </span>
+        ) : null}
+      </button>
+      {hover && !pinned && obs.dead !== true ? (
+        <button
+          type="button"
+          className={css["strip-interrupt"]}
+          aria-label={`Interrupt session ${obs.sessionId}`}
+          disabled={obs.action === "idle"}
+          onClick={(event) => {
+            event.stopPropagation();
+            void store.interrupt(obs.sessionId);
+          }}
+        >
+          ■
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 /** The floating card / PiP shared content. */
 function OverlayBody(props: {
   store: ObservationClientStore;
   focus: SessionObservation | undefined;
+  sessions: readonly SessionObservation[];
+  available: boolean;
+  pinnedId: string | null;
+  onTogglePin: (sessionId: string) => void;
   now: number;
   onPopOut?: (() => void) | undefined;
   onCollapse?: (() => void) | undefined;
   inPip: boolean;
   onHeaderPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
-  const { store, focus, now, onPopOut, onCollapse, inPip, onHeaderPointerDown } = props;
+  const {
+    store,
+    focus,
+    sessions,
+    available,
+    pinnedId,
+    onTogglePin,
+    now,
+    onPopOut,
+    onCollapse,
+    inPip,
+    onHeaderPointerDown,
+  } = props;
   const [interrupting, setInterrupting] = useState(false);
   const [hintOpen, setHintOpen] = useState(false);
   const [hintSeen, setHintSeen] = useState(false);
@@ -96,7 +184,12 @@ function OverlayBody(props: {
   }, [store, thumbId]);
   const thumb = thumbId !== undefined ? store.getSnapshot().thumbnails[thumbId] : undefined;
 
-  const canInterrupt = !interrupting && focus !== undefined && focus.action !== "idle";
+  const canInterrupt =
+    available &&
+    !interrupting &&
+    focus !== undefined &&
+    focus.action !== "idle" &&
+    focus.dead !== true;
   const onInterrupt = (): void => {
     if (!canInterrupt || focus === undefined) return;
     setHintSeen(true);
@@ -105,10 +198,12 @@ function OverlayBody(props: {
     void store.interrupt(focus.sessionId).finally(() => setInterrupting(false));
   };
 
-  const actionText =
-    focus === undefined ? "no session" : focus.action === "idle" ? "idle" : focus.action;
-  const elapsed = focus !== undefined ? formatElapsed(focus.since, now) : "00:00";
-  const state = focus !== undefined ? statusOf(focus) : "idle";
+  const statusText = !available
+    ? "browser unavailable"
+    : focus === undefined
+      ? "no session"
+      : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
+  const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
 
   return (
     <div className={css.body} data-state={state} data-in-pip={inPip || undefined}>
@@ -119,11 +214,7 @@ function OverlayBody(props: {
         role="presentation"
       >
         <span className={css.dot} data-state={state} aria-hidden />
-        <span className={css["status-text"]}>
-          {focus === undefined
-            ? "browser sessions"
-            : `${focus.sessionId} · ${actionText} · ${elapsed}`}
-        </span>
+        <span className={css["status-text"]}>{statusText}</span>
         {onCollapse !== undefined ? (
           <button
             type="button"
@@ -145,7 +236,11 @@ function OverlayBody(props: {
           />
         ) : (
           <div className={css.placeholder}>
-            {thumb?.status === "error" ? "frame unavailable" : "waiting for page"}
+            {!available
+              ? "last frame kept"
+              : thumb?.status === "error"
+                ? "frame unavailable"
+                : "waiting for page"}
           </div>
         )}
         {thumb?.status === "error" ? (
@@ -154,6 +249,20 @@ function OverlayBody(props: {
           </span>
         ) : null}
       </div>
+      {sessions.length >= 2 ? (
+        <div className={css.strip} data-testid="obs-strip" role="list">
+          {sessions.map((obs) => (
+            <StripItem
+              key={obs.sessionId}
+              store={store}
+              obs={obs}
+              pinned={pinnedId === obs.sessionId}
+              focused={focus?.sessionId === obs.sessionId}
+              onTogglePin={onTogglePin}
+            />
+          ))}
+        </div>
+      ) : null}
       <div className={css.actions}>
         <span className={css["interrupt-wrap"]}>
           <button
@@ -209,6 +318,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   const [pos, setPos] = useState<Point | null>(null);
   const [size, setSize] = useState<Size>(DEFAULT_SIZE);
   const [pipWindow, setPipWindow] = useState<Window | null>(null);
+  const [pinnedId, setPinnedId] = useState<string | null>(null);
   const dragRef = useRef<{
     kind: "move" | "resize";
     startX: number;
@@ -217,7 +327,6 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   } | null>(null);
 
   // Elapsed-time ticker: 1s while anything is active.
-  const focus = focusOf(snapshot.sessions);
   const anyActive = snapshot.sessions.some((s) => s.action !== "idle");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -225,6 +334,14 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [anyActive]);
+
+  // Focus: the pinned session wins while it still exists; otherwise auto-follow.
+  const pinned =
+    pinnedId !== null ? snapshot.sessions.find((s) => s.sessionId === pinnedId) : undefined;
+  const focus = pinned ?? focusOf(snapshot.sessions);
+  const onTogglePin = useCallback((sessionId: string) => {
+    setPinnedId((current) => (current === sessionId ? null : sessionId));
+  }, []);
 
   const viewport = (): Size => ({ w: window.innerWidth, h: window.innerHeight });
 
@@ -284,6 +401,10 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     <OverlayBody
       store={store}
       focus={focus}
+      sessions={snapshot.sessions}
+      available={snapshot.available}
+      pinnedId={pinned !== undefined ? pinnedId : null}
+      onTogglePin={onTogglePin}
       now={now}
       inPip={pipWindow !== null}
       onPopOut={pipWindow === null && pipApi() !== undefined ? () => void popOut() : undefined}

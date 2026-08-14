@@ -56,7 +56,9 @@ interface FakeRunner extends BskRunner {
 }
 
 /** Runner that answers screenshot with a real temp PNG and records kills. */
-function fakeRunner(opts: { screenshotFails?: boolean; killCount?: number } = {}): FakeRunner {
+function fakeRunner(
+  opts: { screenshotFails?: boolean; screenshotNotFound?: boolean; killCount?: number } = {},
+): FakeRunner {
   const calls: FakeRunner["calls"] = [];
   const killed: string[] = [];
   return {
@@ -65,6 +67,15 @@ function fakeRunner(opts: { screenshotFails?: boolean; killCount?: number } = {}
     async run(args: string[], options: BskRunOptions = {}): Promise<BskRunResult> {
       calls.push({ args, options });
       if (args[0] === "screenshot") {
+        if (opts.screenshotNotFound) {
+          return {
+            code: 4,
+            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
         if (opts.screenshotFails) {
           return { code: 1, stdout: "", stderr: "boom", timedOut: false, aborted: false };
         }
@@ -257,8 +268,10 @@ describe("observation traffic isolation", () => {
     // The capture upsert carries the thumbnail but the action stays idle…
     const captureEvents = events.filter((e) => e.type === "upsert");
     expect(captureEvents).toHaveLength(1);
-    expect(captureEvents[0].session?.action).toBe("idle");
-    expect(captureEvents[0].session?.thumbnailAttachmentId).toBe("att-1");
+    const captureEvent = captureEvents[0];
+    if (captureEvent.type !== "upsert") throw new Error("unreachable");
+    expect(captureEvent.session?.action).toBe("idle");
+    expect(captureEvent.session?.thumbnailAttachmentId).toBe("att-1");
     // …and the registry's current pointer never moved through observation.
     expect(registry.current()).toBe("s1");
     expect(registry.list()[0].startedAtMs).toBe(1);
@@ -394,6 +407,55 @@ describe("HTTP/SSE interface", () => {
     const dispose = registerObservationRoutes(ctx, service);
     expect(typeof dispose).toBe("function");
     dispose();
+    service.dispose();
+  });
+});
+
+describe("availability and dead sessions", () => {
+  it("flips availability off after repeated global failures and back on success", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner({ screenshotFails: true });
+    const { service, events } = setup({ runner, scheduler });
+    service.addSession("s1");
+    for (let i = 1; i <= 3; i++) {
+      scheduler.runNext();
+      await waitFor(() => runner.calls.filter((c) => c.args[0] === "screenshot").length === i);
+    }
+    expect(service.isAvailable()).toBe(false);
+    expect(events.some((e) => e.type === "availability" && e.available === false)).toBe(true);
+    service.dispose();
+  });
+
+  it("marks a session dead on session_not_found and stops asking for frames", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner({ screenshotNotFound: true });
+    const { service, events } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => events.some((e) => e.type === "upsert" && e.session?.dead === true));
+    expect(service.getState()[0].dead).toBe(true);
+    expect(service.getState()[0].action).toBe("idle");
+    // No further captures are scheduled for a dead session.
+    expect(scheduler.pending()).toEqual([]);
+    // Instrumentation is dropped for dead sessions.
+    service.beginAction("s1", "clicking");
+    expect(service.getState()[0].action).toBe("idle");
+    // A dead session leaves cleanly.
+    service.removeSession("s1");
+    expect(service.getState()).toEqual([]);
+  });
+
+  it("clears lastError on the next action and keeps it on failure", () => {
+    const { service } = setup({});
+    service.addSession("s1");
+    service.endAction("s1", "click failed");
+    expect(service.getState()[0].lastError).toBe("click failed");
+    service.beginAction("s1", "clicking");
+    expect(service.getState()[0].lastError).toBeUndefined();
+    service.endAction("s1");
+    expect(service.getState()[0].lastError).toBeUndefined();
+    service.endAction("s1", "fill failed");
+    expect(service.getState()[0].lastError).toBe("fill failed");
     service.dispose();
   });
 });

@@ -16,6 +16,7 @@ interface Harness {
   store: ObservationClientStore;
   es: () => EventSourceLike;
   push: (sessions: SessionObservation[]) => void;
+  emitRaw: (event: unknown) => void;
   fetches: { url: string; init?: { body?: string } }[];
   loadImage: ReturnType<typeof vi.fn>;
 }
@@ -51,6 +52,9 @@ function makeHarness(initial: SessionObservation[]): Harness {
         es?.onmessage?.({ data: JSON.stringify({ type: "upsert", session: s }) });
       }
       if (sessions.length === 0) es?.onmessage?.({ data: JSON.stringify({ type: "reset" }) });
+    },
+    emitRaw: (event) => {
+      es?.onmessage?.({ data: JSON.stringify(event) });
     },
     fetches,
     loadImage,
@@ -182,5 +186,107 @@ describe("ObservationOverlay", () => {
     // Closing the PiP returns to the in-page card with state preserved.
     for (const fn of listeners.get("pagehide") ?? []) fn();
     await screen.findByTestId("obs-card");
+  });
+
+  it("renders the strip for two sessions and pins focus on click", async () => {
+    const older: SessionObservation = {
+      sessionId: "s1",
+      action: "idle",
+      since: Date.now() - 60000,
+    };
+    const newer: SessionObservation = { sessionId: "s2", action: "clicking", since: Date.now() };
+    const h = makeHarness([older, newer]);
+    render(<ObservationOverlay store={h.store} />);
+    // Auto-follows the most recently active session.
+    await screen.findByText(/s2 · clicking/);
+    const strip = screen.getByTestId("obs-strip");
+    expect(strip.textContent).toContain("s1");
+    expect(strip.textContent).toContain("s2");
+    // Pin s1: focus moves and stays even when s2 gets newer activity.
+    fireEvent.click(screen.getByRole("button", { name: "Pin session s1" }));
+    await screen.findByText(/s1 · idle/);
+    h.push([{ ...newer, since: Date.now() + 5000, action: "filling" }]);
+    await waitFor(() => expect(screen.queryByText(/s2 · filling/)).toBeNull());
+    expect(screen.getByText(/s1 · idle/)).toBeTruthy();
+    // Unpin: auto-follow resumes.
+    fireEvent.click(screen.getByRole("button", { name: "Unpin session s1" }));
+    await screen.findByText(/s2 · filling/);
+  });
+
+  it("flags an errored strip item without stealing focus", async () => {
+    const s1: SessionObservation = { sessionId: "s1", action: "idle", since: Date.now() - 30000 };
+    const s2: SessionObservation = { sessionId: "s2", action: "idle", since: Date.now() - 10000 };
+    const h = makeHarness([s1, s2]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s2 · idle/);
+    // s2's latest action failed: red edge on its strip item, focus stays on s2 already…
+    // now push an even-more-recent ERROR for s1 — focus must NOT jump to it.
+    h.push([
+      { ...s2, since: Date.now() - 5000 },
+      { ...s1, since: Date.now(), lastError: "click failed" },
+    ]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Pin session s1" }).closest("[data-state]"),
+      ).toHaveProperty("dataset", expect.objectContaining({ state: "error" })),
+    );
+    expect(screen.getByText(/s2 · idle/)).toBeTruthy();
+  });
+
+  it("shows browser-unavailable with a kept frame and a greyed interrupt", async () => {
+    const h = makeHarness([{ ...BUSY, thumbnailAttachmentId: "att-1" }]);
+    render(<ObservationOverlay store={h.store} />);
+    await waitFor(() => expect(h.loadImage).toHaveBeenCalledWith("att-1"));
+    await screen.findByRole("img", { name: "session s1 view" });
+    h.emitRaw({ type: "availability", available: false });
+    await screen.findByText("browser unavailable");
+    // Last frame stays on stage; interrupt is greyed.
+    expect(screen.getByRole("img", { name: "session s1 view" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Interrupt the current/ })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
+  it("greys out a dead session in the strip and skips it for focus", async () => {
+    const s1: SessionObservation = { sessionId: "s1", action: "idle", since: Date.now() - 20000 };
+    const s2: SessionObservation = { sessionId: "s2", action: "idle", since: Date.now() - 10000 };
+    const h = makeHarness([s1, s2]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s2 · idle/);
+    h.push([{ ...s1, dead: true, since: Date.now() }, s2]);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Pin session s1" }).closest("[data-state]"),
+      ).toHaveProperty("dataset", expect.objectContaining({ state: "dead" })),
+    );
+    // Dead sessions never take the stage.
+    expect(screen.getByText(/s2 · idle/)).toBeTruthy();
+  });
+
+  it("interrupts a strip session directly on hover without focusing it", async () => {
+    const s1: SessionObservation = {
+      sessionId: "s1",
+      action: "clicking",
+      since: Date.now() - 30000,
+    };
+    const s2: SessionObservation = { sessionId: "s2", action: "idle", since: Date.now() };
+    const h = makeHarness([s1, s2]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s2 · idle/);
+    const item = screen.getByRole("button", { name: "Pin session s1" }).closest("div");
+    if (item === null) throw new Error("no strip item");
+    fireEvent.pointerEnter(item);
+    const mini = await screen.findByRole("button", { name: "Interrupt session s1" });
+    fireEvent.click(mini);
+    await waitFor(() =>
+      expect(
+        h.fetches.some(
+          (f) => f.url === "/bsk-observation/interrupt" && f.init?.body === '{"sessionId":"s1"}',
+        ),
+      ).toBe(true),
+    );
+    // Focus did not move to s1.
+    expect(screen.getByText(/s2 · idle/)).toBeTruthy();
   });
 });

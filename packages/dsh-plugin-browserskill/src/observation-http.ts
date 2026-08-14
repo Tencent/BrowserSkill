@@ -56,7 +56,10 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
-        sendJson(res, 200, { sessions: observation.getState() });
+        sendJson(res, 200, {
+          sessions: observation.getState(),
+          available: observation.isAvailable(),
+        });
       },
     }),
     webServer.register({

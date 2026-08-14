@@ -34,6 +34,8 @@ export interface OverlaySnapshot {
   readonly sessions: readonly SessionObservation[];
   readonly connected: boolean;
   readonly thumbnails: Readonly<Record<string, ThumbnailState>>;
+  /** False when the host reports the browser/daemon as unreachable. */
+  readonly available: boolean;
 }
 
 const STATE_URL = "/bsk-observation/state";
@@ -45,7 +47,13 @@ export class ObservationClientStore {
   private thumbs = new Map<string, ThumbnailState>();
   private listeners = new Set<() => void>();
   private events: EventSourceLike | undefined;
-  private snapshot: OverlaySnapshot = { sessions: [], connected: false, thumbnails: {} };
+  private snapshot: OverlaySnapshot = {
+    sessions: [],
+    connected: false,
+    thumbnails: {},
+    available: true,
+  };
+  private available = true;
   private started = false;
 
   constructor(private readonly deps: ObservationClientDeps) {}
@@ -62,6 +70,7 @@ export class ObservationClientStore {
       sessions: [...this.sessions.values()],
       connected: this.events !== undefined,
       thumbnails: Object.fromEntries(this.thumbs),
+      available: this.available,
     };
     for (const listener of [...this.listeners]) listener();
   }
@@ -74,8 +83,12 @@ export class ObservationClientStore {
       .fetchFn(STATE_URL)
       .then(async (res) => {
         if (!res.ok) return;
-        const body = (await res.json()) as { sessions?: SessionObservation[] };
+        const body = (await res.json()) as {
+          sessions?: SessionObservation[];
+          available?: boolean;
+        };
         this.sessions = new Map((body.sessions ?? []).map((s) => [s.sessionId, s]));
+        if (typeof body.available === "boolean") this.available = body.available;
         this.publish();
       })
       .catch(() => {});
@@ -114,6 +127,8 @@ export class ObservationClientStore {
       this.sessions.delete(event.session.sessionId);
     } else if (event.type === "upsert" && event.session !== undefined) {
       this.sessions.set(event.session.sessionId, event.session);
+    } else if (event.type === "availability") {
+      this.available = event.available;
     }
     this.publish();
   }
