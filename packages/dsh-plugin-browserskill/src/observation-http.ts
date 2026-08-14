@@ -115,7 +115,7 @@ export function registerObservationRoutes(
     }),
     webServer.register({
       kind: "prefix",
-      path: `${ROUTE_BASE}/thumbnail/`,
+      path: `${ROUTE_BASE}/thumbnail`,
       handler: async (req, res) => {
         if (req.method !== "GET") {
           sendJson(res, 405, { error: "method not allowed" });
