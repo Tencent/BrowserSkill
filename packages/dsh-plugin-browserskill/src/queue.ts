@@ -43,14 +43,15 @@ export class KeyedExecutor {
         );
       });
     });
-    // The stored tail never rejects, so one failure never strands the queue.
-    this.tails.set(
-      key,
-      task.then(
-        () => {},
-        () => {},
-      ),
-    );
+    // The stored tail never rejects, so one failure never strands the queue;
+    // and it chains BOTH the previous tail and this task, so a task aborted
+    // while still queued cannot let a later task overlap the one before it.
+    const tail = Promise.allSettled([previous, task]).then(() => {});
+    this.tails.set(key, tail);
+    // Drop the entry once the queue drains, so the map tracks live keys only.
+    void tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
     return task;
   }
 }

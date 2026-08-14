@@ -111,3 +111,87 @@ describe("ObservationClientStore", () => {
     expect(store.getSnapshot().sessions).toHaveLength(0);
   });
 });
+
+describe("thumbnail blob URL lifecycle", () => {
+  function withRevokeSpy() {
+    const revoke = vi.fn();
+    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = revoke;
+    return revoke;
+  }
+
+  it("replacing a frame revokes the old blob URL and drops its entry", async () => {
+    const revoke = withRevokeSpy();
+    const { store, esInstances } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
+    store.start();
+    await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
+    store.ensureThumbnail("a1");
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().thumbnails["a1"]).toEqual({ status: "ready", url: "blob:url-a1" }),
+    );
+    emit(esInstances[0], {
+      type: "upsert",
+      session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" },
+    });
+    expect(store.getSnapshot().thumbnails["a1"]).toBeUndefined();
+    expect(revoke).toHaveBeenCalledWith("blob:url-a1");
+    store.stop();
+  });
+
+  it("remove and reset revoke the session's tracked frame", async () => {
+    const revoke = withRevokeSpy();
+    const { store, esInstances } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
+    store.start();
+    await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
+    store.ensureThumbnail("a1");
+    await vi.waitFor(() => expect(store.getSnapshot().thumbnails["a1"].status).toBe("ready"));
+    emit(esInstances[0], {
+      type: "remove",
+      session: { sessionId: "s1", action: "idle", since: 0 },
+    });
+    expect(revoke).toHaveBeenCalledWith("blob:url-a1");
+    expect(store.getSnapshot().thumbnails["a1"]).toBeUndefined();
+    store.stop();
+  });
+
+  it("a load that finishes after replacement never resurrects the old frame", async () => {
+    const revoke = withRevokeSpy();
+    const { store, esInstances, loadImage } = harness([
+      { ...OBS_IDLE, thumbnailAttachmentId: "a1" },
+    ]);
+    let resolveA1!: (url: string) => void;
+    loadImage.mockImplementation((id: string) =>
+      id === "a1"
+        ? new Promise<string>((resolve) => {
+            resolveA1 = resolve;
+          })
+        : Promise.resolve(`blob:url-${id}`),
+    );
+    store.start();
+    await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
+    store.ensureThumbnail("a1");
+    // the frame is replaced while a1 is still loading
+    emit(esInstances[0], {
+      type: "upsert",
+      session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" },
+    });
+    resolveA1("blob:url-a1-late");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store.getSnapshot().thumbnails["a1"]).toBeUndefined();
+    expect(revoke).toHaveBeenCalledWith("blob:url-a1-late");
+    store.stop();
+  });
+});
+
+describe("SSE (re)open resync", () => {
+  it("refetches the full state when the stream (re)opens", async () => {
+    const { store, fetches, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
+    const before = fetches.filter((f) => f.url === "/bsk-observation/state").length;
+    esInstances[0].onopen?.();
+    await vi.waitFor(() =>
+      expect(fetches.filter((f) => f.url === "/bsk-observation/state").length).toBe(before + 1),
+    );
+    store.stop();
+  });
+});

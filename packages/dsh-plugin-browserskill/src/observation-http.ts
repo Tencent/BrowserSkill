@@ -36,6 +36,56 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /**
+ * Browser-trust fence, mirroring the one dsh applies to its /api routes (ours
+ * live outside that prefix, so the checks are replicated here):
+ * - Host must be a loopback authority (localhost / 127.0.0.0/8 / [::1]) — the
+ *   observation channel exposes live screenshots and must never answer a LAN
+ *   or DNS-rebound name;
+ * - a present Origin must be same-host with the Host header (blocks cross-site
+ *   reads), and `sec-fetch-site: cross-site` is refused outright;
+ * - POST must be `application/json` — anything a cross-site *simple request*
+ *   can send (form/plain) never reaches the handler, which kills CSRF.
+ */
+function fenceViolation(req: IncomingMessage): string | undefined {
+  const host = req.headers.host ?? "";
+  const hostname = /^\[.*\](?::\d+)?$/.test(host)
+    ? host.slice(1, host.indexOf("]"))
+    : host.split(":")[0];
+  const isLoopback =
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname === "::1" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname);
+  if (!isLoopback) return "host is not a loopback authority";
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== "null") {
+    let originHost: string | undefined;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      return "unparseable Origin header";
+    }
+    if (originHost !== host) return "Origin does not match Host";
+  }
+  if (req.headers["sec-fetch-site"] === "cross-site") return "sec-fetch-site: cross-site";
+  if (req.method === "POST") {
+    const contentType = req.headers["content-type"] ?? "";
+    if (!/^\s*application\/json\s*(;|$)/.test(contentType)) {
+      return "POST requires an application/json body";
+    }
+  }
+  return undefined;
+}
+
+/** Run the fence; returns true when the request was rejected (handled). */
+function fenceRejected(req: IncomingMessage, res: ServerResponse): boolean {
+  const violation = fenceViolation(req);
+  if (violation === undefined) return false;
+  sendJson(res, 403, { error: `forbidden: ${violation}` });
+  return true;
+}
+
+/**
  * Register the observation routes. No-op (with a console note) when the
  * composition has no web server.
  * @returns disposer removing the routes.
@@ -57,6 +107,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
+        if (fenceRejected(req, res)) return;
         sendJson(res, 200, {
           sessions: observation.getState(),
           available: observation.isAvailable(),
@@ -71,6 +122,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
+        if (fenceRejected(req, res)) return;
         res.writeHead(200, {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -80,7 +132,7 @@ export function registerObservationRoutes(
           res.write(`data: ${JSON.stringify(event)}\n\n`);
         });
         const heartbeat = setInterval(() => res.write(": heartbeat\n\n"), SSE_HEARTBEAT_MS);
-        req.on("close", () => {
+        res.on("close", () => {
           clearInterval(heartbeat);
           unsubscribe();
         });
@@ -94,6 +146,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
+        if (fenceRejected(req, res)) return;
         let body = "";
         req.on("data", (chunk: Buffer | string) => {
           body += chunk;
@@ -121,6 +174,7 @@ export function registerObservationRoutes(
           sendJson(res, 405, { error: "method not allowed" });
           return;
         }
+        if (fenceRejected(req, res)) return;
         const pathname = decodeURIComponent(new URL(req.url ?? "/", "http://x").pathname);
         const attachmentId = pathname.slice(`${ROUTE_BASE}/thumbnail/`.length);
         const frame = await observation.readThumbnail(attachmentId);

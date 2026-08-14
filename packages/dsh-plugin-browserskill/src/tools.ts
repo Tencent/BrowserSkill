@@ -6,7 +6,7 @@
  * the completed card carries the output.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
@@ -70,19 +70,25 @@ async function runBsk(
   label: string,
   observeSession?: string,
 ): Promise<unknown> {
-  if (observeSession !== undefined) {
-    deps.observation.beginAction(observeSession, actionForLabel(label));
-  }
+  // beginAction must fire only when the task actually starts inside the
+  // per-session queue — marking it while still queued would overwrite the
+  // in-flight action's label (and flash it idle on a queued abort).
+  let began = false;
   let actionError: string | undefined;
   try {
     let result;
     try {
-      const runOnce = () =>
-        deps.runner.run(args, {
+      const runOnce = () => {
+        if (observeSession !== undefined) {
+          began = true;
+          deps.observation.beginAction(observeSession, actionForLabel(label));
+        }
+        return deps.runner.run(args, {
           signal: exec.signal,
           timeoutMs: deps.config.defaultTimeoutMs,
           ...(observeSession !== undefined ? { tag: observeSession } : {}),
         });
+      };
       result =
         observeSession !== undefined
           ? await deps.queue.run(observeSession, runOnce, exec.signal)
@@ -103,7 +109,7 @@ async function runBsk(
     actionError = error instanceof Error ? error.message.split("\n")[0] : String(error);
     throw error;
   } finally {
-    if (observeSession !== undefined) {
+    if (observeSession !== undefined && began) {
       deps.observation.endAction(observeSession, actionError);
     }
   }
@@ -240,9 +246,20 @@ export function registerTools(deps: ToolDeps): void {
           }
         } catch (error) {
           // A half-initialized session must not leak: stop it before surfacing.
-          await deps.runner
-            .run(["session", "stop", reply.session_id], { timeoutMs: 30_000 })
-            .catch(() => {});
+          // The stop funnels through the session's queue (an in-flight command
+          // — e.g. an observation capture — would otherwise make the daemon
+          // refuse it), with one retry for good measure.
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const stopped = await deps.queue.run(reply.session_id, () =>
+                deps.runner.run(["session", "stop", reply.session_id], { timeoutMs: 30_000 }),
+              );
+              if (stopped.code === 0) break;
+            } catch {
+              // retry once, then give up quietly (registry/observation are
+              // cleaned below either way; the daemon reaps orphans).
+            }
+          }
           registry.remove(reply.session_id);
           deps.observation.removeSession(reply.session_id);
           throw error;
@@ -775,36 +792,47 @@ export function registerTools(deps: ToolDeps): void {
         );
         const cmdArgs = ["screenshot", "--session", sessionId, "--out", outPath];
         if (args.ref !== undefined) cmdArgs.push("--ref", args.ref);
-        const reply = (await runBsk(deps, exec, cmdArgs, "screenshot", sessionId)) as {
-          tab_id: number;
-          width: number;
-          height: number;
-          path: string;
-          byte_size: number;
-        };
-        const data = await readFile(reply.path);
-        if (exec.signal.aborted) throw abortError();
-        const ref = await trySaveScreenshot(deps.ctx, exec, data, `screenshot-${sessionId}.png`);
-        return {
-          session: sessionId,
-          tabId: reply.tab_id,
-          path: reply.path,
-          width: reply.width,
-          height: reply.height,
-          byteSize: reply.byte_size,
-          ...(ref !== undefined
-            ? {
-                image: {
-                  attachmentId: String(ref.attachmentId),
-                  mediaType: "image/png" as const,
-                  bytes: ref.bytes,
-                  width: ref.width,
-                  height: ref.height,
-                  ...(ref.name !== undefined ? { name: ref.name } : {}),
-                },
-              }
-            : {}),
-        };
+        // The scratch PNG is only kept when it IS the model-facing artifact
+        // (no attachment store to inline through); once the bytes are saved
+        // into the store — and on every failure/abort path — it is deleted.
+        let keepFile = false;
+        let writtenPath: string | undefined;
+        try {
+          const reply = (await runBsk(deps, exec, cmdArgs, "screenshot", sessionId)) as {
+            tab_id: number;
+            width: number;
+            height: number;
+            path: string;
+            byte_size: number;
+          };
+          writtenPath = reply.path;
+          const data = await readFile(reply.path);
+          if (exec.signal.aborted) throw abortError();
+          const ref = await trySaveScreenshot(deps.ctx, exec, data, `screenshot-${sessionId}.png`);
+          keepFile = ref === undefined;
+          return {
+            session: sessionId,
+            tabId: reply.tab_id,
+            path: reply.path,
+            width: reply.width,
+            height: reply.height,
+            byteSize: reply.byte_size,
+            ...(ref !== undefined
+              ? {
+                  image: {
+                    attachmentId: String(ref.attachmentId),
+                    mediaType: "image/png" as const,
+                    bytes: ref.bytes,
+                    width: ref.width,
+                    height: ref.height,
+                    ...(ref.name !== undefined ? { name: ref.name } : {}),
+                  },
+                }
+              : {}),
+          };
+        } finally {
+          if (!keepFile) await unlink(writtenPath ?? outPath).catch(() => {});
+        }
       },
       presentCall: (args) => ({
         card: "terminal",
@@ -835,7 +863,12 @@ export function registerTools(deps: ToolDeps): void {
         },
         width: { type: "integer", description: "Viewport width in CSS pixels (requires height)." },
         height: { type: "integer", description: "Viewport height in CSS pixels (requires width)." },
-        mobile: { type: "boolean", description: "Emulate a mobile viewport." },
+        mobile: {
+          type: "boolean",
+          description:
+            "Emulate a mobile viewport. Requires width+height — the bsk daemon refuses " +
+            "--mobile without viewport dimensions, so this flag cannot be used alone.",
+        },
         off: { type: "boolean", description: "Clear every emulation override on the tab." },
       },
       output: {
@@ -864,7 +897,9 @@ export function registerTools(deps: ToolDeps): void {
             throw new Error("off is mutually exclusive with device/width/height");
           }
         } else if (args.device === undefined && args.width === undefined) {
-          throw new Error("nothing to apply: pass device, width+height, or off");
+          throw new Error(
+            "nothing to apply: pass device or width+height (mobile also requires width+height), or off",
+          );
         }
         if ((args.width === undefined) !== (args.height === undefined)) {
           throw new Error("width and height must be given together");

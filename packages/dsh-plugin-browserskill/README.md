@@ -107,6 +107,14 @@ shell's theme cannot bleed back in.
   the dsh `webServer` route seam (dsh 0.1's Typert Remote pipeline is closed to out-of-tree
   packages). All commands for one session — tool calls and frame captures alike — run through a
   per-session FIFO, because the daemon accepts only one unfinished command per session.
+- **Trust model**: these routes expose live screenshots (and an interrupt write), so they
+  replicate the browser-trust fence dsh applies to its own `/api` routes: the request Host
+  must be a loopback authority (`localhost`, `127.0.0.0/8`, `[::1]`), a present Origin must
+  match the Host, `sec-fetch-site: cross-site` is refused, and POST requires an
+  `application/json` body (cross-site simple requests can never satisfy that). The channel is
+  therefore built for **loopback-only serving** — binding the dsh web server to `0.0.0.0` and
+  reaching it through a LAN address will (deliberately) fail the fence; do not put these
+  routes behind a non-loopback reverse proxy without adding your own authentication.
 - Configure with `observationEnabled` / `thumbnailIntervalMs` / `idleIntervalMs`.
 
 ## Behavior notes

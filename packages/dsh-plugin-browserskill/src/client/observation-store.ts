@@ -1,14 +1,17 @@
 /**
  * Client-side data layer for the observation overlay: initial state fetch,
- * SSE increment stream, on-demand thumbnail blob loading through the
- * session-authorized readAttachment path, and the interrupt call. All I/O is
- * injected so tests never touch a network.
+ * SSE increment stream (with a state refetch on every (re)open — events that
+ * fired while the stream was down are otherwise lost forever), on-demand
+ * thumbnail blob loading through the session-authorized readAttachment path,
+ * and the interrupt call. All I/O is injected so tests never touch a network.
  */
 
 import type { ObservationEvent, SessionObservation } from "../observation";
 
 export interface EventSourceLike {
   onmessage: ((event: { data: string }) => void) | null;
+  /** Fires on the initial connect AND on every automatic reconnect. */
+  onopen?: (() => void) | null;
   close(): void;
 }
 
@@ -32,7 +35,8 @@ export interface ThumbnailState {
 
 export interface OverlaySnapshot {
   readonly sessions: readonly SessionObservation[];
-  readonly connected: boolean;
+  /** Whether the SSE increment stream is currently subscribed. */
+  readonly subscribed: boolean;
   readonly thumbnails: Readonly<Record<string, ThumbnailState>>;
   /** False when the host reports the browser/daemon as unreachable. */
   readonly available: boolean;
@@ -42,14 +46,22 @@ const STATE_URL = "/bsk-observation/state";
 const EVENTS_URL = "/bsk-observation/events";
 const INTERRUPT_URL = "/bsk-observation/interrupt";
 
+function revoke(url: string | undefined): void {
+  if (url !== undefined && typeof URL.revokeObjectURL === "function") {
+    URL.revokeObjectURL(url);
+  }
+}
+
 export class ObservationClientStore {
   private sessions = new Map<string, SessionObservation>();
   private thumbs = new Map<string, ThumbnailState>();
+  /** sessionId → the attachment id currently displayed for it (leak guard). */
+  private readonly thumbBySession = new Map<string, string>();
   private listeners = new Set<() => void>();
   private events: EventSourceLike | undefined;
   private snapshot: OverlaySnapshot = {
     sessions: [],
-    connected: false,
+    subscribed: false,
     thumbnails: {},
     available: true,
   };
@@ -68,17 +80,15 @@ export class ObservationClientStore {
   private publish(): void {
     this.snapshot = {
       sessions: [...this.sessions.values()],
-      connected: this.events !== undefined,
+      subscribed: this.events !== undefined,
       thumbnails: Object.fromEntries(this.thumbs),
       available: this.available,
     };
     for (const listener of [...this.listeners]) listener();
   }
 
-  /** Initial fetch + SSE subscription. Idempotent. */
-  start(): void {
-    if (this.started) return;
-    this.started = true;
+  /** (Re)pull the full state: initial load and every SSE (re)open. */
+  private refreshState(): void {
     void this.deps
       .fetchFn(STATE_URL)
       .then(async (res) => {
@@ -87,11 +97,25 @@ export class ObservationClientStore {
           sessions?: SessionObservation[];
           available?: boolean;
         };
-        this.sessions = new Map((body.sessions ?? []).map((s) => [s.sessionId, s]));
+        const sessions = body.sessions ?? [];
+        this.sessions = new Map(sessions.map((s) => [s.sessionId, s]));
+        // Prune thumbnails of sessions that vanished while we were away.
+        const alive = new Set(sessions.map((s) => s.sessionId));
+        for (const sessionId of [...this.thumbBySession.keys()]) {
+          if (!alive.has(sessionId)) this.dropThumb(sessionId);
+        }
+        for (const s of sessions) this.trackThumb(s.sessionId, s.thumbnailAttachmentId);
         if (typeof body.available === "boolean") this.available = body.available;
         this.publish();
       })
       .catch(() => {});
+  }
+
+  /** Initial fetch + SSE subscription. Idempotent. */
+  start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.refreshState();
     const events = this.deps.eventSourceFactory(EVENTS_URL);
     events.onmessage = (message) => {
       let event: ObservationEvent;
@@ -102,6 +126,10 @@ export class ObservationClientStore {
       }
       this.apply(event);
     };
+    events.onopen = () => {
+      // Reconnects lose every event fired during the outage — resync.
+      if (this.events === events) this.refreshState();
+    };
     this.events = events;
     this.publish();
   }
@@ -110,23 +138,45 @@ export class ObservationClientStore {
     this.events?.close();
     this.events = undefined;
     this.started = false;
-    for (const thumb of this.thumbs.values()) {
-      if (thumb.url !== undefined && typeof URL.revokeObjectURL === "function") {
-        URL.revokeObjectURL(thumb.url);
-      }
-    }
+    for (const thumb of this.thumbs.values()) revoke(thumb.url);
     this.thumbs.clear();
+    this.thumbBySession.clear();
     this.sessions.clear();
     this.publish();
+  }
+
+  /** Forget one session's tracked thumbnail, revoking its blob URL. */
+  private dropThumb(sessionId: string): void {
+    const attachmentId = this.thumbBySession.get(sessionId);
+    if (attachmentId === undefined) return;
+    this.thumbBySession.delete(sessionId);
+    revoke(this.thumbs.get(attachmentId)?.url);
+    this.thumbs.delete(attachmentId);
+  }
+
+  /**
+   * Track the frame a session currently shows; replacing a frame revokes the
+   * old blob URL immediately — blob URLs must not accumulate one per frame.
+   */
+  private trackThumb(sessionId: string, attachmentId: string | undefined): void {
+    const previous = this.thumbBySession.get(sessionId);
+    if (previous === attachmentId) return;
+    this.dropThumb(sessionId);
+    if (attachmentId !== undefined) this.thumbBySession.set(sessionId, attachmentId);
   }
 
   private apply(event: ObservationEvent): void {
     if (event.type === "reset") {
       this.sessions.clear();
+      for (const thumb of this.thumbs.values()) revoke(thumb.url);
+      this.thumbs.clear();
+      this.thumbBySession.clear();
     } else if (event.type === "remove" && event.session !== undefined) {
       this.sessions.delete(event.session.sessionId);
+      this.dropThumb(event.session.sessionId);
     } else if (event.type === "upsert" && event.session !== undefined) {
       this.sessions.set(event.session.sessionId, event.session);
+      this.trackThumb(event.session.sessionId, event.session.thumbnailAttachmentId);
     } else if (event.type === "availability") {
       this.available = event.available;
     }
@@ -144,6 +194,11 @@ export class ObservationClientStore {
     this.publish();
     this.deps.loadImage(attachmentId).then(
       (url) => {
+        if (!this.thumbs.has(attachmentId)) {
+          // Replaced or removed while loading: never resurrect (or leak) it.
+          revoke(url);
+          return;
+        }
         this.thumbs.set(attachmentId, { status: "ready", url });
         this.publish();
       },

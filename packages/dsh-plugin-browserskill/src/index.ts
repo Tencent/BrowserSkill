@@ -90,8 +90,10 @@ export function apply(
   });
 
   // Non-blocking install probe: warn early when bsk is missing instead of
-  // failing the first tool call with a bare spawn error.
-  runner.run(["status"], { timeoutMs: 10_000 }).then(
+  // failing the first tool call with a bare spawn error. Uses --version on
+  // purpose — it answers without starting the daemon (`bsk status` would
+  // ensure-spawn one, an expensive side effect for a probe).
+  runner.run(["--version"], { timeoutMs: 10_000 }).then(
     () => {},
     (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);

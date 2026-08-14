@@ -48,17 +48,12 @@ export interface BskRunResult {
 export interface BskRunOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Opaque routing tag (e.g. a session id) enabling per-tag kills. */
+  tag?: string;
 }
 
 /** Minimal spawn signature so tests can substitute a fake child process. */
 export type SpawnImpl = (command: string, args: string[]) => ChildProcess;
-
-export interface BskRunOptions {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-  /** Opaque routing tag (e.g. a session id) enabling per-tag kills. */
-  tag?: string;
-}
 
 export interface BskRunner {
   /** Run `bsk <args...> --json` and collect its output. */

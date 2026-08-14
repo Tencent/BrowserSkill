@@ -2,7 +2,7 @@
 // traffic isolation, interrupt routing, the owned boundary, and the HTTP/SSE
 // interface. All bsk runs are faked; the scheduler is a manual timer queue.
 
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -344,6 +344,7 @@ describe("HTTP/SSE interface", () => {
 
   function fakeRes() {
     const chunks: string[] = [];
+    const closeHandlers: (() => void)[] = [];
     const res = {
       status: 0,
       writeHead(status: number) {
@@ -356,12 +357,33 @@ describe("HTTP/SSE interface", () => {
       end(chunk?: string) {
         if (chunk !== undefined) chunks.push(chunk);
       },
+      on(event: string, fn: () => void) {
+        if (event === "close") closeHandlers.push(fn);
+      },
+      close: () => closeHandlers.forEach((fn) => fn()),
       body: () => chunks.join(""),
     };
     return {
-      res: res as unknown as ServerResponse & { status: number; body: () => string },
+      res: res as unknown as ServerResponse & {
+        status: number;
+        body: () => string;
+        close: () => void;
+      },
       chunks,
     };
+  }
+
+  /** Loopback GET/POST request stubs the fence accepts. */
+  function fakeReq(overrides: Record<string, unknown> = {}): IncomingMessage {
+    return {
+      method: "GET",
+      headers: { host: "127.0.0.1:3999" },
+      on: (event: string, fn: (chunk?: string) => void) => {
+        if (event === "data") fn(JSON.stringify({ sessionId: "s1" }));
+        if (event === "end") fn();
+      },
+      ...overrides,
+    } as unknown as IncomingMessage;
   }
 
   it("serves state, streams events, and routes interrupt", async () => {
@@ -379,40 +401,81 @@ describe("HTTP/SSE interface", () => {
     const stateRoute = routes.get("/bsk-observation/state");
     expect(stateRoute).toBeDefined();
     const stateRes = fakeRes();
-    await stateRoute?.handler({ method: "GET" } as IncomingMessage, stateRes.res as never);
+    await stateRoute?.handler(fakeReq(), stateRes.res as never);
     expect(stateRes.res.status).toBe(200);
     expect(JSON.parse(stateRes.res.body()).sessions[0].sessionId).toBe("s1");
 
     // events (SSE): one write per service event
     const eventsRoute = routes.get("/bsk-observation/events");
     const eventsRes = fakeRes();
-    const closeHandlers: (() => void)[] = [];
-    const req = {
-      method: "GET",
-      on: (event: string, fn: () => void) => {
-        if (event === "close") closeHandlers.push(fn);
-      },
-    } as unknown as IncomingMessage;
-    await eventsRoute?.handler(req, eventsRes.res as never);
+    await eventsRoute?.handler(fakeReq(), eventsRes.res as never);
     service.beginAction("s1", "clicking");
     expect(eventsRes.res.body()).toContain('"action":"clicking"');
-    closeHandlers.forEach((fn) => fn());
+    eventsRes.res.close();
 
     // interrupt (POST {sessionId})
     const interruptRoute = routes.get("/bsk-observation/interrupt");
     const interruptRes = fakeRes();
-    const postReq = {
+    const postReq = fakeReq({
       method: "POST",
-      on: (event: string, fn: (chunk?: string) => void) => {
-        if (event === "data") fn(JSON.stringify({ sessionId: "s1" }));
-        if (event === "end") fn();
-      },
-    } as unknown as IncomingMessage;
+      headers: { host: "127.0.0.1:3999", "content-type": "application/json" },
+    });
     await interruptRoute?.handler(postReq, interruptRes.res as never);
     expect(JSON.parse(interruptRes.res.body())).toEqual({ interrupted: true });
 
     dispose();
     expect(routes.size).toBe(0);
+    service.dispose();
+  });
+
+  it("fences off non-loopback, cross-site, and simple-request traffic", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const { service } = setup({ registry });
+    service.addSession("s1");
+    const { routes, webServer } = routeHarness();
+    const ctx = { get: (key: string) => (key === "webServer" ? webServer : undefined) } as never;
+    const dispose = registerObservationRoutes(ctx, service);
+    const stateRoute = routes.get("/bsk-observation/state");
+    const interruptRoute = routes.get("/bsk-observation/interrupt");
+
+    const getState = async (headers: Record<string, string>) => {
+      const res = fakeRes();
+      await stateRoute?.handler(fakeReq({ headers }), res.res as never);
+      return res.res.status;
+    };
+
+    // Host must be a loopback authority.
+    expect(await getState({ host: "192.168.1.20:3999" })).toBe(403);
+    expect(await getState({ host: "attacker.example" })).toBe(403);
+    expect(await getState({ host: "localhost:3999" })).toBe(200);
+    expect(await getState({ host: "[::1]:3999" })).toBe(200);
+    // A present Origin must match the Host (DNS-rebinding reads die here).
+    expect(await getState({ host: "127.0.0.1:3999", origin: "http://evil.example" })).toBe(403);
+    expect(await getState({ host: "127.0.0.1:3999", origin: "http://127.0.0.1:3999" })).toBe(200);
+    // Explicitly cross-site fetches are refused even without an Origin.
+    expect(await getState({ host: "127.0.0.1:3999", "sec-fetch-site": "cross-site" })).toBe(403);
+    expect(await getState({ host: "127.0.0.1:3999", "sec-fetch-site": "same-origin" })).toBe(200);
+
+    // POST must be application/json — a cross-site simple request can never comply.
+    const post = async (contentType: string | undefined) => {
+      const res = fakeRes();
+      const req = fakeReq({
+        method: "POST",
+        headers: {
+          host: "127.0.0.1:3999",
+          ...(contentType !== undefined ? { "content-type": contentType } : {}),
+        },
+      });
+      await interruptRoute?.handler(req, res.res as never);
+      return res.res.status;
+    };
+    expect(await post("text/plain")).toBe(403);
+    expect(await post("application/x-www-form-urlencoded")).toBe(403);
+    expect(await post(undefined)).toBe(403);
+    expect(await post("application/json; charset=utf-8")).toBe(200);
+
+    dispose();
     service.dispose();
   });
 
@@ -434,7 +497,12 @@ describe("availability and dead sessions", () => {
     service.addSession("s1");
     for (let i = 1; i <= 3; i++) {
       scheduler.runNext();
-      await waitFor(() => runner.calls.filter((c) => c.args[0] === "screenshot").length === i);
+      // the frame's scratch-file unlink lands before the next timer is queued
+      await waitFor(
+        () =>
+          runner.calls.filter((c) => c.args[0] === "screenshot").length === i &&
+          scheduler.pending().length === 1,
+      );
     }
     expect(service.isAvailable()).toBe(false);
     expect(events.some((e) => e.type === "availability" && e.available === false)).toBe(true);
@@ -496,5 +564,81 @@ describe("actionForLabel", () => {
     expect(actionForLabel("navigate")).toBe("navigating");
     expect(actionForLabel("screenshot")).toBe("capturing");
     expect(actionForLabel("session start")).toBe("starting");
+  });
+});
+
+describe("scratch files and thumbnail references", () => {
+  it("reuses one scratch path per session and deletes it after reading", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner();
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    // first frame (scheduled with delay 0)
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0]?.thumbnailAttachmentId !== undefined &&
+        scheduler.pending().length === 1,
+    );
+    const firstOut = runner.calls.filter((c) => c.args[0] === "screenshot").at(-1)?.args;
+    const pathOf = (args: string[]) => args[args.indexOf("--out") + 1];
+    expect(pathOf(firstOut ?? [])).toBe(join(tmpdir(), "bsk-obs-s1.png"));
+    expect(existsSync(pathOf(firstOut ?? []))).toBe(false);
+    // second frame: same path, deleted again
+    service.endAction("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        runner.calls.filter((c) => c.args[0] === "screenshot").length >= 2 &&
+        scheduler.pending().length === 1,
+    );
+    const secondOut = runner.calls.filter((c) => c.args[0] === "screenshot").at(-1)?.args;
+    expect(pathOf(secondOut ?? [])).toBe(join(tmpdir(), "bsk-obs-s1.png"));
+    await waitFor(() => !existsSync(pathOf(secondOut ?? [])));
+    service.dispose();
+  });
+
+  it("drops the replaced frame reference and clears it on remove", async () => {
+    let counter = 0;
+    const attachments = {
+      saveImage: async (input: { data: Uint8Array; name?: string }) => {
+        counter += 1;
+        return {
+          attachmentId: `att-${counter}`,
+          mediaType: "image/png",
+          bytes: input.data.byteLength,
+          width: 4,
+          height: 4,
+          name: input.name,
+        };
+      },
+      readImage: async (ref: { attachmentId: unknown }) => ({
+        data: new Uint8Array([1, 2, 3]),
+        attachment: ref,
+      }),
+    };
+    const scheduler = fakeScheduler();
+    const { service } = setup({ scheduler, attachments });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0]?.thumbnailAttachmentId === "att-1" &&
+        scheduler.pending().length === 1,
+    );
+    service.endAction("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0]?.thumbnailAttachmentId === "att-2" &&
+        scheduler.pending().length === 1,
+    );
+    // the replaced frame's read path is gone
+    expect(await service.readThumbnail("att-1")).toBeUndefined();
+    expect((await service.readThumbnail("att-2"))?.mediaType).toBe("image/png");
+    // removing the session clears its live reference too
+    service.removeSession("s1");
+    expect(await service.readThumbnail("att-2")).toBeUndefined();
+    service.dispose();
   });
 });

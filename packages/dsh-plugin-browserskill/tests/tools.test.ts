@@ -1,8 +1,8 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ObservationService } from "../src/observation";
 import { KeyedExecutor } from "../src/queue";
 import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
@@ -619,5 +619,182 @@ describe("presentation", () => {
       isError: false,
     } as never) as { card: string; output: string };
     expect(view).toMatchObject({ card: "terminal", output: "[session s1] screenshot of tab 7" });
+  });
+});
+
+describe("screenshot scratch file lifecycle", () => {
+  /** Runner that honors --out like the real bsk (writes the PNG there). */
+  function outWritingRunner() {
+    const calls: FakeCall[] = [];
+    return {
+      calls,
+      runner: {
+        async run(args: string[], options: BskRunOptions = {}): Promise<BskRunResult> {
+          calls.push({ args, options });
+          if (args[0] === "session") {
+            return {
+              code: 0,
+              stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+              stderr: "",
+              timedOut: false,
+              aborted: false,
+            };
+          }
+          if (args[0] === "screenshot") {
+            const out = args[args.indexOf("--out") + 1];
+            writeFileSync(out, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+            return {
+              code: 0,
+              stdout: JSON.stringify({
+                tab_id: 7,
+                width: 4,
+                height: 4,
+                format: "png",
+                path: out,
+                byte_size: 4,
+              }),
+              stderr: "",
+              timedOut: false,
+              aborted: false,
+            };
+          }
+          return { code: 2, stdout: "{}", stderr: "", timedOut: false, aborted: false };
+        },
+        killAll() {},
+        killFor: () => 0,
+      } as BskRunner,
+    };
+  }
+
+  function setupWithRunner(runner: BskRunner, services: Record<string, unknown> = {}) {
+    const { ctx, tools } = makeCtx(services);
+    const registry = new SessionRegistry(5);
+    registerTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      config: CONFIG,
+      observation: disabledObservation({ ctx, runner, registry }),
+      queue: new KeyedExecutor(),
+    });
+    return { tools, registry };
+  }
+
+  const IMAGE_SERVICES = {
+    attachments: {
+      imageLimits: { mediaTypes: ["image/png"], maxImageBytes: 1e7, maxMessageImageBytes: 1e7 },
+      saveImage: async (input: { data: Uint8Array; mediaType: string }) => ({
+        attachmentId: "att-1",
+        mediaType: input.mediaType,
+        bytes: input.data.byteLength,
+        width: 4,
+        height: 4,
+      }),
+    },
+    llm: { resolveModelInfo: async () => ({ inputModalities: ["text", "image"] }) },
+  };
+
+  it("deletes the scratch PNG once the bytes are in the attachment store", async () => {
+    const { runner, calls } = outWritingRunner();
+    const { tools } = setupWithRunner(runner, IMAGE_SERVICES);
+    await startSession(tools);
+    const exec = makeExec({
+      agent: {
+        session: { requestHeader: () => ({ config: { provider: "p", model: "vl" } }) },
+        options: {},
+      },
+    });
+    const screenshot = tools.get("browser_screenshot");
+    const value = (await screenshot?.execute({}, exec)) as { image?: unknown; path: string };
+    expect(value.image).toBeDefined();
+    const out = calls.find((c) => c.args[0] === "screenshot")?.args.at(-1);
+    expect(out).toBeDefined();
+    expect(existsSync(out ?? "")).toBe(false);
+  });
+
+  it("keeps the PNG only when it is the model-facing artifact (no store)", async () => {
+    const { runner, calls } = outWritingRunner();
+    const { tools } = setupWithRunner(runner);
+    await startSession(tools);
+    const screenshot = tools.get("browser_screenshot");
+    const value = (await screenshot?.execute({}, makeExec())) as { image?: unknown; path: string };
+    expect(value.image).toBeUndefined();
+    const out = calls.find((c) => c.args[0] === "screenshot")?.args.at(-1);
+    expect(existsSync(out ?? "")).toBe(true);
+  });
+});
+
+describe("observation action instrumentation timing", () => {
+  it("a queued call never overwrites the in-flight action label", async () => {
+    const { ctx, tools } = makeCtx();
+    const registry = new SessionRegistry(5);
+    let releaseNavigate!: () => void;
+    const navigateGate = new Promise<void>((resolve) => {
+      releaseNavigate = resolve;
+    });
+    const runner: BskRunner = {
+      async run(args: string[]): Promise<BskRunResult> {
+        if (args[0] === "session") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
+        if (args[0] === "navigate") {
+          await navigateGate;
+          return {
+            code: 0,
+            stdout: JSON.stringify({ tab_id: 7, url: "http://x" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
+        return {
+          code: 0,
+          stdout: JSON.stringify({ text: "ok", ref_count: 0, tab_id: 7, truncated: false }),
+          stderr: "",
+          timedOut: false,
+          aborted: false,
+        };
+      },
+      killAll() {},
+      killFor: () => 0,
+    };
+    const queue = new KeyedExecutor();
+    const observation = new ObservationService({
+      ctx: ctx as never,
+      runner,
+      registry,
+      queue,
+      options: { enabled: true, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
+    });
+    registerTools({ ctx: ctx as never, runner, registry, config: CONFIG, observation, queue });
+
+    await startSession(tools);
+    const navigate = tools.get("browser_navigate");
+    const snapshot = tools.get("browser_snapshot");
+    const a = navigate?.execute({ url: "http://x" }, makeExec()) as Promise<unknown>;
+    // A starts immediately (empty queue) and blocks on the gate.
+    await vi.waitFor(() =>
+      expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("navigating"),
+    );
+    // B queues behind A: the label must stay "navigating" until A settles.
+    const b = snapshot?.execute({}, makeExec()) as Promise<unknown>;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("navigating");
+    releaseNavigate();
+    await a;
+    await vi.waitFor(() =>
+      expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("snapshotting"),
+    );
+    await b;
+    await vi.waitFor(() =>
+      expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("idle"),
+    );
+    observation.dispose();
   });
 });

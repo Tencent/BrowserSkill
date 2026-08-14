@@ -434,10 +434,15 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   const popOut = async (): Promise<void> => {
     const pip = pipApi();
     if (pip === undefined) return;
-    const win = await pip.requestWindow({ width: size.w, height: size.h });
-    cloneStylesInto(win);
-    win.addEventListener("pagehide", () => setPipWindow(null));
-    setPipWindow(win);
+    try {
+      const win = await pip.requestWindow({ width: size.w, height: size.h });
+      cloneStylesInto(win);
+      win.addEventListener("pagehide", () => setPipWindow(null));
+      setPipWindow(win);
+    } catch {
+      // requestWindow rejects without a user gesture (or when the window was
+      // closed mid-request): stay on the in-page card, no state change.
+    }
   };
 
   // Hidden while no owned session exists (and no PiP is up).
@@ -496,7 +501,28 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
         data-testid="obs-resize"
         aria-label="Resize overlay"
         role="separator"
+        aria-valuenow={size.w}
+        aria-valuetext={`${Math.round(size.w)} by ${Math.round(size.h)} pixels`}
+        aria-valuemin={MIN_SIZE.w}
+        aria-valuemax={Math.round(viewport().w * 0.8)}
+        tabIndex={0}
         onPointerDown={beginDrag("resize")}
+        onKeyDown={(event) => {
+          const step = 16;
+          const delta =
+            event.key === "ArrowRight"
+              ? { w: step, h: 0 }
+              : event.key === "ArrowLeft"
+                ? { w: -step, h: 0 }
+                : event.key === "ArrowDown"
+                  ? { w: 0, h: step }
+                  : event.key === "ArrowUp"
+                    ? { w: 0, h: -step }
+                    : undefined;
+          if (delta === undefined) return;
+          event.preventDefault();
+          setSize(clampSize({ w: size.w + delta.w, h: size.h + delta.h }, viewport()));
+        }}
       />
     </div>
   );

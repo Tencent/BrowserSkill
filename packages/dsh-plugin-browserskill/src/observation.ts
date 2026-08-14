@@ -11,7 +11,7 @@
  * events, and never move the registry's current pointer.
  */
 
-import { readFile } from "node:fs/promises";
+import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
@@ -179,6 +179,10 @@ export class ObservationService {
     this.cancelCapture(sessionId);
     this.captureFailures.delete(sessionId);
     this.lastActivity.delete(sessionId);
+    const entry = this.observations.get(sessionId);
+    if (entry?.thumbnailAttachmentId !== undefined) {
+      this.thumbRefs.delete(entry.thumbnailAttachmentId);
+    }
     if (this.observations.delete(sessionId)) {
       this.emit({
         type: "remove",
@@ -324,8 +328,11 @@ export class ObservationService {
       return;
     }
     this.captureInFlight.add(sessionId);
+    // One fixed scratch path per session (overwritten each frame) and always
+    // unlinked after the bytes are read — /tmp must not grow without bound.
+    const outPath = join(tmpdir(), `bsk-obs-${sessionId}.png`);
+    let writtenPath = outPath;
     try {
-      const outPath = join(tmpdir(), `bsk-obs-${sessionId}-${this.scheduler.now()}.png`);
       const result = await this.deps.queue.run(sessionId, () =>
         this.deps.runner.run(["screenshot", "--session", sessionId, "--out", outPath], {
           timeoutMs: 15_000,
@@ -346,7 +353,8 @@ export class ObservationService {
         throw new Error(`screenshot exited ${result.code}`);
       }
       const reply = JSON.parse(result.stdout) as { path?: string };
-      const data = await readFile(reply.path ?? outPath);
+      writtenPath = reply.path ?? outPath;
+      const data = await readFile(writtenPath);
       const ref = await attachments.saveImage({
         data,
         mediaType: "image/png",
@@ -357,6 +365,11 @@ export class ObservationService {
       this.captureFailures.delete(sessionId);
       this.globalFailures = 0;
       this.setAvailable(true);
+      // Drop the replaced frame's reference — the store keeps the bytes, but
+      // this map (and the old id's read path) must not grow without bound.
+      if (entry.thumbnailAttachmentId !== undefined) {
+        this.thumbRefs.delete(entry.thumbnailAttachmentId);
+      }
       this.thumbRefs.set(String(ref.attachmentId), ref);
       this.put({ ...entry, thumbnailAttachmentId: String(ref.attachmentId) });
     } catch {
@@ -365,6 +378,7 @@ export class ObservationService {
       this.globalFailures += 1;
       if (this.globalFailures >= FAILURE_BACKOFF_THRESHOLD) this.setAvailable(false);
     } finally {
+      await unlink(writtenPath).catch(() => {});
       this.captureInFlight.delete(sessionId);
       if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId);
     }
