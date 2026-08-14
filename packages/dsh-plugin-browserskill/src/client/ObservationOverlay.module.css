@@ -182,7 +182,7 @@
 .capsule {
   position: fixed;
   right: 16px;
-  top: 16px;
+  top: 64px;
   z-index: 40;
   display: inline-flex;
   align-items: center;

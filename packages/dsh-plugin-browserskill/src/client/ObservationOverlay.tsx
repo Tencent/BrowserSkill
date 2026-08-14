@@ -46,6 +46,8 @@ interface Size {
 const DEFAULT_SIZE: Size = { w: 320, h: 240 };
 const MIN_SIZE: Size = { w: 240, h: 180 };
 const EDGE_MARGIN = 16;
+/** Default dock: top-right, just under the shell's top bar (no spacing tokens exist in dsh 0.1). */
+const TOP_OFFSET = 64;
 
 function pipApi(): DocumentPip | undefined {
   if (typeof window === "undefined") return undefined;
@@ -408,7 +410,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     )?.getBoundingClientRect();
     const base = {
       x: rect?.left ?? pos?.x ?? viewport().w - size.w - EDGE_MARGIN,
-      y: rect?.top ?? pos?.y ?? EDGE_MARGIN,
+      y: rect?.top ?? pos?.y ?? TOP_OFFSET,
       w: rect?.width ?? size.w,
       h: rect?.height ?? size.h,
     };
@@ -474,7 +476,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   const style: React.CSSProperties =
     pos !== null
       ? { left: pos.x, top: pos.y, width: size.w, height: size.h }
-      : { right: EDGE_MARGIN, top: EDGE_MARGIN, width: size.w, height: size.h };
+      : { right: EDGE_MARGIN, top: TOP_OFFSET, width: size.w, height: size.h };
   return (
     <div className={css.card} style={style} data-obs-card data-testid="obs-card">
       {body}
