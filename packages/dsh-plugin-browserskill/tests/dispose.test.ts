@@ -65,6 +65,8 @@ describe("dispose cleanup ownership", () => {
     const ctx = {
       tools: { register: (def: ToolDefinition) => tools.set(def.name, def) },
       get: () => undefined,
+      // No webServer in this harness: the inject callback never runs.
+      inject: () => {},
       effect: (fn: () => () => Promise<void>) => {
         disposers.push(fn());
       },

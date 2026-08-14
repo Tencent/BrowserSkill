@@ -77,7 +77,14 @@ export function apply(
   });
 
   registerTools({ ctx, runner, registry, config: resolved, observation });
-  const removeRoutes = registerObservationRoutes(ctx, observation);
+  // Route registration rides ctx.inject: the webServer service may be provided
+  // AFTER this plugin loads, and in headless compositions it never appears (the
+  // callback simply never runs, leaving the rest of the plugin unaffected).
+  let removeRoutes: () => void = () => {};
+  ctx.inject(["webServer"], (injected) => {
+    removeRoutes = registerObservationRoutes(injected, observation);
+    return () => removeRoutes();
+  });
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error.
