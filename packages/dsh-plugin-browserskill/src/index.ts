@@ -12,7 +12,7 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
-import { createBskRunner } from "./runner";
+import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
 import { type PluginConfig, registerTools } from "./tools";
 
@@ -34,13 +34,22 @@ export const Config = Schema.object({
 
 export type Config = PluginConfig;
 
-export function apply(ctx: Context, config: Partial<PluginConfig> = {}): void {
+/** Test seams: swap the process runner (unit tests never spawn a real bsk). */
+export interface ApplyOptions {
+  runnerFactory?: (bskPath: string) => BskRunner;
+}
+
+export function apply(
+  ctx: Context,
+  config: Partial<PluginConfig> = {},
+  options: ApplyOptions = {},
+): void {
   const resolved: PluginConfig = {
     bskPath: config.bskPath ?? "bsk",
     defaultTimeoutMs: config.defaultTimeoutMs ?? 120_000,
     maxSessions: config.maxSessions ?? 5,
   };
-  const runner = createBskRunner(resolved.bskPath);
+  const runner = options.runnerFactory?.(resolved.bskPath) ?? createBskRunner(resolved.bskPath);
   const registry = new SessionRegistry(resolved.maxSessions);
 
   registerTools({ ctx, runner, registry, config: resolved });
@@ -58,15 +67,17 @@ export function apply(ctx: Context, config: Partial<PluginConfig> = {}): void {
   );
 
   // Unload cleanup: kill in-flight children, then stop every session this
-  // plugin started (best effort; sessions started outside the plugin are
-  // left running).
+  // plugin OWNS (created via browser_session_start). Referenced or unknown
+  // sessions belonging to other programs on the shared daemon are never
+  // touched; per-stop failures (already stopped externally, daemon restart)
+  // are swallowed so one stale handle cannot abort the rest.
   ctx.effect(() => {
     return () => {
       runner.killAll();
       const stops = registry
-        .list()
-        .map((session) =>
-          runner.run(["session", "stop", session.sessionId], { timeoutMs: 15_000 }).catch(() => {}),
+        .ownedIds()
+        .map((sessionId) =>
+          runner.run(["session", "stop", sessionId], { timeoutMs: 15_000 }).catch(() => {}),
         );
       return Promise.all(stops).then(() => {});
     };

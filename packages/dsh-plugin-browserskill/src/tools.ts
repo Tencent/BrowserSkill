@@ -162,19 +162,23 @@ export function registerTools(deps: ToolDeps): void {
         if ((args.width === undefined) !== (args.height === undefined)) {
           throw new Error("width and height must be given together");
         }
-        // Check the cap BEFORE spawning so a rejected start never leaks a session.
-        registry.assertCapacity();
+        // Reserve the slot BEFORE spawning: check-and-reserve is synchronous,
+        // so concurrent starts can never both pass the cap and leak a session.
+        registry.reserveStart();
         const startArgs = ["session", "start"];
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
         if (args.noFocus === true) startArgs.push("--no-focus");
         if (args.browser !== undefined) startArgs.push("--browser", args.browser);
-        const reply = (await runBsk(deps, exec, startArgs, "session start")) as {
-          session_id: string;
-          browser_instance_id: string;
-        };
-        registry.add({
+        let reply: { session_id: string; browser_instance_id: string };
+        try {
+          reply = (await runBsk(deps, exec, startArgs, "session start")) as typeof reply;
+        } catch (error) {
+          registry.abandonStart();
+          throw error;
+        }
+        registry.completeStart({
           sessionId: reply.session_id,
           browserInstanceId: reply.browser_instance_id,
           startedAtMs: Date.now(),
@@ -230,7 +234,8 @@ export function registerTools(deps: ToolDeps): void {
       name: "browser_session_stop",
       description:
         "Stop a browser session and close its Agent Window. Stops the given session, or the " +
-        "current session when `session` is omitted.",
+        "current session when `session` is omitted. Only sessions created by browser_session_start " +
+        "can be stopped — sessions owned by other programs sharing the bsk daemon are refused.",
       parameters: { session: SESSION_PARAM },
       output: {
         schema: {
@@ -243,7 +248,7 @@ export function registerTools(deps: ToolDeps): void {
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_session_stop");
+        const sessionId = registry.resolveForStop(args.session);
         await runBsk(deps, exec, ["session", "stop", sessionId], "session stop");
         registry.remove(sessionId);
         return { stopped: sessionId };

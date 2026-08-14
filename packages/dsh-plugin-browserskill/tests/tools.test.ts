@@ -238,6 +238,41 @@ describe("multi-session behavior", () => {
     // A rejected start must not spawn another bsk session (no leaked session).
     expect(calls.filter((c) => c.args.join(" ").startsWith("session start"))).toHaveLength(1);
   });
+
+  it("shares the cap atomically across concurrent starts (reservation race)", async () => {
+    const { tools, calls } = setup(
+      { "session start": seq([START_REPLY("s1"), START_REPLY("s2")]) },
+      {},
+      1,
+    );
+    const start = tools.get("browser_session_start");
+    if (start === undefined) throw new Error("not registered");
+    // Two truly concurrent starts against a cap of 1: exactly one may spawn.
+    const outcomes = await Promise.allSettled([
+      start.execute({}, makeExec()),
+      start.execute({}, makeExec()),
+    ]);
+    const fulfilled = outcomes.filter((o) => o.status === "fulfilled");
+    const rejected = outcomes.filter((o) => o.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/session limit/);
+    expect(calls.filter((c) => c.args.join(" ").startsWith("session start"))).toHaveLength(1);
+  });
+
+  it("refuses to stop a session the plugin did not create", async () => {
+    const { tools, calls } = setup(responses);
+    await startSession(tools);
+    // Reference a foreign session (adopted for the current pointer, never owned).
+    const snapshot = tools.get("browser_snapshot");
+    await snapshot?.execute({ session: "ext7" }, makeExec());
+    const stop = tools.get("browser_session_stop");
+    await expect(stop?.execute({ session: "ext7" }, makeExec())).rejects.toThrow(
+      /not created by this plugin/,
+    );
+    // No stop command may reach the daemon for a foreign session.
+    expect(calls.some((c) => c.args.join(" ").startsWith("session stop"))).toBe(false);
+  });
 });
 
 describe("browser_session_stop / list", () => {
