@@ -208,16 +208,31 @@ describe("multi-session behavior", () => {
     expect(calls[1].args).toEqual(["snapshot", "--session", "s1"]);
   });
 
-  it("an explicit session wins and becomes the new current session", async () => {
-    const { tools, calls, registry } = setup(responses);
-    await startSession(tools);
+  it("an explicit owned session wins and becomes the new current session", async () => {
+    const { tools, calls, registry } = setup({
+      "session start": seq([START_REPLY("s1"), START_REPLY("s2")]),
+      snapshot: SNAPSHOT_REPLY,
+    });
+    await startSession(tools, "s1");
+    await startSession(tools, "s2");
     const snapshot = tools.get("browser_snapshot");
-    const value = (await snapshot?.execute({ session: "other" }, makeExec())) as {
+    const value = (await snapshot?.execute({ session: "s1" }, makeExec())) as {
       session: string;
     };
-    expect(value.session).toBe("other");
-    expect(calls[1].args).toEqual(["snapshot", "--session", "other"]);
-    expect(registry.current()).toBe("other");
+    expect(value.session).toBe("s1");
+    expect(calls[2].args).toEqual(["snapshot", "--session", "s1"]);
+    expect(registry.current()).toBe("s1");
+  });
+
+  it("rejects an explicit foreign session without touching the daemon", async () => {
+    const { tools, calls } = setup(responses);
+    await startSession(tools);
+    const callsBefore = calls.length;
+    const snapshot = tools.get("browser_snapshot");
+    await expect(snapshot?.execute({ session: "other" }, makeExec())).rejects.toThrow(
+      /does not belong to this plugin/,
+    );
+    expect(calls.length).toBe(callsBefore);
   });
 
   it("fails with guidance when no session exists", async () => {
@@ -263,12 +278,9 @@ describe("multi-session behavior", () => {
   it("refuses to stop a session the plugin did not create", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    // Reference a foreign session (adopted for the current pointer, never owned).
-    const snapshot = tools.get("browser_snapshot");
-    await snapshot?.execute({ session: "ext7" }, makeExec());
     const stop = tools.get("browser_session_stop");
     await expect(stop?.execute({ session: "ext7" }, makeExec())).rejects.toThrow(
-      /not created by this plugin/,
+      /does not belong to this plugin/,
     );
     // No stop command may reach the daemon for a foreign session.
     expect(calls.some((c) => c.args.join(" ").startsWith("session stop"))).toBe(false);
@@ -289,23 +301,22 @@ describe("browser_session_stop / list", () => {
     expect(registry.current()).toBeUndefined();
   });
 
-  it("lists daemon sessions with the current marker", async () => {
-    const { tools } = setup({
-      "session start": START_REPLY("s1"),
-      "session list": [
-        { session_id: "s1", browser_instance_id: "chrome-1" },
-        { session_id: "s2", browser_instance_id: "chrome-1" },
-      ],
+  it("lists only plugin-owned sessions with the current marker (no daemon view)", async () => {
+    const { tools, calls } = setup({
+      "session start": seq([START_REPLY("s1"), START_REPLY("s2")]),
     });
+    await startSession(tools);
     await startSession(tools);
     const list = tools.get("browser_session_list");
     const value = (await list?.execute({}, makeExec())) as {
       sessions: { sessionId: string; current: boolean }[];
     };
     expect(value.sessions).toEqual([
-      { sessionId: "s1", browserInstanceId: "chrome-1", current: true },
-      { sessionId: "s2", browserInstanceId: "chrome-1", current: false },
+      { sessionId: "s1", browserInstanceId: "chrome-1", current: false },
+      { sessionId: "s2", browserInstanceId: "chrome-1", current: true },
     ]);
+    // Registry-only: listing must not call the daemon at all.
+    expect(calls.some((c) => c.args.join(" ").startsWith("session list"))).toBe(false);
   });
 });
 
@@ -533,8 +544,8 @@ describe("error and cancellation semantics", () => {
       killAll() {},
     };
     registerTools({ ctx: ctx as never, runner, registry, config: CONFIG });
-    const list = tools.get("browser_session_list");
-    await expect(list?.execute({}, makeExec())).rejects.toThrow(/BrowserSkill must be installed/);
+    const start = tools.get("browser_session_start");
+    await expect(start?.execute({}, makeExec())).rejects.toThrow(/BrowserSkill must be installed/);
   });
 });
 

@@ -44,7 +44,8 @@ const DEVICE_PRESETS = [
 const SESSION_PARAM = {
   type: "string",
   description:
-    "bsk session id to act on. Omit to use the current session (the one most recently started or used).",
+    "bsk session id to act on; must be one created by this plugin's browser_session_start. " +
+    "Omit to use the current session (the one most recently started or used).",
 } as const;
 
 /** Run one bsk command and return its parsed JSON payload, or throw. */
@@ -266,8 +267,9 @@ export function registerTools(deps: ToolDeps): void {
     defineTool({
       name: "browser_session_list",
       description:
-        "List active browser sessions known to the bsk daemon. The session marked `current` is " +
-        "the one browser_* tools act on when no explicit `session` is passed.",
+        "List the browser sessions created by this plugin. Sessions owned by other programs on the " +
+        "shared bsk daemon are not visible here. The session marked `current` is the one browser_* " +
+        "tools act on when no explicit `session` is passed.",
       parameters: {},
       output: {
         schema: {
@@ -305,17 +307,15 @@ export function registerTools(deps: ToolDeps): void {
         ],
       },
       isConcurrencySafe: () => true,
-      async execute(_args, exec) {
-        const reply = (await runBsk(deps, exec, ["session", "list"], "session list")) as {
-          session_id: string;
-          browser_instance_id: string;
-        }[];
+      // Registry-only by design: no daemon call, so foreign sessions on a
+      // shared daemon can never even be SEEN through this tool.
+      async execute() {
         const current = registry.current();
         return {
-          sessions: reply.map((entry) => ({
-            sessionId: entry.session_id,
-            browserInstanceId: entry.browser_instance_id,
-            current: entry.session_id === current,
+          sessions: registry.list().map((entry) => ({
+            sessionId: entry.sessionId,
+            browserInstanceId: entry.browserInstanceId ?? "",
+            current: entry.sessionId === current,
           })),
         };
       },

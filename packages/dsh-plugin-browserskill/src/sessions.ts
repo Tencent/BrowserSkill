@@ -1,23 +1,23 @@
 /**
- * Tracks the bsk sessions started through this plugin and the "current"
- * session pointer used when a tool call omits its optional `session` arg.
- * The pointer moves to whatever session was most recently started, stopped,
- * or operated on, so a model can run several browsers side by side without
- * repeating the id on every call.
+ * Tracks the bsk sessions this plugin created and the "current" session
+ * pointer used when a tool call omits its optional `session` arg. The pointer
+ * moves to whatever session was most recently started, stopped, or operated
+ * on, so a model can run several browsers side by side without repeating the
+ * id on every call.
  *
- * Ownership discipline (the bsk daemon may be shared with other agents,
- * terminals, or dsh instances): a session is **owned** only when it was
- * created by this plugin's browser_session_start; an explicit `session`
- * argument naming a foreign session is tracked as a **reference** so the
- * current-session pointer keeps working, but referenced sessions are never
- * stopped — not by browser_session_stop and not by unload cleanup.
+ * Strict ownership boundary (the bsk daemon may be shared with other agents,
+ * terminals, or dsh instances): the registry ONLY ever holds sessions created
+ * by this plugin's browser_session_start. Tools cannot see or act on any
+ * other session — an explicit `session` argument naming a foreign id is an
+ * error, the list tool shows owned sessions only, and stop/unload cleanup
+ * can never touch a session this plugin did not create.
  */
 
 export interface TrackedSession {
   sessionId: string;
   browserInstanceId?: string;
   startedAtMs: number;
-  /** True only for sessions this plugin created (and therefore may stop). */
+  /** Always true: only plugin-created sessions enter the registry at all. */
   owned: boolean;
 }
 
@@ -53,8 +53,8 @@ export class SessionRegistry {
   }
 
   /**
-   * Register a freshly started (owned) session, consuming its reservation,
-   * and make it current.
+   * Register a freshly started session, consuming its reservation, and make
+   * it current.
    */
   completeStart(session: Omit<TrackedSession, "owned">): void {
     this.pendingStarts = Math.max(0, this.pendingStarts - 1);
@@ -78,16 +78,12 @@ export class SessionRegistry {
     }
   }
 
-  /** Mark a session as most recently used. Unknown ids are adopted as references (never owned). */
-  touch(sessionId: string): void {
+  /** Mark an owned session as most recently used (recency order refresh). */
+  private touch(sessionId: string): void {
     const existing = this.sessions.get(sessionId);
-    if (existing !== undefined) {
-      // Re-insert to refresh recency order.
-      this.sessions.delete(sessionId);
-      this.sessions.set(sessionId, existing);
-    } else {
-      this.sessions.set(sessionId, { sessionId, startedAtMs: Date.now(), owned: false });
-    }
+    if (existing === undefined) return;
+    this.sessions.delete(sessionId);
+    this.sessions.set(sessionId, existing);
     this.currentId = sessionId;
   }
 
@@ -96,7 +92,7 @@ export class SessionRegistry {
     return this.currentId;
   }
 
-  /** Tracked sessions in least- to most-recently-used order. */
+  /** Owned sessions in least- to most-recently-used order. */
   list(): TrackedSession[] {
     return [...this.sessions.values()];
   }
@@ -108,7 +104,7 @@ export class SessionRegistry {
       .map((session) => session.sessionId);
   }
 
-  /** Whether the session was created by this plugin and may be stopped by it. */
+  /** Whether the session was created by this plugin. */
   isOwned(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.owned === true;
   }
@@ -117,22 +113,30 @@ export class SessionRegistry {
     return this.sessions.size;
   }
 
+  /** Shared not-yours error for foreign or unknown session ids. */
+  private foreignError(sessionId: string, toolName: string): Error {
+    return new Error(
+      `${toolName}: session "${sessionId}" does not belong to this plugin — only sessions ` +
+        "created by browser_session_start are visible and operable here",
+    );
+  }
+
   /**
-   * Resolve the session an operation tool call acts on: an explicit `session`
-   * argument wins (and becomes current); otherwise fall back to the current
-   * session. Foreign ids are adopted as references.
-   * @throws when neither is available.
+   * Resolve the session a tool call acts on: an explicit `session` argument
+   * must name an owned session (and becomes current); omitted falls back to
+   * the current session. Foreign ids are rejected, never adopted.
+   * @throws on foreign/unknown ids, or when no session exists.
    */
   resolve(explicit: string | undefined, toolName: string): string {
     if (explicit !== undefined && explicit.trim().length > 0) {
+      if (!this.isOwned(explicit)) throw this.foreignError(explicit, toolName);
       this.touch(explicit);
       return explicit;
     }
     const current = this.current();
     if (current === undefined) {
       throw new Error(
-        `${toolName} needs a session but none is active — start one with browser_session_start ` +
-          "or pass an explicit `session` id",
+        `${toolName} needs a session but none is active — start one with browser_session_start`,
       );
     }
     this.touch(current);
@@ -140,26 +144,18 @@ export class SessionRegistry {
   }
 
   /**
-   * Resolve the session a STOP call acts on, without adopting foreign ids:
-   * only owned sessions may be stopped, and the current pointer is not moved
-   * by a rejected stop.
-   * @throws when the target is unknown, foreign, or no session exists.
+   * Resolve the session a STOP call acts on. Same ownership rule as every
+   * other tool; a rejected stop never moves the current pointer.
    */
   resolveForStop(explicit: string | undefined): string {
     const candidate =
       explicit !== undefined && explicit.trim().length > 0 ? explicit : this.current();
     if (candidate === undefined) {
       throw new Error(
-        "browser_session_stop needs a session but none is active — start one with browser_session_start " +
-          "or pass an explicit `session` id",
+        "browser_session_stop needs a session but none is active — start one with browser_session_start",
       );
     }
-    if (!this.isOwned(candidate)) {
-      throw new Error(
-        `browser_session_stop refuses to stop session "${candidate}": it was not created by this plugin. ` +
-          "Only sessions returned by browser_session_start can be stopped (use `bsk session stop` yourself for others).",
-      );
-    }
+    if (!this.isOwned(candidate)) throw this.foreignError(candidate, "browser_session_stop");
     return candidate;
   }
 }

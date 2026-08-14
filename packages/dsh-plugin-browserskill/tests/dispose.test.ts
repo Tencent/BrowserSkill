@@ -75,8 +75,10 @@ describe("dispose cleanup ownership", () => {
     if (start === undefined || snapshot === undefined) throw new Error("tools not registered");
     await start.execute({}, makeExec());
     await start.execute({}, makeExec());
-    // A foreign session gets referenced (current-pointer bookkeeping) but never owned.
-    await snapshot.execute({ session: "ext9" }, makeExec());
+    // A foreign session cannot even be referenced any more.
+    await expect(snapshot.execute({ session: "ext9" }, makeExec())).rejects.toThrow(
+      /does not belong to this plugin/,
+    );
 
     await Promise.all(disposers.map((dispose) => dispose()));
 

@@ -12,8 +12,8 @@ extension keep owning the actual browser control — this package is a thin, wel
 | Tool | bsk command | Purpose |
 | --- | --- | --- |
 | `browser_session_start` | `bsk session start` | Open an Agent Window session; optional initial URL, window size, and device emulation preset. Returns the session id and makes it the current session. |
-| `browser_session_stop` | `bsk session stop` | Stop a session (the current one by default) and close its Agent Window. |
-| `browser_session_list` | `bsk session list` | List daemon-side sessions, marking the plugin's current session. |
+| `browser_session_stop` | `bsk session stop` | Stop a session (the current one by default) and close its Agent Window. Only plugin-created sessions can be stopped. |
+| `browser_session_list` | — (registry only) | List the sessions this plugin created, marking the current one. Foreign daemon sessions are never shown. |
 | `browser_navigate` | `bsk navigate` | Navigate the active tab, with `waitUntil` / timeout control. |
 | `browser_snapshot` | `bsk snapshot` | Indented aria-tree snapshot with `@eN` refs for interaction tools. |
 | `browser_observe` | `bsk observe` | Semantic VOM observation (read-only) with `@eN` refs. |
@@ -33,6 +33,12 @@ One agent conversation can drive several browser sessions at once:
 - Every tool result echoes the session it actually acted on, so the model never has to guess.
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
+
+**Ownership boundary**: the bsk daemon may be shared with other agents, terminals, or dsh
+instances. The plugin therefore only ever sees and operates on sessions it created itself —
+an explicit `session` argument naming a foreign or unknown id is rejected, `browser_session_list`
+shows plugin-created sessions only (no daemon-wide view), and stop/unload cleanup can never touch
+a session owned by another program.
 
 ## Installation
 

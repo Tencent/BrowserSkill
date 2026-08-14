@@ -45,13 +45,22 @@ describe("SessionRegistry", () => {
     expect(registry.ownedIds()).toEqual(["s1"]);
   });
 
-  it("resolve prefers the explicit session and adopts it as a reference", () => {
+  it("resolve accepts an explicit owned session and makes it current", () => {
     const registry = new SessionRegistry(5);
     start(registry, "s1");
-    expect(registry.resolve("foreign", "tool")).toBe("foreign");
-    expect(registry.current()).toBe("foreign");
+    start(registry, "s2");
+    expect(registry.resolve("s1", "tool")).toBe("s1");
+    expect(registry.current()).toBe("s1");
+  });
+
+  it("resolve rejects foreign ids and never adopts them", () => {
+    const registry = new SessionRegistry(5);
+    start(registry, "s1");
+    expect(() => registry.resolve("foreign", "tool")).toThrow(/does not belong to this plugin/);
     expect(registry.isOwned("foreign")).toBe(false);
     expect(registry.ownedIds()).toEqual(["s1"]);
+    // A rejected resolve must not move the current pointer.
+    expect(registry.current()).toBe("s1");
   });
 
   it("resolve falls back to the current session", () => {
@@ -65,11 +74,11 @@ describe("SessionRegistry", () => {
     expect(() => registry.resolve(undefined, "browser_click")).toThrow(/browser_session_start/);
   });
 
-  it("touch refreshes recency so fallback picks the most recent survivor", () => {
+  it("recency order survives remove of the current session", () => {
     const registry = new SessionRegistry(5);
     start(registry, "s1");
     start(registry, "s2");
-    registry.touch("s1");
+    registry.resolve("s1", "tool");
     registry.remove("s1");
     expect(registry.current()).toBe("s2");
   });
@@ -79,9 +88,8 @@ describe("SessionRegistry", () => {
     start(registry, "s1");
     expect(registry.resolveForStop(undefined)).toBe("s1");
     expect(registry.resolveForStop("s1")).toBe("s1");
-    registry.resolve("foreign", "browser_snapshot");
-    expect(() => registry.resolveForStop("foreign")).toThrow(/not created by this plugin/);
-    expect(() => registry.resolveForStop("never-seen")).toThrow(/not created by this plugin/);
+    expect(() => registry.resolveForStop("foreign")).toThrow(/does not belong to this plugin/);
+    expect(() => registry.resolveForStop("never-seen")).toThrow(/does not belong to this plugin/);
   });
 
   it("a refused stop does not move the current pointer", () => {
@@ -91,12 +99,10 @@ describe("SessionRegistry", () => {
     expect(registry.current()).toBe("s1");
   });
 
-  it("ownedIds excludes referenced sessions even after heavy interleaving", () => {
+  it("ownedIds always equals every registered session (foreign ids never enter)", () => {
     const registry = new SessionRegistry(5);
     start(registry, "own1");
-    registry.resolve("ext1", "tool");
     start(registry, "own2");
-    registry.resolve("ext2", "tool");
     expect(registry.ownedIds().sort()).toEqual(["own1", "own2"]);
   });
 });
