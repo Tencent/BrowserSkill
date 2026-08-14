@@ -3,3 +3,6 @@
 **/.output/**
 **/target/**
 **/node_modules/**
+# Generated client CSS (tailwind compile output); built by
+# packages/dsh-plugin-browserskill/scripts/build-client-css.mjs.
+**/dsh-plugin-browserskill/src/client/bsk-ui.nomodule.css

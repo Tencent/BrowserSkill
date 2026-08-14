@@ -34,9 +34,10 @@
     }
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "node scripts/build-client-css.mjs && tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:css": "node scripts/build-client-css.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -82,16 +83,24 @@
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
+    "@tailwindcss/cli": "^4.3.3",
     "@testing-library/react": "^16.1.0",
     "@types/node": "^22.10.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "^18.3.0",
     "happy-dom": "^15.11.7",
     "lightningcss": "^1.30.0",
+    "postcss": "^8.5.0",
+    "postcss-prefix-selector": "^2.1.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "tailwindcss": "^4.3.3",
     "tsdown": "^0.22.14",
     "typescript": "^5.8.0",
     "vitest": "^4.1.6"
+  },
+  "dependencies": {
+    "@browser-skill/ui": "workspace:*",
+    "@remixicon/react": "^4.9.0"
   }
 }

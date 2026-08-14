@@ -10,6 +10,10 @@ import type { ClientContext, ISessions, SessionId } from "@deepseek-ai/dsh-clien
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
 import { createElement } from "react";
+// Scope-prefixed BSK design tokens and utility sheet (injected verbatim as
+// <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).
+import "./bsk-tokens.nomodule.css";
+import "./bsk-ui.nomodule.css";
 import { ObservationOverlay } from "./ObservationOverlay";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
 import { ScreenshotToolView } from "./ScreenshotToolView";

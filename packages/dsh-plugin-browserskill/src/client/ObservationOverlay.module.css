@@ -1,8 +1,10 @@
-/* Observation overlay: floating card + collapsed capsule. Every color,
-   surface, shadow, and label style rides the dsh --dsw-alias-* semantic
-   tokens (dsh 0.1 ships no spacing/radius scales — those stay px, same as
-   dsh's own components). The shell overlay layer is click-through, so the
-   card and capsule opt back into pointer events themselves. */
+/* Observation overlay skin, BrowserSkill family: colors/radius ride the BSK
+   design tokens (--card/--border/--primary/--destructive/--ring/--radius,
+   defined on the .bsk-obs scope root by bsk-tokens.nomodule.css — values
+   mirrored from packages/ui/src/styles/tailwind.css). Layout-only here;
+   component chrome (buttons etc.) comes from @browser-skill/ui plus the
+   scope-prefixed utility sheet. The shell overlay layer is click-through, so
+   the card and capsule opt back into pointer events themselves. */
 
 .card {
   position: fixed;
@@ -10,11 +12,12 @@
   display: flex;
   flex-direction: column;
   pointer-events: auto;
-  background: var(--dsw-alias-bg-overlay);
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 10px;
-  box-shadow: var(--dsw-shadow-lv2);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 18%);
   overflow: hidden;
+  color: var(--card-foreground);
 }
 
 .body {
@@ -22,9 +25,9 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  font: var(--dsw-font-base-16, inherit);
   font-size: 12px;
-  color: var(--dsw-alias-label-primary);
+  background: var(--card);
+  color: var(--card-foreground);
 }
 
 .header {
@@ -35,34 +38,7 @@
   cursor: move;
   user-select: none;
   touch-action: none;
-  border-bottom: 1px solid var(--dsw-alias-border-l2);
-}
-
-.dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--dsw-alias-label-tertiary);
-}
-
-.dot[data-state="active"] {
-  background: var(--dsw-alias-state-success-primary);
-  animation: bsk-obs-pulse 1.6s ease-in-out infinite;
-}
-
-.dot[data-state="error"] {
-  background: var(--dsw-alias-state-error-primary);
-}
-@keyframes bsk-obs-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.35;
-  }
+  border-bottom: 1px solid var(--border);
 }
 
 .status-text {
@@ -81,15 +57,15 @@
   border: none;
   background: none;
   padding: 2px;
-  border-radius: 4px;
+  border-radius: calc(var(--radius) - 6px);
   font: inherit;
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--muted-foreground);
   cursor: pointer;
 }
 
 .icon-button:hover {
-  color: var(--dsw-alias-label-secondary);
-  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--foreground);
+  background: var(--accent);
 }
 
 .stage {
@@ -99,7 +75,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--dsw-alias-bg-base);
+  background: var(--background);
   overflow: hidden;
 }
 
@@ -120,7 +96,7 @@
 }
 
 .placeholder {
-  color: var(--dsw-alias-label-tertiary);
+  color: var(--muted-foreground);
   font-size: 12px;
 }
 
@@ -134,9 +110,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--dsw-alias-state-warn-primary);
-  border: 1px solid var(--dsw-alias-state-warn-primary);
-  background: var(--dsw-alias-bg-overlay);
+  color: oklch(0.7 0.19 60);
+  border: 1px solid oklch(0.7 0.19 60);
+  background: var(--card);
 }
 
 .actions {
@@ -145,17 +121,27 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  border-top: 1px solid var(--dsw-alias-border-l2);
+  border-top: 1px solid var(--border);
 }
 
-/* Destructive action, styled like the shell's own danger affordances. */
-.interrupt {
-  color: var(--dsw-alias-state-error-primary);
-  border-color: var(--dsw-alias-state-error-primary);
+.interrupt-wrap {
+  position: relative;
+  display: inline-flex;
 }
 
-.interrupt:not(:disabled):hover {
-  background: var(--dsw-alias-interactive-bg-hover-danger);
+.hint {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  width: 220px;
+  padding: 6px 8px;
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 16%);
+  z-index: 41;
 }
 
 .resize-handle {
@@ -175,8 +161,8 @@
   bottom: 3px;
   width: 7px;
   height: 7px;
-  border-right: 2px solid var(--dsw-alias-label-tertiary);
-  border-bottom: 2px solid var(--dsw-alias-label-tertiary);
+  border-right: 2px solid var(--muted-foreground);
+  border-bottom: 2px solid var(--muted-foreground);
 }
 
 .capsule {
@@ -190,16 +176,16 @@
   padding: 6px 12px;
   pointer-events: auto;
   border-radius: 999px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  background: var(--dsw-alias-bg-overlay);
-  box-shadow: var(--dsw-shadow-lv1);
+  border: 1px solid var(--border);
+  background: var(--card);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 16%);
   font-size: 12px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
 }
 
 .capsule:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+  background: var(--accent);
 }
 
 .strip {
@@ -207,22 +193,22 @@
   gap: 6px;
   padding: 4px 8px;
   overflow-x: auto;
-  border-top: 1px solid var(--dsw-alias-border-l2);
+  border-top: 1px solid var(--border);
 }
 
 .strip-item {
   position: relative;
   flex: none;
-  border-radius: 6px;
-  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: calc(var(--radius) - 6px);
+  border: 1px solid var(--border);
 }
 
 .strip-item[data-focused] {
-  border-color: var(--dsw-alias-brand-primary);
+  border-color: var(--primary);
 }
 
 .strip-item[data-state="error"] {
-  border-color: var(--dsw-alias-state-error-primary);
+  border-color: var(--destructive);
 }
 
 .strip-item[data-state="dead"] {
@@ -235,16 +221,16 @@
   gap: 4px;
   padding: 3px 6px;
   border: none;
-  border-radius: 6px;
+  border-radius: calc(var(--radius) - 6px);
   background: none;
   font: inherit;
   font-size: 11px;
-  color: var(--dsw-alias-label-secondary);
+  color: var(--muted-foreground);
   cursor: pointer;
 }
 
 .strip-main:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+  background: var(--accent);
 }
 
 .strip-thumb {
@@ -252,7 +238,7 @@
   height: 20px;
   overflow: hidden;
   border-radius: 3px;
-  background: var(--dsw-alias-bg-base);
+  background: var(--background);
   display: inline-flex;
 }
 
@@ -274,7 +260,7 @@
 }
 
 .pin-badge {
-  color: var(--dsw-alias-brand-primary);
+  color: var(--primary);
 }
 
 .strip-interrupt {
@@ -287,9 +273,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--dsw-alias-state-error-primary);
-  background: var(--dsw-alias-bg-overlay);
-  color: var(--dsw-alias-state-error-primary);
+  border: 1px solid var(--destructive);
+  background: var(--card);
+  color: var(--destructive);
   padding: 0;
   cursor: pointer;
 }
@@ -303,14 +289,10 @@
 .capsule:focus-visible,
 .strip-main:focus-visible,
 .strip-interrupt:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline: 2px solid var(--ring);
   outline-offset: 2px;
 }
 @media (prefers-reduced-motion: reduce) {
-  .dot[data-state="active"] {
-    animation: none;
-  }
-
   .thumb {
     animation: none;
   }

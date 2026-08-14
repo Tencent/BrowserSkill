@@ -71,7 +71,10 @@ const client: UserConfig = {
     {
       name: "bsk-css-modules-inline",
       resolveId(source: string, importer: string | undefined) {
-        if (!source.endsWith(".module.css")) return null;
+        // `.module.css` gets hashed class maps; `.nomodule.css` is injected
+        // verbatim (minified) — used for the scope-prefixed BSK utility sheet
+        // and tokens, whose selectors must survive untouched.
+        if (!source.endsWith(".module.css") && !source.endsWith(".nomodule.css")) return null;
         const abs = importer !== undefined ? resolvePath(dirname(importer), source) : source;
         return CSS_VIRTUAL_PREFIX + abs + CSS_VIRTUAL_SUFFIX;
       },
@@ -80,10 +83,11 @@ const client: UserConfig = {
         const fileId = virtualId.slice(CSS_VIRTUAL_PREFIX.length, -CSS_VIRTUAL_SUFFIX.length);
         this.addWatchFile(fileId);
         const source = await readFile(fileId);
+        const isModule = fileId.endsWith(".module.css");
         const { code, exports: cssExports } = transform({
           filename: fileId,
           code: source,
-          cssModules: { pattern: "[hash]_[local]" },
+          ...(isModule ? { cssModules: { pattern: "[hash]_[local]" } } : {}),
           minify: true,
         });
         const classMap: Record<string, string> = {};

@@ -1,0 +1,49 @@
+/*
+ * BrowserSkill UI design tokens, scoped to the observation overlay root.
+ * VALUES MIRROR packages/ui/src/styles/tailwind.css (:root and .dark) — keep
+ * in sync with that file; it is the canonical source. Scoped here (instead of
+ * :root) so the dsh host theme can neither leak in nor be polluted by us.
+ * Dark follows prefers-color-scheme, same as the extension popup.
+ */
+.bsk-obs {
+  color-scheme: light dark;
+  --background: oklch(0.99 0.005 50);
+  --foreground: oklch(0.14 0.03 50);
+  --card: oklch(0.995 0.003 50 / 0.82);
+  --card-foreground: oklch(0.14 0.03 50);
+  --primary: oklch(0.62 0.22 45);
+  --primary-foreground: oklch(0.99 0.01 50);
+  --secondary: oklch(0.96 0.04 65);
+  --secondary-foreground: oklch(0.25 0.08 65);
+  --muted: oklch(0.96 0.01 50);
+  --muted-foreground: oklch(0.55 0.04 50);
+  --accent: oklch(0.96 0.04 65);
+  --accent-foreground: oklch(0.25 0.08 65);
+  --destructive: oklch(0.6 0.25 25);
+  --destructive-foreground: oklch(0.99 0.01 50);
+  --border: oklch(0.9 0.025 60);
+  --input: oklch(0.9 0.025 60);
+  --ring: oklch(0.62 0.22 45);
+  --radius: 0.75rem;
+}
+@media (prefers-color-scheme: dark) {
+  .bsk-obs {
+    --background: oklch(0.2 0.02 50);
+    --foreground: oklch(0.98 0.01 50);
+    --card: oklch(0.24 0.02 50 / 0.82);
+    --card-foreground: oklch(0.98 0.01 50);
+    --primary: oklch(0.7 0.18 45);
+    --primary-foreground: oklch(0.14 0.03 50);
+    --secondary: oklch(0.32 0.03 60);
+    --secondary-foreground: oklch(0.98 0.01 50);
+    --muted: oklch(0.3 0.02 50);
+    --muted-foreground: oklch(0.75 0.03 50);
+    --accent: oklch(0.32 0.03 60);
+    --accent-foreground: oklch(0.98 0.01 50);
+    --destructive: oklch(0.45 0.2 25);
+    --destructive-foreground: oklch(0.98 0.01 50);
+    --border: oklch(0.35 0.02 60);
+    --input: oklch(0.35 0.02 60);
+    --ring: oklch(0.7 0.18 45);
+  }
+}
