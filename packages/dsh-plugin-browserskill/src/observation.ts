@@ -15,6 +15,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
+import type { KeyedExecutor } from "./queue";
 import type { BskRunner } from "./runner";
 import type { SessionRegistry } from "./sessions";
 
@@ -98,6 +99,7 @@ export class ObservationService {
       ctx: Context;
       runner: BskRunner;
       registry: SessionRegistry;
+      queue: KeyedExecutor;
       options: ObservationOptions;
       scheduler?: ObservationScheduler;
     },
@@ -287,9 +289,11 @@ export class ObservationService {
     this.captureInFlight.add(sessionId);
     try {
       const outPath = join(tmpdir(), `bsk-obs-${sessionId}-${this.scheduler.now()}.png`);
-      const result = await this.deps.runner.run(
-        ["screenshot", "--session", sessionId, "--out", outPath],
-        { timeoutMs: 15_000, tag: `observation:${sessionId}` },
+      const result = await this.deps.queue.run(sessionId, () =>
+        this.deps.runner.run(["screenshot", "--session", sessionId, "--out", outPath], {
+          timeoutMs: 15_000,
+          tag: `observation:${sessionId}`,
+        }),
       );
       if (result.code !== 0) {
         let code: string | undefined;

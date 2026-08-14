@@ -14,6 +14,7 @@ import {
   ObservationService,
 } from "../src/observation";
 import { registerObservationRoutes } from "../src/observation-http";
+import { KeyedExecutor } from "../src/queue";
 import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 
@@ -128,6 +129,7 @@ function setup(opts: {
     ctx: fakeCtx(attachments),
     runner,
     registry,
+    queue: new KeyedExecutor(),
     options: OPTIONS,
     scheduler,
   });

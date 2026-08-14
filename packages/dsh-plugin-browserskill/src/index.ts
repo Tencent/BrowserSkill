@@ -14,6 +14,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
+import { KeyedExecutor } from "./queue";
 import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
 import { type PluginConfig, registerTools } from "./tools";
@@ -65,10 +66,12 @@ export function apply(
   };
   const runner = options.runnerFactory?.(resolved.bskPath) ?? createBskRunner(resolved.bskPath);
   const registry = new SessionRegistry(resolved.maxSessions);
+  const queue = new KeyedExecutor();
   const observation = new ObservationService({
     ctx,
     runner,
     registry,
+    queue,
     options: {
       enabled: resolved.observationEnabled,
       thumbnailIntervalMs: resolved.thumbnailIntervalMs,
@@ -76,7 +79,7 @@ export function apply(
     },
   });
 
-  registerTools({ ctx, runner, registry, config: resolved, observation });
+  registerTools({ ctx, runner, registry, config: resolved, observation, queue });
   // Route registration rides ctx.inject: the webServer service may be provided
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
@@ -121,6 +124,7 @@ export function apply(
 export type { ObservationEvent, ObservationOptions, SessionObservation } from "./observation";
 export { ObservationService } from "./observation";
 export { registerObservationRoutes } from "./observation-http";
+export { KeyedExecutor } from "./queue";
 export type { BskRunner, BskRunResult, SpawnImpl } from "./runner";
 export { BskError, createBskRunner } from "./runner";
 export { SessionRegistry } from "./sessions";

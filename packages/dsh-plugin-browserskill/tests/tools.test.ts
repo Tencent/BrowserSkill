@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it } from "vitest";
 import { ObservationService } from "../src/observation";
+import { KeyedExecutor } from "../src/queue";
 import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 import { type PluginConfig, registerTools } from "../src/tools";
@@ -23,6 +24,7 @@ function disabledObservation(deps: { ctx: unknown; runner: BskRunner; registry: 
     ctx: deps.ctx as never,
     runner: deps.runner,
     registry: deps.registry,
+    queue: new KeyedExecutor(),
     options: { enabled: false, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
   });
 }
@@ -121,6 +123,7 @@ function setup(
     registry,
     config,
     observation: disabledObservation({ ctx, runner: runner as BskRunner, registry }),
+    queue: new KeyedExecutor(),
   });
   return { tools, calls, registry };
 }
@@ -576,6 +579,7 @@ describe("error and cancellation semantics", () => {
       registry,
       config: CONFIG,
       observation: disabledObservation({ ctx, runner, registry }),
+      queue: new KeyedExecutor(),
     });
     const start = tools.get("browser_session_start");
     await expect(start?.execute({}, makeExec())).rejects.toThrow(/BrowserSkill must be installed/);

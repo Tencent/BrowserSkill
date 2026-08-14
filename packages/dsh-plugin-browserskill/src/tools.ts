@@ -14,6 +14,7 @@ import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import { defineTool, type ToolResult, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
+import type { KeyedExecutor } from "./queue";
 import { type BskRunner, bskInstallMessage, isCommandNotFound, parseBskJson } from "./runner";
 import type { SessionRegistry } from "./sessions";
 
@@ -33,6 +34,8 @@ export interface ToolDeps {
   registry: SessionRegistry;
   config: PluginConfig;
   observation: ObservationService;
+  /** Per-session FIFO: the daemon rejects a second command while one is unfinished. */
+  queue: KeyedExecutor;
 }
 
 /** Device presets supported by `bsk emulate --device`. */
@@ -74,11 +77,16 @@ async function runBsk(
   try {
     let result;
     try {
-      result = await deps.runner.run(args, {
-        signal: exec.signal,
-        timeoutMs: deps.config.defaultTimeoutMs,
-        ...(observeSession !== undefined ? { tag: observeSession } : {}),
-      });
+      const runOnce = () =>
+        deps.runner.run(args, {
+          signal: exec.signal,
+          timeoutMs: deps.config.defaultTimeoutMs,
+          ...(observeSession !== undefined ? { tag: observeSession } : {}),
+        });
+      result =
+        observeSession !== undefined
+          ? await deps.queue.run(observeSession, runOnce, exec.signal)
+          : await runOnce();
     } catch (error) {
       if (isCommandNotFound(error)) {
         throw new Error(bskInstallMessage(deps.config.bskPath));
