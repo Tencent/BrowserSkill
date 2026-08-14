@@ -71,7 +71,7 @@ describe("dispose cleanup ownership", () => {
         disposers.push(fn());
       },
     };
-    apply(ctx as never, { maxSessions: 5 }, { runnerFactory: () => runner });
+    apply(ctx as never, { maxSessions: 5, lazyTools: false }, { runnerFactory: () => runner });
 
     const start = tools.get("browser_session_start");
     const snapshot = tools.get("browser_snapshot");

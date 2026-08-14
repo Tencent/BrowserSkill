@@ -16,6 +16,7 @@ const CONFIG: PluginConfig = {
   observationEnabled: false,
   thumbnailIntervalMs: 1500,
   idleIntervalMs: 8000,
+  lazyTools: false,
 };
 
 /** An observation service with the feature off: instrumentation becomes a no-op. */

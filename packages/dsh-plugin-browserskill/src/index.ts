@@ -12,6 +12,7 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
+import { armLazyTools } from "./lazy-tools";
 import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
@@ -43,6 +44,12 @@ export const Config = Schema.object({
   idleIntervalMs: Schema.number()
     .default(8000)
     .description("Thumbnail refresh cadence for idle sessions; also the recent-activity window."),
+  lazyTools: Schema.boolean()
+    .default(true)
+    .description(
+      "Reveal the browser_* tools only after the browser-skill skill is invoked (default true); " +
+        "false registers the full suite at load.",
+    ),
 });
 
 export type Config = PluginConfig;
@@ -64,6 +71,7 @@ export function apply(
     observationEnabled: config.observationEnabled ?? true,
     thumbnailIntervalMs: config.thumbnailIntervalMs ?? 1500,
     idleIntervalMs: config.idleIntervalMs ?? 8000,
+    lazyTools: config.lazyTools ?? true,
   };
   const runner = options.runnerFactory?.(resolved.bskPath) ?? createBskRunner(resolved.bskPath);
   const registry = new SessionRegistry(resolved.maxSessions);
@@ -80,11 +88,17 @@ export function apply(
     },
   });
 
-  registerTools({ ctx, runner, registry, config: resolved, observation, queue });
   // Progressive disclosure of the BSK agent skill (catalog entry resident,
   // body on demand) through the official skill seam; silent no-op when the
-  // composition lacks it.
+  // composition lacks it. With lazyTools on, the skill entry is initially the
+  // ONLY model-visible advertisement — the tool suite reveals itself on a
+  // successful skill invocation (or a session whose history already has one).
   const unregisterSkill = registerBskSkill(ctx);
+  const removeSuite = resolved.lazyTools
+    ? armLazyTools(ctx, () =>
+        registerTools({ ctx, runner, registry, config: resolved, observation, queue }),
+      )
+    : registerTools({ ctx, runner, registry, config: resolved, observation, queue });
   // Route registration rides ctx.inject: the webServer service may be provided
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
@@ -115,6 +129,7 @@ export function apply(
   // are swallowed so one stale handle cannot abort the rest.
   ctx.effect(() => {
     return () => {
+      removeSuite();
       unregisterSkill();
       removeRoutes();
       observation.dispose();

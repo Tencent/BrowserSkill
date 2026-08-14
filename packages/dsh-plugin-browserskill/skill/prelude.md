@@ -5,6 +5,11 @@ through this plugin's `browser_*` tools. Each tool spawns `bsk <cmd> --json` —
 same engine the canonical CLI skill documents — so the workflow, judgment rules, and
 safety constraints are identical.
 
+> **Tool availability**: invoking this skill (which you just did) makes the plugin's
+> `browser_*` tools available for the rest of the session — they are injected on
+> successful skill load. Until then they are deliberately hidden, so do not attempt
+> a browser action before loading this skill.
+
 ## Tool ↔ CLI map
 
 The tools below are thin, structured wrappers over the bsk CLI verbs of the same

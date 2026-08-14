@@ -26,6 +26,13 @@ export interface PluginConfig {
   observationEnabled: boolean;
   thumbnailIntervalMs: number;
   idleIntervalMs: number;
+  /**
+   * Lazy tool-schema injection: when true (default), the browser_* tools are
+   * registered only after the `browser-skill` skill has been successfully
+   * invoked (skill catalog entry advertises alone until then); when false,
+   * the suite is registered at apply time (legacy always-on behavior).
+   */
+  lazyTools: boolean;
 }
 
 export interface ToolDeps {
@@ -136,9 +143,22 @@ function abortError(): Error {
   return error;
 }
 
-/** Register the full browser tool suite. */
-export function registerTools(deps: ToolDeps): void {
-  const { ctx, registry } = deps;
+/** Register the full browser tool suite; returns the combined unregister disposer. */
+export function registerTools(deps: ToolDeps): () => void {
+  // Track every registration through a prototype-preserving overlay so the
+  // lazy-injection path can dispose the whole suite in one call.
+  const disposers: (() => void)[] = [];
+  const ctx = Object.create(deps.ctx) as ToolDeps["ctx"];
+  const toolsOverlay = Object.create(deps.ctx.tools) as ToolDeps["ctx"]["tools"];
+  const originalRegister = deps.ctx.tools.register;
+  toolsOverlay.register = (definition: Parameters<typeof originalRegister>[0]) => {
+    const dispose = originalRegister.call(deps.ctx.tools, definition);
+    // Test doubles occasionally return the registry map instead of a disposer.
+    if (typeof dispose === "function") disposers.push(dispose);
+    return dispose;
+  };
+  ctx.tools = toolsOverlay;
+  const { registry } = deps;
 
   ctx.tools.register(
     defineTool({
@@ -934,4 +954,7 @@ export function registerTools(deps: ToolDeps): void {
       presentResult: presentTerminalResult,
     }),
   );
+  return () => {
+    for (const dispose of disposers.splice(0)) dispose();
+  };
 }
