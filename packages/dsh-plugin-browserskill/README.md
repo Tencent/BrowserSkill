@@ -66,7 +66,41 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
         bskPath: bsk          # path to the bsk binary (default: resolve from PATH)
         defaultTimeoutMs: 120000
         maxSessions: 5
+        # observationEnabled: true     # live PiP/overlay observation (below)
+        # thumbnailIntervalMs: 1500    # frame cadence while a session is active
+        # idleIntervalMs: 8000         # idle cadence / recent-activity window
 ```
+
+## Observation overlay (PiP mini-window)
+
+When the plugin runs inside the dsh Web UI, an **observation overlay** floats over the app
+(registered into the `shell.overlay` seat): a breathing thumbnail per owned session plus its
+current action and elapsed time.
+
+- **Lifecycle**: hidden while the plugin owns no sessions; appears on the first
+  `browser_session_start`; disappears when all sessions stop (or the plugin unloads).
+- **Focus view**: status row (green/idle/red dot + session + action + mm:ss), the latest page
+  frame (refreshes every ~1.5s while active, ~8s when idle, keeps the last frame on errors),
+  and the action row (Interrupt + Pop out).
+- **Interrupt**: one click kills the in-flight bsk command of the focus session (same semantics
+  as the chat Stop button — the current action fails, the agent run may continue). Strip items
+  carry their own hover interrupt button.
+- **Multi-session strip**: every session gets a tile (mini frame + id + status dot); focus
+  auto-follows the most recently active session; clicking a tile pins focus (pin badge, click
+  again to release); errored sessions get a red edge without stealing focus; sessions the daemon
+  lost are greyed out; prolonged daemon/browser outage shows "browser unavailable" and greys
+  the interrupt button until captures recover.
+- **Drag & resize**: drag the header to move the card, drag the corner handle to resize
+  (min 240×180, max 80% of the viewport); both are remembered for the page lifetime.
+- **Pop out (PiP)**: upgrades the card into a native Document PiP window (requires a user
+  gesture, per browser rules), sized from the current card; closing the PiP falls back to the
+  in-page card with state intact. Browsers without Document PiP simply hide the button.
+- **Wire**: the host serves `GET /bsk-observation/state`, `GET /bsk-observation/events` (SSE),
+  `POST /bsk-observation/interrupt`, and `GET /bsk-observation/thumbnail/<attachmentId>` over
+  the dsh `webServer` route seam (dsh 0.1's Typert Remote pipeline is closed to out-of-tree
+  packages). All commands for one session — tool calls and frame captures alike — run through a
+  per-session FIFO, because the daemon accepts only one unfinished command per session.
+- Configure with `observationEnabled` / `thumbnailIntervalMs` / `idleIntervalMs`.
 
 ## Behavior notes
 
