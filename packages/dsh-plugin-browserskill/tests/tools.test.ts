@@ -3,11 +3,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it } from "vitest";
-import type { BskRunOptions, BskRunResult } from "../src/runner";
+import { ObservationService } from "../src/observation";
+import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 import { type PluginConfig, registerTools } from "../src/tools";
 
-const CONFIG: PluginConfig = { bskPath: "bsk", defaultTimeoutMs: 120_000, maxSessions: 5 };
+const CONFIG: PluginConfig = {
+  bskPath: "bsk",
+  defaultTimeoutMs: 120_000,
+  maxSessions: 5,
+  observationEnabled: false,
+  thumbnailIntervalMs: 1500,
+  idleIntervalMs: 8000,
+};
+
+/** An observation service with the feature off: instrumentation becomes a no-op. */
+function disabledObservation(deps: { ctx: unknown; runner: BskRunner; registry: SessionRegistry }) {
+  return new ObservationService({
+    ctx: deps.ctx as never,
+    runner: deps.runner,
+    registry: deps.registry,
+    options: { enabled: false, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
+  });
+}
 
 interface FakeCall {
   args: string[];
@@ -58,6 +76,7 @@ function fakeRunner(responses: Record<string, unknown>) {
         };
       },
       killAll() {},
+      killFor: () => 0,
     },
   };
 }
@@ -95,7 +114,14 @@ function setup(
   const { ctx, tools } = makeCtx(services);
   const { runner, calls } = fakeRunner(responses);
   const registry = new SessionRegistry(maxSessions);
-  registerTools({ ctx: ctx as never, runner, registry, config: { ...CONFIG, maxSessions } });
+  const config = { ...CONFIG, maxSessions };
+  registerTools({
+    ctx: ctx as never,
+    runner: runner as BskRunner,
+    registry,
+    config,
+    observation: disabledObservation({ ctx, runner: runner as BskRunner, registry }),
+  });
   return { tools, calls, registry };
 }
 
@@ -542,8 +568,15 @@ describe("error and cancellation semantics", () => {
         throw Object.assign(new Error("spawn bsk ENOENT"), { code: "ENOENT" });
       },
       killAll() {},
+      killFor: () => 0,
     };
-    registerTools({ ctx: ctx as never, runner, registry, config: CONFIG });
+    registerTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      config: CONFIG,
+      observation: disabledObservation({ ctx, runner, registry }),
+    });
     const start = tools.get("browser_session_start");
     await expect(start?.execute({}, makeExec())).rejects.toThrow(/BrowserSkill must be installed/);
   });

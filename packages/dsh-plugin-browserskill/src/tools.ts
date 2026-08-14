@@ -13,6 +13,7 @@ import type { Context } from "@deepseek-ai/cordis";
 import type { ContentBlock } from "@deepseek-ai/dsh-llm";
 import { defineTool, type ToolResult, type ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { trySaveScreenshot } from "./image";
+import { actionForLabel, type ObservationService } from "./observation";
 import { type BskRunner, bskInstallMessage, isCommandNotFound, parseBskJson } from "./runner";
 import type { SessionRegistry } from "./sessions";
 
@@ -21,6 +22,9 @@ export interface PluginConfig {
   bskPath: string;
   defaultTimeoutMs: number;
   maxSessions: number;
+  observationEnabled: boolean;
+  thumbnailIntervalMs: number;
+  idleIntervalMs: number;
 }
 
 export interface ToolDeps {
@@ -28,6 +32,7 @@ export interface ToolDeps {
   runner: BskRunner;
   registry: SessionRegistry;
   config: PluginConfig;
+  observation: ObservationService;
 }
 
 /** Device presets supported by `bsk emulate --device`. */
@@ -48,31 +53,52 @@ const SESSION_PARAM = {
     "Omit to use the current session (the one most recently started or used).",
 } as const;
 
-/** Run one bsk command and return its parsed JSON payload, or throw. */
+/**
+ * Run one bsk command and return its parsed JSON payload, or throw.
+ * `observeSession` marks the run as model-facing work on that session: it is
+ * instrumented into the observation service (action begin/end) and tagged so
+ * interrupt() can kill exactly this child. Observation traffic itself never
+ * passes an observeSession.
+ */
 async function runBsk(
   deps: ToolDeps,
   exec: ToolRunContext,
   args: string[],
   label: string,
+  observeSession?: string,
 ): Promise<unknown> {
-  let result;
+  if (observeSession !== undefined) {
+    deps.observation.beginAction(observeSession, actionForLabel(label));
+  }
+  let actionError: string | undefined;
   try {
-    result = await deps.runner.run(args, {
-      signal: exec.signal,
-      timeoutMs: deps.config.defaultTimeoutMs,
-    });
-  } catch (error) {
-    if (isCommandNotFound(error)) {
-      throw new Error(bskInstallMessage(deps.config.bskPath));
+    let result;
+    try {
+      result = await deps.runner.run(args, {
+        signal: exec.signal,
+        timeoutMs: deps.config.defaultTimeoutMs,
+        ...(observeSession !== undefined ? { tag: observeSession } : {}),
+      });
+    } catch (error) {
+      if (isCommandNotFound(error)) {
+        throw new Error(bskInstallMessage(deps.config.bskPath));
+      }
+      throw error;
     }
+    if (result.aborted) {
+      const error = new Error("tool call aborted");
+      error.name = "AbortError";
+      throw error;
+    }
+    return parseBskJson(result, label);
+  } catch (error) {
+    actionError = error instanceof Error ? error.message.split("\n")[0] : String(error);
     throw error;
+  } finally {
+    if (observeSession !== undefined) {
+      deps.observation.endAction(observeSession, actionError);
+    }
   }
-  if (result.aborted) {
-    const error = new Error("tool call aborted");
-    error.name = "AbortError";
-    throw error;
-  }
-  return parseBskJson(result, label);
 }
 
 /** Build the command line shown on the pending terminal card (pure). */
@@ -184,6 +210,7 @@ export function registerTools(deps: ToolDeps): void {
           browserInstanceId: reply.browser_instance_id,
           startedAtMs: Date.now(),
         });
+        deps.observation.addSession(reply.session_id, args.url);
         try {
           if (args.device !== undefined) {
             await runBsk(
@@ -191,6 +218,7 @@ export function registerTools(deps: ToolDeps): void {
               exec,
               ["emulate", "--session", reply.session_id, "--device", args.device],
               "emulate",
+              reply.session_id,
             );
           }
           if (args.url !== undefined) {
@@ -199,6 +227,7 @@ export function registerTools(deps: ToolDeps): void {
               exec,
               ["navigate", "--session", reply.session_id, args.url],
               "navigate",
+              reply.session_id,
             );
           }
         } catch (error) {
@@ -207,6 +236,7 @@ export function registerTools(deps: ToolDeps): void {
             .run(["session", "stop", reply.session_id], { timeoutMs: 30_000 })
             .catch(() => {});
           registry.remove(reply.session_id);
+          deps.observation.removeSession(reply.session_id);
           throw error;
         }
         return {
@@ -250,8 +280,9 @@ export function registerTools(deps: ToolDeps): void {
       },
       async execute(args, exec) {
         const sessionId = registry.resolveForStop(args.session);
-        await runBsk(deps, exec, ["session", "stop", sessionId], "session stop");
+        await runBsk(deps, exec, ["session", "stop", sessionId], "session stop", sessionId);
         registry.remove(sessionId);
+        deps.observation.removeSession(sessionId);
         return { stopped: sessionId };
       },
       presentCall: (args) => ({
@@ -377,12 +408,13 @@ export function registerTools(deps: ToolDeps): void {
         if (args.waitUntil !== undefined) cmdArgs.push("--wait-until", args.waitUntil);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
         cmdArgs.push(args.url);
-        const reply = (await runBsk(deps, exec, cmdArgs, "navigate")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "navigate", sessionId)) as {
           tab_id: number;
           url: string;
           final_url?: string;
           reached: string;
         };
+        deps.observation.setUrl(sessionId, reply.final_url ?? reply.url);
         return {
           session: sessionId,
           tabId: reply.tab_id,
@@ -448,7 +480,7 @@ export function registerTools(deps: ToolDeps): void {
           const cmdArgs = [kind, "--session", sessionId];
           if (args.maxDepth !== undefined) cmdArgs.push("--max-depth", String(args.maxDepth));
           if (args.maxTokens !== undefined) cmdArgs.push("--max-tokens", String(args.maxTokens));
-          const reply = (await runBsk(deps, exec, cmdArgs, kind)) as {
+          const reply = (await runBsk(deps, exec, cmdArgs, kind, sessionId)) as {
             text: string;
             ref_count: number;
             tab_id: number;
@@ -522,7 +554,7 @@ export function registerTools(deps: ToolDeps): void {
         if (args.button !== undefined) cmdArgs.push("--button", args.button);
         if (args.clickCount !== undefined) cmdArgs.push("--click-count", String(args.clickCount));
         cmdArgs.push(args.target);
-        const reply = (await runBsk(deps, exec, cmdArgs, "click")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "click", sessionId)) as {
           tab_id: number;
           x: number;
           y: number;
@@ -580,7 +612,7 @@ export function registerTools(deps: ToolDeps): void {
         const cmdArgs = ["fill", "--session", sessionId, "--value", args.value];
         if (args.noClear === true) cmdArgs.push("--no-clear");
         cmdArgs.push(args.target);
-        const reply = (await runBsk(deps, exec, cmdArgs, "fill")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "fill", sessionId)) as {
           tab_id: number;
           value_length: number;
         };
@@ -650,7 +682,7 @@ export function registerTools(deps: ToolDeps): void {
         }
         if (args.holdMs !== undefined) cmdArgs.push("--hold-ms", String(args.holdMs));
         cmdArgs.push(args.key);
-        const reply = (await runBsk(deps, exec, cmdArgs, "press")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "press", sessionId)) as {
           tab_id: number;
           key: string;
         };
@@ -735,7 +767,7 @@ export function registerTools(deps: ToolDeps): void {
         );
         const cmdArgs = ["screenshot", "--session", sessionId, "--out", outPath];
         if (args.ref !== undefined) cmdArgs.push("--ref", args.ref);
-        const reply = (await runBsk(deps, exec, cmdArgs, "screenshot")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "screenshot", sessionId)) as {
           tab_id: number;
           width: number;
           height: number;
@@ -839,7 +871,7 @@ export function registerTools(deps: ToolDeps): void {
           }
           if (args.mobile === true) cmdArgs.push("--mobile");
         }
-        const reply = (await runBsk(deps, exec, cmdArgs, "emulate")) as {
+        const reply = (await runBsk(deps, exec, cmdArgs, "emulate", sessionId)) as {
           tab_id: number;
           cleared: boolean;
         };

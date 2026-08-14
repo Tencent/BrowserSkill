@@ -58,6 +58,7 @@ describe("dispose cleanup ownership", () => {
         return fail(`unexpected command: ${joined}`);
       },
       killAll() {},
+      killFor: () => 0,
     };
     const tools = new Map<string, ToolDefinition>();
     const disposers: Array<() => Promise<void>> = [];

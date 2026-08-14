@@ -1,0 +1,320 @@
+/**
+ * ObservationService: per-owned-session live observation state for the PiP
+ * overlay — current action, page url, and a breathing thumbnail carried by
+ * attachment reference. Strict ownership boundary applies throughout: only
+ * sessions in the plugin's SessionRegistry (owned by construction) ever get
+ * an observation entry, and interrupt/kill paths can only reach children this
+ * plugin spawned.
+ *
+ * Observation traffic isolation: thumbnail captures run through the runner
+ * directly (never through the tool-level instrumentation), emit no action
+ * events, and never move the registry's current pointer.
+ */
+
+import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Context } from "@deepseek-ai/cordis";
+import type { BskRunner } from "./runner";
+import type { SessionRegistry } from "./sessions";
+
+/** One owned session's live observation record (wire-stable shape). */
+export interface SessionObservation {
+  sessionId: string;
+  /** Last settled page URL, when any navigation completed. */
+  url?: string;
+  /** Current action ('idle' when nothing is in flight). */
+  action: string;
+  /** Epoch ms when the current action started (elapsed time is client-side). */
+  since: number;
+  /** Latest thumbnail, by attachment-store reference (never bytes on the wire). */
+  thumbnailAttachmentId?: string;
+  /** Summary of the most recent failed action (drives the red status dot). */
+  lastError?: string;
+}
+
+/** Incremental event carried to subscribers (SSE on the wire). */
+export interface ObservationEvent {
+  type: "upsert" | "remove" | "reset";
+  session?: SessionObservation;
+}
+
+export interface ObservationOptions {
+  enabled: boolean;
+  /** Fast cadence while a session is active or recently was. */
+  thumbnailIntervalMs: number;
+  /** Slow cadence for idle sessions; also the "recently active" window. */
+  idleIntervalMs: number;
+}
+
+/** Structural view of the optional attachment seam (absent in headless compositions). */
+interface AttachmentLike {
+  saveImage(input: {
+    data: Uint8Array;
+    mediaType: string;
+    name?: string;
+  }): Promise<{ attachmentId: unknown }>;
+}
+
+/** Injectable clock/scheduler bits for tests. */
+export interface ObservationScheduler {
+  setTimeout: (fn: () => void, ms: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+  now: () => number;
+}
+
+const DEFAULT_SCHEDULER: ObservationScheduler = {
+  setTimeout: (fn, ms) => {
+    const timer = setTimeout(fn, ms);
+    // Never hold the event loop open for a frame refresh.
+    if (typeof timer === "object" && typeof timer.unref === "function") timer.unref();
+    return timer;
+  },
+  clearTimeout: (h) => clearTimeout(h as Parameters<typeof clearTimeout>[0]),
+  now: () => Date.now(),
+};
+
+/** Max consecutive capture failures before a session drops to the idle cadence. */
+const FAILURE_BACKOFF_THRESHOLD = 3;
+
+export class ObservationService {
+  private readonly observations = new Map<string, SessionObservation>();
+  private readonly listeners = new Set<(event: ObservationEvent) => void>();
+  private readonly captureTimers = new Map<string, unknown>();
+  private readonly captureInFlight = new Set<string>();
+  private readonly captureFailures = new Map<string, number>();
+  private readonly lastActivity = new Map<string, number>();
+  private disposed = false;
+
+  constructor(
+    private readonly deps: {
+      ctx: Context;
+      runner: BskRunner;
+      registry: SessionRegistry;
+      options: ObservationOptions;
+      scheduler?: ObservationScheduler;
+    },
+  ) {}
+
+  private get scheduler(): ObservationScheduler {
+    return this.deps.scheduler ?? DEFAULT_SCHEDULER;
+  }
+
+  /** All current entries (client initial/resync snapshot). */
+  getState(): SessionObservation[] {
+    return [...this.observations.values()].map((entry) => ({ ...entry }));
+  }
+
+  /** Subscribe to incremental changes; returns an unsubscribe function. */
+  subscribe(listener: (event: ObservationEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: ObservationEvent): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // A faulty subscriber must not starve the others.
+      }
+    }
+  }
+
+  private put(entry: SessionObservation): void {
+    this.observations.set(entry.sessionId, entry);
+    this.emit({ type: "upsert", session: { ...entry } });
+  }
+
+  /** Register a fresh owned session (called from browser_session_start). */
+  addSession(sessionId: string, url?: string): void {
+    if (!this.deps.options.enabled || this.disposed) return;
+    this.put({
+      sessionId,
+      ...(url !== undefined ? { url } : {}),
+      action: "idle",
+      since: this.scheduler.now(),
+    });
+    this.lastActivity.set(sessionId, this.scheduler.now());
+    this.scheduleCapture(sessionId, 0);
+  }
+
+  /** Drop a session (called from browser_session_stop). */
+  removeSession(sessionId: string): void {
+    this.cancelCapture(sessionId);
+    this.captureFailures.delete(sessionId);
+    this.lastActivity.delete(sessionId);
+    if (this.observations.delete(sessionId)) {
+      this.emit({
+        type: "remove",
+        session: { sessionId, action: "idle", since: this.scheduler.now() },
+      });
+    }
+  }
+
+  /** Mark an action starting on a session (tool entry instrumentation). */
+  beginAction(sessionId: string, action: string): void {
+    if (!this.deps.options.enabled || this.disposed) return;
+    const entry = this.observations.get(sessionId);
+    if (entry === undefined) return;
+    const now = this.scheduler.now();
+    this.lastActivity.set(sessionId, now);
+    this.put({ ...entry, action, since: now });
+  }
+
+  /**
+   * Mark the current action settling (tool exit instrumentation). Triggers an
+   * immediate thumbnail refresh — action-driven first, timer as fallback.
+   */
+  endAction(sessionId: string, error?: string): void {
+    if (!this.deps.options.enabled || this.disposed) return;
+    const entry = this.observations.get(sessionId);
+    if (entry === undefined) return;
+    const now = this.scheduler.now();
+    this.lastActivity.set(sessionId, now);
+    this.put({
+      ...entry,
+      action: "idle",
+      since: now,
+      ...(error !== undefined ? { lastError: error } : {}),
+    });
+    this.scheduleCapture(sessionId, 0);
+  }
+
+  /** Record the settled page URL (navigate success / start with url). */
+  setUrl(sessionId: string, url: string): void {
+    if (!this.deps.options.enabled || this.disposed) return;
+    const entry = this.observations.get(sessionId);
+    if (entry === undefined) return;
+    this.put({ ...entry, url });
+  }
+
+  /**
+   * Interrupt the in-flight call of one session (default: the registry's
+   * current). Kills exactly the bsk children this plugin spawned for that
+   * session — same user-visible semantics as the chat Stop button (the in-flight
+   * tool call fails; the agent flow may continue).
+   * @returns whether an in-flight call was actually interrupted.
+   */
+  interrupt(sessionId?: string): boolean {
+    const target = sessionId ?? this.deps.registry.current();
+    if (target === undefined || !this.deps.registry.isOwned(target)) return false;
+    return this.deps.runner.killFor(target) > 0;
+  }
+
+  /** Tear down all state and timers (plugin dispose). */
+  dispose(): void {
+    this.disposed = true;
+    for (const sessionId of [...this.captureTimers.keys()]) this.cancelCapture(sessionId);
+    this.captureTimers.clear();
+    this.captureInFlight.clear();
+    this.captureFailures.clear();
+    this.lastActivity.clear();
+    this.observations.clear();
+    this.emit({ type: "reset" });
+    this.listeners.clear();
+  }
+
+  // ------------------------------------------------------------------
+  // Thumbnail loop
+  // ------------------------------------------------------------------
+
+  private cancelCapture(sessionId: string): void {
+    const timer = this.captureTimers.get(sessionId);
+    if (timer !== undefined) {
+      this.scheduler.clearTimeout(timer);
+      this.captureTimers.delete(sessionId);
+    }
+  }
+
+  /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */
+  private scheduleCapture(sessionId: string, delayMs?: number): void {
+    if (!this.deps.options.enabled || this.disposed) return;
+    if (!this.observations.has(sessionId)) return;
+    this.cancelCapture(sessionId);
+    const now = this.scheduler.now();
+    const lastSeen = this.lastActivity.get(sessionId) ?? 0;
+    const failures = this.captureFailures.get(sessionId) ?? 0;
+    const { thumbnailIntervalMs, idleIntervalMs } = this.deps.options;
+    const cadence =
+      now - lastSeen < idleIntervalMs && failures < FAILURE_BACKOFF_THRESHOLD
+        ? thumbnailIntervalMs
+        : idleIntervalMs;
+    const delay = delayMs ?? cadence;
+    const timer = this.scheduler.setTimeout(() => {
+      this.captureTimers.delete(sessionId);
+      void this.capture(sessionId);
+    }, delay);
+    this.captureTimers.set(sessionId, timer);
+  }
+
+  /**
+   * Capture one frame: `bsk screenshot --json` through the runner, bytes into
+   * the attachment store, reference onto the observation. Runs OUTSIDE the
+   * tool instrumentation on purpose — no action events, no registry writes.
+   * Failures keep the previous frame and back off silently.
+   */
+  private async capture(sessionId: string): Promise<void> {
+    if (this.disposed || !this.observations.has(sessionId)) return;
+    if (this.captureInFlight.has(sessionId)) return;
+    const attachments = this.deps.ctx.get("attachments") as AttachmentLike | undefined;
+    if (attachments === undefined) {
+      // No attachment store (headless composition): thumbnails stay absent.
+      return;
+    }
+    this.captureInFlight.add(sessionId);
+    try {
+      const outPath = join(tmpdir(), `bsk-obs-${sessionId}-${this.scheduler.now()}.png`);
+      const result = await this.deps.runner.run(
+        ["screenshot", "--session", sessionId, "--out", outPath],
+        { timeoutMs: 15_000, tag: `observation:${sessionId}` },
+      );
+      if (result.code !== 0) throw new Error(`screenshot exited ${result.code}`);
+      const reply = JSON.parse(result.stdout) as { path?: string };
+      const data = await readFile(reply.path ?? outPath);
+      const ref = await attachments.saveImage({
+        data,
+        mediaType: "image/png",
+        name: `observation-${sessionId}.png`,
+      });
+      const entry = this.observations.get(sessionId);
+      if (entry === undefined) return;
+      this.captureFailures.delete(sessionId);
+      this.put({ ...entry, thumbnailAttachmentId: String(ref.attachmentId) });
+    } catch {
+      // Silent by design: keep the previous frame, count toward backoff.
+      this.captureFailures.set(sessionId, (this.captureFailures.get(sessionId) ?? 0) + 1);
+    } finally {
+      this.captureInFlight.delete(sessionId);
+      if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId);
+    }
+  }
+}
+
+/** Map a bsk command label onto its observation action verb. */
+export function actionForLabel(label: string): string {
+  switch (label) {
+    case "session start":
+      return "starting";
+    case "session stop":
+      return "stopping";
+    case "navigate":
+      return "navigating";
+    case "snapshot":
+      return "snapshotting";
+    case "observe":
+      return "observing";
+    case "click":
+      return "clicking";
+    case "fill":
+      return "filling";
+    case "press":
+      return "pressing";
+    case "screenshot":
+      return "capturing";
+    case "emulate":
+      return "emulating";
+    default:
+      return label;
+  }
+}

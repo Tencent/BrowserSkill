@@ -12,6 +12,8 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
+import { ObservationService } from "./observation";
+import { registerObservationRoutes } from "./observation-http";
 import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
 import { type PluginConfig, registerTools } from "./tools";
@@ -30,6 +32,15 @@ export const Config = Schema.object({
   maxSessions: Schema.number()
     .default(5)
     .description("Maximum number of concurrent browser sessions started through this plugin."),
+  observationEnabled: Schema.boolean()
+    .default(true)
+    .description("Track per-session observation state (action/url/thumbnail) for the PiP overlay."),
+  thumbnailIntervalMs: Schema.number()
+    .default(1500)
+    .description("Thumbnail refresh cadence for active sessions (milliseconds)."),
+  idleIntervalMs: Schema.number()
+    .default(8000)
+    .description("Thumbnail refresh cadence for idle sessions; also the recent-activity window."),
 });
 
 export type Config = PluginConfig;
@@ -48,11 +59,25 @@ export function apply(
     bskPath: config.bskPath ?? "bsk",
     defaultTimeoutMs: config.defaultTimeoutMs ?? 120_000,
     maxSessions: config.maxSessions ?? 5,
+    observationEnabled: config.observationEnabled ?? true,
+    thumbnailIntervalMs: config.thumbnailIntervalMs ?? 1500,
+    idleIntervalMs: config.idleIntervalMs ?? 8000,
   };
   const runner = options.runnerFactory?.(resolved.bskPath) ?? createBskRunner(resolved.bskPath);
   const registry = new SessionRegistry(resolved.maxSessions);
+  const observation = new ObservationService({
+    ctx,
+    runner,
+    registry,
+    options: {
+      enabled: resolved.observationEnabled,
+      thumbnailIntervalMs: resolved.thumbnailIntervalMs,
+      idleIntervalMs: resolved.idleIntervalMs,
+    },
+  });
 
-  registerTools({ ctx, runner, registry, config: resolved });
+  registerTools({ ctx, runner, registry, config: resolved, observation });
+  const removeRoutes = registerObservationRoutes(ctx, observation);
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error.
@@ -73,6 +98,8 @@ export function apply(
   // are swallowed so one stale handle cannot abort the rest.
   ctx.effect(() => {
     return () => {
+      removeRoutes();
+      observation.dispose();
       runner.killAll();
       const stops = registry
         .ownedIds()
@@ -84,6 +111,9 @@ export function apply(
   });
 }
 
+export type { ObservationEvent, ObservationOptions, SessionObservation } from "./observation";
+export { ObservationService } from "./observation";
+export { registerObservationRoutes } from "./observation-http";
 export type { BskRunner, BskRunResult, SpawnImpl } from "./runner";
 export { BskError, createBskRunner } from "./runner";
 export { SessionRegistry } from "./sessions";

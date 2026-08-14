@@ -53,17 +53,26 @@ export interface BskRunOptions {
 /** Minimal spawn signature so tests can substitute a fake child process. */
 export type SpawnImpl = (command: string, args: string[]) => ChildProcess;
 
+export interface BskRunOptions {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Opaque routing tag (e.g. a session id) enabling per-tag kills. */
+  tag?: string;
+}
+
 export interface BskRunner {
   /** Run `bsk <args...> --json` and collect its output. */
   run(args: string[], options?: BskRunOptions): Promise<BskRunResult>;
   /** Kill every in-flight child (used when the plugin unloads). */
   killAll(): void;
+  /** Kill only the in-flight children carrying this tag; returns how many were killed. */
+  killFor(tag: string): number;
 }
 
 const KILL_GRACE_MS = 2000;
 
 export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): BskRunner {
-  const live = new Set<ChildProcess>();
+  const live = new Map<ChildProcess, string | undefined>();
 
   function killChild(child: ChildProcess): void {
     if (child.exitCode !== null || child.signalCode !== null) return;
@@ -84,7 +93,7 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
           reject(error);
           return;
         }
-        live.add(child);
+        live.set(child, options.tag);
 
         let stdout = "";
         let stderr = "";
@@ -134,7 +143,17 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
       });
     },
     killAll() {
-      for (const child of live) killChild(child);
+      for (const child of live.keys()) killChild(child);
+    },
+    killFor(tag: string) {
+      let killed = 0;
+      for (const [child, childTag] of live) {
+        if (childTag === tag) {
+          killChild(child);
+          killed += 1;
+        }
+      }
+      return killed;
     },
   };
 }
