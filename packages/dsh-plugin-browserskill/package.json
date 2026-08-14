@@ -34,10 +34,11 @@
     }
   },
   "scripts": {
-    "build": "node scripts/build-client-css.mjs && tsdown",
-    "typecheck": "tsc --noEmit",
-    "test": "pnpm run build:css && vitest run",
-    "build:css": "node scripts/build-client-css.mjs"
+    "build": "node scripts/build-client-css.mjs && node scripts/build-skill-content.mjs && tsdown",
+    "typecheck": "pnpm run build:skill && tsc --noEmit",
+    "test": "pnpm run build:css && pnpm run build:skill && vitest run",
+    "build:css": "node scripts/build-client-css.mjs",
+    "build:skill": "node scripts/build-skill-content.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

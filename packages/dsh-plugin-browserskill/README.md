@@ -23,6 +23,19 @@ extension keep owning the actual browser control — this package is a thin, wel
 | `browser_screenshot` | `bsk screenshot` | PNG capture of the tab or a ref-cropped element; inlines the image when the deployment supports image input, otherwise returns a file path. |
 | `browser_emulate` | `bsk emulate` | Apply or clear mobile device emulation on the active tab. |
 
+## Agent skill (progressive disclosure)
+
+Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
+official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
+resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
+tool. The body is assembled at build time from two parts, so there is exactly one source of
+truth: a dsh-specific prelude (`skill/prelude.md` — tool↔CLI map, owned-session semantics,
+plugin-only overrides) followed verbatim by the canonical CLI skill (`skill/SKILL.md` at the
+repo root — the same file `crates/bsk-cli/build.rs` mirrors for the CLI package; workflows,
+stop-when-done rules, refs usage, sandbox rules). Registration and every pre-step catalog
+snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
+seam degrade silently.
+
 ## Multi-session model
 
 One agent conversation can drive several browser sessions at once:

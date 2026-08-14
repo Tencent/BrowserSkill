@@ -17,6 +17,7 @@ import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
 import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
+import { registerBskSkill } from "./skill";
 import { type PluginConfig, registerTools } from "./tools";
 
 export const name = "dsh-plugin-browserskill";
@@ -80,6 +81,10 @@ export function apply(
   });
 
   registerTools({ ctx, runner, registry, config: resolved, observation, queue });
+  // Progressive disclosure of the BSK agent skill (catalog entry resident,
+  // body on demand) through the official skill seam; silent no-op when the
+  // composition lacks it.
+  const unregisterSkill = registerBskSkill(ctx);
   // Route registration rides ctx.inject: the webServer service may be provided
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
@@ -110,6 +115,7 @@ export function apply(
   // are swallowed so one stale handle cannot abort the rest.
   ctx.effect(() => {
     return () => {
+      unregisterSkill();
       removeRoutes();
       observation.dispose();
       runner.killAll();
