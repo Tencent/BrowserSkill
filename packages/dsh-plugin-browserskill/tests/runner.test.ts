@@ -117,6 +117,10 @@ describe("parseBskJson", () => {
     expect(() => parseBskJson({ ...base, code: 1, stderr: "boom" }, "x")).toThrow(/boom/);
   });
 
+  it("reports killed-by-interrupt children (null exit code) as interrupted", () => {
+    expect(() => parseBskJson({ ...base, code: null }, "navigate")).toThrow(/interrupted/);
+  });
+
   it("reports timeouts distinctly", () => {
     expect(() => parseBskJson({ ...base, timedOut: true }, "x")).toThrow(/timed out/);
   });

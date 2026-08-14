@@ -187,6 +187,11 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     throw new BskError(`bsk ${commandLabel} timed out`, { timedOut: true });
   }
   const body = result.stdout.trim();
+  // Killed by our own interrupt (SIGTERM from killFor), not by the abort path:
+  // say so instead of doubling the generic label into the message.
+  if (result.code === null && !result.aborted && !result.timedOut) {
+    throw new BskError(`bsk ${commandLabel} was interrupted (process killed)`);
+  }
   if (result.code !== 0) {
     let parsed: BskErrorBody | undefined;
     try {
