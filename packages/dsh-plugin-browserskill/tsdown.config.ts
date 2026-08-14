@@ -6,7 +6,7 @@ import { defineConfig, type UserConfig } from "tsdown";
 /**
  * Two build faces of the dual-face package:
  * - host: the Cordis tool plugin (lib/index.mjs, ESM, dsh packages external);
- * - client: the Web UI bundle (lib/client.js) in dsh's closure-factory shape —
+ * - client: the Web UI bundle (lib/client.cjs, CJS in a type:module package) in dsh's closure-factory shape —
  *   the artifact registers itself through `window.__ModuleLoader__.load`, with
  *   platform modules resolved from the loader's frozen module table and every
  *   other dependency inlined. Mirrors deepseek-harness `packages/client/tsdown.client.ts`.
@@ -108,7 +108,7 @@ const client: UserConfig = {
     },
   ],
   outputOptions: {
-    entryFileNames: "client.js",
+    entryFileNames: "client.cjs",
     banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(CLIENT_ID)}, factory: (require) => {`,
     footer: "return module.exports; } });",
     intro: "var module = { exports: {} }; var exports = module.exports;",
