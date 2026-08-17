@@ -290,6 +290,7 @@ export class ToolDispatcher {
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
+          signal,
         });
       }
       case "tool.tab_list":

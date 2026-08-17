@@ -34,8 +34,8 @@ pub struct DaemonState {
     /// `stop_session` / browser disconnect.
     pub tool_queues: Arc<ToolQueueRegistry>,
     /// Per-rpc-id cancellation tokens for daemon-side long-runners
-    /// (M9.3 — currently only `tool.wait_ms`). The CLI's `cancel
-    /// { rpc_id }` consults this registry first.
+    /// (`tool.wait_ms` plus `session.*` lifecycle calls). The CLI's
+    /// `cancel { rpc_id }` consults this registry first.
     pub abort_registry: Arc<AbortRegistry>,
     /// Tracks `tool.*` RPCs that have been forwarded to an extension
     /// over WS but have not yet received a response. Indexed by the

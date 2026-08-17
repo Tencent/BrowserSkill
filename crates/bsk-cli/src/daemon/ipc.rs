@@ -206,15 +206,15 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
-                Method::SessionStart => match handle_session_start(&state, params).await {
+                Method::SessionStart => match handle_session_start(&state, rpc_id, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
-                Method::SessionStop => match handle_session_stop(&state, params).await {
+                Method::SessionStop => match handle_session_stop(&state, rpc_id, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
-                Method::SessionStopAll => match handle_session_stop_all(&state).await {
+                Method::SessionStopAll => match handle_session_stop_all_rpc(&state, rpc_id).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
@@ -434,8 +434,9 @@ async fn handle_wait_ms(
 /// cancellation surfaces (M10.2 + review C2):
 ///
 /// 1. [`AbortRegistry`] — answers daemon-local cancellable runners
-///    (currently `tool.wait_ms`). If a token is registered we trip it
-///    and stop.
+///    (`tool.wait_ms` and `session.*` lifecycle calls). If a token is
+///    registered we trip it and stop. Lifecycle handlers forward their
+///    own WS cancel after preserving request-before-cancel ordering.
 /// 2. [`super::inflight::ToolInflightRegistry`] — every IPC-tracked
 ///    `tool.*` RPC, registered the moment the IPC handler accepts the
 ///    request. Trips the entry's cancel token regardless of whether
@@ -634,7 +635,20 @@ fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
     ))
 }
 
-async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+async fn handle_session_start(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let abort_guard = state
+        .abort_registry
+        .register(rpc_id)
+        .map_err(|err| RpcError {
+            code: ErrorCode::ProtocolError,
+            message: format!("session.start cancellation registration failed: {err:?}"),
+            data: None,
+        })?;
+    let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
             browser_instance_id: None,
@@ -673,6 +687,7 @@ async fn handle_session_start(state: &Arc<DaemonState>, params: Value) -> Result
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
+        Some(cancel),
     )
     .await
     {
@@ -696,6 +711,8 @@ fn map_start_error(err: StartSessionError) -> RpcError {
         StartSessionError::AmbiguousBrowserLabel { .. } => ErrorCode::InvalidParams,
         StartSessionError::IdExhausted => ErrorCode::ProtocolError,
         StartSessionError::Timeout => ErrorCode::Timeout,
+        StartSessionError::Cancelled => ErrorCode::Cancelled,
+        StartSessionError::CleanupFailed { .. } => ErrorCode::ProtocolError,
         StartSessionError::TransportClosed => ErrorCode::ProtocolError,
         StartSessionError::ExtensionError(inner) => inner.code,
     };
@@ -711,6 +728,16 @@ fn map_start_error(err: StartSessionError) -> RpcError {
             "label": label,
             "instance_ids": instance_ids,
         })),
+        StartSessionError::CleanupFailed {
+            session_id,
+            agent_window_id,
+            ..
+        } => Some(serde_json::json!({
+            "reason": "cleanup_failed",
+            "session_id": session_id.0,
+            "agent_window_id": agent_window_id,
+        })),
+        StartSessionError::ExtensionError(inner) => inner.data.clone(),
         _ => None,
     };
     RpcError {
@@ -720,7 +747,20 @@ fn map_start_error(err: StartSessionError) -> RpcError {
     }
 }
 
-async fn handle_session_stop(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+async fn handle_session_stop(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let abort_guard = state
+        .abort_registry
+        .register(rpc_id)
+        .map_err(|err| RpcError {
+            code: ErrorCode::ProtocolError,
+            message: format!("session.stop cancellation registration failed: {err:?}"),
+            data: None,
+        })?;
+    let cancel = abort_guard.token().clone();
     let params: CliSessionStopParams = if params.is_null() {
         CliSessionStopParams {
             session_id: None,
@@ -734,7 +774,7 @@ async fn handle_session_stop(state: &Arc<DaemonState>, params: Value) -> Result<
         })?
     };
     if params.all {
-        return handle_session_stop_all(state).await;
+        return handle_session_stop_all(state, Some(cancel)).await;
     }
     let session_id = match params.session_id {
         Some(s) => SessionId(s),
@@ -753,6 +793,7 @@ async fn handle_session_stop(state: &Arc<DaemonState>, params: Value) -> Result<
         &state.session_interrupts,
         &session_id,
         DEFAULT_SESSION_STOP_TIMEOUT,
+        Some(cancel),
     )
     .await
     {
@@ -804,7 +845,25 @@ fn map_stop_error(err: StopSessionError) -> RpcError {
     }
 }
 
-async fn handle_session_stop_all(state: &Arc<DaemonState>) -> Result<Value, RpcError> {
+async fn handle_session_stop_all_rpc(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+) -> Result<Value, RpcError> {
+    let abort_guard = state
+        .abort_registry
+        .register(rpc_id)
+        .map_err(|err| RpcError {
+            code: ErrorCode::ProtocolError,
+            message: format!("session.stop_all cancellation registration failed: {err:?}"),
+            data: None,
+        })?;
+    handle_session_stop_all(state, Some(abort_guard.token().clone())).await
+}
+
+async fn handle_session_stop_all(
+    state: &Arc<DaemonState>,
+    cancel: Option<super::abort::AbortToken>,
+) -> Result<Value, RpcError> {
     let ids: Vec<SessionId> = state
         .sessions
         .snapshot()
@@ -816,6 +875,16 @@ async fn handle_session_stop_all(state: &Arc<DaemonState>) -> Result<Value, RpcE
     let mut returned_tab_ids = Vec::new();
     let mut return_failures = Vec::new();
     for id in ids {
+        if cancel
+            .as_ref()
+            .is_some_and(super::abort::AbortToken::is_cancelled)
+        {
+            return Err(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "session.stop_all was cancelled".into(),
+                data: None,
+            });
+        }
         match stop_session(
             &state.browsers,
             &state.sessions,
@@ -823,6 +892,7 @@ async fn handle_session_stop_all(state: &Arc<DaemonState>) -> Result<Value, RpcE
             &state.session_interrupts,
             &id,
             DEFAULT_SESSION_STOP_TIMEOUT,
+            cancel.clone(),
         )
         .await
         {
@@ -847,6 +917,15 @@ async fn handle_session_stop_all(state: &Arc<DaemonState>) -> Result<Value, RpcE
                 });
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);
+            }
+            Err(err)
+                if matches!(
+                    &err,
+                    StopSessionError::ExtensionError(inner)
+                        if inner.code == ErrorCode::Cancelled
+                ) =>
+            {
+                return Err(map_stop_error(err));
             }
             Err(err) => {
                 debug!(session = %id, ?err, "session.stop_all: failure (continuing)");
