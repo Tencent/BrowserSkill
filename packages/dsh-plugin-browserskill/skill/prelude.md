@@ -1,9 +1,25 @@
 # browser-skill (dsh edition)
 
+## DSH tool-routing requirement (highest priority)
+
+This skill is running inside DeepSeek Harness, where the plugin has injected
+structured `browser_*` model tools. **Always call those injected `browser_*` tools
+for browser work. Never use `bash`, `shell`, `exec`, or another tool to invoke the
+`bsk` CLI directly.** The CLI command names shown below are only conceptual
+mappings for understanding the tools; they are not instructions to run commands.
+If a `browser_*` tool is available, using the CLI directly is incorrect because it
+bypasses plugin session ownership, observation UI, tool cards, and cleanup.
+
+Use the injected tool whose name matches the operation, for example:
+`browser_session_start`, `browser_navigate`, `browser_observe`, `browser_snapshot`,
+`browser_click`, `browser_fill`, `browser_press`, `browser_screenshot`, and
+`browser_session_stop`. Pass arguments as the tool schema specifies (not CLI flags).
+
 Drive the user's **real Chromium browser** (logins, cookies, Agent Window isolation)
-through this plugin's `browser_*` tools. Each tool spawns `bsk <cmd> --json` — the
-same engine the canonical CLI skill documents — so the workflow, judgment rules, and
-safety constraints are identical.
+through this plugin's `browser_*` tools. Each injected tool is implemented by the
+plugin using the `bsk` engine internally — the model must not invoke that engine
+itself. The workflow, judgment rules, and safety constraints remain identical to
+the canonical CLI skill.
 
 > **Tool availability**: invoking this skill (which you just did) makes the plugin's
 > `browser_*` tools available for the rest of the session — they are injected on

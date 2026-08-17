@@ -26,9 +26,14 @@ describe("registerBskSkill", () => {
     expect(skill.name).toBe("browser-skill");
     expect(typeof skill.description).toBe("string");
     expect(String(skill.description)).toContain("browser_*");
-    // body = dsh prelude + canonical CLI skill body
+    // body = dsh prelude + canonical CLI skill body + dsh postlude
     const content = String(skill.content);
     expect(content).toContain("browser_observe");
+    expect(String(skill.description)).toContain("never invoke bsk through bash or shell");
+    expect(content).toContain("Always call those injected `browser_*` tools");
+    expect(content).toContain("Never use `bash`, `shell`, `exec`");
+    expect(content).toContain("## DSH routing reminder");
+    expect(content.trimEnd()).toMatch(/always begin with[\s\S]*`browser_session_start`[\s\S]*`browser_session_stop`\.$/);
     expect(content).toContain("Owned sessions only");
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
