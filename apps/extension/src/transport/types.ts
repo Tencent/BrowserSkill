@@ -793,6 +793,7 @@ export type DraftTraceStep =
 export type Step =
   | ({ op: "navigate" } & StepCommon & { to: string })
   | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
+  | ({ op: "hover" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "fill" } & StepCommon & {
         target: TargetDescriptor;
         value: string;
@@ -834,7 +835,7 @@ export type StepV3 =
       })
   | ({ op: "select" } & StepCommonV3 & {
         target: TargetDescriptorV3;
-        selection: SelectedOption[];
+        selection?: SelectedOption[];
       })
   | ({ op: "press" } & StepCommonV3 & {
         key: string;
@@ -844,7 +845,7 @@ export type StepV3 =
   | ({ op: "scroll" } & StepCommonV3);
 
 export interface TraceV3 {
-  version: number;
+  version: 3;
   recorded_at: string;
   started_at?: string;
   purpose?: string;

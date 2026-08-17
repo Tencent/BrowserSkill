@@ -51,10 +51,10 @@
     },
     "version": {
       "type": "integer",
-      "format": "uint32",
-      "minimum": 0.0
+      "const": 3
     }
   },
+  "additionalProperties": false,
   "definitions": {
     "FillCommit": {
       "type": "string",

@@ -4,7 +4,7 @@
 //! observations (VOM) captured before and after the action.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::interaction::KeyModifier;
 
@@ -16,6 +16,28 @@ pub const TRACE_VERSION: u32 = 3;
 pub const TRACE_VERSION_V2: u32 = 2;
 pub const DEFAULT_TRACE_VERSION: u32 = 2;
 pub const VOM_FORMAT_VERSION: u32 = 1;
+
+fn deserialize_trace_v3_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let version = u32::deserialize(deserializer)?;
+    if version != TRACE_VERSION {
+        return Err(serde::de::Error::custom(format!(
+            "unsupported trace version {version} (expected {TRACE_VERSION})"
+        )));
+    }
+    Ok(version)
+}
+
+fn trace_v3_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Integer.into()),
+        const_value: Some(serde_json::json!(TRACE_VERSION)),
+        ..Default::default()
+    }
+    .into()
+}
 
 // ---------------------------------------------------------------------------
 // Target
@@ -179,7 +201,10 @@ pub enum Step {
 
 /// Persisted user-action trace exported by `tool.record_stop` / `await`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct Trace {
+    #[serde(deserialize_with = "deserialize_trace_v3_version")]
+    #[schemars(schema_with = "trace_v3_version_schema")]
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
@@ -236,21 +261,22 @@ pub enum RecordedTrace {
 impl RecordedTrace {
     pub fn classify_value(v: &serde_json::Value) -> Result<Self, String> {
         if let Some(ver) = v.get("version").and_then(|x| x.as_u64()) {
-            if ver == u64::from(TRACE_VERSION) {
-                return serde_json::from_value(v.clone())
-                    .map(RecordedTrace::V3)
-                    .map_err(|e| e.to_string());
+            if ver != u64::from(TRACE_VERSION) {
+                return Err(format!("unsupported trace version {ver}"));
             }
-            return Err(format!("unsupported trace version {ver}"));
-        }
-        if v.get("pages").is_some() && v.get("states").is_none() {
+            if v.get("pages").is_some() {
+                return Err("trace v3 must not include legacy pages[]".into());
+            }
             return serde_json::from_value(v.clone())
-                .map(RecordedTrace::V2)
+                .map(RecordedTrace::V3)
                 .map_err(|e| e.to_string());
         }
         if v.get("states").is_some() {
+            return Err("trace v2 must not include states[]; set version: 3 for Trace v3".into());
+        }
+        if v.get("pages").is_some() {
             return serde_json::from_value(v.clone())
-                .map(RecordedTrace::V3)
+                .map(RecordedTrace::V2)
                 .map_err(|e| e.to_string());
         }
         Err("ambiguous or unparseable trace".into())
@@ -570,6 +596,42 @@ mod tests {
     }
 
     #[test]
+    fn recorded_trace_rejects_mixed_and_unsupported_versions() {
+        let v2_with_states = json!({
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "entry": { "start_url": "https://example.com/" },
+            "pages": [{ "id": "p1", "url": "https://example.com/" }],
+            "states": [],
+            "steps": []
+        });
+        assert!(RecordedTrace::classify_value(&v2_with_states).is_err());
+
+        let v3_with_pages = json!({
+            "version": 3,
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "stopped_by": "user_finish",
+            "entry": { "start_url": "https://example.com/" },
+            "recorder": { "bsk": "0.1.10", "vom": 1 },
+            "pages": [{ "id": "p1", "url": "https://example.com/" }],
+            "states": [],
+            "steps": []
+        });
+        assert!(RecordedTrace::classify_value(&v3_with_pages).is_err());
+
+        let unsupported = json!({
+            "version": 2,
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "stopped_by": "user_finish",
+            "entry": { "start_url": "https://example.com/" },
+            "recorder": { "bsk": "0.1.10", "vom": 1 },
+            "states": [],
+            "steps": []
+        });
+        assert!(RecordedTrace::classify_value(&unsupported).is_err());
+        assert!(serde_json::from_value::<Trace>(unsupported).is_err());
+    }
+
+    #[test]
     fn recorded_trace_schema_includes_v2_and_v3() {
         let schema = serde_json::to_value(schemars::schema_for!(RecordStopResult)).unwrap();
         let variants = schema["definitions"]["RecordedTrace"]["oneOf"]
@@ -577,6 +639,8 @@ mod tests {
             .expect("RecordedTrace schema should use oneOf");
 
         assert_eq!(variants.len(), 2);
+        let trace_schema = schema["definitions"]["Trace"].clone();
+        assert_eq!(trace_schema["properties"]["version"]["const"], 3);
     }
 
     #[test]
