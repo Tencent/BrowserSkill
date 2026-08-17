@@ -90,6 +90,7 @@
   },
   "recordOverlay": {
     "recording": "正在录制你的操作",
-    "finish": "结束"
+    "finish": "结束",
+    "partialCapture": "部分嵌入页面可能未被录制。"
   }
 }

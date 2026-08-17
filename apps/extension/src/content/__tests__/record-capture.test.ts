@@ -1614,3 +1614,79 @@ describe("record-capture semantic", () => {
     expect(steps.map((s) => s.op)).toEqual(["click"]);
   });
 });
+
+describe("record-capture child frame", () => {
+  let steps: RecordStepPayload[];
+
+  beforeEach(() => {
+    steps = [];
+    document.body.innerHTML = `
+      <label for="child-q">Child query</label>
+      <input id="child-q" name="child-q" />
+      <button type="button" aria-label="Child search">Search</button>
+      <select aria-label="Child status">
+        <option value="on">On</option>
+        <option value="off">Off</option>
+      </select>
+    `;
+  });
+
+  it("stamps a document token on start and clears it on dispose", () => {
+    const capture = startRecordCapture("rec-child-token", (step) => steps.push(step), {
+      frameMode: "child",
+    });
+    const token = document.documentElement.getAttribute("data-bsk-record-document");
+    expect(token).toBeTruthy();
+    click(document.querySelector("button")!);
+    expect(steps[0]?.documentToken).toBe(token);
+    expect(steps[0]?.frame_url).toBeTruthy();
+    capture.dispose();
+    expect(document.documentElement.hasAttribute("data-bsk-record-document")).toBe(false);
+  });
+
+  it("records click, fill, select, and press in child frame mode", () => {
+    const capture = startRecordCapture("rec-child-ops", (step) => steps.push(step), {
+      frameMode: "child",
+    });
+    const input = document.querySelector("input")!;
+    const select = document.querySelector("select")!;
+
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "child value";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    select.value = "off";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    click(document.querySelector("button")!);
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(
+      expect.arrayContaining(["fill", "select", "press", "click"]),
+    );
+    expect(steps.every((s) => s.documentToken)).toBe(true);
+  });
+
+  it("commits the last fill when dispose runs in child frame mode", () => {
+    const capture = startRecordCapture("rec-child-fill-stop", (step) => steps.push(step), {
+      frameMode: "child",
+    });
+    const input = document.querySelector("input")!;
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "pending child fill";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps.some((s) => s.op === "fill" && s.value === "pending child fill")).toBe(true);
+  });
+
+  it("does not emit navigate steps for child frame navigations", () => {
+    const capture = startRecordCapture("rec-child-nav", (step) => steps.push(step), {
+      frameMode: "child",
+    });
+    history.pushState({}, "", "/child-frame-path");
+    capture.dispose();
+    expect(steps.filter((s) => s.op === "navigate")).toHaveLength(0);
+  });
+});

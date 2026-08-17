@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bsk_protocol::tools::{
-    RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult, RecordStopParams,
-    RecordStopResult, TRACE_VERSION, Trace, TraceState,
+    FrameCaptureStatus, RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult,
+    RecordStopParams, RecordStopResult, TRACE_VERSION, Trace, TraceState,
 };
 use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
@@ -550,6 +550,13 @@ fn render_finish(
                 trace_path.display(),
                 pages_dir.display()
             );
+            if let Some(frame_capture) = &trace.frame_capture {
+                if matches!(frame_capture.status, FrameCaptureStatus::Partial) {
+                    eprintln!(
+                        "warning: trace is partial — some embedded frames were not recorded (see frame_capture.failures in trace.json)"
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -584,6 +591,7 @@ mod tests {
                 bsk: "0.1.10".into(),
                 vom: VOM_FORMAT_VERSION,
             },
+            frame_capture: None,
             states: vec![TraceState {
                 id: state_id.into(),
                 url: "https://example.com/".into(),

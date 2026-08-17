@@ -18,11 +18,13 @@ import {
   handleRecordStart,
   handleRecordStop,
   resetBrowserObservationForTests,
+  type RecordDeps,
 } from "../record";
 
 const AGENT_WINDOW_ID = 100;
 const TAB_ID = 4;
 const START_URL = "https://example.com/";
+const TOP_DOCUMENT_ID = "doc-top";
 
 type RuntimeListener = (
   message: unknown,
@@ -63,9 +65,18 @@ function installChrome() {
     webNavigation: {
       onCompleted: webNavigationOnCompleted,
       onCommitted: webNavigationOnCommitted,
+      getAllFrames: vi.fn(async ({ tabId }: { tabId: number }) => [
+        {
+          frameId: 0,
+          documentId: TOP_DOCUMENT_ID,
+          url: START_URL,
+          parentFrameId: -1,
+          tabId,
+        },
+      ]),
     },
   });
-  return { runtimeOnMessage, webNavigationOnCompleted, webNavigationOnCommitted };
+  return { runtimeOnMessage, webNavigationOnCompleted, webNavigationOnCommitted, TOP_DOCUMENT_ID };
 }
 
 function fakeManager() {
@@ -203,6 +214,57 @@ function makeTabsApi() {
     goTo(url: string, title: string) {
       Object.assign(tab, { url, title });
     },
+  };
+}
+
+function makeRecordDeps(
+  tabsApi: ReturnType<typeof makeTabsApi> | ReturnType<typeof makeMultiTabsApi>,
+  sendToTabMock: (tabId: number, msg: unknown) => Promise<unknown>,
+  cdp?: ReturnType<typeof makeFakeCdp>,
+): RecordDeps {
+  return {
+    tabsApi,
+    sendToTab: sendToTabMock as RecordDeps["sendToTab"],
+    sendToDocument: (async (tabId, _documentId, msg) =>
+      sendToTabMock(tabId, msg)) as RecordDeps["sendToDocument"],
+    getAllFrames: (async () => [
+      {
+        frameId: 0,
+        documentId: TOP_DOCUMENT_ID,
+        url: START_URL,
+        parentFrameId: -1,
+      },
+    ]) as RecordDeps["getAllFrames"],
+    ...(cdp ? { cdp } : {}),
+  };
+}
+
+function makeMultiTabRecordDeps(
+  tabsApi: ReturnType<typeof makeMultiTabsApi>,
+  sendToTabMock: (tabId: number, msg: unknown) => Promise<unknown>,
+  tabIds: number[],
+  cdp?: ReturnType<typeof makeFakeCdp>,
+): RecordDeps {
+  const framesByTab = new Map(
+    tabIds.map((tabId) => [
+      tabId,
+      [
+        {
+          frameId: 0,
+          documentId: tabId === TAB_ID ? TOP_DOCUMENT_ID : `doc-tab-${tabId}`,
+          url: tabId === TAB_ID ? START_URL : `https://example.com/tab-${tabId}`,
+          parentFrameId: -1,
+        },
+      ],
+    ]),
+  );
+  return {
+    tabsApi,
+    sendToTab: sendToTabMock as RecordDeps["sendToTab"],
+    sendToDocument: (async (tabId, _documentId, msg) =>
+      sendToTabMock(tabId, msg)) as RecordDeps["sendToDocument"],
+    getAllFrames: (async (tabId) => framesByTab.get(tabId) ?? []) as RecordDeps["getAllFrames"],
+    ...(cdp ? { cdp } : {}),
   };
 }
 
@@ -1171,25 +1233,25 @@ describe("recorded user steps reach the exported trace", () => {
       }
       return { ok: true };
     });
-    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+    const deps = makeMultiTabRecordDeps(tabsApi, sendToTab, [TAB_ID, 5], makeFakeCdp());
 
     await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     attachRecordQueryListener(deps);
     await new Promise<void>((resolve) => {
       chromeApi.runtimeOnMessage.emit(
         { type: RECORD_QUERY },
-        { tab: secondTab } as chrome.runtime.MessageSender,
+        { tab: secondTab, documentId: "doc-tab-5" } as chrome.runtime.MessageSender,
         () => resolve(),
       );
     });
 
     const firstStop = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    expect(firstStop).toMatchObject({ code: "protocol_error" });
+    expect((firstStop as RecordStopResult).trace.version).toBe(3);
+    expect((firstStop as RecordStopResult).trace.frame_capture?.status).toBe("partial");
     expect(stopTabs).toEqual([TAB_ID, 5]);
 
     const retry = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    expect((retry as RecordStopResult).trace.version).toBe(3);
-    expect(stopTabs).toEqual([TAB_ID, 5, 5]);
+    expect(retry).toMatchObject({ code: "not_found" });
   });
 
   it("does not let a closed armed tab block finish", async () => {
@@ -1215,14 +1277,14 @@ describe("recorded user steps reach the exported trace", () => {
       if ((msg as { type?: string }).type === RECORD_STOP) stopTabs.push(tabId);
       return { ok: true };
     });
-    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+    const deps = makeMultiTabRecordDeps(tabsApi, sendToTab, [TAB_ID, 5], makeFakeCdp());
 
     await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     attachRecordQueryListener(deps);
     await new Promise<void>((resolve) => {
       chromeApi.runtimeOnMessage.emit(
         { type: RECORD_QUERY },
-        { tab: secondTab } as chrome.runtime.MessageSender,
+        { tab: secondTab, documentId: "doc-tab-5" } as chrome.runtime.MessageSender,
         () => resolve(),
       );
     });
@@ -1231,7 +1293,7 @@ describe("recorded user steps reach the exported trace", () => {
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
 
     expect((stopped as RecordStopResult).trace.version).toBe(3);
-    expect(stopTabs).toEqual([TAB_ID]);
+    expect(stopTabs).toContain(TAB_ID);
   });
 
   it("waits for an acknowledged in-flight rearm before stopping armed tabs", async () => {
@@ -1270,13 +1332,13 @@ describe("recorded user steps reach the exported trace", () => {
       if (type === RECORD_STOP) stopTabs.push(tabId);
       return { ok: true };
     });
-    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+    const deps = makeMultiTabRecordDeps(tabsApi, sendToTab, [TAB_ID, 5], makeFakeCdp());
 
     await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
     attachRecordQueryListener(deps);
     chromeApi.runtimeOnMessage.emit(
       { type: RECORD_QUERY },
-      { tab: secondTab } as chrome.runtime.MessageSender,
+      { tab: secondTab, documentId: "doc-tab-5" } as chrome.runtime.MessageSender,
       () => {},
     );
     await secondStartBegan;

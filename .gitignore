@@ -17,3 +17,7 @@ dist/
 # Environment
 .env.local
 .env.*.local
+.pnpm-store/
+
+# Local recording output
+/trace/

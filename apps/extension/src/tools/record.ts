@@ -7,16 +7,28 @@ import {
   isRecordQueryMessage,
   isRecordStepMessage,
   RECORD_CANCEL,
+  RECORD_CAPTURE_STATUS,
   RECORD_START,
   RECORD_STEP,
   RECORD_STOP,
   type RecordCancelMessage,
+  type RecordCaptureStatusMessage,
   type RecordFinishMessage,
   type RecordQueryResponse,
   type RecordStartAck,
   type RecordStartMessage,
+  type RecordStepPayload,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import {
+  armAllDocumentsForTab,
+  armDocumentCapture,
+  cancelDocumentCapture,
+  type ArmedDocument,
+  listInjectableFrames,
+  type RecordFrameSendDeps,
+  stopDocumentCapture,
+} from "@/lib/record-frame-arming";
 import { DEFAULT_MAX_PAGE_TOKENS } from "@/lib/record-constants";
 import {
   applyTargetMatching,
@@ -39,6 +51,9 @@ import type { SessionManager } from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   DraftTraceStep,
+  FrameCaptureFailure,
+  FrameCaptureInfo,
+  FrameCaptureStatus,
   RecordAwaitParams,
   RecordAwaitResult,
   RecordStartParams,
@@ -80,8 +95,12 @@ interface ActiveRecording {
   stoppedBy: StopReason;
   maxPageTokens: number;
   redactValues: boolean;
-  /** Tabs whose content capture acknowledged START and still need STOP. */
-  armedTabIds: Set<number>;
+  /** Documents whose capture acknowledged START and still need STOP. */
+  armedDocuments: Map<string, ArmedDocument>;
+  frameCaptureFailures: FrameCaptureFailure[];
+  frameCaptureStatus: FrameCaptureStatus;
+  /** When false, ignore subframe rearm requests during finish. */
+  acceptingNewFrames: boolean;
   /** Rearms already sending START when finish begins. */
   rearmCallbacks: Set<Promise<void>>;
   /** Navigation callbacks tracked from event receipt through action enqueue. */
@@ -203,6 +222,15 @@ async function sendRecordStartWithAck(
 }
 
 function buildTrace(recording: ActiveRecording): Trace {
+  const frameCapture: FrameCaptureInfo | undefined =
+    recording.frameCaptureFailures.length > 0 || recording.frameCaptureStatus === "partial"
+      ? {
+          status: recording.frameCaptureStatus,
+          ...(recording.frameCaptureFailures.length > 0
+            ? { failures: recording.frameCaptureFailures }
+            : {}),
+        }
+      : undefined;
   return buildTraceV3({
     obs: recording.observation,
     steps: recording.steps,
@@ -211,7 +239,49 @@ function buildTrace(recording: ActiveRecording): Trace {
     startUrl: recording.startUrl,
     stoppedBy: recording.stoppedBy,
     bskVersion: BSK_TRACE_VERSION,
+    ...(frameCapture ? { frameCapture } : {}),
   });
+}
+
+function recordFrameFailure(recording: ActiveRecording, failure: FrameCaptureFailure): void {
+  recording.frameCaptureFailures.push(failure);
+  recording.frameCaptureStatus = "partial";
+}
+
+function enrichRecordedStep(
+  recording: ActiveRecording,
+  step: RecordStepPayload,
+): RecordStepPayload {
+  const enriched: RecordStepPayload = { ...step };
+  if (enriched.geometry && enriched.documentToken) {
+    const owner = recording.observation.documentTokenOwners.get(enriched.documentToken);
+    if (owner !== undefined) {
+      enriched.geometry = { ...enriched.geometry, ownerFrameBackendNodeId: owner };
+    }
+  }
+  if (!enriched.page_url && recording.currentUrl) {
+    enriched.page_url = recording.currentUrl;
+  }
+  return enriched;
+}
+
+async function publishCaptureStatus(
+  recording: ActiveRecording,
+  deps: RecordDeps,
+): Promise<void> {
+  if (!deps.broadcastCaptureStatus) return;
+  const msg: RecordCaptureStatusMessage = {
+    type: RECORD_CAPTURE_STATUS,
+    status: recording.frameCaptureStatus,
+    ...(recording.frameCaptureFailures.length > 0
+      ? { failures: recording.frameCaptureFailures }
+      : {}),
+  };
+  try {
+    await deps.broadcastCaptureStatus(recording.tabId, msg);
+  } catch {
+    // Overlay is best-effort.
+  }
 }
 
 async function processRecordedStep(
@@ -249,9 +319,46 @@ export interface RecordDeps {
     tabId: number,
     msg: RecordStartMessage | RecordStopMessage | RecordCancelMessage,
   ): Promise<unknown>;
+  sendToDocument?(
+    tabId: number,
+    documentId: string,
+    msg: RecordStartMessage | RecordStopMessage | RecordCancelMessage,
+  ): Promise<unknown>;
+  getAllFrames?(tabId: number): Promise<
+    Array<{
+      frameId: number;
+      documentId?: string;
+      url?: string;
+      parentFrameId: number;
+    }>
+  >;
+  broadcastCaptureStatus?(
+    tabId: number,
+    msg: RecordCaptureStatusMessage,
+  ): Promise<void>;
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   cdp?: CdpRunner;
   signal?: AbortSignal;
+}
+
+function frameSendDeps(deps: RecordDeps): RecordFrameSendDeps {
+  return {
+    sendToDocument: (tabId, documentId, msg) => {
+      if (deps.sendToDocument) return deps.sendToDocument(tabId, documentId, msg);
+      return deps.sendToTab(tabId, msg);
+    },
+    getAllFrames: async (tabId) => {
+      if (deps.getAllFrames) return deps.getAllFrames(tabId);
+      if (!chrome.webNavigation?.getAllFrames) return [];
+      const frames = await chrome.webNavigation.getAllFrames({ tabId });
+      return (frames ?? []).map((frame) => ({
+        frameId: frame.frameId,
+        documentId: frame.documentId,
+        url: frame.url,
+        parentFrameId: frame.parentFrameId,
+      }));
+    },
+  };
 }
 
 let defaultDeps: RecordDeps | null = null;
@@ -260,6 +367,19 @@ function getDefaultDeps(): RecordDeps {
     defaultDeps = {
       tabsApi: chromeTabsApi,
       sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
+      sendToDocument: (tabId, documentId, msg) =>
+        chrome.tabs.sendMessage(tabId, msg, { documentId }),
+      getAllFrames: async (tabId) => {
+        if (!chrome.webNavigation?.getAllFrames) return [];
+        const frames = await chrome.webNavigation.getAllFrames({ tabId });
+        return (frames ?? []).map((frame) => ({
+          frameId: frame.frameId,
+          documentId: frame.documentId,
+          url: frame.url,
+          parentFrameId: frame.parentFrameId,
+        }));
+      },
+      broadcastCaptureStatus: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg, { frameId: 0 }),
     };
   }
   return defaultDeps;
@@ -320,7 +440,7 @@ export function releaseBrowserObservationListenersIfIdle(): void {
 export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): () => void {
   const listener = (
     message: unknown,
-    _sender: chrome.runtime.MessageSender,
+    sender: chrome.runtime.MessageSender,
     _sendResponse: () => void,
   ) => {
     if (!isRecordStepMessage(message)) return false;
@@ -328,9 +448,6 @@ export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): (
       if (recording.requestId !== message.requestId) continue;
       enqueueRecordingAction(recording, async () => {
         const cdp = recording.cdp ?? deps.cdp;
-        // Flush before appending so a coalesced OAuth navigate is ordered
-        // ahead of the click that landed on the destination page. The flush
-        // itself waits for that navigate's observation before returning.
         await flushPendingRedirectLanding(
           recording.observation,
           recording.steps,
@@ -339,7 +456,8 @@ export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): (
           deps.tabsApi,
           { cancelled: () => recording.settled },
         );
-        const draftIndex = appendRecordedPayload(recording, message.step);
+        const enriched = enrichRecordedStep(recording, message.step);
+        const draftIndex = appendRecordedPayload(recording, enriched);
         if (draftIndex !== null) await processRecordedStep(recording, deps, draftIndex);
       });
       return false;
@@ -368,8 +486,10 @@ export function attachRecordFinishListener(deps: RecordDeps = getDefaultDeps()):
 
 function findRecordingByTabId(tabId: number): ActiveRecording | null {
   for (const recording of recordings.values()) {
-    if (!recording.settled && (recording.tabId === tabId || recording.armedTabIds.has(tabId))) {
-      return recording;
+    if (recording.settled) continue;
+    if (recording.tabId === tabId) return recording;
+    for (const armed of recording.armedDocuments.values()) {
+      if (armed.tabId === tabId) return recording;
     }
   }
   return null;
@@ -418,47 +538,64 @@ async function clearRearmTimersForRecording(
   }
 }
 
-async function stopRecordingOnAllAgentTabs(
+async function stopRecordingOnAllDocuments(
   recording: ActiveRecording,
   deps: RecordDeps,
 ): Promise<void> {
+  recording.acceptingNewFrames = false;
   const stopMsg: RecordStopMessage = { type: RECORD_STOP, requestId: recording.requestId };
-  let failed = false;
-  for (const tabId of [...recording.armedTabIds]) {
-    try {
-      await deps.tabsApi.get(tabId);
-    } catch {
-      // A closed tab no longer has content capture to flush.
-      recording.armedTabIds.delete(tabId);
+  const frameDeps = frameSendDeps(deps);
+  const armed = [...recording.armedDocuments.values()];
+  for (const doc of armed) {
+    const result = await stopDocumentCapture(doc, stopMsg, frameDeps);
+    if ("ok" in result) {
+      recording.armedDocuments.delete(doc.documentId);
       continue;
     }
-    try {
-      const response = await deps.sendToTab(tabId, stopMsg);
-      if (!isRecordStartAck(response)) {
-        throw new Error("content script did not confirm recorded steps");
-      }
-      recording.armedTabIds.delete(tabId);
-    } catch {
-      failed = true;
-      continue;
-    }
-    if (deps.bypassOverlay) {
-      try {
-        await deps.bypassOverlay(tabId, false);
-      } catch {
-        // Best-effort cleanup.
-      }
-    }
+    recordFrameFailure(recording, result);
   }
-  if (failed || recording.armedTabIds.size > 0) {
-    throw new Error("failed to flush recorded steps");
+  if (recording.armedDocuments.size > 0) {
+    for (const doc of [...recording.armedDocuments.values()]) {
+      recordFrameFailure(
+        recording,
+        {
+          reason: "flush_failed",
+          frame_id: doc.frameId,
+          document_id: doc.documentId,
+          url: doc.url,
+          detail: "document still armed after STOP",
+        },
+      );
+    }
+    recording.armedDocuments.clear();
+  }
+  await publishCaptureStatus(recording, deps);
+  if (deps.bypassOverlay) {
+    try {
+      await deps.bypassOverlay(recording.tabId, false);
+    } catch {
+      // Best-effort cleanup.
+    }
   }
 }
 
-async function rearmRecording(
+async function cancelRecordingOnAllDocuments(
+  recording: ActiveRecording,
+  deps: RecordDeps,
+): Promise<void> {
+  const cancelMsg: RecordCancelMessage = { type: RECORD_CANCEL, requestId: recording.requestId };
+  const frameDeps = frameSendDeps(deps);
+  for (const doc of [...recording.armedDocuments.values()]) {
+    await cancelDocumentCapture(doc, cancelMsg, frameDeps);
+  }
+  recording.armedDocuments.clear();
+}
+
+async function rearmRecordingDocuments(
   recording: ActiveRecording,
   targetTabId: number,
   deps: RecordDeps,
+  targetDocumentId?: string,
 ): Promise<boolean> {
   let resolveTracked!: () => void;
   const tracked = new Promise<void>((resolve) => {
@@ -466,29 +603,65 @@ async function rearmRecording(
   });
   recording.rearmCallbacks.add(tracked);
 
-  // Do NOT toggle automation-bypass here: each retry used to increment the
-  // content-script counter, and a single stop decrement left the ControlOverlay
-  // stuck with pointer-events:none (page usable, Interrupt dead). RecordOverlay
-  // already hides the control chrome while activeRecord is set.
+  const frameDeps = frameSendDeps(deps);
   try {
-    for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
-      if (recording.settled || recording.finishing) return false;
-      const startMsg: RecordStartMessage = {
-        type: RECORD_START,
-        requestId: recording.requestId,
-        startedAtMs: recording.startedAtMs,
-      };
-      try {
-        await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab);
-        recording.armedTabIds.add(targetTabId);
-        recording.tabId = targetTabId;
-        return true;
-      } catch {
-        if (attempt + 1 < RECORD_REARM_MAX_ATTEMPTS) {
-          await sleep(RECORD_REARM_RETRY_DELAY_MS);
+    const attemptLimit = targetDocumentId ? 1 : RECORD_REARM_MAX_ATTEMPTS;
+    for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
+      if (recording.settled || recording.finishing || !recording.acceptingNewFrames) return false;
+      const { injectable, failures } = await listInjectableFrames(targetTabId, frameDeps);
+      for (const failure of failures) recordFrameFailure(recording, failure);
+      const targets = targetDocumentId
+        ? injectable.filter((frame) => frame.documentId === targetDocumentId)
+        : injectable.filter((frame) => !recording.armedDocuments.has(frame.documentId ?? ""));
+      if (targets.length === 0) {
+        if (targetDocumentId) {
+          recordFrameFailure(recording, {
+            reason: "rearm_failed",
+            frame_id: 0,
+            document_id: targetDocumentId,
+            detail: "document not injectable",
+          });
+          await publishCaptureStatus(recording, deps);
+          return false;
         }
+        recording.tabId = targetTabId;
+        return injectable.some((frame) => recording.armedDocuments.has(frame.documentId ?? ""));
+      }
+
+      let armedAny = false;
+      for (const frame of targets) {
+        const startMsg: RecordStartMessage = {
+          type: RECORD_START,
+          requestId: recording.requestId,
+          startedAtMs: recording.startedAtMs,
+          showOverlay: frame.frameId === 0,
+          frameMode: frame.frameId === 0 ? "top" : "child",
+        };
+        const result = await armDocumentCapture(targetTabId, frame, startMsg, frameDeps);
+        if (result.armed) {
+          recording.armedDocuments.set(result.armed.documentId, result.armed);
+          armedAny = true;
+        }
+        if (result.failure) recordFrameFailure(recording, result.failure);
+      }
+      if (armedAny) {
+        recording.tabId = targetTabId;
+        await publishCaptureStatus(recording, deps);
+        if (deps.cdp && recording.acceptingNewFrames) {
+          void captureAndRegisterObservation(
+            recording.observation,
+            deps.cdp,
+            targetTabId,
+            deps.tabsApi,
+          ).catch(() => {});
+        }
+        return true;
+      }
+      if (attempt + 1 < RECORD_REARM_MAX_ATTEMPTS) {
+        await sleep(RECORD_REARM_RETRY_DELAY_MS);
       }
     }
+    await publishCaptureStatus(recording, deps);
     return false;
   } finally {
     recording.rearmCallbacks.delete(tracked);
@@ -505,7 +678,7 @@ function scheduleRearmForTab(tabId: number, deps: RecordDeps): void {
       rearmTimers.delete(tabId);
       void (async () => {
         const current = await findRecordingForTab(tabId, deps);
-        if (current) await rearmRecording(current, tabId, deps);
+        if (current) await rearmRecordingDocuments(current, tabId, deps);
       })();
     }, RECORD_REARM_DEBOUNCE_MS),
   );
@@ -626,12 +799,24 @@ export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps
     })();
   };
 
+  const onSubFrameComplete = (tabId: number, documentId?: string) => {
+    if (!documentId) return;
+    void (async () => {
+      const recording = await findRecordingForTab(tabId, deps);
+      if (!recording || !recording.acceptingNewFrames) return;
+      await rearmRecordingDocuments(recording, tabId, deps, documentId);
+    })();
+  };
+
   if (chrome.webNavigation?.onCompleted) {
     const completedListener = (
       details: chrome.webNavigation.WebNavigationFramedCallbackDetails,
     ) => {
-      if (details.frameId !== 0) return;
-      onMainFrameComplete(details.tabId, details.url);
+      if (details.frameId === 0) {
+        onMainFrameComplete(details.tabId, details.url);
+        return;
+      }
+      onSubFrameComplete(details.tabId, details.documentId);
     };
     const committedListener = (
       details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
@@ -719,11 +904,15 @@ export function attachRecordQueryListener(deps: RecordDeps = getDefaultDeps()): 
         sendResponse({ active: false });
         return;
       }
-      await rearmRecording(recording, tabId, deps);
+      await rearmRecordingDocuments(recording, tabId, deps, sender.documentId);
       sendResponse({
         active: true,
         requestId: recording.requestId,
         startedAtMs: recording.startedAtMs,
+        captureStatus: recording.frameCaptureStatus,
+        ...(recording.frameCaptureFailures.length > 0
+          ? { captureFailures: recording.frameCaptureFailures }
+          : {}),
       });
     })();
     return true;
@@ -760,10 +949,7 @@ async function finishRecording(
   await clearRearmTimersForRecording(recording, deps);
   await Promise.all([...recording.rearmCallbacks]);
   try {
-    // Disposing content capture may commit a final dirty fill. Flush content
-    // first so all resulting RECORD_STEP messages enter actionQueue before it
-    // and the observation queues are drained.
-    await stopRecordingOnAllAgentTabs(recording, deps);
+    await stopRecordingOnAllDocuments(recording, deps);
   } catch {
     recording.finishing = false;
     return null;
@@ -845,7 +1031,10 @@ export async function handleRecordStart(
     stoppedBy: "user_finish",
     maxPageTokens: maxPageTokens ?? DEFAULT_MAX_PAGE_TOKENS,
     redactValues,
-    armedTabIds: new Set(),
+    armedDocuments: new Map(),
+    frameCaptureFailures: [],
+    frameCaptureStatus: "complete",
+    acceptingNewFrames: true,
     rearmCallbacks: new Set(),
     navigationCallbacks: new Set(),
     acceptingNavigation: true,
@@ -857,17 +1046,11 @@ export async function handleRecordStart(
   ensureBrowserObservationListeners(deps);
 
   const abortPending = async (notifyContent: boolean) => {
+    const pending = recordings.get(params.session_id);
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
-    if (notifyContent) {
-      try {
-        await deps.sendToTab(target.tabId, {
-          type: RECORD_CANCEL,
-          requestId,
-        });
-      } catch {
-        // Content may never have received RECORD_START.
-      }
+    if (notifyContent && pending) {
+      await cancelRecordingOnAllDocuments(pending, deps);
     }
     if (deps.bypassOverlay) {
       try {
@@ -970,11 +1153,28 @@ export async function handleRecordStart(
     if (cancelled) return cancelled;
   }
 
-  const startMsg: RecordStartMessage = { type: RECORD_START, requestId, startedAtMs };
+  const startMsg: RecordStartMessage = {
+    type: RECORD_START,
+    requestId,
+    startedAtMs,
+    showOverlay: true,
+    frameMode: "top",
+  };
 
   try {
-    await sendRecordStartWithAck(target.tabId, startMsg, deps.sendToTab);
-    active.armedTabIds.add(target.tabId);
+    const frameDeps = frameSendDeps(deps);
+    const { armed, failures } = await armAllDocumentsForTab(target.tabId, startMsg, frameDeps);
+    for (const failure of failures) recordFrameFailure(active, failure);
+    for (const doc of armed) active.armedDocuments.set(doc.documentId, doc);
+    if (active.armedDocuments.size === 0) {
+      await abortPending(true);
+      return {
+        code: "protocol_error",
+        message:
+          "failed to start recording in any frame — reload the BrowserSkill extension, then retry",
+      };
+    }
+    await publishCaptureStatus(active, deps);
   } catch {
     await abortPending(true);
     return {

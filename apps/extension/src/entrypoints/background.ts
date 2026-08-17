@@ -33,6 +33,9 @@ import {
   defaultBorrowChromeWindows,
   requestBorrowConfirmation,
 } from "@/tools/borrow-confirmation";
+import {
+  type RecordCaptureStatusMessage,
+} from "@/lib/record-bridge";
 import { ToolDispatcher } from "@/tools/dispatcher";
 import {
   attachRecordFinishListener,
@@ -175,6 +178,24 @@ export default defineBackground(() => {
     cdp,
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
       chrome.tabs.sendMessage(tabId, msg),
+    sendToDocument: (
+      tabId: number,
+      documentId: string,
+      msg: Parameters<typeof chrome.tabs.sendMessage>[1],
+    ) => chrome.tabs.sendMessage(tabId, msg, { documentId }),
+    getAllFrames: async (tabId: number) => {
+      if (!chrome.webNavigation?.getAllFrames) return [];
+      const frames = await chrome.webNavigation.getAllFrames({ tabId });
+      return (frames ?? []).map((frame) => ({
+        frameId: frame.frameId,
+        documentId: frame.documentId,
+        url: frame.url,
+        parentFrameId: frame.parentFrameId,
+      }));
+    },
+    broadcastCaptureStatus: async (tabId: number, msg: RecordCaptureStatusMessage) => {
+      await chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
+    },
     bypassOverlay: async (tabId: number, enabled: boolean) => {
       try {
         await chrome.tabs.sendMessage(tabId, {

@@ -90,6 +90,7 @@
   },
   "recordOverlay": {
     "recording": "Recording your actions",
-    "finish": "Finish"
+    "finish": "Finish",
+    "partialCapture": "Some embedded frames may not be recorded."
   }
 }

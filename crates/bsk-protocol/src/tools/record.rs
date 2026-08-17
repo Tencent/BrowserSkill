@@ -168,6 +168,46 @@ pub enum Step {
 }
 
 // ---------------------------------------------------------------------------
+// Frame capture metadata
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameCaptureStatus {
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FrameCaptureFailureReason {
+    NotInjectable,
+    ArmFailed,
+    RearmFailed,
+    DrainFailed,
+    FlushFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FrameCaptureFailure {
+    pub reason: FrameCaptureFailureReason,
+    pub frame_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FrameCaptureInfo {
+    pub status: FrameCaptureStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failures: Option<Vec<FrameCaptureFailure>>,
+}
+
+// ---------------------------------------------------------------------------
 // Trace root
 // ---------------------------------------------------------------------------
 
@@ -183,6 +223,8 @@ pub struct Trace {
     pub stopped_by: StopReason,
     pub entry: TraceEntry,
     pub recorder: RecorderInfo,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_capture: Option<FrameCaptureInfo>,
     pub states: Vec<TraceState>,
     pub steps: Vec<Step>,
 }
@@ -277,6 +319,7 @@ mod tests {
                 bsk: "0.1.10".into(),
                 vom: VOM_FORMAT_VERSION,
             },
+            frame_capture: None,
             states: vec![
                 TraceState {
                     id: "s1".into(),
@@ -478,5 +521,40 @@ mod tests {
         assert_eq!(trace.version, 3);
         assert_eq!(trace.states.len(), 2);
         assert_eq!(trace.steps.len(), 2);
+    }
+
+    #[test]
+    fn trace_deserializes_optional_frame_capture_metadata() {
+        let v = json!({
+            "version": 3,
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "stopped_by": "cli_stop",
+            "entry": { "start_url": "https://example.com/editor" },
+            "recorder": { "bsk": "0.1.10", "vom": 1 },
+            "frame_capture": {
+                "status": "partial",
+                "failures": [
+                    {
+                        "reason": "not_injectable",
+                        "frame_id": 2,
+                        "url": "chrome://settings",
+                        "detail": "restricted frame url"
+                    }
+                ]
+            },
+            "states": [],
+            "steps": []
+        });
+        let trace: Trace = serde_json::from_value(v).unwrap();
+        let frame_capture = trace.frame_capture.expect("frame_capture");
+        assert_eq!(frame_capture.status, FrameCaptureStatus::Partial);
+        let failures = frame_capture.failures.expect("failures");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            failures[0].reason,
+            FrameCaptureFailureReason::NotInjectable
+        );
+        assert_eq!(failures[0].frame_id, 2);
+        assert_eq!(failures[0].url.as_deref(), Some("chrome://settings"));
     }
 }

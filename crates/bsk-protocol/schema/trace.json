@@ -16,6 +16,16 @@
     "entry": {
       "$ref": "#/definitions/TraceEntry"
     },
+    "frame_capture": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/FrameCaptureInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "purpose": {
       "type": [
         "string",
@@ -62,6 +72,77 @@
         "enter",
         "suggestion",
         "blur"
+      ]
+    },
+    "FrameCaptureFailure": {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "reason"
+      ],
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "document_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame_id": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "reason": {
+          "$ref": "#/definitions/FrameCaptureFailureReason"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "FrameCaptureFailureReason": {
+      "type": "string",
+      "enum": [
+        "not_injectable",
+        "arm_failed",
+        "rearm_failed",
+        "drain_failed",
+        "flush_failed"
+      ]
+    },
+    "FrameCaptureInfo": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "failures": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/FrameCaptureFailure"
+          }
+        },
+        "status": {
+          "$ref": "#/definitions/FrameCaptureStatus"
+        }
+      }
+    },
+    "FrameCaptureStatus": {
+      "type": "string",
+      "enum": [
+        "complete",
+        "partial"
       ]
     },
     "KeyModifier": {

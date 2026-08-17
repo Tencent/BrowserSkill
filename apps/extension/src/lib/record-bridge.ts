@@ -4,6 +4,7 @@
  */
 
 import type { CaptureTargetDescriptor } from "./describe-target";
+import type { FrameCaptureFailure, FrameCaptureStatus } from "@/transport/types";
 
 export const RECORD_START = "bsk-record-start";
 export const RECORD_STEP = "bsk-record-step";
@@ -11,6 +12,7 @@ export const RECORD_STOP = "bsk-record-stop";
 export const RECORD_CANCEL = "bsk-record-cancel";
 export const RECORD_FINISH = "bsk-record-finish";
 export const RECORD_QUERY = "bsk-record-query";
+export const RECORD_CAPTURE_STATUS = "bsk-record-capture-status";
 
 export interface RecordStartAck {
   ok: true;
@@ -27,7 +29,11 @@ export interface RecordQueryResponse {
   requestId?: string;
   /** Epoch ms when the recording began; see `RecordStartMessage.startedAtMs`. */
   startedAtMs?: number;
+  captureStatus?: FrameCaptureStatus;
+  captureFailures?: FrameCaptureFailure[];
 }
+
+export type RecordFrameMode = "top" | "child";
 
 export interface RecordStartMessage {
   type: typeof RECORD_START;
@@ -38,6 +44,10 @@ export interface RecordStartMessage {
    * content-script remounts instead of restarting per page.
    */
   startedAtMs?: number;
+  /** When true, the top-frame overlay should mount. Child frames omit this. */
+  showOverlay?: boolean;
+  /** Whether this document runs top-frame or child-frame capture semantics. */
+  frameMode?: RecordFrameMode;
 }
 
 export interface RecordStepPayload {
@@ -51,8 +61,14 @@ export interface RecordStepPayload {
   url?: string;
   redacted?: boolean;
   commit?: "enter" | "suggestion" | "blur";
-  /** Page URL when the step was captured. */
+  /** Top-level tab URL when the step was captured. */
   page_url?: string;
+  /** URL of the frame document where the interaction occurred. */
+  frame_url?: string;
+  /** Ephemeral token stamped on the active document root; not persisted in trace steps. */
+  documentToken?: string;
+  /** Epoch ms when the step was captured in the content script. */
+  capturedAtMs?: number;
   /** Document geometry at capture time for background geometric matching. */
   geometry?: {
     rect: { x: number; y: number; w: number; h: number };
@@ -92,6 +108,12 @@ export interface RecordFinishMessage {
   requestId: string;
 }
 
+export interface RecordCaptureStatusMessage {
+  type: typeof RECORD_CAPTURE_STATUS;
+  status: FrameCaptureStatus;
+  failures?: FrameCaptureFailure[];
+}
+
 export function isRecordStartMessage(msg: unknown): msg is RecordStartMessage {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
@@ -120,6 +142,16 @@ export function isRecordQueryMessage(msg: unknown): msg is RecordQueryMessage {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
   return m.type === RECORD_QUERY;
+}
+
+export function isRecordCaptureStatusMessage(msg: unknown): msg is RecordCaptureStatusMessage {
+  if (typeof msg !== "object" || msg === null) return false;
+  const m = msg as Record<string, unknown>;
+  return (
+    m.type === RECORD_CAPTURE_STATUS &&
+    (m.status === "complete" || m.status === "partial") &&
+    (m.failures === undefined || Array.isArray(m.failures))
+  );
 }
 
 export function isRecordStepMessage(msg: unknown): msg is RecordStepMessage {

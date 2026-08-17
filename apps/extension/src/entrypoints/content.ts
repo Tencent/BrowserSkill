@@ -44,12 +44,15 @@ import {
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
+  isRecordCaptureStatusMessage,
   RECORD_FINISH,
   RECORD_QUERY,
+  type RecordCaptureStatusMessage,
   type RecordQueryResponse,
   type RecordStartAck,
   type RecordStopAck,
 } from "@/lib/record-bridge";
+import type { FrameCaptureFailure, FrameCaptureStatus } from "@/transport/types";
 import type {
   BorrowCancelMessage,
   BorrowRequestMessage,
@@ -70,6 +73,8 @@ export default defineContentScript({
     const overlays = new OverlayController();
     let recordCapture: RecordCaptureController | null = null;
     let activeRecordRequestId: string | null = null;
+    let recordCaptureStatus: FrameCaptureStatus = "complete";
+    let recordCaptureFailures: FrameCaptureFailure[] = [];
     let reactRoot: ReactDOM.Root | null = null;
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
@@ -188,7 +193,11 @@ export default defineContentScript({
                 requests: overlayState.borrowRequests,
               }),
               React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
-              React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(RecordOverlay, {
+                request: overlayState.activeRecord,
+                captureStatus: recordCaptureStatus,
+                captureFailures: recordCaptureFailures,
+              }),
               React.createElement(ControlOverlay, {
                 visible: controlOverlayVisible,
                 interrupting: overlayState.interrupting,
@@ -260,12 +269,20 @@ export default defineContentScript({
         | CaptureSuppressMessage
         | OverlayAgentOverlayResetMessage
         | OverlayAgentStateMessage
-        | OverlayAutomationBypassMessage,
+        | OverlayAutomationBypassMessage
+        | RecordCaptureStatusMessage,
       _sender: chrome.runtime.MessageSender,
       sendResponse: (response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck) => void,
     ) => {
       if (isCaptureSuppressMessage(message)) {
         return captureSuppress.handleMessage(message, sendResponse);
+      }
+
+      if (isRecordCaptureStatusMessage(message)) {
+        recordCaptureStatus = message.status;
+        recordCaptureFailures = message.failures ?? [];
+        renderAll();
+        return false;
       }
 
       if (isRecordContentMessage(message)) {
@@ -295,6 +312,8 @@ export default defineContentScript({
             },
             onStop: () => {
               overlays.clearAgentRecordRequest(activeRecordRequestId ?? undefined);
+              recordCaptureStatus = "complete";
+              recordCaptureFailures = [];
               renderAll();
             },
           },
@@ -449,6 +468,8 @@ export default defineContentScript({
         ) {
           const requestId = recordQuery.requestId;
           const startedAtMs = recordQuery.startedAtMs;
+          recordCaptureStatus = recordQuery.captureStatus ?? "complete";
+          recordCaptureFailures = recordQuery.captureFailures ?? [];
           overlays.setAgentRecordRequest({
             id: requestId,
             ...(typeof startedAtMs === "number" ? { startedAtMs } : {}),

@@ -17,6 +17,8 @@ import { reduceTraceSteps, resolveTraceStartUrl } from "./trace-reducer";
 export interface LastSettledObservation {
   stateId: string;
   captured: CapturedNode[];
+  matchNodes: CapturedNode[];
+  documentTokenOwners: Map<string, number | null>;
   refs: RenderedRef[];
   url: string;
   title?: string;
@@ -40,6 +42,8 @@ export interface PendingRedirectLanding {
 export interface RecordingObservationState {
   stateRegistry: Map<string, StateRegistryEntry>;
   lastSettled: LastSettledObservation | null;
+  /** Latest token→owner map from the most recent observation capture. */
+  documentTokenOwners: Map<string, number | null>;
   maxPageTokens: number;
   redactValues: boolean;
   lastCaptureAtMs: number;
@@ -67,6 +71,7 @@ export function createObservationState(options?: {
   return {
     stateRegistry: new Map(),
     lastSettled: null,
+    documentTokenOwners: new Map(),
     maxPageTokens: options?.maxPageTokens ?? DEFAULT_MAX_PAGE_TOKENS,
     redactValues: options?.redactValues ?? false,
     lastCaptureAtMs: 0,
@@ -125,9 +130,12 @@ export async function captureAndRegisterObservation(
   });
 
   obs.lastCaptureAtMs = Date.now();
+  obs.documentTokenOwners = rendered.documentTokenOwners;
   const settled: LastSettledObservation = {
     stateId,
     captured: rendered.captured,
+    matchNodes: rendered.matchNodes,
+    documentTokenOwners: rendered.documentTokenOwners,
     refs: rendered.refs,
     url,
     title: resolvedTitle,
@@ -164,7 +172,7 @@ export function applyTargetMatching(
       "geometry" in draft && draft.geometry
         ? matchTarget({
             geometry: draft.geometry,
-            captured: obs.lastSettled.captured,
+            captured: obs.lastSettled.matchNodes,
             refs: obs.lastSettled.refs,
             fallback: draft.captureTarget,
           })
@@ -636,6 +644,7 @@ export function buildTraceV3(input: {
   startUrl?: string;
   stoppedBy: StopReason;
   bskVersion: string;
+  frameCapture?: Trace["frame_capture"];
 }): Trace {
   const { steps, stepIdByDraftId } = reduceTraceSteps(input.steps, input.obs.stateRegistry);
   const published = selectPublishedStates(input.obs.stateRegistry, steps);
@@ -657,6 +666,7 @@ export function buildTraceV3(input: {
     stopped_by: input.stoppedBy,
     entry: { start_url: startUrl },
     recorder: { bsk: input.bskVersion, vom: 1 },
+    ...(input.frameCapture ? { frame_capture: input.frameCapture } : {}),
     states,
     steps,
   };

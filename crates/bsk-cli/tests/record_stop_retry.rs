@@ -96,6 +96,7 @@ fn sample_trace() -> Trace {
             bsk: "0.1.10".into(),
             vom: VOM_FORMAT_VERSION,
         },
+        frame_capture: None,
         states: vec![TraceState {
             id: "s1".into(),
             url: "https://example.com/".into(),

@@ -1,4 +1,5 @@
 import { useTranslation } from "@browser-skill/i18n/react";
+import type { FrameCaptureFailure, FrameCaptureStatus } from "@/transport/types";
 import {
   type PointerEvent as ReactPointerEvent,
   useCallback,
@@ -21,6 +22,8 @@ export interface RecordRequestData {
 
 type Props = {
   request: RecordRequestData | null;
+  captureStatus?: FrameCaptureStatus;
+  captureFailures?: FrameCaptureFailure[];
 };
 
 const VIEWPORT_MARGIN = 16;
@@ -52,7 +55,11 @@ function clampDragPos(
   };
 }
 
-export function RecordOverlay({ request }: Props) {
+export function RecordOverlay({
+  request,
+  captureStatus = "complete",
+  captureFailures = [],
+}: Props) {
   const { t } = useTranslation("extension");
   const [show, setShow] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -154,6 +161,7 @@ export function RecordOverlay({ request }: Props) {
 
   const introVisible = elapsedSeconds * 1_000 < INTRO_DURATION_MS;
   const positioned = dragPos !== null;
+  const partialCapture = captureStatus === "partial" || captureFailures.length > 0;
   const defaultTransform = show
     ? "translateX(-50%) translateY(0)"
     : "translateX(-50%) translateY(8px)";
@@ -208,8 +216,9 @@ export function RecordOverlay({ request }: Props) {
           data-slot="record-overlay-status"
           style={{
             display: "flex",
-            alignItems: "center",
-            gap: 8,
+            flexDirection: "column",
+            alignItems: "flex-start",
+            gap: 2,
             minWidth: 0,
             flex: 1,
             borderRadius: 9999,
@@ -218,41 +227,57 @@ export function RecordOverlay({ request }: Props) {
             paddingRight: 4,
           }}
         >
-          <span
-            data-slot="record-overlay-indicator"
-            style={{
-              width: 9,
-              height: 9,
-              borderRadius: "50%",
-              backgroundColor: "#ef4444",
-              flexShrink: 0,
-              animation: "bsk-rec-pulse 1.4s ease-in-out infinite",
-            }}
-          />
-          <span
-            data-slot="record-overlay-label"
-            style={{
-              display: "block",
-              flex: "0 1 auto",
-              fontSize: 16,
-              fontWeight: 500,
-              color: "#333",
-              whiteSpace: "nowrap",
-              userSelect: "none",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              width: introVisible ? "auto" : 48,
-              maxWidth: introVisible ? 280 : 48,
-              fontVariantNumeric: introVisible ? undefined : "tabular-nums",
-              textAlign: introVisible ? "left" : "center",
-              margin: 0,
-              padding: 0,
-              minWidth: 0,
-              transition: "max-width 180ms ease-out",
-            }}
-          >
-            {introVisible ? t("recordOverlay.recording") : formatElapsed(elapsedSeconds)}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, width: "100%" }}>
+            <span
+              data-slot="record-overlay-indicator"
+              style={{
+                width: 9,
+                height: 9,
+                borderRadius: "50%",
+                backgroundColor: "#ef4444",
+                flexShrink: 0,
+                animation: "bsk-rec-pulse 1.4s ease-in-out infinite",
+              }}
+            />
+            <span
+              data-slot="record-overlay-label"
+              style={{
+                display: "block",
+                flex: "0 1 auto",
+                fontSize: 16,
+                fontWeight: 500,
+                color: "#333",
+                whiteSpace: "nowrap",
+                userSelect: "none",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                width: introVisible ? "auto" : 48,
+                maxWidth: introVisible ? 280 : 48,
+                fontVariantNumeric: introVisible ? undefined : "tabular-nums",
+                textAlign: introVisible ? "left" : "center",
+                margin: 0,
+                padding: 0,
+                minWidth: 0,
+                transition: "max-width 180ms ease-out",
+              }}
+            >
+              {introVisible ? t("recordOverlay.recording") : formatElapsed(elapsedSeconds)}
+            </span>
+          </div>
+          {partialCapture ? (
+            <span
+              data-slot="record-overlay-partial-warning"
+              style={{
+                fontSize: 12,
+                lineHeight: "16px",
+                color: "#b45309",
+                whiteSpace: "normal",
+                maxWidth: 280,
+              }}
+            >
+              {t("recordOverlay.partialCapture")}
+            </span>
+          ) : null}
         </div>
         <button
           type="button"

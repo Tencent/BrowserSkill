@@ -40,9 +40,8 @@ function matchingRects(
   target: { x: number; y: number; w: number; h: number };
   node: { x: number; y: number; w: number; h: number } | null;
 } {
-  const topFrame = (geometry.ownerFrameBackendNodeId ?? null) === null;
   const viewportPosition = geometry.position === "fixed" || geometry.position === "sticky";
-  if (!topFrame || viewportPosition || !node.documentRect) {
+  if (viewportPosition || !node.documentRect) {
     return { target: geometry.rect, node: nodeViewportRect(node) };
   }
   return {

@@ -285,6 +285,7 @@ bsk record stop [--output trace]   # terminal fallback if the browser panel is u
 - `target.ref` values like `@e12` exist **only inside** the bundle for disambiguation; do **not** copy `@eN` refs into SKILL.md or agent runbooks — use visible names from the observation text instead.
 - `--purpose` is optional context metadata; it does **not** change what gets captured.
 - `--redact-values` masks all form values in page files as `[filled]` / `[empty]`.
+- Recording captures interactions in the **top frame and injectable child frames** (same-origin and cross-origin where the extension can attach). Embedded frames that cannot be injected are omitted; the trace may include `frame_capture.status: "partial"` with failure details.
 - Do **not** record on banking/SSO/password-manager pages; passwords are redacted but traces may still contain sensitive text.
 
 ## Error handling

@@ -21,12 +21,18 @@ import {
   RECORD_STEP,
   RECORD_STOP,
   type RecordCancelMessage,
+  type RecordFrameMode,
   type RecordStartAck,
   type RecordStartMessage,
   type RecordStepPayload,
   type RecordStopAck,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import {
+  clearRecordDocumentToken,
+  createRecordDocumentToken,
+  stampRecordDocumentToken,
+} from "@/lib/record-document-token";
 import { shouldRecordPress } from "@/lib/trace-reducer";
 import {
   closestHoverSurfaceCandidate,
@@ -402,12 +408,37 @@ function scheduleInputCompletionCommit(
   setTimeout(syncAndCommit, 0);
 }
 
+export interface RecordCaptureOptions {
+  frameMode?: RecordFrameMode;
+}
+
 export function startRecordCapture(
   _requestId: string,
   sendStep: (step: RecordStepPayload) => void,
+  options: RecordCaptureOptions = {},
 ): RecordCaptureController {
+  const frameMode = options.frameMode ?? "top";
+  const emitNavigate = frameMode === "top";
+  const documentToken = createRecordDocumentToken();
+  stampRecordDocumentToken(documentToken);
+  const capturedAtMs = () => Date.now();
+
+  const resolveTopPageUrl = (): string => {
+    try {
+      return window.top?.location.href ?? location.href;
+    } catch {
+      return location.href;
+    }
+  };
+
   const emitStep = (step: RecordStepPayload) => {
-    sendStep({ page_url: location.href, ...step });
+    sendStep({
+      page_url: resolveTopPageUrl(),
+      frame_url: location.href,
+      documentToken,
+      capturedAtMs: capturedAtMs(),
+      ...step,
+    });
   };
   const hoverSurfaceStateMap = (states: HoverSurfaceState[]): Map<Element, string> =>
     new Map(states.map((state) => [state.element, state.signature]));
@@ -478,6 +509,7 @@ export function startRecordCapture(
   };
 
   const emitNavigateIfChanged = (causedByAction?: boolean) => {
+    if (!emitNavigate) return;
     if (location.href === lastUrl) return;
     commitFillSession();
     lastUrl = location.href;
@@ -965,6 +997,7 @@ export function startRecordCapture(
   return {
     dispose() {
       commitFillSession();
+      clearRecordDocumentToken();
       document.removeEventListener("click", onClick, true);
       document.removeEventListener("mouseover", onMouseOver, true);
       document.removeEventListener("focusin", onFocusIn, true);
@@ -997,8 +1030,8 @@ export function handleRecordContentMessage(
     capture: RecordCaptureController | null;
     setActiveRequestId(id: string | null): void;
     setCapture(capture: RecordCaptureController | null): void;
-    onStart(requestId: string, startedAtMs?: number): void;
-    onStop(): void;
+    onStart?(requestId: string, startedAtMs?: number): void;
+    onStop?(): void;
   },
   sendResponse?: (response: RecordStartAck | RecordStopAck) => void,
 ): boolean {
@@ -1009,13 +1042,20 @@ export function handleRecordContentMessage(
       failedStepPayloads.delete(message.requestId);
     }
     state.capture?.dispose();
+    const frameMode = message.frameMode ?? "top";
     state.setCapture(
-      startRecordCapture(message.requestId, (step) => {
-        sendRecordStep(message.requestId, step);
-      }),
+      startRecordCapture(
+        message.requestId,
+        (step) => {
+          sendRecordStep(message.requestId, step);
+        },
+        { frameMode },
+      ),
     );
     state.setActiveRequestId(message.requestId);
-    state.onStart(message.requestId, message.startedAtMs);
+    if (message.showOverlay !== false && frameMode === "top") {
+      state.onStart?.(message.requestId, message.startedAtMs);
+    }
     sendResponse?.({ ok: true });
     return sendResponse !== undefined;
   }
@@ -1030,7 +1070,7 @@ export function handleRecordContentMessage(
     state.capture?.dispose();
     state.setCapture(null);
     const finishStop = () => {
-      state.onStop();
+      state.onStop?.();
       state.setActiveRequestId(null);
     };
     if (isRecordStopMessage(message) && sendResponse) {

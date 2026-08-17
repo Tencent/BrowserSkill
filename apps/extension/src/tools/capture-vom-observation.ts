@@ -1,4 +1,5 @@
 import { type RenderedRef, renderVom, type VomOptions } from "@browser-skill/vom";
+import { readRecordDocumentTokenFromAttrs } from "@/lib/record-document-token";
 import type { CdpAxNode } from "./observation";
 import { buildVomScene } from "./observation";
 import type { CdpRunner } from "./shared";
@@ -20,7 +21,26 @@ export interface CaptureVomObservationResult {
   refs: RenderedRef[];
   truncated: boolean;
   captured: CapturedNode[];
+  /** All nodes including iframe sub-documents, for geometric target matching. */
+  matchNodes: CapturedNode[];
+  /** Maps ephemeral record document tokens to immediate iframe owner backend ids. */
+  documentTokenOwners: Map<string, number | null>;
   surfaceProbes?: CapturedSurfaceProbe[];
+}
+
+export function flattenCapturedNodes(vm: CapturedViewModel): CapturedNode[] {
+  return [...vm.nodes, ...[...vm.iframeNodes.values()].flat()];
+}
+
+export function collectDocumentTokenOwners(vm: CapturedViewModel): Map<string, number | null> {
+  const owners = new Map<string, number | null>();
+  for (const node of flattenCapturedNodes(vm)) {
+    if (node.tag !== "html") continue;
+    const token = readRecordDocumentTokenFromAttrs(node.attrs);
+    if (!token) continue;
+    owners.set(token, node.ownerFrameBackendNodeId ?? null);
+  }
+  return owners;
 }
 
 function emptyCapturedViewModel(viewport = { width: 0, height: 0 }): CapturedViewModel {
@@ -91,11 +111,14 @@ export async function captureVomObservation(
     redactValues: opts.redactValues,
     activeRegionPolicy: opts.activeRegionPolicy ?? true,
   });
+  const matchNodes = flattenCapturedNodes(captured);
   return {
     text: rendered.text,
     refs: rendered.refs,
     truncated: rendered.truncated,
     captured: captured.nodes,
+    matchNodes,
+    documentTokenOwners: collectDocumentTokenOwners(captured),
     surfaceProbes: captured.surfaceProbes,
   };
 }

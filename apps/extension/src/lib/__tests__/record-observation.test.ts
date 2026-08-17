@@ -33,6 +33,8 @@ function finalizedFillBody(value: string, redactValues: boolean): string {
   obs.lastSettled = {
     stateId,
     captured: [capturedInput()],
+    matchNodes: [capturedInput()],
+    documentTokenOwners: new Map(),
     refs: [{ ref: "e1", backendNodeId: 42, role: "textbox", name: "Password", line: 1 }],
     url: URL,
     vomText: rawVomText,

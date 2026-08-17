@@ -178,4 +178,30 @@ describe("RecordOverlay", () => {
     expect(pill.style.bottom).toBe("auto");
     expect(pill.style.transform).toBe("none");
   });
+
+  it("shows a persistent partial-capture warning when frame capture is incomplete", () => {
+    const { container } = render(
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(RecordOverlay, {
+          request: { id: "rec-1", onFinish: vi.fn() },
+          captureStatus: "partial",
+          captureFailures: [
+            {
+              reason: "not_injectable",
+              frame_id: 2,
+              url: "chrome://settings",
+            },
+          ],
+        }),
+      ),
+    );
+
+    const warning = container.querySelector("[data-slot='record-overlay-partial-warning']");
+    expect(warning).toBeTruthy();
+    expect(warning?.textContent).toBe(
+      i18n.t("recordOverlay.partialCapture", { ns: "extension" }),
+    );
+  });
 });

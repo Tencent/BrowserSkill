@@ -113,4 +113,60 @@ describe("matchTarget", () => {
     });
     expect(target.ref).toBe("e1");
   });
+
+  it("isolates geometry matching to the owner iframe backend node", () => {
+    const sharedRect = { x: 10, y: 20, w: 100, h: 30 };
+    const iframeRefs: RenderedRef[] = [
+      { ref: "e1", backendNodeId: 42, role: "button", name: "Top", line: 1 },
+      { ref: "e2", backendNodeId: 99, role: "button", name: "Iframe", line: 2 },
+    ];
+    const target = matchTarget({
+      geometry: {
+        rect: sharedRect,
+        scrollX: 0,
+        scrollY: 0,
+        position: "static",
+        tag: "button",
+        ownerFrameBackendNodeId: 13,
+      },
+      captured: [
+        node(42, { rect: sharedRect, documentRect: sharedRect }),
+        node(99, {
+          rect: sharedRect,
+          documentRect: sharedRect,
+          ownerFrameBackendNodeId: 13,
+        }),
+      ],
+      refs: iframeRefs,
+      fallback: { tag: "button", name: "Iframe" },
+    });
+    expect(target).toEqual({ ref: "e2", role: "button", name: "Iframe" });
+  });
+
+  it("matches iframe static elements using frame scroll and document coordinates", () => {
+    const iframeRefs: RenderedRef[] = [
+      { ref: "e2", backendNodeId: 99, role: "button", name: "Iframe", line: 2 },
+    ];
+    const target = matchTarget({
+      geometry: {
+        rect: { x: 10, y: 50, w: 100, h: 30 },
+        scrollX: 0,
+        scrollY: 120,
+        position: "static",
+        tag: "button",
+        ownerFrameBackendNodeId: 13,
+      },
+      captured: [
+        node(99, {
+          ownerFrameBackendNodeId: 13,
+          documentRect: { x: 10, y: 170, w: 100, h: 30 },
+          localRect: { x: 10, y: 50, w: 100, h: 30 },
+          rect: { x: 10, y: 50, w: 100, h: 30 },
+        }),
+      ],
+      refs: iframeRefs,
+      fallback: { tag: "button", name: "Iframe" },
+    });
+    expect(target).toEqual({ ref: "e2", role: "button", name: "Iframe" });
+  });
 });

@@ -681,6 +681,28 @@ export interface RecorderInfo {
   vom: number;
 }
 
+export type FrameCaptureStatus = "complete" | "partial";
+
+export type FrameCaptureFailureReason =
+  | "not_injectable"
+  | "arm_failed"
+  | "rearm_failed"
+  | "drain_failed"
+  | "flush_failed";
+
+export interface FrameCaptureFailure {
+  reason: FrameCaptureFailureReason;
+  frame_id: number;
+  document_id?: string;
+  url?: string;
+  detail?: string;
+}
+
+export interface FrameCaptureInfo {
+  status: FrameCaptureStatus;
+  failures?: FrameCaptureFailure[];
+}
+
 export type StopReason = "user_finish" | "cli_stop";
 
 export interface TraceState {
@@ -864,6 +886,8 @@ export interface Trace {
   stopped_by: StopReason;
   entry: TraceEntry;
   recorder: RecorderInfo;
+  /** Present when one or more frames could not be armed, rearmed, or flushed. */
+  frame_capture?: FrameCaptureInfo;
   states: TraceState[];
   steps: Step[];
 }
