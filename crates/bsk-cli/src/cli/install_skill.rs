@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::cli::error::CliError;
 use crate::cli::status::Output;
 use crate::skill_install::{
-    InstallOptions, all_harness_reports,
+    InstallOptions, InstallSourceKind, all_harness_reports,
     harness::{HarnessId, parse_harness_id},
     load_source, print_harness_table, run_interactive_prompt,
 };
@@ -56,11 +56,17 @@ pub fn dispatch(args: InstallSkillArgs, output: Output) -> Result<(), CliError> 
     }
 
     let harnesses = resolve_targets(&args, &reports).map_err(CliError::Local)?;
+    let source_kind = if args.source.is_some() {
+        InstallSourceKind::Custom
+    } else {
+        InstallSourceKind::Bundled
+    };
     let source = load_source(args.source.as_deref()).map_err(CliError::Local)?;
 
     let install_output = crate::skill_install::install_to_harnesses(&InstallOptions {
         harnesses: &harnesses,
         source: &source,
+        source_kind,
         force: args.force,
         home: None,
     });

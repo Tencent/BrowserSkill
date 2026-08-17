@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use super::{DEFAULT_SKILL_MD, harness::HarnessId};
+use super::{
+    DEFAULT_SKILL_MD, SOURCE_CUSTOM, SOURCE_MARKER_FILE, bundled_source_marker, harness::HarnessId,
+};
 
 /// Per-harness outcome of a sync pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -13,6 +15,9 @@ pub struct SyncReport {
     /// Harnesses whose on-disk `SKILL.md` already matched the bundled
     /// content; no write happened, mtime preserved.
     pub up_to_date: Vec<HarnessId>,
+    /// Harnesses whose skill is custom, manually edited, or from a
+    /// marker-less historical install. Automatic sync preserves it.
+    pub preserved: Vec<HarnessId>,
     /// Harnesses that have an installed `SKILL.md` but the sync attempt
     /// failed with an I/O error. The string is a human-readable detail.
     pub errors: Vec<(HarnessId, String)>,
@@ -33,6 +38,7 @@ pub(crate) fn sync_with_source(home: &Path, source: &str) -> SyncReport {
             SyncOne::Missing => continue,
             SyncOne::UpToDate => report.up_to_date.push(harness),
             SyncOne::Updated => report.updated.push(harness),
+            SyncOne::Preserved => report.preserved.push(harness),
             SyncOne::Error(msg) => report.errors.push((harness, msg)),
         }
     }
@@ -43,6 +49,7 @@ enum SyncOne {
     Missing,
     UpToDate,
     Updated,
+    Preserved,
     Error(String),
 }
 
@@ -54,6 +61,29 @@ fn sync_one(dest: &Path, source: &str) -> SyncOne {
         Ok(s) => s,
         Err(err) => return SyncOne::Error(format!("read {}: {err}", dest.display())),
     };
+    let marker = dest
+        .parent()
+        .expect("SKILL.md destination must have a parent")
+        .join(SOURCE_MARKER_FILE);
+    let managed_marker = match std::fs::read_to_string(&marker) {
+        Ok(value) if value == SOURCE_CUSTOM => return SyncOne::Preserved,
+        Ok(value) if value.starts_with("bundled:") => value,
+        Ok(_) => return SyncOne::Preserved,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            if on_disk != source {
+                return SyncOne::Preserved;
+            }
+            let marker_value = bundled_source_marker(source);
+            if let Err(err) = std::fs::write(&marker, &marker_value) {
+                return SyncOne::Error(format!("write {}: {err}", marker.display()));
+            }
+            return SyncOne::UpToDate;
+        }
+        Err(err) => return SyncOne::Error(format!("read {}: {err}", marker.display())),
+    };
+    if managed_marker != bundled_source_marker(&on_disk) {
+        return SyncOne::Preserved;
+    }
     if on_disk == source {
         return SyncOne::UpToDate;
     }
@@ -74,6 +104,9 @@ fn sync_one(dest: &Path, source: &str) -> SyncOne {
             dest.display()
         ));
     }
+    if let Err(err) = std::fs::write(&marker, bundled_source_marker(source)) {
+        return SyncOne::Error(format!("write {}: {err}", marker.display()));
+    }
     SyncOne::Updated
 }
 
@@ -82,12 +115,21 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    fn mark_bundled(dest: &Path, content: &str) {
+        std::fs::write(
+            dest.parent().unwrap().join(SOURCE_MARKER_FILE),
+            bundled_source_marker(content),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn sync_skips_uninstalled_harness() {
         let tmp = TempDir::new().unwrap();
         let report = sync_with_source(tmp.path(), "anything");
         assert!(report.updated.is_empty());
         assert!(report.up_to_date.is_empty());
+        assert!(report.preserved.is_empty());
         assert!(report.errors.is_empty());
         // Defensive: sync must not silently create files in harnesses that
         // never had the skill installed. This guards Task 2's real impl.
@@ -108,6 +150,7 @@ mod tests {
         std::fs::create_dir_all(&dest_dir).unwrap();
         let dest = dest_dir.join("SKILL.md");
         std::fs::write(&dest, b"old content").unwrap();
+        mark_bundled(&dest, "old content");
 
         let report = sync_with_source(home, "fresh content");
 
@@ -137,6 +180,7 @@ mod tests {
         std::fs::create_dir_all(&dest_dir).unwrap();
         let dest = dest_dir.join("SKILL.md");
         std::fs::write(&dest, "frozen content").unwrap();
+        mark_bundled(&dest, "frozen content");
         let mtime_before = std::fs::metadata(&dest).unwrap().modified().unwrap();
 
         // Sleep enough that any rewrite would visibly change mtime on
@@ -167,12 +211,14 @@ mod tests {
         let cursor_dir = HarnessId::Cursor.skill_dest_dir_for_home(home);
         std::fs::create_dir_all(&cursor_dir).unwrap();
         std::fs::write(cursor_dir.join("SKILL.md"), "old").unwrap();
+        mark_bundled(&cursor_dir.join("SKILL.md"), "old");
 
         // Codex: parent dir set to r-x. Reads still succeed, but creating
         // SKILL.md.tmp fails → exercises sync_one's write-tmp error branch.
         let codex_dir = HarnessId::Codex.skill_dest_dir_for_home(home);
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(codex_dir.join("SKILL.md"), "old").unwrap();
+        mark_bundled(&codex_dir.join("SKILL.md"), "old");
         let mut perms = std::fs::metadata(&codex_dir).unwrap().permissions();
         perms.set_mode(0o500); // r-x: blocks tmp creation in this dir
         std::fs::set_permissions(&codex_dir, perms).unwrap();
@@ -187,5 +233,65 @@ mod tests {
         assert_eq!(report.updated, vec![HarnessId::Cursor]);
         assert_eq!(report.errors.len(), 1);
         assert_eq!(report.errors[0].0, HarnessId::Codex);
+    }
+
+    #[test]
+    fn sync_preserves_custom_edited_and_unknown_skills() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+
+        let custom_dir = HarnessId::Cursor.skill_dest_dir_for_home(home);
+        std::fs::create_dir_all(&custom_dir).unwrap();
+        std::fs::write(custom_dir.join("SKILL.md"), "custom content").unwrap();
+        std::fs::write(custom_dir.join(SOURCE_MARKER_FILE), SOURCE_CUSTOM).unwrap();
+
+        let edited_dir = HarnessId::Codex.skill_dest_dir_for_home(home);
+        std::fs::create_dir_all(&edited_dir).unwrap();
+        std::fs::write(edited_dir.join("SKILL.md"), "managed then edited").unwrap();
+        mark_bundled(&edited_dir.join("SKILL.md"), "original managed content");
+
+        let unknown_dir = HarnessId::ClaudeCode.skill_dest_dir_for_home(home);
+        std::fs::create_dir_all(&unknown_dir).unwrap();
+        std::fs::write(unknown_dir.join("SKILL.md"), "historical content").unwrap();
+
+        let report = sync_with_source(home, "new bundled content");
+
+        assert_eq!(
+            report.preserved,
+            vec![HarnessId::Codex, HarnessId::ClaudeCode, HarnessId::Cursor]
+        );
+        assert_eq!(
+            std::fs::read_to_string(custom_dir.join("SKILL.md")).unwrap(),
+            "custom content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(edited_dir.join("SKILL.md")).unwrap(),
+            "managed then edited"
+        );
+        assert_eq!(
+            std::fs::read_to_string(unknown_dir.join("SKILL.md")).unwrap(),
+            "historical content"
+        );
+    }
+
+    #[test]
+    fn sync_adopts_markerless_current_bundle_then_updates_it() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let dest_dir = HarnessId::Cursor.skill_dest_dir_for_home(home);
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        let dest = dest_dir.join("SKILL.md");
+        std::fs::write(&dest, "current bundle").unwrap();
+
+        let first = sync_with_source(home, "current bundle");
+        assert_eq!(first.up_to_date, vec![HarnessId::Cursor]);
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join(SOURCE_MARKER_FILE)).unwrap(),
+            bundled_source_marker("current bundle")
+        );
+
+        let second = sync_with_source(home, "next bundle");
+        assert_eq!(second.updated, vec![HarnessId::Cursor]);
+        assert_eq!(std::fs::read_to_string(dest).unwrap(), "next bundle");
     }
 }
