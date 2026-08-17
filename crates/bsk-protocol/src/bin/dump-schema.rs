@@ -113,6 +113,7 @@ fn main() {
     dump!(RequestHelpParams, "tool_request_help_params");
     dump!(RequestHelpResult, "tool_request_help_result");
 
+    dump!(TraceV2, "trace_v2");
     dump!(Trace, "trace");
     dump!(Step, "trace_step");
     dump!(RecordStartParams, "tool_record_start_params");
