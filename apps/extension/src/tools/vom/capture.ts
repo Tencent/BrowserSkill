@@ -67,6 +67,25 @@ export interface CapturedViewModel {
 export interface CaptureViewModelOptions {
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  signal?: AbortSignal;
+}
+
+function captureAbortError(): Error {
+  const error = new Error("observation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: string }).name === "AbortError"
+  );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw captureAbortError();
 }
 
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
@@ -205,21 +224,25 @@ async function enrichFormControlStates(
   cdp: CdpRunner,
   tabId: number,
   frameNodeGroups: CapturedNode[][],
+  signal?: AbortSignal,
 ): Promise<void> {
   const hasControls = frameNodeGroups.some((nodes) =>
     nodes.some((node) => isFormControlTag(node.tag)),
   );
   if (!hasControls) return;
   try {
+    throwIfAborted(signal);
     const result = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
       expression: formStateBatchExpression(MAX_FORM_ENRICH_CONTROLS),
       returnByValue: true,
     });
+    throwIfAborted(signal);
     const frameStates = flattenFrameFormStates(runtimeValue<CapturedFrameFormState>(result));
     for (let i = 0; i < frameNodeGroups.length; i += 1) {
       applyFormStates(frameNodeGroups[i], frameStates[i] ?? []);
     }
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     // Best-effort enrichment. DOMSnapshot/AX data still carries the nodes.
   }
 }
@@ -427,8 +450,20 @@ function hoverStateExpression(): string {
   })()`;
 }
 
-async function wait(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
+async function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(captureAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
@@ -600,41 +635,51 @@ async function probeHoverSurfaces(
 ): Promise<CapturedSurfaceProbe[]> {
   const started = Date.now();
   try {
+    throwIfAborted(options.signal);
     const cssScan = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
       expression: hoverCssTriggerScanExpression(),
       returnByValue: true,
     });
+    throwIfAborted(options.signal);
     const cssHoverPoints = runtimeValue<Array<{ x: number; y: number }>>(cssScan) ?? [];
     const candidates = buildHoverCandidates(nodes, cssHoverPoints);
     if (candidates.length === 0) return [];
 
     const results: CapturedSurfaceProbe[] = [];
     const seen = new Set<number>();
+    throwIfAborted(options.signal);
     await options.hoverProbeBypassOverlay?.(tabId, true).catch(() => undefined);
     try {
+      throwIfAborted(options.signal);
       for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
+        throwIfAborted(options.signal);
         if (Date.now() - started > MAX_HOVER_PROBE_MS) break;
         if (results.length >= MAX_HOVER_SURFACES) break;
         if (seen.has(candidate.backendNodeId)) continue;
         try {
           await clearHover(cdp, tabId);
-          await wait(HOVER_SETTLE_MS);
+          throwIfAborted(options.signal);
+          await wait(HOVER_SETTLE_MS, options.signal);
           const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
             expression: hoverStateExpression(),
             returnByValue: true,
           });
+          throwIfAborted(options.signal);
           const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
 
+          throwIfAborted(options.signal);
           await cdp.send(tabId, "Input.dispatchMouseEvent", {
             type: "mouseMoved",
             x: candidate.x,
             y: candidate.y,
           });
-          await wait(HOVER_SETTLE_MS);
+          throwIfAborted(options.signal);
+          await wait(HOVER_SETTLE_MS, options.signal);
           const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
             expression: hoverStateExpression(),
             returnByValue: true,
           });
+          throwIfAborted(options.signal);
           const subItems = diffHoverItems(
             baselineItems,
             runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
@@ -648,7 +693,8 @@ async function probeHoverSurfaces(
             subItems,
             confidence: confidenceForHover(candidate, subItems),
           });
-        } catch {
+        } catch (error) {
+          if (isAbortError(error)) throw error;
           continue;
         } finally {
           await clearHover(cdp, tabId);
@@ -659,6 +705,7 @@ async function probeHoverSurfaces(
     }
     return results;
   } catch (err) {
+    if (isAbortError(err)) throw err;
     console.debug("[bsk capture] hover surface probe failed", err);
     return [];
   }
@@ -671,13 +718,16 @@ async function probeHoverSurfaces(
 export async function collectOverlayExcludedBackendIds(
   cdp: CdpRunner,
   tabId: number,
+  signal?: AbortSignal,
 ): Promise<Set<number>> {
   const excluded = new Set<number>();
   try {
+    throwIfAborted(signal);
     const doc = await cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
       depth: 0,
       pierce: true,
     });
+    throwIfAborted(signal);
     const rootNodeId = doc.root?.nodeId;
     if (typeof rootNodeId !== "number") return excluded;
 
@@ -685,6 +735,7 @@ export async function collectOverlayExcludedBackendIds(
       nodeId: rootNodeId,
       selector: OVERLAY_HOST_SELECTOR,
     });
+    throwIfAborted(signal);
     if (typeof found.nodeId !== "number" || found.nodeId === 0) return excluded;
 
     const described = await cdp.send<{ node?: CdpDomNode }>(tabId, "DOM.describeNode", {
@@ -692,8 +743,10 @@ export async function collectOverlayExcludedBackendIds(
       depth: -1,
       pierce: true,
     });
+    throwIfAborted(signal);
     collectBackendIdsFromDomNode(described.node, excluded);
   } catch (err) {
+    if (isAbortError(err)) throw err;
     console.debug("[bsk capture] overlay exclusion fallback failed", err);
   }
   return excluded;
@@ -920,7 +973,9 @@ export async function captureViewModel(
   tabId: number,
   options: CaptureViewModelOptions = {},
 ): Promise<CapturedViewModel> {
+  throwIfAborted(options.signal);
   const metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  throwIfAborted(options.signal);
   const dpr = devicePixelRatio(metrics);
   const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
   const viewport: Viewport = {
@@ -931,11 +986,13 @@ export async function captureViewModel(
   const scrollY = vpSrc.pageY ?? 0;
 
   await cdp.send(tabId, "DOMSnapshot.enable", {});
+  throwIfAborted(options.signal);
   const snap = await cdp.send<SnapshotReply>(tabId, "DOMSnapshot.captureSnapshot", {
     computedStyles: REQUESTED_STYLES,
     includePaintOrder: true,
     includeDOMRects: true,
   });
+  throwIfAborted(options.signal);
 
   const strings = snap.strings ?? [];
   const documents = snap.documents ?? [];
@@ -967,11 +1024,13 @@ export async function captureViewModel(
     excludedBackendNodeIds.add(id);
   }
 
-  await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()]);
+  await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()], options.signal);
+  throwIfAborted(options.signal);
 
   const surfaceProbes = options.conditionalSurfaceProbe
     ? await probeHoverSurfaces(cdp, tabId, nodes, options)
     : [];
+  throwIfAborted(options.signal);
 
   return { nodes, viewport, iframeNodes, surfaceProbes, excludedBackendNodeIds };
 }

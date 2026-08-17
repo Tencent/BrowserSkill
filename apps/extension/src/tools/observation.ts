@@ -132,16 +132,42 @@ function defaultScreenshotDeps(): ScreenshotDeps {
   };
 }
 
+function cancelled(tool: string): RpcError {
+  return { code: "cancelled", message: `${tool} aborted` };
+}
+
+function abortError(tool: string): Error {
+  const error = new Error(`${tool} aborted`);
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { name?: string }).name === "AbortError"
+  );
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, tool: string): void {
+  if (signal?.aborted) throw abortError(tool);
+}
+
 async function captureElementScreenshot(
   cdp: SharedCdpRunner,
   tabId: number,
   backendNodeId: number,
+  signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
+  if (signal?.aborted) return cancelled("screenshot");
   const scrollErr = await scrollNodeIntoView(cdp, tabId, backendNodeId);
   if (scrollErr) return scrollErr;
+  if (signal?.aborted) return cancelled("screenshot");
 
   const rectOrErr = await nodeBoundingRect(cdp, tabId, backendNodeId);
   if (isRpcError(rectOrErr)) return rectOrErr;
+  if (signal?.aborted) return cancelled("screenshot");
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
@@ -154,6 +180,7 @@ async function captureElementScreenshot(
         scale: 1,
       },
     });
+    if (signal?.aborted) return cancelled("screenshot");
     const image_base64 = shot.data ?? "";
     if (!image_base64) {
       return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
@@ -188,11 +215,15 @@ async function captureFullTabPng(
   deps: ScreenshotDeps,
   ctx: SessionContext,
   target: ResolvedTargetTab,
+  signal?: AbortSignal,
 ): Promise<string | RpcError> {
+  if (signal?.aborted) return cancelled("screenshot");
   try {
     const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
+    if (signal?.aborted) return cancelled("screenshot");
     return stripDataUrlPrefix(dataUrl);
   } catch (primaryErr) {
+    if (signal?.aborted) return cancelled("screenshot");
     const cdp = deps.cdp;
     if (!cdp) {
       return {
@@ -202,12 +233,15 @@ async function captureFullTabPng(
     }
     let fallbackMsg: string;
     try {
+      if (signal?.aborted) return cancelled("screenshot");
       cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       await cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+      if (signal?.aborted) return cancelled("screenshot");
       const shot = await cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
         format: "png",
         fromSurface: true,
       });
+      if (signal?.aborted) return cancelled("screenshot");
       if (shot.data) return shot.data;
       fallbackMsg = "Page.captureScreenshot returned no data";
     } catch (fallbackErr) {
@@ -226,7 +260,9 @@ export async function handleScreenshot(
   manager: SessionManager,
   params: ScreenshotParams,
   deps: ScreenshotDeps = defaultScreenshotDeps(),
+  signal?: AbortSignal,
 ): Promise<ScreenshotResult | RpcError> {
+  if (signal?.aborted) return cancelled("screenshot");
   const ctxOrErr = lookupSession(manager, params, "screenshot");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -238,6 +274,7 @@ export async function handleScreenshot(
     "screenshot",
   );
   if (isRpcError(target)) return target;
+  if (signal?.aborted) return cancelled("screenshot");
   const dialogCursor = deps.cdp ? markDialogCursor(deps.cdp, target.tabId) : 0;
   const withShotDialogs = <T extends object>(result: T) =>
     deps.cdp ? attachDialogs(deps.cdp, target.tabId, dialogCursor, result) : result;
@@ -249,15 +286,18 @@ export async function handleScreenshot(
     }
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
+    if (signal?.aborted) return cancelled("screenshot");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+    if (signal?.aborted) return cancelled("screenshot");
     const cdp = deps.cdp;
     const captured = await withOverlaysHiddenForCapture(
       target.tabId,
-      () => captureElementScreenshot(cdp, target.tabId, node.backendNodeId),
+      () => captureElementScreenshot(cdp, target.tabId, node.backendNodeId, signal),
       deps.sendToTab,
     );
     if (isRpcError(captured)) return captured;
+    if (signal?.aborted) return cancelled("screenshot");
     return withShotDialogs({
       image_base64: captured.image_base64,
       width: captured.width,
@@ -277,10 +317,11 @@ export async function handleScreenshot(
 
   const captured = await withOverlaysHiddenForCapture(
     target.tabId,
-    () => captureFullTabPng(deps, ctx, target),
+    () => captureFullTabPng(deps, ctx, target, signal),
     deps.sendToTab,
   );
   if (isRpcError(captured)) return captured;
+  if (signal?.aborted) return cancelled("screenshot");
   const image_base64 = captured;
   const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
   return withShotDialogs({
@@ -1264,7 +1305,9 @@ export async function handleGetHtml(
   manager: SessionManager,
   params: GetHtmlParams,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<GetHtmlResult | RpcError> {
+  if (signal?.aborted) return cancelled("get_html");
   const ctxOrErr = lookupSession(manager, params, "get_html");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -1276,14 +1319,17 @@ export async function handleGetHtml(
     "get_html",
   );
   if (isRpcError(target)) return target;
+  if (signal?.aborted) return cancelled("get_html");
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   const maxBytes =
     params.max_bytes && params.max_bytes > 0 ? params.max_bytes : DEFAULT_GET_HTML_MAX_BYTES;
 
   try {
+    throwIfAborted(signal, "get_html");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+    throwIfAborted(signal, "get_html");
     let html: string;
     if (params.ref) {
       const resolved = resolveSnapshotRef(ctx, params.ref, target.tabId);
@@ -1291,6 +1337,7 @@ export async function handleGetHtml(
       const resp = await deps.cdp.send<{ outerHTML?: string }>(target.tabId, "DOM.getOuterHTML", {
         backendNodeId: resolved.backendNodeId,
       });
+      throwIfAborted(signal, "get_html");
       html = resp.outerHTML ?? "";
     } else {
       const doc = await deps.cdp.send<{ root?: { nodeId?: number } }>(
@@ -1298,6 +1345,7 @@ export async function handleGetHtml(
         "DOM.getDocument",
         { depth: 0 },
       );
+      throwIfAborted(signal, "get_html");
       const nodeId = doc.root?.nodeId;
       if (typeof nodeId !== "number") {
         return {
@@ -1308,6 +1356,7 @@ export async function handleGetHtml(
       const resp = await deps.cdp.send<{ outerHTML?: string }>(target.tabId, "DOM.getOuterHTML", {
         nodeId,
       });
+      throwIfAborted(signal, "get_html");
       html = resp.outerHTML ?? "";
     }
     const originalBytes = utf8ByteLength(html);
@@ -1319,6 +1368,7 @@ export async function handleGetHtml(
       tab_id: target.tabId,
     });
   } catch (err) {
+    if (isAbortError(err)) return cancelled("get_html");
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -1333,7 +1383,9 @@ async function handleVomObservation(
   effect: ToolEffect,
   conditionalSurfaceProbe: boolean,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<SnapshotResult | ObserveResult | RpcError> {
+  if (signal?.aborted) return cancelled(toolName);
   const ctxOrErr = lookupSession(manager, params, toolName);
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -1345,11 +1397,13 @@ async function handleVomObservation(
     toolName,
   );
   if (isRpcError(target)) return target;
+  if (signal?.aborted) return cancelled(toolName);
   const denied = enforceToolTargetScope(ctx, target, effect, toolName);
   if (denied) return denied;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   try {
+    throwIfAborted(signal, toolName);
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
@@ -1360,6 +1414,7 @@ async function handleVomObservation(
       conditionalSurfaceProbe: effectiveConditionalSurfaceProbe,
       hoverProbeBypassOverlay: deps.hoverProbeBypassOverlay,
     });
+    throwIfAborted(signal, toolName);
     ctx.refStore.replace(
       rendered.refs.map(
         (r) => [r.ref, { backendNodeId: r.backendNodeId, tabId: target.tabId }] as const,
@@ -1385,6 +1440,7 @@ async function handleVomObservation(
         : {}),
     });
   } catch (err) {
+    if (isAbortError(err)) return cancelled(toolName);
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
@@ -1396,14 +1452,16 @@ export async function handleSnapshot(
   manager: SessionManager,
   params: SnapshotParams,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<SnapshotResult | RpcError> {
-  return handleVomObservation(manager, params, "snapshot", "passive_read", false, deps);
+  return handleVomObservation(manager, params, "snapshot", "passive_read", false, deps, signal);
 }
 
 export async function handleObserve(
   manager: SessionManager,
   params: ObserveParams,
   deps: SnapshotDeps = getDefaultDeps(),
+  signal?: AbortSignal,
 ): Promise<ObserveResult | RpcError> {
-  return handleVomObservation(manager, params, "observe", "transient_input", true, deps);
+  return handleVomObservation(manager, params, "observe", "transient_input", true, deps, signal);
 }

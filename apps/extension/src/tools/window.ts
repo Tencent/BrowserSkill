@@ -47,7 +47,9 @@ export async function handleWindowResize(
   manager: SessionManager,
   params: WindowResizeParams,
   api: WindowResizeApi = chromeWindowResizeApi,
+  signal?: AbortSignal,
 ): Promise<WindowResizeResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "window_resize aborted" };
   const ctxOrErr = lookupSession(manager, params, "window_resize");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -64,6 +66,7 @@ export async function handleWindowResize(
   }
 
   try {
+    if (signal?.aborted) return { code: "cancelled", message: "window_resize aborted" };
     await api.update(ctx.agentWindowId, {
       width: sizeOrErr.width,
       height: sizeOrErr.height,

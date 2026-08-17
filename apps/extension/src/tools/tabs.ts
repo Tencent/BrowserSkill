@@ -157,6 +157,7 @@ export interface ChromeWindowsApi {
   get(windowId: number): Promise<chrome.windows.Window>;
   getLastFocused(filters?: chrome.windows.QueryOptions): Promise<chrome.windows.Window>;
   create(props: chrome.windows.CreateData): Promise<chrome.windows.Window | undefined>;
+  remove(windowId: number): Promise<void>;
 }
 
 export const chromeWindowsApi: ChromeWindowsApi = {
@@ -164,6 +165,7 @@ export const chromeWindowsApi: ChromeWindowsApi = {
   getLastFocused: (filters) =>
     filters ? chrome.windows.getLastFocused(filters) : chrome.windows.getLastFocused(),
   create: (p) => chrome.windows.create(p),
+  remove: (id) => chrome.windows.remove(id),
 };
 
 export interface AgentOverlayResetApi {
@@ -215,7 +217,9 @@ export async function handleTabList(
   manager: SessionManager,
   params: TabListParams,
   api: ChromeTabsApi = chromeTabsApi,
+  signal?: AbortSignal,
 ): Promise<TabListResult | RpcError> {
+  if (signal?.aborted) return { code: "cancelled", message: "tab_list aborted" };
   if (!params || typeof params.session_id !== "string" || params.session_id.length === 0) {
     return {
       code: "invalid_params",
@@ -249,6 +253,7 @@ export async function handleTabList(
   const myAgentWindowId = ctx.agentWindowId;
 
   const allTabs = await api.query({});
+  if (signal?.aborted) return { code: "cancelled", message: "tab_list aborted" };
   const tabs: TabInfo[] = [];
   for (const t of allTabs) {
     if (typeof t.id !== "number") continue;
@@ -382,7 +387,12 @@ async function createTabAndCleanup(
       try {
         await getTabsApi(deps).remove(tab.id);
       } catch (cleanupErr) {
-        console.debug("[bsk tab_create] cleanup after abort failed", cleanupErr);
+        return rpcError(
+          "protocol_error",
+          "cleanup_failed",
+          `tab_create aborted but cleanup of tab ${tab.id} failed: ${describeError(cleanupErr)}`,
+          { resource_type: "tab", resource_id: tab.id },
+        );
       }
     }
     return { code: "cancelled", message: "tab_create aborted" };
@@ -693,7 +703,17 @@ async function moveTabForBorrow(
     try {
       await tabsApi.move(tabId, { windowId: originalWindowId, index: originalIndex });
     } catch (rollbackErr) {
-      console.debug("[bsk tab_borrow] rollback move failed", rollbackErr);
+      return rpcError(
+        "protocol_error",
+        "cleanup_failed",
+        `tab_borrow aborted but rollback of tab ${tabId} to window ${originalWindowId} failed: ${describeError(rollbackErr)}`,
+        {
+          resource_type: "tab",
+          resource_id: tabId,
+          original_window_id: originalWindowId,
+          original_index: originalIndex,
+        },
+      );
     }
     return { code: "cancelled", message: "tab_borrow aborted" };
   }
@@ -825,6 +845,12 @@ export interface ReturnOutcome {
   fallback: boolean;
 }
 
+interface FallbackWindowTarget {
+  windowId: number;
+  index: number;
+  created: boolean;
+}
+
 function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -833,10 +859,13 @@ async function chooseFallbackWindow(
   ctx: SessionContext,
   windowsApi: ChromeWindowsApi,
   isAgentWindowId: (windowId: number) => boolean,
-): Promise<{ windowId: number; index: number } | RpcError> {
+  signal?: AbortSignal,
+): Promise<FallbackWindowTarget | RpcError> {
   let lastFocusedError: unknown;
   try {
     const last = await windowsApi.getLastFocused({ windowTypes: ["normal"] });
+    const cancelled = aborted(signal, "tab_return");
+    if (cancelled) return cancelled;
     const lastId = typeof last?.id === "number" ? last.id : null;
     // Never relocate a user tab into *any* session's Agent Window: this
     // session's is excluded explicitly, and other sessions' are excluded
@@ -846,11 +875,14 @@ async function chooseFallbackWindow(
     // session write to it and, worse, see it destroyed when that session
     // stops and closes its window.
     if (lastId !== null && lastId !== ctx.agentWindowId && !isAgentWindowId(lastId)) {
-      return { windowId: lastId, index: -1 };
+      return { windowId: lastId, index: -1, created: false };
     }
   } catch (err) {
     lastFocusedError = err;
   }
+
+  const cancelled = aborted(signal, "tab_return");
+  if (cancelled) return cancelled;
 
   try {
     const created = await windowsApi.create({
@@ -863,7 +895,20 @@ async function chooseFallbackWindow(
         message: "tab_return: failed to create fallback window",
       };
     }
-    return { windowId: created.id, index: 0 };
+    if (aborted(signal, "tab_return")) {
+      try {
+        await windowsApi.remove(created.id);
+      } catch (cleanupErr) {
+        return rpcError(
+          "protocol_error",
+          "cleanup_failed",
+          `tab_return aborted but cleanup of fallback window ${created.id} failed: ${describeError(cleanupErr)}`,
+          { resource_type: "window", resource_id: created.id },
+        );
+      }
+      return { code: "cancelled", message: "tab_return aborted" };
+    }
+    return { windowId: created.id, index: 0, created: true };
   } catch (err) {
     const suffix = lastFocusedError
       ? ` (after getLastFocused failed: ${describeError(lastFocusedError)})`
@@ -872,6 +917,25 @@ async function chooseFallbackWindow(
       code: "protocol_error",
       message: `tab_return: fallback window creation failed: ${describeError(err)}${suffix}`,
     };
+  }
+}
+
+async function cleanupUnusedFallbackWindow(
+  windowsApi: ChromeWindowsApi,
+  target: FallbackWindowTarget,
+  reason: string,
+): Promise<RpcError | null> {
+  if (!target.created) return null;
+  try {
+    await windowsApi.remove(target.windowId);
+    return null;
+  } catch (cleanupErr) {
+    return rpcError(
+      "protocol_error",
+      "cleanup_failed",
+      `${reason}; cleanup of fallback window ${target.windowId} failed: ${describeError(cleanupErr)}`,
+      { resource_type: "window", resource_id: target.windowId },
+    );
   }
 }
 
@@ -911,10 +975,13 @@ export async function returnBorrowedTab(
   const tabsApi = getTabsApi(deps);
   const windowsApi = getWindowsApi(deps);
   const isAgentWindowId = getIsAgentWindowId(deps);
+  const alreadyCancelled = aborted(deps.signal, "tab_return");
+  if (alreadyCancelled) return alreadyCancelled;
 
   let targetWindowId = entry.originalWindowId;
   let targetIndex = entry.originalIndex;
   let fallback = false;
+  let fallbackTarget: FallbackWindowTarget | null = null;
 
   // Check the original window is still around.
   let originalAlive = true;
@@ -924,12 +991,28 @@ export async function returnBorrowedTab(
     console.debug("[bsk tab_return] original window gone, falling back", err);
     originalAlive = false;
   }
+  const cancelledAfterLookup = aborted(deps.signal, "tab_return");
+  if (cancelledAfterLookup) return cancelledAfterLookup;
   if (!originalAlive) {
     fallback = true;
-    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId);
+    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
     if ("code" in target) return target;
+    fallbackTarget = target;
     targetWindowId = target.windowId;
     targetIndex = target.index;
+  }
+
+  const cancelledBeforeMove = aborted(deps.signal, "tab_return");
+  if (cancelledBeforeMove) {
+    if (fallbackTarget) {
+      const cleanupError = await cleanupUnusedFallbackWindow(
+        windowsApi,
+        fallbackTarget,
+        "tab_return aborted before moving the borrowed tab",
+      );
+      if (cleanupError) return cleanupError;
+    }
+    return cancelledBeforeMove;
   }
 
   try {
@@ -947,13 +1030,32 @@ export async function returnBorrowedTab(
       fallback,
     };
   } catch (err) {
+    if (fallbackTarget) {
+      const cleanupError = await cleanupUnusedFallbackWindow(
+        windowsApi,
+        fallbackTarget,
+        `tab_return could not move tab ${tabId}`,
+      );
+      if (cleanupError) return cleanupError;
+    }
+    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
+    if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
     if (!fallback) {
-      const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId);
+      const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
       if ("code" in target) {
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback failed: ${target.message}`,
         };
+      }
+      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return");
+      if (cancelledBeforeFallbackMove) {
+        const cleanupError = await cleanupUnusedFallbackWindow(
+          windowsApi,
+          target,
+          "tab_return aborted before fallback move",
+        );
+        return cleanupError ?? cancelledBeforeFallbackMove;
       }
       try {
         const moved = await tabsApi.move(tabId, {
@@ -970,6 +1072,12 @@ export async function returnBorrowedTab(
           fallback: true,
         };
       } catch (fallbackErr) {
+        const cleanupError = await cleanupUnusedFallbackWindow(
+          windowsApi,
+          target,
+          `tab_return fallback move for tab ${tabId} failed`,
+        );
+        if (cleanupError) return cleanupError;
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,

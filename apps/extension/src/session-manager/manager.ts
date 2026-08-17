@@ -31,6 +31,38 @@ export interface SessionStartOptions {
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
   focused?: boolean;
+  /** Cancellation for the transactional Agent Window startup sequence. */
+  signal?: AbortSignal;
+}
+
+export class SessionStartCleanupError extends Error {
+  readonly windowId: number;
+  readonly startupError: unknown;
+  readonly cleanupError: unknown;
+
+  constructor(windowId: number, startupError: unknown, cleanupError: unknown) {
+    const startupMessage =
+      startupError instanceof Error ? startupError.message : String(startupError);
+    const cleanupMessage =
+      cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+    super(
+      `session_start failed (${startupMessage}) and cleanup of Agent Window ${windowId} failed: ${cleanupMessage}`,
+    );
+    this.name = "SessionStartCleanupError";
+    this.windowId = windowId;
+    this.startupError = startupError;
+    this.cleanupError = cleanupError;
+  }
+}
+
+function sessionStartAbortError(): Error {
+  const error = new Error("session_start aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfSessionStartAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw sessionStartAbortError();
 }
 
 /**
@@ -140,18 +172,36 @@ export class SessionManager {
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
-    const windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, opts);
-    await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
-    const ctx: SessionContext = {
-      sessionId,
-      agentWindowId: windowId,
-      refStore: new RefStore(),
-      borrowedTabs: new Map(),
-      createdAtMs: this.now(),
-    };
-    this.sessions.set(sessionId, ctx);
-    this.windowIndex.set(windowId, sessionId);
-    return ctx;
+    throwIfSessionStartAborted(opts.signal);
+
+    let windowId: number | null = null;
+    try {
+      const { signal: _signal, ...createOptions } = opts;
+      windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+      throwIfSessionStartAborted(opts.signal);
+      await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
+      throwIfSessionStartAborted(opts.signal);
+
+      const ctx: SessionContext = {
+        sessionId,
+        agentWindowId: windowId,
+        refStore: new RefStore(),
+        borrowedTabs: new Map(),
+        createdAtMs: this.now(),
+      };
+      this.sessions.set(sessionId, ctx);
+      this.windowIndex.set(windowId, sessionId);
+      return ctx;
+    } catch (startupError) {
+      if (windowId !== null) {
+        try {
+          await this.agentWindow.remove(windowId);
+        } catch (cleanupError) {
+          throw new SessionStartCleanupError(windowId, startupError, cleanupError);
+        }
+      }
+      throw startupError;
+    }
   }
 
   /**

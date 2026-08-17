@@ -43,12 +43,11 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     return win.id;
   },
   async remove(windowId: number): Promise<void> {
-    try {
-      await chrome.windows.remove(windowId);
-    } catch (err) {
-      // Window may have been closed by the user already; ignore.
-      console.debug("[bh] chrome.windows.remove failed", err);
-    }
+    // Callers decide whether a missing/failed removal is benign. In
+    // particular, transactional session-start cleanup must be able to
+    // surface a window it could not remove instead of reporting a false
+    // cancellation success while the Agent Window remains open.
+    await chrome.windows.remove(windowId);
   },
   async ensureActiveTab(windowId: number, url: string): Promise<void> {
     const tabs = await chrome.tabs.query({ windowId });
