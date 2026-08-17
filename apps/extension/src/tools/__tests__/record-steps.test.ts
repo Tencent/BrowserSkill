@@ -10,7 +10,7 @@ import { resetStateIdCounterForTests } from "@/lib/trace-reducer";
 import type { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { EXTENSION_VERSION } from "@/transport/handshake";
-import type { RecordStopResult, Trace } from "@/transport/types";
+import type { RecordedTrace, RecordStopResult, TraceV3 } from "@/transport/types";
 import {
   attachRecordFinishListener,
   attachRecordQueryListener,
@@ -23,6 +23,14 @@ import {
 const AGENT_WINDOW_ID = 100;
 const TAB_ID = 4;
 const START_URL = "https://example.com/";
+const RECORD_START_V3 = { session_id: "abcd", url: START_URL, trace_version: 3 as const };
+
+function asTraceV3(trace: RecordedTrace): TraceV3 {
+  if (!("version" in trace)) {
+    throw new Error("expected v3 trace");
+  }
+  return trace;
+}
 
 type RuntimeListener = (
   message: unknown,
@@ -264,11 +272,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
 
     const startDeps = { tabsApi, sendToTab, cdp };
-    const started = await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      startDeps,
-    );
+    const started = await handleRecordStart(manager, RECORD_START_V3, startDeps);
     expect(started).toEqual({ tab_id: TAB_ID, recording: true });
     expect(requestId).not.toBe("");
 
@@ -298,7 +302,7 @@ describe("recorded user steps reach the exported trace", () => {
     );
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.recorder.bsk).toBe(EXTENSION_VERSION);
     expect(trace.steps).toHaveLength(1);
@@ -321,11 +325,7 @@ describe("recorded user steps reach the exported trace", () => {
       return { ok: true };
     });
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp: makeFakeCdp() },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     const emit = (step: unknown) => {
@@ -350,7 +350,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["fill", "click"]);
     expect(trace.steps.map((step) => step.id)).toEqual([1, 2]);
@@ -366,11 +366,7 @@ describe("recorded user steps reach the exported trace", () => {
     const tabsApi = makeTabsApi();
     const sendToTab = vi.fn(async () => ({ ok: true }));
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp: makeFakeCdp() },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
 
     const destination = "https://example.com/next";
     chromeApi.webNavigationOnCommitted.emit({
@@ -384,7 +380,7 @@ describe("recorded user steps reach the exported trace", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps).toHaveLength(1);
     const [step] = trace.steps;
@@ -404,19 +400,15 @@ describe("recorded user steps reach the exported trace", () => {
     });
     let requestId = "";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp: makeFakeCdp([
-          axTree("Example Domain", ["Learn more"]),
-          axTree("腾讯 iWiki"),
-          axTree("工作台 - 腾讯iWiki", ["文档C+D"]),
-        ]),
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([
+        axTree("Example Domain", ["Learn more"]),
+        axTree("腾讯 iWiki"),
+        axTree("工作台 - 腾讯iWiki", ["文档C+D"]),
+      ]),
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     const commit = (url: string, transitionType: string) => {
@@ -446,7 +438,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.states.map((state) => state.url)).toEqual([
       START_URL,
@@ -481,20 +473,16 @@ describe("recorded user steps reach the exported trace", () => {
     const callbackUrl = "https://passport.example/callback";
     const dashboardUrl = "https://app.example/dashboard";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp: makeFakeCdp([
-          axTree("Example Domain"),
-          axTree("OA登录", ["发起验证"]),
-          axTree("工作台", ["新建"]),
-          axTree("工作台", ["新建", "文档"]),
-        ]),
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([
+        axTree("Example Domain"),
+        axTree("OA登录", ["发起验证"]),
+        axTree("工作台", ["新建"]),
+        axTree("工作台", ["新建", "文档"]),
+      ]),
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     const commit = (url: string, transitionType: string, transitionQualifiers: string[] = []) => {
@@ -527,7 +515,7 @@ describe("recorded user steps reach the exported trace", () => {
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     // Login → dashboard may collapse into one navigate in the reducer; what
     // matters is the click is bound to the dashboard observation, not login.
@@ -554,15 +542,11 @@ describe("recorded user steps reach the exported trace", () => {
     });
     let requestId = "";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp: makeFakeCdp([axTree("编辑", ["发布"]), axTree("已发布")]),
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([axTree("编辑", ["发布"]), axTree("已发布")]),
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     // Click 发布, the page navigates to the published doc, and the user hits
@@ -583,7 +567,7 @@ describe("recorded user steps reach the exported trace", () => {
     } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["click"]);
     expect(trace.steps[0]).toMatchObject({ target: { name: "发布" } });
@@ -602,15 +586,11 @@ describe("recorded user steps reach the exported trace", () => {
 
     // Only the initial observation succeeds; every later capture throws.
     const cdp = makeFakeCdp([axTree("编辑", ["发布"])]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp,
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp,
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -623,7 +603,7 @@ describe("recorded user steps reach the exported trace", () => {
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     // No post-action observation exists anywhere, but the action still happened.
     expect(trace.steps.map((step) => step.op)).toEqual(["click"]);
@@ -643,15 +623,11 @@ describe("recorded user steps reach the exported trace", () => {
     let requestId = "";
 
     const cdp = makeFakeCdp([axTree("编辑", ["发布"]), axTree("已发布", ["编辑"])]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp,
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp,
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -668,7 +644,7 @@ describe("recorded user steps reach the exported trace", () => {
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["click"]);
     expect(trace.steps[0]?.result.state).toBe("s2");
@@ -687,15 +663,11 @@ describe("recorded user steps reach the exported trace", () => {
     let requestId = "";
 
     const cdp = makeFakeCdp([axTree("编辑", ["发布"]), axTree("已发布", ["编辑"])]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp,
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp,
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -712,7 +684,7 @@ describe("recorded user steps reach the exported trace", () => {
     cdp.setCaptureFailure(false);
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["click"]);
     expect(trace.steps[0]?.state).toBe("s1");
@@ -737,15 +709,11 @@ describe("recorded user steps reach the exported trace", () => {
       axTree("分组 已展开", ["添加配置", "确认"]),
       axTree("停止时的页面", ["无关"]),
     ]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp,
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp,
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -777,7 +745,7 @@ describe("recorded user steps reach the exported trace", () => {
     // landing state of an earlier step.
     tabsApi.goTo("https://example.com/elsewhere", "停止时的页面");
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["click", "click"]);
     const [first, second] = trace.steps;
@@ -803,15 +771,11 @@ describe("recorded user steps reach the exported trace", () => {
       axTree("分组 已展开", ["确认"]),
       axTree("停止时的页面", ["无关"]),
     ]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp,
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp,
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     // First click: its own settle never produces an observation.
@@ -836,7 +800,7 @@ describe("recorded user steps reach the exported trace", () => {
 
     tabsApi.goTo("https://example.com/elsewhere", "停止时的页面");
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["click", "click"]);
     const [first, second] = trace.steps;
@@ -858,11 +822,7 @@ describe("recorded user steps reach the exported trace", () => {
     let requestId = "";
 
     const cdp = makeFakeCdp([axTree("列表", ["打开"]), axTree("详情", ["返回"])]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     // The click starts a render that runs well past any fixed settle delay.
@@ -876,7 +836,7 @@ describe("recorded user steps reach the exported trace", () => {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     const [step] = trace.steps;
     const landing = trace.states.find((state) => state.id === step?.result.state);
@@ -898,11 +858,7 @@ describe("recorded user steps reach the exported trace", () => {
       axTree("编辑器 弹窗", ["输入标题", "确定"]),
       axTree("编辑器", ["发布"]),
     ]);
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     // Typing keeps the page busy, so the fill has not settled when the user
@@ -924,7 +880,7 @@ describe("recorded user steps reach the exported trace", () => {
     await new Promise((resolve) => setTimeout(resolve, 1_500));
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps.map((step) => step.op)).toEqual(["fill", "click"]);
     const [fill, click] = trace.steps;
@@ -944,19 +900,15 @@ describe("recorded user steps reach the exported trace", () => {
     });
     let requestId = "";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp: makeFakeCdp([
-          axTree("Example Domain", ["Submit"]),
-          axTree("Loading"),
-          axTree("Done", ["Next"]),
-        ]),
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([
+        axTree("Example Domain", ["Submit"]),
+        axTree("Loading"),
+        axTree("Done", ["Next"]),
+      ]),
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -974,7 +926,7 @@ describe("recorded user steps reach the exported trace", () => {
     runtimeOnMessageEmit(chromeApi, requestId, { op: "click", page_url: START_URL });
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps).toHaveLength(1);
     expect(trace.steps[0]).toMatchObject({
@@ -1006,15 +958,11 @@ describe("recorded user steps reach the exported trace", () => {
       return { ok: true };
     });
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp: makeFakeCdp() },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps).toEqual([expect.objectContaining({ op: "fill", value: "saved at stop" })]);
   });
@@ -1027,11 +975,11 @@ describe("recorded user steps reach the exported trace", () => {
     const intermediateUrl = "https://idp.example/callback";
     const finalUrl = "https://app.example/home";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp: makeFakeCdp([axTree("Start"), axTree("Home")]) },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([axTree("Start"), axTree("Home")]),
+    });
 
     tabsApi.goTo(finalUrl, "Home");
     chromeApi.webNavigationOnCommitted.emit({
@@ -1044,7 +992,7 @@ describe("recorded user steps reach the exported trace", () => {
     await Promise.resolve();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
 
     expect(trace.steps).toEqual([expect.objectContaining({ op: "navigate", to: finalUrl })]);
   }, 15_000);
@@ -1062,15 +1010,11 @@ describe("recorded user steps reach the exported trace", () => {
     const intermediateUrl = "https://example.com/loading";
     const finalUrl = "https://example.com/result";
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      {
-        tabsApi,
-        sendToTab,
-        cdp: makeFakeCdp([axTree("Search", ["Go"]), axTree("Result", ["Open"])]),
-      },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, {
+      tabsApi,
+      sendToTab,
+      cdp: makeFakeCdp([axTree("Search", ["Go"]), axTree("Result", ["Open"])]),
+    });
     attachRecordStepListener({ tabsApi, sendToTab });
 
     runtimeOnMessageEmit(chromeApi, requestId, {
@@ -1090,7 +1034,7 @@ describe("recorded user steps reach the exported trace", () => {
     tabsApi.goTo(finalUrl, "Result");
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
-    const trace = (stopped as RecordStopResult).trace as Trace;
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
     const resultState = trace.states.find((state) => state.id === trace.steps[0]?.result.state);
 
     expect(resultState?.url).toBe(finalUrl);
@@ -1119,11 +1063,7 @@ describe("recorded user steps reach the exported trace", () => {
       return { ok: true };
     });
 
-    await handleRecordStart(
-      manager,
-      { session_id: "abcd", url: START_URL },
-      { tabsApi, sendToTab, cdp: makeFakeCdp() },
-    );
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
     attachRecordFinishListener({ tabsApi, sendToTab });
     chromeApi.runtimeOnMessage.emit(
       { type: RECORD_FINISH, requestId },
@@ -1136,7 +1076,7 @@ describe("recorded user steps reach the exported trace", () => {
     releaseStop();
     const stopped = await cliStop;
 
-    expect((stopped as RecordStopResult).trace.stopped_by).toBe("user_finish");
+    expect(asTraceV3((stopped as RecordStopResult).trace).stopped_by).toBe("user_finish");
   });
 
   it("retries STOP only on armed tabs whose final delivery did not ack", async () => {
@@ -1173,7 +1113,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
 
-    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    await handleRecordStart(manager, RECORD_START_V3, deps);
     attachRecordQueryListener(deps);
     await new Promise<void>((resolve) => {
       chromeApi.runtimeOnMessage.emit(
@@ -1188,8 +1128,53 @@ describe("recorded user steps reach the exported trace", () => {
     expect(stopTabs).toEqual([TAB_ID, 5]);
 
     const retry = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    expect((retry as RecordStopResult).trace.version).toBe(3);
+    const retryTrace = (retry as RecordStopResult).trace;
+    expect("version" in retryTrace && retryTrace.version).toBe(3);
     expect(stopTabs).toEqual([TAB_ID, 5, 5]);
+  });
+
+  it("defaults to trace v2 when trace_version is omitted", async () => {
+    const { runtimeOnMessage } = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, msg: unknown) => {
+      const typed = msg as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    attachRecordStepListener(deps);
+    runtimeOnMessage.emit(
+      {
+        type: RECORD_STEP,
+        requestId,
+        step: {
+          op: "click",
+          page_url: START_URL,
+          target: { role: "button", name: "Submit", tag: "button" },
+        },
+      },
+      { tab: { id: TAB_ID } } as chrome.runtime.MessageSender,
+      () => {},
+    );
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = (stopped as RecordStopResult).trace;
+    expect("version" in trace).toBe(false);
+    expect("pages" in trace && trace.pages.length).toBeGreaterThan(0);
+  });
+
+  it("rejects unsupported trace_version values", async () => {
+    const manager = fakeManager();
+    const result = await handleRecordStart(
+      manager,
+      { session_id: "abcd", url: START_URL, trace_version: 99 },
+      { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
+    );
+    expect(result).toMatchObject({ code: "invalid_params" });
   });
 
   it("does not let a closed armed tab block finish", async () => {
@@ -1217,7 +1202,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
 
-    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    await handleRecordStart(manager, RECORD_START_V3, deps);
     attachRecordQueryListener(deps);
     await new Promise<void>((resolve) => {
       chromeApi.runtimeOnMessage.emit(
@@ -1230,7 +1215,8 @@ describe("recorded user steps reach the exported trace", () => {
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
 
-    expect((stopped as RecordStopResult).trace.version).toBe(3);
+    const stoppedTrace = (stopped as RecordStopResult).trace;
+    expect("version" in stoppedTrace && stoppedTrace.version).toBe(3);
     expect(stopTabs).toEqual([TAB_ID]);
   });
 
@@ -1272,7 +1258,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
 
-    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    await handleRecordStart(manager, RECORD_START_V3, deps);
     attachRecordQueryListener(deps);
     chromeApi.runtimeOnMessage.emit(
       { type: RECORD_QUERY },
@@ -1286,7 +1272,8 @@ describe("recorded user steps reach the exported trace", () => {
     releaseSecondStart();
     const stopped = await stopping;
 
-    expect((stopped as RecordStopResult).trace.version).toBe(3);
+    const stoppedTrace = (stopped as RecordStopResult).trace;
+    expect("version" in stoppedTrace && stoppedTrace.version).toBe(3);
     expect(stopTabs).toEqual([TAB_ID, 5]);
   });
 
@@ -1331,7 +1318,7 @@ describe("recorded user steps reach the exported trace", () => {
     });
     const deps = { tabsApi, sendToTab, cdp };
 
-    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    await handleRecordStart(manager, RECORD_START_V3, deps);
     attachRecordStepListener(deps);
     runtimeOnMessageEmit(chromeApi, requestId, {
       op: "click",
@@ -1353,7 +1340,7 @@ describe("recorded user steps reach the exported trace", () => {
     ]);
     releaseLookup();
     const stopped = earlyStop?.result ?? (await stopping);
-    const trace = (stopped as RecordStopResult).trace;
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
 
     expect(trace.steps.some((step) => step.op === "navigate" && step.to === secondUrl)).toBe(true);
     const navigation = trace.steps.find((step) => step.op === "navigate" && step.to === secondUrl);
@@ -1390,7 +1377,7 @@ describe("recorded user steps reach the exported trace", () => {
     const sendToTab = vi.fn(async () => ({ ok: true }));
     const deps = { tabsApi, sendToTab, cdp };
 
-    await handleRecordStart(manager, { session_id: "abcd", url: START_URL }, deps);
+    await handleRecordStart(manager, RECORD_START_V3, deps);
     chromeApi.webNavigationOnCommitted.emit({
       tabId: 5,
       frameId: 0,
@@ -1401,7 +1388,7 @@ describe("recorded user steps reach the exported trace", () => {
     await settleWait();
 
     const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
-    const trace = (stopped as RecordStopResult).trace;
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
     const navigation = trace.steps.find((step) => step.op === "navigate" && step.to === secondUrl);
     const landed = trace.states.find((state) => state.id === navigation?.result.state);
 

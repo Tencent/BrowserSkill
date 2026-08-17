@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::tools::{
     RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult, RecordStopParams,
-    RecordStopResult, TRACE_VERSION, Trace, TraceState,
+    RecordStopResult, RecordedTrace, TRACE_VERSION, TRACE_VERSION_V2, Trace, TraceState, TraceV2,
 };
 use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
@@ -136,6 +136,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         purpose: args.purpose.clone(),
         max_page_tokens: args.max_page_tokens,
         redact_values: Some(args.redact_values),
+        trace_version: Some(TRACE_VERSION),
     };
     let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),
@@ -180,8 +181,8 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     // Keep write/render inside a Result so `?` cannot skip session teardown.
     let run_result: Result<(), CliError> = match await_result {
         Ok(result) => (|| {
-            let pages_dir = write_trace_bundle(&args.output, &result.trace)?;
-            render_finish(&result.trace, &args.output, &pages_dir, format)
+            let exported = export_recorded_trace(&args.output, &result.trace)?;
+            render_finish(&result.trace, &args.output, &exported, format)
         })(),
         Err(err) => Err(err),
     };
@@ -211,8 +212,8 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
     )?;
 
     let run_result: Result<(), CliError> = (|| {
-        let pages_dir = write_trace_bundle(&args.output, &result.trace)?;
-        render_stop(&result, &args.output, &pages_dir, format)
+        let exported = export_recorded_trace(&args.output, &result.trace)?;
+        render_stop(&result, &args.output, &exported, format)
     })();
 
     let session_stop_result = stop_recording_session(info.sock_path, &session_id);
@@ -227,6 +228,106 @@ fn record_await_ipc_timeout(timeout_ms: u32) -> Duration {
     Duration::from_millis(u64::from(timeout_ms))
         .checked_add(Duration::from_secs(15))
         .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
+}
+
+struct ExportMeta {
+    pages_dir: Option<PathBuf>,
+    trace_version: u32,
+    /// True when the CLI requested v3 but the extension returned legacy v2.
+    v2_fallback: bool,
+}
+
+fn export_recorded_trace(output_dir: &Path, trace: &RecordedTrace) -> Result<ExportMeta, CliError> {
+    match trace {
+        RecordedTrace::V3(trace) => {
+            let pages_dir = write_trace_bundle(output_dir, trace)?;
+            Ok(ExportMeta {
+                pages_dir: Some(pages_dir),
+                trace_version: TRACE_VERSION,
+                v2_fallback: false,
+            })
+        }
+        RecordedTrace::V2(trace) => {
+            write_trace_v2(output_dir, trace)?;
+            Ok(ExportMeta {
+                pages_dir: None,
+                trace_version: TRACE_VERSION_V2,
+                v2_fallback: true,
+            })
+        }
+    }
+}
+
+fn acquire_export_lock(output_dir: &Path) -> Result<std::fs::File, CliError> {
+    validate_bundle_directory(output_dir, "output bundle directory")?;
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("create output dir {}", output_dir.display()))
+        .map_err(CliError::Local)?;
+    let lock_path = output_dir.join(".bsk-record-export.lock");
+    let lock_file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open export lock {}", lock_path.display()))
+        .map_err(CliError::Local)?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .with_context(|| format!("lock export bundle {}", output_dir.display()))
+        .map_err(CliError::Local)?;
+    Ok(lock_file)
+}
+
+fn write_trace_v2(output_dir: &Path, trace: &TraceV2) -> Result<(), CliError> {
+    let trace_path = trace_json_path(output_dir);
+    let pages_dir = pages_dir_for_output(output_dir);
+    let json = serde_json::to_string_pretty(trace)
+        .context("serialize trace JSON")
+        .map_err(CliError::Local)?;
+
+    let _lock = acquire_export_lock(output_dir)?;
+    validate_replaceable_file(&trace_path, "trace JSON")?;
+
+    let transaction_id = uuid::Uuid::new_v4();
+    let staging_dir = output_dir.join(format!(".bsk-record-stage-{transaction_id}"));
+    fs::create_dir_all(&staging_dir)
+        .with_context(|| format!("create staging dir {}", staging_dir.display()))
+        .map_err(CliError::Local)?;
+
+    let staged_trace = staging_dir.join("trace.json");
+    let stage_result: Result<(), CliError> = (|| {
+        fs::write(&staged_trace, format!("{json}\n"))
+            .with_context(|| format!("write staged trace to {}", staged_trace.display()))
+            .map_err(CliError::Local)?;
+        Ok(())
+    })();
+    if let Err(err) = stage_result {
+        let _ = fs::remove_dir_all(&staging_dir);
+        return Err(err);
+    }
+
+    let backup = output_dir.join(format!(".trace.json.{transaction_id}.bak"));
+    match commit_staged_file(&staged_trace, &trace_path, &backup) {
+        Ok(old_file) => {
+            if let Some(old_file) = old_file {
+                let _ = fs::remove_file(old_file);
+            }
+        }
+        Err(err) => {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(CliError::Local(anyhow::anyhow!(
+                "commit v2 trace {}: {err}",
+                trace_path.display()
+            )));
+        }
+    }
+    let _ = fs::remove_dir_all(&staging_dir);
+
+    if pages_dir.is_dir() {
+        prune_stale_pages(&pages_dir, &HashSet::new())?;
+    }
+
+    Ok(())
 }
 
 fn pages_dir_for_output(output_dir: &Path) -> PathBuf {
@@ -426,21 +527,7 @@ fn write_trace_bundle(output_dir: &Path, trace: &Trace) -> Result<PathBuf, CliEr
 
     validate_bundle_directory(&pages_dir, "pages directory")?;
 
-    // `record start` and `record stop` can export the same recording at once.
-    // Serialize writers without replacing the shared directory underneath one
-    // another; the lock is released when this file handle is dropped.
-    let lock_path = output_dir.join(".bsk-record-export.lock");
-    let lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("open export lock {}", lock_path.display()))
-        .map_err(CliError::Local)?;
-    fs2::FileExt::lock_exclusive(&lock_file)
-        .with_context(|| format!("lock export bundle {}", output_dir.display()))
-        .map_err(CliError::Local)?;
+    let _lock = acquire_export_lock(output_dir)?;
 
     fs::create_dir_all(&pages_dir)
         .with_context(|| format!("create pages dir {}", pages_dir.display()))
@@ -522,35 +609,65 @@ fn write_trace_bundle(output_dir: &Path, trace: &Trace) -> Result<PathBuf, CliEr
 }
 
 fn render_finish(
-    trace: &Trace,
+    trace: &RecordedTrace,
     output_dir: &PathBuf,
-    pages_dir: &PathBuf,
+    exported: &ExportMeta,
     format: Format,
 ) -> Result<(), CliError> {
     let trace_path = trace_json_path(output_dir);
     match format {
         Format::Json => {
-            println!(
-                "{}",
-                serde_json::to_string(&serde_json::json!({
+            let payload = match trace {
+                RecordedTrace::V3(t) => serde_json::json!({
                     "output": output_dir,
                     "trace_json": trace_path,
-                    "pages_dir": pages_dir,
-                    "trace": trace,
+                    "trace_version": exported.trace_version,
+                    "pages_dir": exported.pages_dir,
+                    "trace": t,
                     "window_closed": true,
-                }))
-                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
-            );
-        }
-        Format::Human => {
+                }),
+                RecordedTrace::V2(t) => serde_json::json!({
+                    "output": output_dir,
+                    "trace_json": trace_path,
+                    "trace_version": exported.trace_version,
+                    "pages_dir": null,
+                    "trace": t,
+                    "window_closed": true,
+                }),
+            };
             println!(
-                "saved {} steps and {} states to {} (+ {})",
-                trace.steps.len(),
-                trace.states.len(),
-                trace_path.display(),
-                pages_dir.display()
+                "{}",
+                serde_json::to_string(&payload).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
             );
         }
+        Format::Human => match trace {
+            RecordedTrace::V3(t) => {
+                let pages_dir = exported
+                    .pages_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| pages_dir_for_output(output_dir).display().to_string());
+                println!(
+                    "saved {} steps and {} states to {} (+ {})",
+                    t.steps.len(),
+                    t.states.len(),
+                    trace_path.display(),
+                    pages_dir
+                );
+            }
+            RecordedTrace::V2(t) => {
+                if exported.v2_fallback {
+                    eprintln!(
+                        "note: extension returned trace v2 (no page observations); update the BrowserSkill extension for v3 bundles"
+                    );
+                }
+                println!(
+                    "saved {} steps to {} (trace v2)",
+                    t.steps.len(),
+                    trace_path.display()
+                );
+            }
+        },
     }
     Ok(())
 }
@@ -558,10 +675,10 @@ fn render_finish(
 fn render_stop(
     result: &RecordStopResult,
     output: &PathBuf,
-    pages_dir: &PathBuf,
+    exported: &ExportMeta,
     format: Format,
 ) -> Result<(), CliError> {
-    render_finish(&result.trace, output, pages_dir, format)
+    render_finish(&result.trace, output, exported, format)
 }
 
 #[cfg(test)]
@@ -803,6 +920,52 @@ mod tests {
         );
         assert!(!external_output.join("trace.json").exists());
         assert!(!external_output.join("pages").exists());
+    }
+
+    #[test]
+    fn write_trace_v2_writes_single_json_and_prunes_stale_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("flow");
+        fs::create_dir_all(output.join("pages")).unwrap();
+        fs::write(output.join("pages/s1.vom.txt"), "stale").unwrap();
+
+        let trace = TraceV2 {
+            recorded_at: "2026-08-10T02:12:55.360Z".into(),
+            started_at: None,
+            purpose: None,
+            entry: bsk_protocol::tools::TraceEntry {
+                start_url: "https://example.com/".into(),
+            },
+            pages: vec![bsk_protocol::tools::PageRef {
+                id: "p1".into(),
+                url: "https://example.com/".into(),
+                title: None,
+            }],
+            steps: vec![],
+        };
+        write_trace_v2(&output, &trace).unwrap();
+        assert!(output.join("trace.json").exists());
+        assert!(!output.join("pages/s1.vom.txt").exists());
+    }
+
+    #[test]
+    fn export_recorded_trace_accepts_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("flow");
+        let trace = RecordedTrace::V2(TraceV2 {
+            recorded_at: "2026-08-10T02:12:55.360Z".into(),
+            started_at: None,
+            purpose: None,
+            entry: bsk_protocol::tools::TraceEntry {
+                start_url: "https://example.com/".into(),
+            },
+            pages: vec![],
+            steps: vec![],
+        });
+        let exported = export_recorded_trace(&output, &trace).unwrap();
+        assert_eq!(exported.trace_version, TRACE_VERSION_V2);
+        assert!(exported.pages_dir.is_none());
+        assert!(output.join("trace.json").exists());
     }
 
     #[test]

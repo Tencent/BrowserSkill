@@ -65,9 +65,9 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 }
 
 describe("performHandshake", () => {
-  it("advertises the Trace v3 compatibility boundary", () => {
+  it("advertises the protocol compatibility boundary", () => {
     expect(PROTOCOL_VERSION).toBe("1.1");
-    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.1");
+    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.0");
   });
 
   it("sends system.handshake with identity and both compat fields", async () => {
@@ -81,7 +81,7 @@ describe("performHandshake", () => {
           version: "0.1.0",
           protocol_version: "1.1",
           min_compatible_peer: "0.0.0",
-          min_compatible_protocol: "1.1",
+          min_compatible_protocol: "1.0",
         },
       };
     });
@@ -107,7 +107,7 @@ describe("performHandshake", () => {
       },
     });
     expect(outcome.result.min_compatible_peer).toBe("0.0.0");
-    expect(outcome.result.min_compatible_protocol).toBe("1.1");
+    expect(outcome.result.min_compatible_protocol).toBe("1.0");
   });
 
   it("accepts legacy daemon reply with only min_compatible_peer", async () => {

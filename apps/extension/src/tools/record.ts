@@ -35,20 +35,22 @@ import {
   settleUnsettledDrafts,
 } from "@/lib/record-observation";
 import { appendRecordedPayload, observeRecordedNavigation } from "@/lib/recording-step-buffer";
+import { buildTraceV2 } from "@/lib/trace-reducer-v2";
 import type { SessionManager } from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   DraftTraceStep,
   RecordAwaitParams,
   RecordAwaitResult,
+  RecordedTrace,
   RecordStartParams,
   RecordStartResult,
   RecordStopParams,
   RecordStopResult,
   RpcError,
   StopReason,
-  Trace,
 } from "@/transport/types";
+import { TRACE_VERSION } from "@/transport/types";
 import { handleNavigate } from "./navigation";
 import {
   type CdpRunner,
@@ -68,8 +70,9 @@ interface ActiveRecording {
   steps: DraftTraceStep[];
   startedAt: string;
   startedAtMs: number;
-  finishPromise: Promise<Trace>;
-  resolveFinish: (trace: Trace) => void;
+  traceVersion: 2 | 3;
+  finishPromise: Promise<RecordedTrace>;
+  resolveFinish: (trace: RecordedTrace) => void;
   rejectFinish: (err: Error) => void;
   settled: boolean;
   finishing: boolean;
@@ -202,15 +205,32 @@ async function sendRecordStartWithAck(
   throw lastError ?? new Error("failed to start recording in content script");
 }
 
-function buildTrace(recording: ActiveRecording): Trace {
-  return buildTraceV3({
-    obs: recording.observation,
+function negotiatedTraceVersion(params: RecordStartParams): 2 | 3 | RpcError {
+  if (params.trace_version === undefined) return 2;
+  if (params.trace_version === TRACE_VERSION) return 3;
+  return {
+    code: "invalid_params",
+    message: `unsupported trace_version ${params.trace_version}; supported values are omitted (v2) or ${TRACE_VERSION} (v3)`,
+  };
+}
+
+function buildTrace(recording: ActiveRecording): RecordedTrace {
+  if (recording.traceVersion === 3) {
+    return buildTraceV3({
+      obs: recording.observation,
+      steps: recording.steps,
+      startedAt: recording.startedAt,
+      ...(recording.purpose ? { purpose: recording.purpose } : {}),
+      startUrl: recording.startUrl,
+      stoppedBy: recording.stoppedBy,
+      bskVersion: BSK_TRACE_VERSION,
+    });
+  }
+  return buildTraceV2({
     steps: recording.steps,
     startedAt: recording.startedAt,
+    ...(recording.startUrl ? { startUrl: recording.startUrl } : {}),
     ...(recording.purpose ? { purpose: recording.purpose } : {}),
-    startUrl: recording.startUrl,
-    stoppedBy: recording.stoppedBy,
-    bskVersion: BSK_TRACE_VERSION,
   });
 }
 
@@ -750,7 +770,7 @@ async function finishRecording(
   sessionId: string,
   deps: RecordDeps,
   stoppedBy: StopReason,
-): Promise<Trace | null> {
+): Promise<RecordedTrace | null> {
   const recording = recordings.get(sessionId);
   if (!recording || recording.settled) return null;
   if (recording.finishing) return recording.finishPromise;
@@ -798,6 +818,9 @@ export async function handleRecordStart(
   params: RecordStartParams,
   deps: RecordDeps = getDefaultDeps(),
 ): Promise<RecordStartResult | RpcError> {
+  const traceVersionOrErr = negotiatedTraceVersion(params);
+  if (typeof traceVersionOrErr !== "number") return traceVersionOrErr;
+
   const ctxOrErr = lookupSession(manager, params, "record_start");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -814,9 +837,9 @@ export async function handleRecordStart(
   // on the destination page can RECORD_QUERY → rearm → show RecordOverlay
   // instead of flashing ControlOverlay ("Agent 正在控制").
   const requestId = makeRequestId(target.tabId);
-  let resolveFinish!: (trace: Trace) => void;
+  let resolveFinish!: (trace: RecordedTrace) => void;
   let rejectFinish!: (err: Error) => void;
-  const finishPromise = new Promise<Trace>((resolve, reject) => {
+  const finishPromise = new Promise<RecordedTrace>((resolve, reject) => {
     resolveFinish = resolve;
     rejectFinish = reject;
   });
@@ -833,6 +856,7 @@ export async function handleRecordStart(
     steps: [],
     startedAt: new Date(startedAtMs).toISOString(),
     startedAtMs,
+    traceVersion: traceVersionOrErr,
     finishPromise,
     resolveFinish,
     rejectFinish,
@@ -1055,9 +1079,9 @@ export async function handleRecordAwait(
     return { code: "cancelled", message: "record_await aborted" };
   }
 
-  const outcome = await new Promise<{ trace: Trace } | { error: RpcError }>((resolve) => {
+  const outcome = await new Promise<{ trace: RecordedTrace } | { error: RpcError }>((resolve) => {
     let settled = false;
-    const finish = (result: { trace: Trace } | { error: RpcError }) => {
+    const finish = (result: { trace: RecordedTrace } | { error: RpcError }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);

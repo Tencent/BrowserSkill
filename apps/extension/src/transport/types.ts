@@ -663,6 +663,8 @@ export interface EmulateResult {
 // --------------------------------------------------------------------------
 
 export const TRACE_VERSION = 3;
+export const TRACE_VERSION_V2 = 2;
+export const DEFAULT_TRACE_VERSION = 2;
 export const VOM_FORMAT_VERSION = 1;
 
 export interface TargetDescriptor {
@@ -857,7 +859,7 @@ export type Step =
       })
   | ({ op: "scroll" } & StepCommon);
 
-export interface Trace {
+export interface TraceV3 {
   version: number;
   recorded_at: string;
   started_at?: string;
@@ -869,6 +871,71 @@ export interface Trace {
   steps: Step[];
 }
 
+/** @deprecated Use TraceV3 — kept as alias for existing call sites. */
+export type Trace = TraceV3;
+
+export interface TargetDescriptorV2 {
+  role?: string;
+  name?: string;
+  tag: string;
+  name_attr?: string;
+  placeholder?: string;
+  nearby_label?: string;
+}
+
+export interface PageRef {
+  id: string;
+  url: string;
+  title?: string;
+}
+
+export type StepV2 =
+  | { op: "navigate"; id: number; page: string; to: string; effect?: { navigated_to: string } }
+  | {
+      op: "click";
+      id: number;
+      page: string;
+      target: TargetDescriptorV2;
+      effect?: { navigated_to: string };
+    }
+  | {
+      op: "fill";
+      id: number;
+      page: string;
+      target: TargetDescriptorV2;
+      value: string;
+      redacted?: boolean;
+      effect?: { navigated_to: string };
+    }
+  | {
+      op: "select";
+      id: number;
+      page: string;
+      target: TargetDescriptorV2;
+      selection: SelectedOption[];
+      effect?: { navigated_to: string };
+    }
+  | {
+      op: "press";
+      id: number;
+      page: string;
+      key: string;
+      modifiers?: KeyModifier[];
+      target?: TargetDescriptorV2;
+      effect?: { navigated_to: string };
+    };
+
+export interface TraceV2 {
+  recorded_at: string;
+  started_at?: string;
+  purpose?: string;
+  entry: TraceEntry;
+  pages: PageRef[];
+  steps: StepV2[];
+}
+
+export type RecordedTrace = TraceV2 | TraceV3;
+
 export interface RecordStartParams {
   session_id: string;
   tab_id?: number;
@@ -876,6 +943,8 @@ export interface RecordStartParams {
   purpose?: string;
   max_page_tokens?: number;
   redact_values?: boolean;
+  /** Omitted ⇒ v2; `3` ⇒ state-linked v3 bundle. */
+  trace_version?: number;
 }
 
 export interface RecordStartResult {
@@ -888,7 +957,7 @@ export interface RecordStopParams {
 }
 
 export interface RecordStopResult {
-  trace: Trace;
+  trace: RecordedTrace;
 }
 
 export interface RecordAwaitParams {
@@ -897,5 +966,5 @@ export interface RecordAwaitParams {
 }
 
 export interface RecordAwaitResult {
-  trace: Trace;
+  trace: RecordedTrace;
 }

@@ -105,7 +105,7 @@ describe("App", () => {
       snapshot: {
         ...baseSnapshot,
         lastError:
-          "[handshake] daemon rejected handshake: version_too_old — peer protocol 1.0 is below local min_compatible_protocol 1.1",
+          "[handshake] daemon rejected handshake: version_too_old — peer protocol 1.0 is below local min_compatible_protocol 1.0",
       },
       statusState: "disconnected",
       setLabel,

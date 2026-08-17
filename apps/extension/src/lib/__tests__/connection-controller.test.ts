@@ -84,9 +84,10 @@ describe("computeConnectedState (protocol-based compat)", () => {
     }
   });
 
-  it("rejects a pre-Trace-v3 daemon using the configured extension floor", () => {
-    const result = computeConnectedState(handshake("1.0", "1.0"));
-    expect(result.kind).toBe("rejected");
+  it("returns version_skew when daemon protocol is 1.0 and floor is satisfied", () => {
+    expect(computeConnectedState(handshake("1.0", "1.0"))).toEqual({
+      kind: "version_skew",
+    });
   });
 
   it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {

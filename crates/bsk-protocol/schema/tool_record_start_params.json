@@ -36,6 +36,15 @@
       ],
       "format": "int64"
     },
+    "trace_version": {
+      "description": "Desired trace export format. Omitted ⇒ v2; `3` ⇒ state-linked v3 bundle.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
     "url": {
       "type": [
         "string",

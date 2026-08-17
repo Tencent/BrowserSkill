@@ -265,7 +265,7 @@ retry — complete the task autonomously or stop gracefully.
 
 ### Recording — `bsk record`
 
-Capture the user's own actions in the Agent Window to a **trace v3 bundle**, for later LLM-driven automation:
+Capture the user's own actions in the Agent Window to a **trace bundle**, for later LLM-driven automation. New CLI builds request **trace v3** (page observations + action chain); older extensions may still return **trace v2** (actions only), which the CLI exports as a single `trace.json` without `pages/`.
 
 ```bash
 bsk record start --browser <instance-id-or-label> \
@@ -274,13 +274,14 @@ bsk record start --browser <instance-id-or-label> \
   [--output trace]
 # `--url` is optional; default https://example.com/ when omitted (must be http(s)).
 # Blocks until the user clicks Finish in the recording panel, then writes:
-#   trace/trace.json    — action chain + state index (version 3)
-#   trace/pages/        — one `.vom.txt` observe snapshot per settled page state
+#   trace/trace.json    — action chain (+ state index when v3)
+#   trace/pages/        — v3 only: one `.vom.txt` observe snapshot per settled page state
 
 bsk record stop [--output trace]   # terminal fallback if the browser panel is unavailable
 ```
 
-- **Bundle layout:** `--output` is a directory (default `./trace`) containing `trace.json` and `pages/`. `trace.json` lists `states[]` (page observation ids) and `steps[]` (each step binds `state` = observe snapshot *before* the action and `result.state` = snapshot *after* settle). Page bodies live in `pages/sN.vom.txt` using the same VOM format as `bsk observe`.
+- **v3 bundle (preferred):** `--output` is a directory (default `./trace`) containing `trace.json` and `pages/`. `trace.json` lists `states[]` (page observation ids) and `steps[]` (each step binds `state` = observe snapshot *before* the action and `result.state` = snapshot *after* settle). Page bodies live in `pages/sN.vom.txt` using the same VOM format as `bsk observe`.
+- **v2 fallback:** when the connected extension is older, export may contain only legacy `trace.json` with `pages[]` action context and no `pages/` observation files. Update the extension for full v3 bundles.
 - Each `states[]` entry is one **settled page observation** (captured after recording start, navigation landing, or action settle — not on a timer).
 - `target.ref` values like `@e12` exist **only inside** the bundle for disambiguation; do **not** copy `@eN` refs into SKILL.md or agent runbooks — use visible names from the observation text instead.
 - `--purpose` is optional context metadata; it does **not** change what gets captured.

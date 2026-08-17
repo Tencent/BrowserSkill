@@ -8,7 +8,13 @@ use serde::{Deserialize, Serialize};
 
 use super::interaction::KeyModifier;
 
+pub use crate::record_v2::{
+    PageRef, SelectedOptionV2, StepCommonV2, StepEffectV2, StepV2, TargetDescriptorV2, TraceV2,
+};
+
 pub const TRACE_VERSION: u32 = 3;
+pub const TRACE_VERSION_V2: u32 = 2;
+pub const DEFAULT_TRACE_VERSION: u32 = 2;
 pub const VOM_FORMAT_VERSION: u32 = 1;
 
 // ---------------------------------------------------------------------------
@@ -204,6 +210,9 @@ pub struct RecordStartParams {
     pub max_page_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redact_values: Option<bool>,
+    /// Desired trace export format. Omitted ⇒ v2; `3` ⇒ state-linked v3 bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -217,9 +226,100 @@ pub struct RecordStopParams {
     pub session_id: String,
 }
 
+/// Wire trace payload — v2 (legacy `pages[]`) or v3 (`version: 3`, `states[]`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum RecordedTrace {
+    V2(TraceV2),
+    V3(Trace),
+}
+
+impl RecordedTrace {
+    pub fn classify_value(v: &serde_json::Value) -> Result<Self, String> {
+        if let Some(ver) = v.get("version").and_then(|x| x.as_u64()) {
+            if ver == u64::from(TRACE_VERSION) {
+                return serde_json::from_value(v.clone())
+                    .map(RecordedTrace::V3)
+                    .map_err(|e| e.to_string());
+            }
+            return Err(format!("unsupported trace version {ver}"));
+        }
+        if v.get("pages").is_some() && v.get("states").is_none() {
+            return serde_json::from_value(v.clone())
+                .map(RecordedTrace::V2)
+                .map_err(|e| e.to_string());
+        }
+        if v.get("states").is_some() {
+            return serde_json::from_value(v.clone())
+                .map(RecordedTrace::V3)
+                .map_err(|e| e.to_string());
+        }
+        Err("ambiguous or unparseable trace".into())
+    }
+
+    pub fn is_v3(&self) -> bool {
+        matches!(self, RecordedTrace::V3(_))
+    }
+
+    pub fn as_v3(&self) -> Option<&Trace> {
+        match self {
+            RecordedTrace::V3(t) => Some(t),
+            RecordedTrace::V2(_) => None,
+        }
+    }
+
+    pub fn as_v2(&self) -> Option<&TraceV2> {
+        match self {
+            RecordedTrace::V2(t) => Some(t),
+            RecordedTrace::V3(_) => None,
+        }
+    }
+}
+
+impl Serialize for RecordedTrace {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            RecordedTrace::V2(t) => t.serialize(serializer),
+            RecordedTrace::V3(t) => t.serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RecordedTrace {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        Self::classify_value(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl JsonSchema for RecordedTrace {
+    fn schema_name() -> String {
+        "RecordedTrace".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        schemars::schema::SchemaObject {
+            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
+                one_of: Some(vec![
+                    generator.subschema_for::<TraceV2>(),
+                    generator.subschema_for::<Trace>(),
+                ]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordStopResult {
-    pub trace: Trace,
+    pub trace: RecordedTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -231,7 +331,7 @@ pub struct RecordAwaitParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecordAwaitResult {
-    pub trace: Trace,
+    pub trace: RecordedTrace,
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +539,44 @@ mod tests {
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["target"]["unmatched"], true);
         assert!(v["target"].get("ref").is_none());
+    }
+
+    #[test]
+    fn recorded_trace_classifies_v2_and_v3() {
+        let v2 = json!({
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "entry": { "start_url": "https://example.com/" },
+            "pages": [{ "id": "p1", "url": "https://example.com/" }],
+            "steps": []
+        });
+        match RecordedTrace::classify_value(&v2).unwrap() {
+            RecordedTrace::V2(_) => {}
+            other => panic!("expected v2, got {other:?}"),
+        }
+
+        let v3 = json!({
+            "version": 3,
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "stopped_by": "user_finish",
+            "entry": { "start_url": "https://example.com/" },
+            "recorder": { "bsk": "0.1.10", "vom": 1 },
+            "states": [],
+            "steps": []
+        });
+        match RecordedTrace::classify_value(&v3).unwrap() {
+            RecordedTrace::V3(t) => assert_eq!(t.version, 3),
+            other => panic!("expected v3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recorded_trace_schema_includes_v2_and_v3() {
+        let schema = serde_json::to_value(schemars::schema_for!(RecordStopResult)).unwrap();
+        let variants = schema["definitions"]["RecordedTrace"]["oneOf"]
+            .as_array()
+            .expect("RecordedTrace schema should use oneOf");
+
+        assert_eq!(variants.len(), 2);
     }
 
     #[test]

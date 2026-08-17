@@ -124,7 +124,7 @@ async fn handshake_ok_when_protocol_matches() {
     );
     assert_eq!(
         result.min_compatible_protocol.as_deref(),
-        Some("1.1"),
+        Some("1.0"),
         "daemon must advertise protocol floor for new extensions"
     );
     handle.shutdown().await;
@@ -169,7 +169,7 @@ async fn handshake_skew_when_protocol_minor_differs() {
 }
 
 #[tokio::test]
-async fn handshake_rejects_pre_trace_v3_extension() {
+async fn handshake_skew_when_protocol_1_0_peer() {
     let (handle, _sock) = spawn_daemon().await;
     let mut ws = open_ws(handle.ws_addr()).await;
     let resp = send_handshake_with_floors(
@@ -181,12 +181,15 @@ async fn handshake_rejects_pre_trace_v3_extension() {
     )
     .await;
     match resp.body {
-        ResponseBody::Err(e) => {
-            assert_eq!(e.code, ErrorCode::VersionTooOld);
-            assert!(e.message.contains("below local min_compatible_protocol"));
-        }
-        other => panic!("pre-Trace-v3 extension must be rejected, got {other:?}"),
+        ResponseBody::Ok(_) => {}
+        other => panic!("protocol 1.0 peer should connect with skew, got {other:?}"),
     }
+    let state = handle.state();
+    let client = state
+        .browsers
+        .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
+        .expect("browser registered");
+    assert!(client.version_skew);
     handle.shutdown().await;
 }
 

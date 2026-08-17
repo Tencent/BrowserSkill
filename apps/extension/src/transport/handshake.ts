@@ -18,7 +18,7 @@ export const EXTENSION_VERSION: string =
  * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
  * Must stay in sync with daemon `MIN_COMPATIBLE_PROTOCOL`.
  */
-export const MIN_COMPATIBLE_PROTOCOL = "1.1";
+export const MIN_COMPATIBLE_PROTOCOL = "1.0";
 /**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.

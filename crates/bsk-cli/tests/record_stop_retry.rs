@@ -10,8 +10,8 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
-    RecordStopResult, RecorderInfo, SessionStartParams, SessionStartResult, StopReason, Trace,
-    TraceEntry, TraceState, VOM_FORMAT_VERSION,
+    RecordStopResult, RecordedTrace, RecorderInfo, SessionStartParams, SessionStartResult,
+    StopReason, Trace, TraceEntry, TraceState, VOM_FORMAT_VERSION,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -139,7 +139,7 @@ fn run_extension(
                     } else {
                         ResponseBody::Ok(
                             serde_json::to_value(RecordStopResult {
-                                trace: sample_trace(),
+                                trace: RecordedTrace::V3(sample_trace()),
                             })
                             .unwrap(),
                         )
