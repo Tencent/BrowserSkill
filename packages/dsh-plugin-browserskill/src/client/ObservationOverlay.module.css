@@ -118,53 +118,116 @@
 }
 
 .actions {
+  position: relative;
+  z-index: 3;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 4px;
+  /* A little inset so icons are not flush with the resize corners. */
+  padding: 4px 8px;
+  min-height: 32px;
   border-top: 1px solid var(--border);
 }
 
-.interrupt-wrap {
+.tool-wrap {
   position: relative;
   display: inline-flex;
 }
 
+.tool-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: calc(var(--radius) - 4px);
+  background: none;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.tool-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tool-danger {
+  color: var(--destructive);
+}
+
+/* Hover the wrap (not just :hover on the button) so the tooltip target and
+   the left-corner resize overlay still light the icon up. */
+.tool-wrap:hover .tool-button:not(:disabled) {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.tool-wrap:hover .tool-danger:not(:disabled) {
+  color: var(--destructive);
+  background: color-mix(in oklch, var(--destructive) 18%, var(--card));
+}
+
+.tool-wrap:hover .tool-button:disabled {
+  background: var(--accent);
+}
+
 .hint {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 4px);
   left: 0;
-  width: 220px;
-  padding: 6px 8px;
+  width: max-content;
+  max-width: 220px;
+  padding: 4px 6px;
   border-radius: calc(var(--radius) - 4px);
   background: var(--card);
   border: 1px solid var(--border);
   color: var(--muted-foreground);
   font-size: 11px;
+  line-height: 1.35;
   box-shadow: 0 4px 14px rgb(0 0 0 / 16%);
   z-index: 41;
 }
 
-.resize-handle {
-  position: absolute;
+.hint[data-align="end"] {
+  left: auto;
   right: 0;
-  bottom: 0;
-  width: 14px;
-  height: 14px;
-  cursor: nwse-resize;
-  touch-action: none;
 }
 
-.resize-handle::after {
-  content: "";
+/* Invisible hit targets — no grip glyph; all four corners resize. */
+.resize-handle {
   position: absolute;
-  right: 3px;
-  bottom: 3px;
-  width: 7px;
-  height: 7px;
-  border-right: 2px solid var(--muted-foreground);
-  border-bottom: 2px solid var(--muted-foreground);
+  width: 16px;
+  height: 16px;
+  touch-action: none;
+  z-index: 2;
+}
+
+.resize-handle[data-corner="nw"] {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.resize-handle[data-corner="ne"] {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.resize-handle[data-corner="sw"] {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.resize-handle[data-corner="se"] {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
 }
 
 .capsule {
@@ -288,6 +351,7 @@
 }
 
 .icon-button:focus-visible,
+.tool-button:focus-visible,
 .capsule:focus-visible,
 .strip-main:focus-visible,
 .strip-interrupt:focus-visible {

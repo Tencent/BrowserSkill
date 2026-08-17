@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 // ObservationOverlay: visibility lifecycle, focus view, interrupt interaction,
-// one-time hint, drag move/resize with clamps, collapse capsule, and PiP
+// hover tooltip, drag move/resize from every corner with clamps, collapse capsule, and PiP
 // upgrade/fallback (mocked documentPictureInPicture). NOTE: use RTL's waitFor
 // (act-flushing), not vi.waitFor, when asserting store-driven UI updates.
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ObservationOverlay } from "../../src/client/ObservationOverlay";
+import { applyResize, ObservationOverlay } from "../../src/client/ObservationOverlay";
 import { type EventSourceLike, ObservationClientStore } from "../../src/client/observation-store";
 import type { SessionObservation } from "../../src/observation";
 
@@ -130,16 +130,18 @@ describe("ObservationOverlay", () => {
     );
   });
 
-  it("shows the semantics hint once", async () => {
+  it("shows a hover tooltip on the interrupt icon and keeps the button icon-only", async () => {
     const h = makeHarness([BUSY]);
     render(<ObservationOverlay store={h.store} />);
     const button = await screen.findByRole("button", { name: /Interrupt the current/ });
-    fireEvent.pointerEnter(button);
-    await screen.findByRole("tooltip");
-    fireEvent.pointerLeave(button);
-    fireEvent.click(button);
-    fireEvent.pointerEnter(button);
+    expect(button.textContent ?? "").not.toMatch(/Interrupt/i);
+    fireEvent.pointerEnter(button.parentElement as HTMLElement);
+    const tip = await screen.findByRole("tooltip");
+    expect(tip.textContent).toBe("Stop the current browser action.");
+    fireEvent.pointerLeave(button.parentElement as HTMLElement);
     expect(screen.queryByRole("tooltip")).toBeNull();
+    fireEvent.pointerEnter(button.parentElement as HTMLElement);
+    expect(screen.getByRole("tooltip")).toBeTruthy();
   });
 
   it("collapses to a capsule and expands back", async () => {
@@ -159,15 +161,36 @@ describe("ObservationOverlay", () => {
     const h = makeHarness([BUSY]);
     render(<ObservationOverlay store={h.store} />);
     const card = await screen.findByTestId("obs-card");
+    card.getBoundingClientRect = () =>
+      ({
+        x: 0,
+        y: 0,
+        left: 0,
+        top: 0,
+        width: 320,
+        height: 240,
+        right: 320,
+        bottom: 240,
+        toJSON: () => {},
+      }) as DOMRect;
     expect(Number.parseFloat(card.style.width)).toBe(320);
-    fireEvent.pointerDown(screen.getByTestId("obs-resize"), { clientX: 100, clientY: 100 });
-    fireEvent.pointerMove(document, { clientX: 40, clientY: 40 });
+    fireEvent.pointerDown(screen.getByTestId("obs-resize-se"), { clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(document, { clientX: 0, clientY: 0 });
     fireEvent.pointerUp(document);
     expect(Number.parseFloat(card.style.width)).toBe(240); // min width clamp
-    fireEvent.pointerDown(screen.getByTestId("obs-resize"), { clientX: 100, clientY: 100 });
+    fireEvent.pointerDown(screen.getByTestId("obs-resize-se"), { clientX: 100, clientY: 100 });
     fireEvent.pointerMove(document, { clientX: 5000, clientY: 5000 });
     fireEvent.pointerUp(document);
     expect(Number.parseFloat(card.style.width)).toBe(window.innerWidth * 0.8);
+  });
+
+  it("exposes an invisible resize hit target on every corner", async () => {
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    for (const corner of ["nw", "ne", "sw", "se"]) {
+      expect(screen.getByTestId(`obs-resize-${corner}`)).toBeTruthy();
+    }
   });
 
   it("moves the card with header drags, clamped to the viewport", async () => {
@@ -313,5 +336,40 @@ describe("ObservationOverlay", () => {
     );
     // Focus did not move to s1.
     expect(screen.getByText(/s2 · idle/)).toBeTruthy();
+  });
+});
+
+describe("applyResize", () => {
+  const base = { x: 200, y: 100, w: 320, h: 240 };
+  const viewport = { w: 1000, h: 800 };
+
+  it("grows the planted opposite corner from each handle", () => {
+    expect(applyResize(base, "se", 20, 10, viewport)).toEqual({
+      pos: { x: 200, y: 100 },
+      size: { w: 340, h: 250 },
+    });
+    expect(applyResize(base, "nw", -20, -10, viewport)).toEqual({
+      pos: { x: 180, y: 90 },
+      size: { w: 340, h: 250 },
+    });
+    expect(applyResize(base, "ne", 20, -10, viewport)).toEqual({
+      pos: { x: 200, y: 90 },
+      size: { w: 340, h: 250 },
+    });
+    expect(applyResize(base, "sw", -20, 10, viewport)).toEqual({
+      pos: { x: 180, y: 100 },
+      size: { w: 340, h: 250 },
+    });
+  });
+
+  it("clamps to the minimum size without drifting the planted corner", () => {
+    expect(applyResize(base, "se", -200, -200, viewport)).toEqual({
+      pos: { x: 200, y: 100 },
+      size: { w: 240, h: 180 },
+    });
+    expect(applyResize(base, "nw", 200, 200, viewport)).toEqual({
+      pos: { x: 280, y: 160 },
+      size: { w: 240, h: 180 },
+    });
   });
 });

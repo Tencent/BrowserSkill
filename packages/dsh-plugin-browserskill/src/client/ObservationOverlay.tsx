@@ -7,20 +7,20 @@
 // and oklch tokens on a .bsk-obs scope root, so the card reads as BSK's own
 // surface without leaking styles into (or inheriting themes from) the shell.
 
-import { Button, cn } from "@browser-skill/ui";
+import { cn } from "@browser-skill/ui";
 import {
   RiArrowDownSLine,
   RiErrorWarningLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
-  RiStopMiniFill,
+  RiStopCircleLine,
 } from "@remixicon/react";
 
 // remixicon's component types target @types/react 19 while the dsh shell
 // runs react 18 — a compile-time-only recast keeps the 18 typecheck happy.
 type IconComponent = (props: { size?: number | string; className?: string }) => ReactNode;
 const asIcon = (component: unknown): IconComponent => component as IconComponent;
-const IconStop = asIcon(RiStopMiniFill);
+const IconStop = asIcon(RiStopCircleLine);
 const IconPip = asIcon(RiPictureInPicture2Line);
 const IconDown = asIcon(RiArrowDownSLine);
 const IconWarn = asIcon(RiErrorWarningLine);
@@ -82,6 +82,31 @@ function clampPos(pos: Point, size: Size, viewport: Size): Point {
   };
 }
 
+export type ResizeCorner = "nw" | "ne" | "sw" | "se";
+
+/** Grow/shrink from one corner, keeping the opposite corner planted. */
+export function applyResize(
+  base: Point & Size,
+  corner: ResizeCorner,
+  dx: number,
+  dy: number,
+  viewport: Size,
+): { pos: Point; size: Size } {
+  const nextW = corner === "ne" || corner === "se" ? base.w + dx : base.w - dx;
+  const nextH = corner === "sw" || corner === "se" ? base.h + dy : base.h - dy;
+  const size = clampSize({ w: nextW, h: nextH }, viewport);
+  const x = corner === "nw" || corner === "sw" ? base.x + base.w - size.w : base.x;
+  const y = corner === "nw" || corner === "ne" ? base.y + base.h - size.h : base.y;
+  return { pos: clampPos({ x, y }, size, viewport), size };
+}
+
+const CORNER_LABEL: Record<ResizeCorner, string> = {
+  nw: "top left",
+  ne: "top right",
+  sw: "bottom left",
+  se: "bottom right",
+};
+
 function formatElapsed(sinceMs: number, nowMs: number): string {
   const total = Math.max(0, Math.floor((nowMs - sinceMs) / 1000));
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
@@ -104,6 +129,41 @@ export function focusOf(sessions: readonly SessionObservation[]): SessionObserva
 export function statusOf(obs: SessionObservation): "active" | "idle" | "error" {
   if (obs.lastError !== undefined && obs.action === "idle") return "error";
   return obs.action === "idle" ? "idle" : "active";
+}
+
+/** Compact toolbar icon: no label, hover bubble for the name / semantics. */
+function IconAction(props: {
+  label: string;
+  hint: string;
+  disabled?: boolean;
+  danger?: boolean;
+  align?: "start" | "end";
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span
+      className={css["tool-wrap"]}
+      onPointerEnter={() => setOpen(true)}
+      onPointerLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        className={cn(css["tool-button"], props.danger === true && css["tool-danger"])}
+        disabled={props.disabled}
+        aria-label={props.label}
+        onClick={props.onClick}
+      >
+        {props.children}
+      </button>
+      {open ? (
+        <span className={css.hint} data-align={props.align} role="tooltip">
+          {props.hint}
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 /** Flat status dot, specced after the BSK popup's ConnectionStatusIndicator. */
@@ -179,7 +239,7 @@ function StripItem(props: {
             void store.interrupt(obs.sessionId);
           }}
         >
-          <IconStop size={9} />
+          <IconStop size={10} />
         </button>
       ) : null}
     </div>
@@ -214,9 +274,6 @@ function OverlayBody(props: {
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
-  // One-time semantics hint bubble, retired after the first interrupt.
-  const [hintOpen, setHintOpen] = useState(false);
-  const [hintSeen, setHintSeen] = useState(false);
 
   const thumbId = focus?.thumbnailAttachmentId;
   useEffect(() => {
@@ -236,7 +293,6 @@ function OverlayBody(props: {
     focus.dead !== true;
   const onInterrupt = (): void => {
     if (!canInterrupt || focus === undefined) return;
-    setHintSeen(true);
     setInterrupting(true);
     void store.interrupt(focus.sessionId).finally(() => setInterrupting(false));
   };
@@ -306,43 +362,24 @@ function OverlayBody(props: {
         </div>
       ) : null}
       <div className={css.actions}>
-        <span
-          className={css["interrupt-wrap"]}
-          onPointerEnter={() => {
-            if (!hintSeen) setHintOpen(true);
-          }}
-          onPointerLeave={() => setHintOpen(false)}
+        <IconAction
+          label={interrupting ? "Interrupting…" : "Interrupt the current browser action"}
+          hint="Stop the current browser action."
+          disabled={!canInterrupt}
+          danger
+          onClick={onInterrupt}
         >
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-destructive border-destructive/60 hover:bg-destructive/10"
-            disabled={!canInterrupt}
-            aria-label="Interrupt the current browser action"
-            onClick={onInterrupt}
-          >
-            <IconStop size={14} />
-            {interrupting ? "Interrupting…" : "Interrupt"}
-          </Button>
-          {/* BSK ships no shared tooltip component; this bubble follows the BSK
-              card spec (bg-card, border, 12px radius, caption text). */}
-          {hintOpen && !hintSeen ? (
-            <span className={css.hint} role="tooltip">
-              Interrupt stops only the current browser action — the agent run continues (use the
-              chat Stop button to halt the run).
-            </span>
-          ) : null}
-        </span>
+          <IconStop size={16} />
+        </IconAction>
         {onPopOut !== undefined ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label="Pop out into a mini window"
+          <IconAction
+            label="Pop out into a mini window"
+            hint="Pop out into a mini window"
+            align="end"
             onClick={onPopOut}
           >
-            <IconPip size={14} />
-            Pop out
-          </Button>
+            <IconPip size={16} />
+          </IconAction>
         ) : null}
       </div>
     </div>
@@ -370,6 +407,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   const [pinnedId, setPinnedId] = useState<string | null>(null);
   const dragRef = useRef<{
     kind: "move" | "resize";
+    corner?: ResizeCorner;
     startX: number;
     startY: number;
     base: Point & Size;
@@ -407,8 +445,10 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
           viewport(),
         ),
       );
-    } else {
-      setSize(clampSize({ w: drag.base.w + dx, h: drag.base.h + dy }, viewport()));
+    } else if (drag.corner !== undefined) {
+      const next = applyResize(drag.base, drag.corner, dx, dy, viewport());
+      setPos(next.pos);
+      setSize(next.size);
     }
   }, []);
   const onPointerUp = useCallback(() => {
@@ -417,19 +457,55 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     document.removeEventListener("pointerup", onPointerUp);
   }, [onPointerMove]);
 
-  const beginDrag = (kind: "move" | "resize") => (event: ReactPointerEvent) => {
+  const cardOrigin = (): Point & Size => {
+    const vp = viewport();
+    return {
+      x: pos?.x ?? vp.w - size.w - EDGE_MARGIN,
+      y: pos?.y ?? TOP_OFFSET,
+      w: size.w,
+      h: size.h,
+    };
+  };
+
+  const beginMove = (event: ReactPointerEvent) => {
     event.preventDefault();
     const rect = (
       event.currentTarget.closest("[data-obs-card]") as HTMLElement | null
     )?.getBoundingClientRect();
+    const origin = cardOrigin();
     const base = {
-      x: rect?.left ?? pos?.x ?? viewport().w - size.w - EDGE_MARGIN,
-      y: rect?.top ?? pos?.y ?? TOP_OFFSET,
-      w: rect?.width ?? size.w,
-      h: rect?.height ?? size.h,
+      x: rect?.left ?? origin.x,
+      y: rect?.top ?? origin.y,
+      w: rect !== undefined && rect.width > 0 ? rect.width : origin.w,
+      h: rect !== undefined && rect.height > 0 ? rect.height : origin.h,
     };
-    dragRef.current = { kind, startX: event.clientX, startY: event.clientY, base };
-    if (kind === "move") setPos({ x: base.x, y: base.y });
+    dragRef.current = { kind: "move", startX: event.clientX, startY: event.clientY, base };
+    setPos({ x: base.x, y: base.y });
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
+  };
+
+  const beginResize = (corner: ResizeCorner) => (event: ReactPointerEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const rect = (
+      event.currentTarget.closest("[data-obs-card]") as HTMLElement | null
+    )?.getBoundingClientRect();
+    const origin = cardOrigin();
+    const base = {
+      x: rect?.left ?? origin.x,
+      y: rect?.top ?? origin.y,
+      w: rect !== undefined && rect.width > 0 ? rect.width : origin.w,
+      h: rect !== undefined && rect.height > 0 ? rect.height : origin.h,
+    };
+    dragRef.current = {
+      kind: "resize",
+      corner,
+      startX: event.clientX,
+      startY: event.clientY,
+      base,
+    };
+    setPos({ x: base.x, y: base.y });
     document.addEventListener("pointermove", onPointerMove);
     document.addEventListener("pointerup", onPointerUp);
   };
@@ -463,7 +539,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
       inPip={pipWindow !== null}
       onPopOut={pipWindow === null && pipApi() !== undefined ? () => void popOut() : undefined}
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
-      onHeaderPointerDown={pipWindow === null ? beginDrag("move") : undefined}
+      onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
   );
 
@@ -499,34 +575,38 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   return (
     <div className={cn(css.card, "bsk-obs")} style={style} data-obs-card data-testid="obs-card">
       {body}
-      <div
-        className={css["resize-handle"]}
-        data-testid="obs-resize"
-        aria-label="Resize overlay"
-        role="separator"
-        aria-valuenow={size.w}
-        aria-valuetext={`${Math.round(size.w)} by ${Math.round(size.h)} pixels`}
-        aria-valuemin={MIN_SIZE.w}
-        aria-valuemax={Math.round(viewport().w * 0.8)}
-        tabIndex={0}
-        onPointerDown={beginDrag("resize")}
-        onKeyDown={(event) => {
-          const step = 16;
-          const delta =
-            event.key === "ArrowRight"
-              ? { w: step, h: 0 }
-              : event.key === "ArrowLeft"
-                ? { w: -step, h: 0 }
-                : event.key === "ArrowDown"
-                  ? { w: 0, h: step }
-                  : event.key === "ArrowUp"
-                    ? { w: 0, h: -step }
-                    : undefined;
-          if (delta === undefined) return;
-          event.preventDefault();
-          setSize(clampSize({ w: size.w + delta.w, h: size.h + delta.h }, viewport()));
-        }}
-      />
+      {(["nw", "ne", "sw", "se"] as const).map((corner) => (
+        <div
+          key={corner}
+          className={css["resize-handle"]}
+          data-corner={corner}
+          data-testid={`obs-resize-${corner}`}
+          aria-label={`Resize overlay from the ${CORNER_LABEL[corner]}`}
+          role="separator"
+          aria-valuenow={size.w}
+          aria-valuetext={`${Math.round(size.w)} by ${Math.round(size.h)} pixels`}
+          aria-valuemin={MIN_SIZE.w}
+          aria-valuemax={Math.round(viewport().w * 0.8)}
+          tabIndex={corner === "se" ? 0 : -1}
+          onPointerDown={beginResize(corner)}
+          onKeyDown={
+            corner === "se"
+              ? (event) => {
+                  const step = 16;
+                  const dx =
+                    event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0;
+                  const dy =
+                    event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0;
+                  if (dx === 0 && dy === 0) return;
+                  event.preventDefault();
+                  const next = applyResize(cardOrigin(), "se", dx, dy, viewport());
+                  setPos(next.pos);
+                  setSize(next.size);
+                }
+              : undefined
+          }
+        />
+      ))}
     </div>
   );
 }

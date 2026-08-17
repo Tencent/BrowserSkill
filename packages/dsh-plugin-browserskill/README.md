@@ -111,7 +111,7 @@ shell's theme cannot bleed back in.
 - **Focus view**: status row (green/idle/red dot + session + action + mm:ss), the latest page
   frame (refreshes every ~1.5s while active, ~8s when idle; the last good frame stays on
   stage while the next one loads, and is kept on errors so the card does not flash),
-  and the action row (Interrupt + Pop out).
+  and a compact icon toolbar (Interrupt + Pop out, hover for the label).
 - **Interrupt**: one click kills the in-flight bsk command of the focus session (same semantics
   as the chat Stop button — the current action fails, the agent run may continue). Strip items
   carry their own hover interrupt button.
@@ -120,8 +120,9 @@ shell's theme cannot bleed back in.
   again to release); errored sessions get a red edge without stealing focus; sessions the daemon
   lost are greyed out; prolonged daemon/browser outage shows "browser unavailable" and greys
   the interrupt button until captures recover.
-- **Drag & resize**: drag the header to move the card, drag the corner handle to resize
-  (min 240×180, max 80% of the viewport); both are remembered for the page lifetime.
+- **Drag & resize**: drag the header to move the card; drag any of the four
+  corners to resize (min 240×180, max 80% of the viewport; no visible grip).
+  Both are remembered for the page lifetime.
 - **Pop out (PiP)**: upgrades the card into a native Document PiP window (requires a user
   gesture, per browser rules), sized from the current card; closing the PiP falls back to the
   in-page card with state intact. Browsers without Document PiP simply hide the button.
