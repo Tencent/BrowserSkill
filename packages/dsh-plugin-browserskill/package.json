@@ -1,7 +1,27 @@
 {
-  "name": "dsh-plugin-browserskill",
+  "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
   "description": "DeepSeek Harness tool plugin that exposes BrowserSkill (bsk) browser automation to the model",
   "version": "0.1.0",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Tencent/BrowserSkill.git",
+    "directory": "packages/dsh-plugin-browserskill"
+  },
+  "homepage": "https://github.com/Tencent/BrowserSkill/tree/main/packages/dsh-plugin-browserskill#readme",
+  "bugs": {
+    "url": "https://github.com/Tencent/BrowserSkill/issues"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "browserskill",
+    "browser-automation"
+  ],
   "type": "module",
   "main": "lib/index.mjs",
   "types": "lib/index.d.mts",
@@ -106,6 +126,5 @@
     "vitest": "^4.1.6",
     "@browser-skill/ui": "workspace:*",
     "@remixicon/react": "^4.9.0"
-  },
-  "license": "MIT"
+  }
 }

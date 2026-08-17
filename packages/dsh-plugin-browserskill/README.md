@@ -1,5 +1,7 @@
 # dsh-plugin-browserskill
 
+npm: [`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) tool plugin that exposes
 [BrowserSkill](https://github.com/Tencent/BrowserSkill) (`bsk`) browser automation to the model.
 
@@ -58,7 +60,7 @@ a session owned by another program.
 The plugin follows the standard dsh bundle layout (`dsh.bundle` manifest + `cordis.patch.yml`):
 
 ```sh
-dsh plugin --profile <name> add <path-or-spec-of-this-package>
+dsh plugin --profile <name> add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile <name>
 ```
 
@@ -166,10 +168,26 @@ shell's theme cannot bleed back in.
 
 ```sh
 pnpm install
-pnpm --filter dsh-plugin-browserskill typecheck
-pnpm --filter dsh-plugin-browserskill test     # unit tests mock bsk; no browser needed
-pnpm --filter dsh-plugin-browserskill build    # tsdown -> lib/
+pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck
+pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test     # unit tests mock bsk; no browser needed
+pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build    # tsdown -> lib/
 ```
+
+## Publishing
+
+The GitHub Actions workflow **Release dsh plugin** publishes this package to npm
+as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id stays
+`dsh-plugin-browserskill`.
+
+Trigger it by pushing a tag that matches `package.json`'s `version`:
+
+```sh
+git tag dsh-plugin-v0.1.0
+git push origin dsh-plugin-v0.1.0
+```
+
+Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads
+`NPM_TOKEN` from the GitHub Environment of the same name.
 
 ## License
 
