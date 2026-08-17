@@ -42,6 +42,7 @@
       }
     }
   },
+  "additionalProperties": false,
   "definitions": {
     "KeyModifier": {
       "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
@@ -178,6 +179,46 @@
               "type": "string",
               "enum": [
                 "click"
+              ]
+            },
+            "page": {
+              "description": "Reference into `pages[]`.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptorV2"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "page",
+            "target"
+          ],
+          "properties": {
+            "effect": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/StepEffectV2"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "hover"
               ]
             },
             "page": {

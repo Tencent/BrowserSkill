@@ -151,7 +151,7 @@ describe("reduceTraceSteps", () => {
     });
   });
 
-  it("drops hover steps unsupported by historical v2 clients", () => {
+  it("keeps hover steps before menu clicks", () => {
     const { steps } = reduceTraceSteps(
       [
         {
@@ -167,11 +167,11 @@ describe("reduceTraceSteps", () => {
       ],
       "https://example.com/app",
     );
-    expect(steps.map((s) => s.op)).toEqual(["click"]);
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
     expect(steps[0]).toMatchObject({
-      op: "click",
+      op: "hover",
       page: "p1",
-      target: { name: "Profile" },
+      target: { name: "Account" },
     });
   });
 
