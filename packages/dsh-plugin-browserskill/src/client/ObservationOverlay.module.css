@@ -124,6 +124,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 4px;
+
   /* A little inset so icons are not flush with the resize corners. */
   padding: 4px 8px;
   min-height: 32px;
@@ -153,6 +154,11 @@
 .tool-button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.tool-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
 }
 
 .tool-danger {
@@ -351,7 +357,6 @@
 }
 
 .icon-button:focus-visible,
-.tool-button:focus-visible,
 .capsule:focus-visible,
 .strip-main:focus-visible,
 .strip-interrupt:focus-visible {
