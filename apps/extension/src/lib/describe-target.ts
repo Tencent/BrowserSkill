@@ -6,7 +6,8 @@
  * `{ "tag": "div" }` / “点击div” is useless and must not be recorded.
  */
 
-export interface TargetDescriptor {
+/** Content-script capture descriptor before VOM geometric matching. */
+export interface CaptureTargetDescriptor {
   role?: string;
   name?: string;
   tag: string;
@@ -14,6 +15,9 @@ export interface TargetDescriptor {
   placeholder?: string;
   nearby_label?: string;
 }
+
+/** @deprecated Capture-time alias retained until the recorder integration migrates. */
+export type TargetDescriptor = CaptureTargetDescriptor;
 
 /** Max length for a label that is still a useful “find this on screen” hint. */
 const ACTIONABLE_LABEL_MAX = 48;
@@ -247,7 +251,7 @@ export function resolveHoverElement(target: Element): Element | null {
  * (visible name), or at least a form `name_attr` for checkbox/radio.
  * Recording “点击div” with no name fails this bar.
  */
-export function isMeaningfulClickTarget(target: TargetDescriptor): boolean {
+export function isMeaningfulClickTarget(target: CaptureTargetDescriptor): boolean {
   const name = target.name?.trim();
   if (name && isActionableLabel(name)) return true;
   if (
@@ -323,7 +327,7 @@ function nearbyLabelText(el: Element): string | undefined {
   return undefined;
 }
 
-export function describeTarget(el: Element): TargetDescriptor {
+export function describeTarget(el: Element): CaptureTargetDescriptor {
   const tag = el.tagName.toLowerCase();
   const role = inferRole(el);
   const name = accessibleName(el);
@@ -350,7 +354,7 @@ export function describeTarget(el: Element): TargetDescriptor {
   };
 }
 
-export function describeEventTarget(target: EventTarget | null): TargetDescriptor | null {
+export function describeEventTarget(target: EventTarget | null): CaptureTargetDescriptor | null {
   if (!(target instanceof Element)) return null;
   const clickable = resolveClickableElement(target);
   if (!clickable) return null;
