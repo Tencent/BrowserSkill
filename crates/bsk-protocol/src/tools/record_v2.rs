@@ -75,6 +75,11 @@ pub enum StepV2 {
         common: StepCommonV2,
         target: TargetDescriptorV2,
     },
+    Hover {
+        #[serde(flatten)]
+        common: StepCommonV2,
+        target: TargetDescriptorV2,
+    },
     Fill {
         #[serde(flatten)]
         common: StepCommonV2,
@@ -102,6 +107,7 @@ pub enum StepV2 {
 
 /// Persisted user-action trace exported by legacy `tool.record_stop` / `await`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TraceV2 {
     /// RFC 3339 timestamp when recording stopped.
     pub recorded_at: String,
@@ -197,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn historical_v2_rejects_hover_steps() {
+    fn v2_hover_steps_round_trip() {
         let value = json!({
             "recorded_at": "2026-07-21T08:00:00Z",
             "entry": { "start_url": "https://example.com/" },
@@ -206,10 +212,15 @@ mod tests {
                 "op": "hover",
                 "id": 1,
                 "page": "p1",
-                "target": { "tag": "button", "name": "结束" }
+                "target": { "tag": "span", "role": "button", "name": "Account" }
             }]
         });
 
-        assert!(serde_json::from_value::<TraceV2>(value).is_err());
+        let trace: TraceV2 = serde_json::from_value(value).unwrap();
+        assert!(matches!(trace.steps.as_slice(), [StepV2::Hover { .. }]));
+        assert_eq!(
+            serde_json::to_value(&trace).unwrap()["steps"][0]["op"],
+            "hover"
+        );
     }
 }
