@@ -33,7 +33,9 @@ describe("registerBskSkill", () => {
     expect(content).toContain("Always call those injected `browser_*` tools");
     expect(content).toContain("Never use `bash`, `shell`, `exec`");
     expect(content).toContain("## DSH routing reminder");
-    expect(content.trimEnd()).toMatch(/always begin with[\s\S]*`browser_session_start`[\s\S]*`browser_session_stop`\.$/);
+    expect(content.trimEnd()).toMatch(
+      /always begin with[\s\S]*`browser_session_start`[\s\S]*`browser_session_stop`\.$/,
+    );
     expect(content).toContain("Owned sessions only");
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");

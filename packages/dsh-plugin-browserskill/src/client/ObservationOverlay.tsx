@@ -282,7 +282,8 @@ function OverlayBody(props: {
   // Paint the last good frame while the next attachment decodes — swapping
   // to a placeholder (and remounting <img> with a fade) is what made the
   // card flash on every breath / action-end capture.
-  const thumb = focus !== undefined ? store.getSnapshot().displayFrames[focus.sessionId] : undefined;
+  const thumb =
+    focus !== undefined ? store.getSnapshot().displayFrames[focus.sessionId] : undefined;
   const displayUrl = thumb?.url;
 
   const canInterrupt =
@@ -595,8 +596,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
                   const step = 16;
                   const dx =
                     event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0;
-                  const dy =
-                    event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0;
+                  const dy = event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0;
                   if (dx === 0 && dy === 0) return;
                   event.preventDefault();
                   const next = applyResize(cardOrigin(), "se", dx, dy, viewport());
