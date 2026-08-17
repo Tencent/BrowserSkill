@@ -9,6 +9,7 @@ pub mod navigation;
 pub mod network;
 pub mod observation;
 pub mod record;
+pub mod record_v2;
 pub mod script;
 pub mod session;
 pub mod tabs;
