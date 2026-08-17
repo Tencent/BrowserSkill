@@ -119,7 +119,7 @@ describe("thumbnail blob URL lifecycle", () => {
     return revoke;
   }
 
-  it("replacing a frame revokes the old blob URL and drops its entry", async () => {
+  it("holds the last ready frame until the replacement decodes", async () => {
     const revoke = withRevokeSpy();
     const { store, esInstances } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
     store.start();
@@ -132,8 +132,47 @@ describe("thumbnail blob URL lifecycle", () => {
       type: "upsert",
       session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" },
     });
+    // Old blob stays painted so the overlay does not flash a placeholder.
+    expect(store.getSnapshot().thumbnails["a1"]).toEqual({
+      status: "ready",
+      url: "blob:url-a1",
+    });
+    expect(store.getSnapshot().displayFrames.s1).toEqual({
+      status: "ready",
+      url: "blob:url-a1",
+    });
+    expect(revoke).not.toHaveBeenCalled();
+    store.ensureThumbnail("a2");
+    await vi.waitFor(() =>
+      expect(store.getSnapshot().displayFrames.s1).toEqual({
+        status: "ready",
+        url: "blob:url-a2",
+      }),
+    );
     expect(store.getSnapshot().thumbnails["a1"]).toBeUndefined();
     expect(revoke).toHaveBeenCalledWith("blob:url-a1");
+    store.stop();
+  });
+
+  it("keeps the last good frame in displayFrames when the next load fails", async () => {
+    const { store, esInstances, loadImage } = harness([
+      { ...OBS_IDLE, thumbnailAttachmentId: "a1" },
+    ]);
+    store.start();
+    await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
+    store.ensureThumbnail("a1");
+    await vi.waitFor(() => expect(store.getSnapshot().thumbnails["a1"].status).toBe("ready"));
+    loadImage.mockRejectedValueOnce(new Error("nope"));
+    emit(esInstances[0], {
+      type: "upsert",
+      session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" },
+    });
+    store.ensureThumbnail("a2");
+    await vi.waitFor(() => expect(store.getSnapshot().thumbnails["a2"]?.status).toBe("error"));
+    expect(store.getSnapshot().displayFrames.s1).toEqual({
+      status: "error",
+      url: "blob:url-a1",
+    });
     store.stop();
   });
 

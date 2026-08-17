@@ -92,6 +92,31 @@ describe("ObservationOverlay", () => {
     await screen.findByRole("img", { name: "session s1 view" });
   });
 
+  it("keeps the current frame on stage while the next thumbnail loads", async () => {
+    let resolveNext: ((url: string) => void) | undefined;
+    const h = makeHarness([{ ...BUSY, thumbnailAttachmentId: "att-1" }]);
+    h.loadImage.mockImplementation(async (id: string) => {
+      if (id === "att-2") {
+        return new Promise<string>((resolve) => {
+          resolveNext = resolve;
+        });
+      }
+      return `blob:${id}`;
+    });
+    render(<ObservationOverlay store={h.store} />);
+    const img = await screen.findByRole("img", { name: "session s1 view" });
+    expect(img.getAttribute("src")).toBe("blob:att-1");
+    h.push([{ ...BUSY, thumbnailAttachmentId: "att-2" }]);
+    await waitFor(() => expect(h.loadImage).toHaveBeenCalledWith("att-2"));
+    // Same <img> node, same src — no placeholder flash, no remount/fade.
+    expect(screen.queryByText("waiting for page")).toBeNull();
+    expect(screen.getByRole("img", { name: "session s1 view" })).toBe(img);
+    expect(img.getAttribute("src")).toBe("blob:att-1");
+    resolveNext?.("blob:att-2");
+    await waitFor(() => expect(img.getAttribute("src")).toBe("blob:att-2"));
+    expect(screen.getByRole("img", { name: "session s1 view" })).toBe(img);
+  });
+
   it("interrupt: disabled while idle, active call posts and shows progress", async () => {
     const h = makeHarness([{ sessionId: "s1", action: "idle", since: Date.now() }]);
     render(<ObservationOverlay store={h.store} />);

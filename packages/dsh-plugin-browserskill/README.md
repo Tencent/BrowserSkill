@@ -109,7 +109,8 @@ shell's theme cannot bleed back in.
 - **Lifecycle**: hidden while the plugin owns no sessions; appears on the first
   `browser_session_start`; disappears when all sessions stop (or the plugin unloads).
 - **Focus view**: status row (green/idle/red dot + session + action + mm:ss), the latest page
-  frame (refreshes every ~1.5s while active, ~8s when idle, keeps the last frame on errors),
+  frame (refreshes every ~1.5s while active, ~8s when idle; the last good frame stays on
+  stage while the next one loads, and is kept on errors so the card does not flash),
   and the action row (Interrupt + Pop out).
 - **Interrupt**: one click kills the in-flight bsk command of the focus session (same semantics
   as the chat Stop button — the current action fails, the agent run may continue). Strip items

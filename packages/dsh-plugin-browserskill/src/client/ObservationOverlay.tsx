@@ -139,7 +139,7 @@ function StripItem(props: {
   useEffect(() => {
     store.ensureThumbnail(thumbId);
   }, [store, thumbId]);
-  const thumb = thumbId !== undefined ? store.getSnapshot().thumbnails[thumbId] : undefined;
+  const thumb = store.getSnapshot().displayFrames[obs.sessionId];
   const state = obs.dead === true ? "dead" : statusOf(obs);
   return (
     <div
@@ -158,7 +158,7 @@ function StripItem(props: {
         onClick={() => onTogglePin(obs.sessionId)}
       >
         <span className={css["strip-thumb"]}>
-          {thumb?.status === "ready" && thumb.url !== undefined ? (
+          {thumb?.url !== undefined ? (
             <img src={thumb.url} alt="" />
           ) : (
             <span className={css["strip-thumb-empty"]} />
@@ -222,7 +222,11 @@ function OverlayBody(props: {
   useEffect(() => {
     store.ensureThumbnail(thumbId);
   }, [store, thumbId]);
-  const thumb = thumbId !== undefined ? store.getSnapshot().thumbnails[thumbId] : undefined;
+  // Paint the last good frame while the next attachment decodes — swapping
+  // to a placeholder (and remounting <img> with a fade) is what made the
+  // card flash on every breath / action-end capture.
+  const thumb = focus !== undefined ? store.getSnapshot().displayFrames[focus.sessionId] : undefined;
+  const displayUrl = thumb?.url;
 
   const canInterrupt =
     available &&
@@ -266,11 +270,10 @@ function OverlayBody(props: {
         ) : null}
       </div>
       <div className={css.stage}>
-        {thumb?.status === "ready" && thumb.url !== undefined ? (
+        {displayUrl !== undefined ? (
           <img
-            key={thumb.url}
             className={css.thumb}
-            src={thumb.url}
+            src={displayUrl}
             alt={`session ${focus?.sessionId ?? ""} view`}
           />
         ) : (
