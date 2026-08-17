@@ -18,6 +18,7 @@ export function shouldRecordPress(
 }
 
 function shouldIncludeDraft(step: DraftTraceStep): boolean {
+  if (step.op === "hover") return false;
   if (step.op === "press" && !shouldRecordPress(step.key, step.modifiers)) return false;
   return true;
 }
@@ -139,12 +140,7 @@ function toV2Step(
         effectForNavigation(step.navigated_to, urlToId),
       );
     case "hover":
-      return {
-        op: "hover",
-        id,
-        page,
-        target: step.target,
-      };
+      return null;
     case "fill":
       return {
         op: "fill",

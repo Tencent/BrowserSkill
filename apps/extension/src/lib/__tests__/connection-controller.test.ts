@@ -27,19 +27,19 @@ function handshake(
 
 describe("computeConnectedState (protocol-based compat)", () => {
   it("returns connected when protocol strings match", () => {
-    expect(computeConnectedState(handshake("1.0", "1.0"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
+    expect(computeConnectedState(handshake("1.1", "1.0"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
       kind: "connected",
     });
   });
 
   it("returns version_skew when daemon protocol minor is newer", () => {
-    expect(computeConnectedState(handshake("1.1", "1.0"))).toEqual({
+    expect(computeConnectedState(handshake("1.2", "1.0"))).toEqual({
       kind: "version_skew",
     });
   });
 
   it("returns version_skew when daemon protocol string differs but floor is satisfied", () => {
-    expect(computeConnectedState(handshake("1", "1.0"))).toEqual({
+    expect(computeConnectedState(handshake("1.1.0", "1.0"))).toEqual({
       kind: "version_skew",
     });
   });
@@ -53,7 +53,7 @@ describe("computeConnectedState (protocol-based compat)", () => {
   });
 
   it("rejects when extension is below daemon min_compatible_protocol", () => {
-    const result = computeConnectedState(handshake("1.0", "1.5"));
+    const result = computeConnectedState(handshake("1.1", "1.5"));
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toContain("min_compatible_protocol");
@@ -65,7 +65,7 @@ describe("computeConnectedState (protocol-based compat)", () => {
     const result = computeConnectedState({
       server: "browser-skill-daemon",
       version: "0.1.0",
-      protocol_version: "1.0",
+      protocol_version: "1.1",
       min_compatible_peer: "0.1.0",
     });
     expect(result).toEqual({ kind: "connected" });
@@ -79,8 +79,14 @@ describe("computeConnectedState (protocol-based compat)", () => {
     }
   });
 
+  it("returns version_skew when daemon protocol is 1.0 and floor is satisfied", () => {
+    expect(computeConnectedState(handshake("1.0", "1.0"))).toEqual({
+      kind: "version_skew",
+    });
+  });
+
   it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {
-    const result = computeConnectedState(handshake("1.0", "not-a-protocol"));
+    const result = computeConnectedState(handshake("1.1", "not-a-protocol"));
     expect(result.kind).toBe("rejected");
     if (result.kind === "rejected") {
       expect(result.reason).toContain("daemon min_compatible_protocol");
@@ -242,11 +248,11 @@ describe("ConnectionController connectionEnabled", () => {
     const second = transport.send.mock.calls[1]?.[0] as { id: string };
     expect(second.id).not.toBe(first.id);
 
-    transport.emitMessage({ id: first.id, result: handshake("1.0", "1.0") });
+    transport.emitMessage({ id: first.id, result: handshake("1.1", "1.0") });
     await Promise.resolve();
     expect(controller.snapshot().state).not.toBe("connected");
 
-    transport.emitMessage({ id: second.id, result: handshake("1.0", "1.0") });
+    transport.emitMessage({ id: second.id, result: handshake("1.1", "1.0") });
     await vi.waitFor(() => expect(controller.snapshot().state).toBe("connected"));
   });
 });

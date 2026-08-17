@@ -657,9 +657,62 @@ export interface EmulateResult {
 }
 
 // --------------------------------------------------------------------------
-// Semantic record payloads — mirror bsk-protocol record.rs (Trace v2)
+// Semantic record payloads — mirror bsk-protocol record.rs
 // --------------------------------------------------------------------------
 
+export const TRACE_VERSION = 3;
+export const TRACE_VERSION_V2 = 2;
+export const DEFAULT_TRACE_VERSION = 2;
+export const VOM_FORMAT_VERSION = 1;
+
+export interface TargetDescriptorV3 {
+  ref?: string;
+  role?: string;
+  name?: string;
+  ctx?: string;
+  unmatched?: boolean;
+}
+
+export interface RecorderInfo {
+  bsk: string;
+  vom: number;
+}
+
+export type StopReason = "user_finish" | "cli_stop";
+
+export interface TraceState {
+  id: string;
+  url: string;
+  title?: string;
+  /** Wire-only: full page observation text. */
+  body?: string;
+  /** Disk-only: filename under the bundle `pages/` directory. */
+  page?: string;
+  truncated?: boolean;
+}
+
+export interface StepResult {
+  state: string;
+}
+
+export interface StepCommonV3 {
+  id: number;
+  state: string;
+  result: StepResult;
+}
+
+export type NavigationCause =
+  | "user_typed"
+  | "link"
+  | "form_submit"
+  | "reload"
+  | "history"
+  | "script"
+  | "browser";
+
+export type FillCommit = "enter" | "suggestion" | "blur";
+
+/** Legacy v2 target shape retained for existing record producers. */
 export interface TargetDescriptor {
   role?: string;
   name?: string;
@@ -740,7 +793,6 @@ export type DraftTraceStep =
 export type Step =
   | ({ op: "navigate" } & StepCommon & { to: string })
   | ({ op: "click" } & StepCommon & { target: TargetDescriptor })
-  | ({ op: "hover" } & StepCommon & { target: TargetDescriptor })
   | ({ op: "fill" } & StepCommon & {
         target: TargetDescriptor;
         value: string;
@@ -756,6 +808,9 @@ export type Step =
         target?: TargetDescriptor;
       });
 
+export type TargetDescriptorV2 = TargetDescriptor;
+export type StepV2 = Step;
+
 export interface Trace {
   recorded_at: string;
   started_at?: string;
@@ -765,11 +820,52 @@ export interface Trace {
   steps: Step[];
 }
 
+export type TraceV2 = Trace;
+
+export type StepV3 =
+  | ({ op: "navigate" } & StepCommonV3 & { to: string; cause: NavigationCause })
+  | ({ op: "click" } & StepCommonV3 & { target: TargetDescriptorV3 })
+  | ({ op: "hover" } & StepCommonV3 & { target: TargetDescriptorV3 })
+  | ({ op: "fill" } & StepCommonV3 & {
+        target: TargetDescriptorV3;
+        value: string;
+        commit: FillCommit;
+        redacted?: boolean;
+      })
+  | ({ op: "select" } & StepCommonV3 & {
+        target: TargetDescriptorV3;
+        selection: SelectedOption[];
+      })
+  | ({ op: "press" } & StepCommonV3 & {
+        key: string;
+        modifiers?: KeyModifier[];
+        target?: TargetDescriptorV3;
+      })
+  | ({ op: "scroll" } & StepCommonV3);
+
+export interface TraceV3 {
+  version: number;
+  recorded_at: string;
+  started_at?: string;
+  purpose?: string;
+  stopped_by: StopReason;
+  entry: TraceEntry;
+  recorder: RecorderInfo;
+  states: TraceState[];
+  steps: StepV3[];
+}
+
+export type RecordedTrace = TraceV2 | TraceV3;
+
 export interface RecordStartParams {
   session_id: string;
   tab_id?: number;
   url?: string;
   purpose?: string;
+  max_page_tokens?: number;
+  redact_values?: boolean;
+  /** Omitted means v2; `3` requests a state-linked v3 trace. */
+  trace_version?: number;
 }
 
 export interface RecordStartResult {
@@ -782,7 +878,7 @@ export interface RecordStopParams {
 }
 
 export interface RecordStopResult {
-  trace: Trace;
+  trace: RecordedTrace;
 }
 
 export interface RecordAwaitParams {
@@ -791,5 +887,5 @@ export interface RecordAwaitParams {
 }
 
 export interface RecordAwaitResult {
-  trace: Trace;
+  trace: RecordedTrace;
 }
