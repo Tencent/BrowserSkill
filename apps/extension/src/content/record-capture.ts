@@ -264,7 +264,10 @@ function collectHoverTriggerLabelText(root: Element): string {
   return normalizeLabelText(text);
 }
 
-function compactHoverTargetName(el: Element, desc: CaptureTargetDescriptor): CaptureTargetDescriptor {
+function compactHoverTargetName(
+  el: Element,
+  desc: CaptureTargetDescriptor,
+): CaptureTargetDescriptor {
   if (!desc.name) return desc;
   const fullText = normalizeLabelText(el.textContent ?? "");
   const compactName = collectHoverTriggerLabelText(el);

@@ -185,8 +185,19 @@ describe("reduceTraceSteps v3", () => {
 
     const { steps } = reduceTraceSteps(
       [
-        { op: "fill", target: { ref: "e1", role: "textbox", name: "Search" }, value: "", preStateId: s1, postStateId: s1 },
-        { op: "click", target: { ref: "e2", role: "button", name: "Apply" }, preStateId: s1, postStateId: s1 },
+        {
+          op: "fill",
+          target: { ref: "e1", role: "textbox", name: "Search" },
+          value: "",
+          preStateId: s1,
+          postStateId: s1,
+        },
+        {
+          op: "click",
+          target: { ref: "e2", role: "button", name: "Apply" },
+          preStateId: s1,
+          postStateId: s1,
+        },
       ],
       registry,
     );
