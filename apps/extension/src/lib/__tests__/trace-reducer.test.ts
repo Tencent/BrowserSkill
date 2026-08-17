@@ -104,6 +104,27 @@ describe("reduceTraceSteps", () => {
     });
   });
 
+  it("keeps committed empty fill steps", () => {
+    const { steps } = reduceTraceSteps(
+      [
+        {
+          op: "fill",
+          target: { tag: "input", role: "textbox", name: "Search query" },
+          value: "",
+          page_url: "https://example.com/search",
+        },
+      ],
+      "https://example.com/search",
+    );
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "fill",
+        value: "",
+      }),
+    ]);
+  });
+
   it("maps select navigated_to onto effect.navigated_to (page id)", () => {
     const { pages, steps } = reduceTraceSteps(
       [
