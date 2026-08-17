@@ -73,14 +73,14 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: "1.1".into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.0".into()),
+        min_compatible_protocol: Some("1.1".into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
