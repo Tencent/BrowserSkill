@@ -8,8 +8,10 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
+  type RenderedRef,
   renderVom,
   type VomNode,
+  type VomOptions,
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
@@ -48,6 +50,7 @@ import {
 import { resolveSnapshotRef } from "./snapshot-ref";
 import {
   type CapturedNode,
+  type CapturedSurfaceProbe,
   type CapturedViewModel,
   captureViewModel,
   collectOverlayExcludedBackendIds,
@@ -411,7 +414,15 @@ function isModalSignal(
 
 function isSensitive(capturedNode: CapturedNode | undefined): boolean {
   const attrs = capturedNode?.attrs ?? {};
-  return (attrs.type ?? "").toLowerCase() === "password";
+  const type = (attrs.type ?? "").toLowerCase();
+  if (type === "password") return true;
+  const autocomplete = (attrs.autocomplete ?? "").toLowerCase();
+  return (
+    autocomplete.startsWith("cc-") ||
+    autocomplete === "one-time-code" ||
+    autocomplete === "current-password" ||
+    autocomplete === "new-password"
+  );
 }
 
 interface AxNodeSignals {
@@ -461,7 +472,13 @@ const AX_TEXT_STOP_ROLES = new Set([
   "columnheader",
   "rowheader",
 ]);
-const SENSITIVE_AX_INPUT_TYPES = new Set(["password", "credit-card"]);
+const SENSITIVE_AX_INPUT_TYPES = new Set([
+  "password",
+  "credit-card",
+  "one-time-code",
+  "current-password",
+  "new-password",
+]);
 
 function axPropertyString(axNode: CdpAxNode, name: string): string | undefined {
   const prop = axNode.properties?.find((item) => item.name === name);
@@ -1537,14 +1554,13 @@ async function fallbackCapturedViewModel(
   try {
     const metrics = await cdp.send<LayoutMetricsViewportReply>(tabId, "Page.getLayoutMetrics", {});
     throwIfAborted(signal, "observation");
-    const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
+    const source = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
     viewport = {
-      width: vpSrc.clientWidth ?? 0,
-      height: vpSrc.clientHeight ?? 0,
+      width: source.clientWidth ?? 0,
+      height: source.clientHeight ?? 0,
     };
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    // viewport stays zero-sized
+  } catch (error) {
+    if (isAbortError(error)) throw error;
   }
   const excludedBackendNodeIds = await collectOverlayExcludedBackendIds(cdp, tabId, signal);
   throwIfAborted(signal, "observation");
@@ -1554,20 +1570,67 @@ async function fallbackCapturedViewModel(
 async function captureForVom(
   cdp: CdpRunner,
   tabId: number,
-  conditionalSurfaceProbe: boolean,
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>,
-  signal?: AbortSignal,
+  options: CaptureVomObservationOptions,
 ): Promise<CapturedViewModel> {
   try {
     return await captureViewModel(cdp, tabId, {
-      conditionalSurfaceProbe,
-      hoverProbeBypassOverlay,
-      signal,
+      conditionalSurfaceProbe: options.conditionalSurfaceProbe ?? false,
+      hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
+      signal: options.signal,
     });
-  } catch (err) {
-    if (isAbortError(err)) throw err;
-    return fallbackCapturedViewModel(cdp, tabId, signal);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return fallbackCapturedViewModel(cdp, tabId, options.signal);
   }
+}
+
+export interface CaptureVomObservationOptions extends VomOptions {
+  conditionalSurfaceProbe?: boolean;
+  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  signal?: AbortSignal;
+}
+
+export interface CaptureVomObservationResult {
+  text: string;
+  refs: RenderedRef[];
+  truncated: boolean;
+  captured: CapturedNode[];
+  documents: CapturedFrameDocument<CdpAxNode>[];
+  surfaceProbes?: CapturedSurfaceProbe[];
+}
+
+export async function captureVomObservation(
+  cdp: CdpRunner,
+  tabId: number,
+  url: string | undefined,
+  options: CaptureVomObservationOptions = {},
+): Promise<CaptureVomObservationResult> {
+  throwIfAborted(options.signal, "observation");
+  await cdp.ensureAttachedToUrl?.(tabId, url);
+  throwIfAborted(options.signal, "observation");
+  const captured = await captureForVom(cdp, tabId, options);
+  throwIfAborted(options.signal, "observation");
+  const documents = await captureFrameData<CdpAxNode>(cdp, tabId, captured, options.signal);
+  throwIfAborted(options.signal, "observation");
+  const scene =
+    captured.rootFrameId && captured.frameNodes?.size
+      ? buildFrameVomScene(documents, captured, { pageUrl: url })
+      : buildVomScene(documents[0]?.axNodes ?? [], captured, { pageUrl: url });
+  const rendered = renderVom(scene, {
+    maxDepth: options.maxDepth,
+    maxTokens: options.maxTokens,
+    redactValues: options.redactValues,
+    activeRegionPolicy: options.activeRegionPolicy,
+  });
+  throwIfAborted(options.signal, "observation");
+  return {
+    text: rendered.text,
+    refs: rendered.refs,
+    truncated: rendered.truncated,
+    captured: captured.nodes,
+    documents,
+    surfaceProbes: captured.surfaceProbes,
+  };
 }
 
 async function handleVomObservation(
@@ -1599,37 +1662,19 @@ async function handleVomObservation(
   try {
     throwIfAborted(signal, toolName);
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
-    throwIfAborted(signal, toolName);
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
-    const captured = await captureForVom(
-      deps.cdp,
-      target.tabId,
-      effectiveConditionalSurfaceProbe,
-      deps.hoverProbeBypassOverlay,
-      signal,
-    );
-    throwIfAborted(signal, toolName);
-    const frameDocuments = await captureFrameData<CdpAxNode>(
-      deps.cdp,
-      target.tabId,
-      captured,
-      signal,
-    );
-    throwIfAborted(signal, toolName);
-    const scene =
-      captured.rootFrameId && captured.frameNodes?.size
-        ? buildFrameVomScene(frameDocuments, captured, { pageUrl: target.url })
-        : buildVomScene(frameDocuments[0]?.axNodes ?? [], captured, { pageUrl: target.url });
-    const rendered = renderVom(scene, {
+    const rendered = await captureVomObservation(deps.cdp, target.tabId, target.url, {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
+      conditionalSurfaceProbe: effectiveConditionalSurfaceProbe,
+      hoverProbeBypassOverlay: deps.hoverProbeBypassOverlay,
+      signal,
     });
     throwIfAborted(signal, toolName);
     const targetByFrameId = new Map(
-      frameDocuments.map((document) => [document.frameId, document.target]),
+      rendered.documents.map((document) => [document.frameId, document.target]),
     );
     ctx.refStore.replace(
       rendered.refs.map((ref) => {
@@ -1653,7 +1698,7 @@ async function handleVomObservation(
       ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
         ? {
             debug: {
-              surface_probes: (captured.surfaceProbes ?? []).map((probe) => ({
+              surface_probes: (rendered.surfaceProbes ?? []).map((probe) => ({
                 trigger_backend_node_id: probe.triggerBackendNodeId,
                 ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
                 trigger_action: probe.triggerAction,

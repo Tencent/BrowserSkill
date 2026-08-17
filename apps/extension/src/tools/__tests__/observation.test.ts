@@ -8,6 +8,7 @@ import {
   buildFrameVomScene,
   buildVomScene,
   type CdpAxNode,
+  captureVomObservation,
   handleGetHtml,
   handleObserve,
   handleScreenshot,
@@ -1329,7 +1330,7 @@ describe("buildVomScene", () => {
     expect(rendered).toContain('      @e2 textbox "验证码"');
   });
 
-  it("does not mark non-password inputs sensitive from password-like labels", () => {
+  it("marks current-password autocomplete as sensitive even for text inputs", () => {
     const axNodes: CdpAxNode[] = [
       {
         nodeId: "1",
@@ -1364,7 +1365,7 @@ describe("buildVomScene", () => {
     expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
       expect.objectContaining({
         id: 10,
-        sensitive: false,
+        sensitive: true,
       }),
     );
   });
@@ -1659,7 +1660,9 @@ describe("buildVomScene", () => {
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
-    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
+    expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
+      { ref: "e1", backendNodeId: 20 },
+    ]);
   });
 
   it("does not promote a clickable container that wraps a real interactive control", () => {
@@ -1803,7 +1806,9 @@ describe("buildVomScene", () => {
     expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
-    expect(rendered.refs).toEqual([{ ref: "e1", backendNodeId: 20 }]);
+    expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
+      { ref: "e1", backendNodeId: 20 },
+    ]);
   });
 
   it("builds active scope blocks from active aria-controls relationships", () => {
@@ -2907,6 +2912,41 @@ describe("handleSnapshot", () => {
   const VP_METRICS = {
     cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
   };
+
+  it("exposes the frame-aware observation result for recording", async () => {
+    const ax: CdpAxNode[] = [
+      {
+        nodeId: "root",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 11,
+        childIds: ["password"],
+      },
+      {
+        nodeId: "password",
+        parentId: "root",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Password" },
+        value: { value: "hunter2" },
+        backendDOMNodeId: 13,
+      },
+    ];
+    const deps = makeOverlayDeps(ax, loginSnapshotReply(), VP_METRICS);
+
+    const result = await captureVomObservation(deps.cdp, 4, "https://example.com", {
+      redactValues: true,
+    });
+
+    expect(result.text).not.toContain("hunter2");
+    expect(result.text).toContain("•••");
+    expect(result.refs[0]).toMatchObject({
+      backendNodeId: 13,
+      role: "textbox",
+      name: "Password",
+      line: expect.any(Number),
+    });
+    expect(result.captured.some((node) => node.backendNodeId === 13)).toBe(true);
+    expect(result.documents).toHaveLength(1);
+  });
 
   it("renders a blocking login overlay as the focused top layer", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });

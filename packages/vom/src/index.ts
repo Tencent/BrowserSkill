@@ -5,6 +5,7 @@ export type {
   CondSurface,
   LayerKind,
   Rect,
+  RenderedRef,
   Viewport,
   VomNode,
   VomOptions,
