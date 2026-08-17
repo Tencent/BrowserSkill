@@ -30,7 +30,6 @@ export function shouldRecordPress(
 }
 
 function shouldIncludeDraft(step: DraftTraceStep): boolean {
-  if (step.op === "fill" && !(step.value ?? "").trim() && !step.redacted) return false;
   if (step.op === "press" && !shouldRecordPress(step.key, step.modifiers)) return false;
   return true;
 }

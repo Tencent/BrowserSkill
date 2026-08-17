@@ -166,8 +166,8 @@ describe("reduceTraceSteps v3", () => {
 
     const { steps, stepIdByDraftId } = reduceTraceSteps(
       [
-        // Dropped: blank fill.
-        { op: "fill", target: { ref: "e1" }, value: "  ", preStateId: s1, postStateId: s1 },
+        // Dropped: bare typing press.
+        { op: "press", key: "a", preStateId: s1, postStateId: s1 },
         { op: "click", target: { ref: "e2" }, preStateId: s1, postStateId: s1 },
       ],
       registry,
@@ -176,6 +176,23 @@ describe("reduceTraceSteps v3", () => {
     expect(steps.map((step) => step.op)).toEqual(["click"]);
     expect(stepIdByDraftId.get(1)).toBeUndefined();
     expect(stepIdByDraftId.get(2)).toBe(1);
+  });
+
+  it("keeps committed empty fills", () => {
+    resetStateIdCounterForTests();
+    const registry = new Map();
+    const s1 = registerObservation(registry, { url: "https://a.example/", rawVomText: "a" });
+
+    const { steps } = reduceTraceSteps(
+      [
+        { op: "fill", target: { ref: "e1", role: "textbox", name: "Search" }, value: "", preStateId: s1, postStateId: s1 },
+        { op: "click", target: { ref: "e2", role: "button", name: "Apply" }, preStateId: s1, postStateId: s1 },
+      ],
+      registry,
+    );
+
+    expect(steps.map((step) => step.op)).toEqual(["fill", "click"]);
+    expect(steps[0]).toMatchObject({ op: "fill", value: "" });
   });
 
   it("keeps hover steps before menu clicks", () => {
