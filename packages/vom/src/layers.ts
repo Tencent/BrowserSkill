@@ -50,10 +50,18 @@ function classifyLayer(
   return blockerCoverage >= MASK_COVERAGE_THRESHOLD ? "mask" : "modal";
 }
 
-export function detectBlockingLayer(nodes: VomNode[], vp: Viewport): BlockingLayer | null {
+export function detectBlockingLayer(
+  nodes: VomNode[],
+  vp: Viewport,
+  rootFrameId?: string,
+): BlockingLayer | null {
   let blocker: { node: VomNode; coverage: number } | null = null;
 
   for (const node of nodes) {
+    // A document's paint order is local to its iframe stacking context. Only
+    // the root document can establish a page-level blocking layer; child
+    // documents are constrained by their iframe owner in the parent document.
+    if (rootFrameId !== undefined && node.frameId !== rootFrameId) continue;
     if (!isBlockingCandidate(node)) continue;
     const cov = coverage(node.rect, vp);
     const qualifies = cov >= BLOCK_COVERAGE_THRESHOLD || (hasModalFeature(node) && cov >= 0.15);
@@ -72,7 +80,9 @@ export function detectBlockingLayer(nodes: VomNode[], vp: Viewport): BlockingLay
   const threshold = blocker.node.paintOrder;
   const members = new Set<number>();
   for (const node of nodes) {
-    if (node.paintOrder >= threshold) members.add(node.id);
+    if (node.frameId === blocker.node.frameId && node.paintOrder >= threshold) {
+      members.add(node.id);
+    }
   }
 
   return {

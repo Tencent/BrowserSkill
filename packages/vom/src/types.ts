@@ -21,6 +21,9 @@ export type LayerKind = "page" | "modal" | "mask";
 export interface VomNode {
   id: number;
   parentId: number | null;
+  backendNodeId?: number;
+  frameId?: string;
+  contextScopeId?: string;
 
   role?: string;
   name?: string;
@@ -52,6 +55,8 @@ export interface VomNode {
 export interface VomScene {
   viewport: Viewport;
   nodes: VomNode[];
+  /** Root document whose paint order defines page-level blocking layers. */
+  rootFrameId?: string;
   surfaces?: CondSurface[];
   activeScopeBlocks?: ActiveScopeBlock[];
 }
@@ -79,9 +84,15 @@ export interface ActiveScopeBlock {
   lines: string[];
 }
 
+export interface VomRef {
+  ref: string;
+  backendNodeId: number;
+  frameId?: string;
+}
+
 export interface VomResult {
   text: string;
-  refs: Array<{ ref: string; backendNodeId: number }>;
+  refs: VomRef[];
   truncated: boolean;
 }
 

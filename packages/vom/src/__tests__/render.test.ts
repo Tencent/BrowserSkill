@@ -25,6 +25,85 @@ function scene(nodes: VomNode[]): VomScene {
 }
 
 describe("renderVom single-layer page", () => {
+  it("does not derive handle context across frame scopes", () => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          role: "RootWebArea",
+          frameId: "main",
+          contextScopeId: "main",
+        }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "StaticText",
+          name: "创建于",
+          frameId: "main",
+          contextScopeId: "main",
+        }),
+        node({
+          id: 3,
+          parentId: 1,
+          role: "Iframe",
+          frameId: "main",
+          contextScopeId: "main",
+        }),
+        node({
+          id: 4,
+          parentId: 3,
+          role: "button",
+          name: "表格视图",
+          frameId: "child",
+          contextScopeId: "child",
+        }),
+        node({
+          id: 5,
+          parentId: 1,
+          role: "button",
+          name: "表格视图",
+          frameId: "main",
+          contextScopeId: "main",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "表格视图"');
+    expect(out.text).not.toContain('@e1 button "表格视图" [ctx: 创建于]');
+  });
+
+  it("preserves handle context within a frame scope", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", contextScopeId: "main" }),
+        node({ id: 2, parentId: 1, role: "Iframe", contextScopeId: "main" }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "StaticText",
+          name: "工具栏",
+          contextScopeId: "child",
+        }),
+        node({
+          id: 4,
+          parentId: 2,
+          role: "button",
+          name: "更多",
+          contextScopeId: "child",
+        }),
+        node({
+          id: 5,
+          parentId: 1,
+          role: "button",
+          name: "更多",
+          contextScopeId: "main",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "更多" [ctx: 工具栏]');
+  });
+
   it("always emits a complete @vom single-layer document when there is no blocker", () => {
     const out = renderVom(
       scene([
@@ -157,7 +236,7 @@ describe("renderVom single-layer page", () => {
     expect(out.text).not.toContain("hunter2");
   });
 
-  it("does not imply a sensitive textbox has a value when the value is missing", () => {
+  it("renders a sensitive filled state without retaining its clear text value", () => {
     const out = renderVom(
       scene([
         node({ id: 1, role: "RootWebArea", name: "Login" }),
@@ -168,6 +247,26 @@ describe("renderVom single-layer page", () => {
           name: "密码",
           tag: "input",
           sensitive: true,
+          inputState: "filled",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 textbox "密码" [filled] ="•••"');
+  });
+
+  it("does not imply an empty sensitive textbox has a value", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Login" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "textbox",
+          name: "密码",
+          tag: "input",
+          sensitive: true,
+          inputState: "empty",
         }),
       ]),
     );
@@ -387,6 +486,102 @@ describe("renderVom single-layer page", () => {
     expect(out.text).not.toContain("Background");
     expect(out.text).toContain('@e1 button "Foreground"');
     expect(out.refs).toEqual([{ ref: "e1", backendNodeId: 4 }]);
+  });
+
+  it("keeps paint-order comparisons inside their frame document", () => {
+    const out = renderVom(
+      {
+        ...scene([
+          node({ id: 1, role: "RootWebArea", frameId: "main" }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "button",
+            name: "Top-level action",
+            tag: "button",
+            rect: { x: 120, y: 120, w: 120, h: 40 },
+            paintOrder: 2,
+            frameId: "main",
+          }),
+          node({
+            id: 3,
+            parentId: 1,
+            role: "Iframe",
+            tag: "iframe",
+            rect: { x: 0, y: 0, w: 1000, h: 700 },
+            paintOrder: 1,
+            frameId: "main",
+          }),
+          node({
+            id: 4,
+            parentId: 3,
+            role: "generic",
+            rect: { x: 0, y: 0, w: 1000, h: 700 },
+            paintOrder: 100,
+            position: "fixed",
+            frameId: "child",
+          }),
+          node({
+            id: 5,
+            parentId: 4,
+            role: "button",
+            name: "Child action",
+            tag: "button",
+            rect: { x: 120, y: 120, w: 120, h: 40 },
+            paintOrder: 101,
+            frameId: "child",
+          }),
+        ]),
+        rootFrameId: "main",
+      },
+      { activeRegionPolicy: true },
+    );
+
+    expect(out.text).toContain("@layers 1 focus=L1");
+    expect(out.text).toContain('button "Top-level action"');
+    expect(out.text).toContain('button "Child action"');
+  });
+
+  it("uses the iframe owner when a parent-frame region covers child content", () => {
+    const out = renderVom(
+      {
+        ...scene([
+          node({ id: 1, role: "RootWebArea", frameId: "main" }),
+          node({
+            id: 2,
+            parentId: 1,
+            role: "Iframe",
+            tag: "iframe",
+            rect: { x: 100, y: 100, w: 400, h: 300 },
+            paintOrder: 1,
+            frameId: "main",
+          }),
+          node({
+            id: 3,
+            parentId: 2,
+            role: "button",
+            name: "Covered child action",
+            tag: "button",
+            rect: { x: 150, y: 150, w: 120, h: 40 },
+            paintOrder: 100,
+            frameId: "child",
+          }),
+          node({
+            id: 4,
+            parentId: 1,
+            role: "generic",
+            rect: { x: 120, y: 120, w: 200, h: 120 },
+            paintOrder: 2,
+            position: "fixed",
+            frameId: "main",
+          }),
+        ]),
+        rootFrameId: "main",
+      },
+      { activeRegionPolicy: true },
+    );
+
+    expect(out.text).not.toContain("Covered child action");
   });
 
   it("renders conditional surface items inline on the trigger", () => {

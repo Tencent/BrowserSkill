@@ -8,6 +8,7 @@ export type {
   Viewport,
   VomNode,
   VomOptions,
+  VomRef,
   VomResult,
   VomScene,
 } from "./types";

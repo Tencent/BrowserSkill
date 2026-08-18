@@ -18,6 +18,8 @@ function fakeSnapshotReply() {
     "auto",
     "type",
     "password",
+    "value",
+    "hunter2",
   ];
   const i = (s: string) => S.indexOf(s);
   return {
@@ -29,7 +31,8 @@ function fakeSnapshotReply() {
           nodeType: [1, 1, 1, 1],
           nodeName: [i("html"), i("body"), i("div"), i("input")],
           backendNodeId: [10, 11, 12, 13],
-          attributes: [[], [], [], [i("type"), i("password")]],
+          attributes: [[], [], [], [i("type"), i("password"), i("value"), i("hunter2")]],
+          inputValue: { index: [3], value: [i("hunter2")] },
         },
         layout: {
           nodeIndex: [1, 2, 3],
@@ -217,7 +220,8 @@ function makeCdp(snapshot: unknown) {
                 {
                   state: "filled",
                   sensitive: true,
-                  defaultValue: "",
+                  defaultValue: "hunter2",
+                  value: "hunter2",
                   placeholder: "secret",
                 },
               ],
@@ -262,10 +266,11 @@ describe("captureViewModel", () => {
 
     expect(input).toMatchObject({
       formState: "filled",
-      formDefaultValue: "",
       formPlaceholder: "secret",
+      attrs: { type: "password" },
     });
     expect(input?.formValue).toBeUndefined();
+    expect(input?.formDefaultValue).toBeUndefined();
     expect(cdp.send).toHaveBeenCalledWith(
       4,
       "Runtime.evaluate",
@@ -692,10 +697,8 @@ describe("captureViewModel", () => {
     };
     const { nodes } = await captureViewModel(cdp, 4);
     const div = nodes.find((n) => n.backendNodeId === 12);
-    // local rect preserves viewport-relative scroll math.
     expect(div?.localRect?.y).toBe(-200);
-    // exported rect is clipped to the top-level viewport before VOM consumes it.
-    expect(div?.rect).toMatchObject({ y: 0, h: 600 });
+    expect(div?.rect).toMatchObject({ y: -200, h: 800 });
   });
 
   it("normalizes device-pixel bounds by devicePixelRatio", async () => {
@@ -839,6 +842,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "main-frame",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -866,6 +870,7 @@ describe("captureViewModel", () => {
         },
         // documents[1]: the iframe's sub-document with a login input
         {
+          frameId: "child-frame",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -895,7 +900,14 @@ describe("captureViewModel", () => {
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const { nodes, iframeNodes } = await captureViewModel(cdp, 4);
+    const {
+      nodes,
+      iframeNodes,
+      frameNodes,
+      frameOwnerBackendNodeIds,
+      frameParentIds,
+      rootFrameId,
+    } = await captureViewModel(cdp, 4);
     // Main frame has 4 nodes; iframe is included
     expect(nodes.find((n) => n.backendNodeId === 13)?.tag).toBe("iframe");
     // iframeNodes keyed by the <iframe> element's backendNodeId=13
@@ -907,10 +919,14 @@ describe("captureViewModel", () => {
     expect(input?.attrs.type).toBe("text");
     expect(input?.ownerFrameBackendNodeId).toBe(13);
     expect(input?.localRect).toEqual({ x: 0, y: 0, w: 200, h: 40 });
-    expect(input?.rect).toEqual({ x: 100, y: 300, w: 200, h: 40 });
+    expect(input?.rect).toBeNull();
+    expect(rootFrameId).toBe("main-frame");
+    expect(frameNodes?.get("child-frame")).toBe(subNodes);
+    expect(frameOwnerBackendNodeIds?.get("child-frame")).toBe(13);
+    expect(frameParentIds?.get("child-frame")).toBe("main-frame");
   });
 
-  it("clips iframe sub-document rects to the iframe viewport in top coordinates", async () => {
+  it("captures iframe documents without requiring owner-frame geometry", async () => {
     const S = [
       "html",
       "body",
@@ -938,16 +954,10 @@ describe("captureViewModel", () => {
             contentDocumentIndex: { index: [2], value: [1] },
           },
           layout: {
-            nodeIndex: [1, 2],
-            styles: [
-              [i("static"), i("auto")],
-              [i("static"), i("auto")],
-            ],
-            bounds: [
-              [0, 0, 1000, 800],
-              [950, 760, 200, 100],
-            ],
-            paintOrders: [0, 1],
+            nodeIndex: [1],
+            styles: [[i("static"), i("auto")]],
+            bounds: [[0, 0, 1000, 800]],
+            paintOrders: [0],
           },
         },
         {
@@ -985,7 +995,7 @@ describe("captureViewModel", () => {
     const input = iframeNodes.get(13)?.find((n) => n.backendNodeId === 101);
 
     expect(input?.localRect).toEqual({ x: 20, y: 20, w: 120, h: 60 });
-    expect(input?.rect).toEqual({ x: 970, y: 780, w: 30, h: 20 });
+    expect(input?.rect).toBeNull();
   });
 
   it("recursively normalizes nested iframe sub-documents", async () => {
@@ -1080,9 +1090,11 @@ describe("captureViewModel", () => {
     const nestedIframe = iframeNodes.get(13)?.find((n) => n.backendNodeId === 23);
     const input = iframeNodes.get(23)?.find((n) => n.backendNodeId === 31);
 
-    expect(nestedIframe?.rect).toEqual({ x: 15, y: 26, w: 100, h: 80 });
+    expect(nestedIframe?.localRect).toEqual({ x: 5, y: 6, w: 100, h: 80 });
+    expect(nestedIframe?.rect).toBeNull();
     expect(input?.ownerFrameBackendNodeId).toBe(23);
-    expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
+    expect(input?.localRect).toEqual({ x: 1, y: 2, w: 40, h: 20 });
+    expect(input?.rect).toBeNull();
   });
 
   it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {

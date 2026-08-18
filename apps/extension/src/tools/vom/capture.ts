@@ -17,13 +17,14 @@ const STYLE_COL = Object.fromEntries(
 export interface CapturedNode {
   backendNodeId: number;
   parentBackendNodeId: number | null;
+  frameId?: string;
   /** Owning iframe backend node id; `null` for the top-level document. */
   ownerFrameBackendNodeId?: number | null;
   tag: string;
   attrs: Record<string, string>;
-  /** Top-level viewport-relative CSS px, clipped to the owning frame viewport. */
+  /** Top-level viewport geometry when this node belongs to the root document. */
   rect: Rect | null;
-  /** Frame-local viewport-relative CSS px before top-level translation/clipping. */
+  /** Owning document viewport-relative CSS px. */
   localRect?: Rect | null;
   paintOrder: number;
   position: string;
@@ -57,6 +58,11 @@ export interface CapturedViewModel {
   nodes: CapturedNode[];
   viewport: Viewport;
   iframeNodes: CapturedIframeNodes;
+  frameNodes?: Map<string, CapturedNode[]>;
+  frameOwnerBackendNodeIds?: Map<string, number>;
+  /** Explicit DOMSnapshot frame ancestry; never inferred from backend node ids. */
+  frameParentIds?: Map<string, string>;
+  rootFrameId?: string;
   surfaceProbes?: CapturedSurfaceProbe[];
   /** Backend node ids belonging to the agent overlay host + its shadow subtree. */
   excludedBackendNodeIds: Set<number>;
@@ -92,7 +98,12 @@ interface SparseArray {
   value: number[];
 }
 
+interface RareBooleanData {
+  index: number[];
+}
+
 interface SnapshotDocument {
+  frameId?: string | number;
   scrollOffsetX?: number;
   scrollOffsetY?: number;
   nodes?: {
@@ -107,6 +118,10 @@ interface SnapshotDocument {
     nodeValue?: number[];
     /** Maps node array index → index into `documents[]` for frame content. */
     contentDocumentIndex?: SparseArray;
+    inputValue?: SparseArray;
+    textValue?: SparseArray;
+    inputChecked?: RareBooleanData;
+    optionSelected?: RareBooleanData;
   };
   layout?: {
     nodeIndex?: number[];
@@ -114,6 +129,12 @@ interface SnapshotDocument {
     bounds?: number[][];
     paintOrders?: number[];
   };
+}
+
+function snapshotFrameId(document: SnapshotDocument, strings: string[]): string | undefined {
+  if (typeof document.frameId === "string") return document.frameId || undefined;
+  if (typeof document.frameId === "number") return str(strings, document.frameId) || undefined;
+  return undefined;
 }
 
 interface SnapshotReply {
@@ -133,6 +154,25 @@ interface LayoutMetricsReply {
 
 function isFormControlTag(tag: string): boolean {
   return tag === "input" || tag === "textarea" || tag === "select";
+}
+
+function isSensitiveFormControl(node: Pick<CapturedNode, "tag" | "attrs">): boolean {
+  return node.tag === "input" && (node.attrs.type ?? "").toLowerCase() === "password";
+}
+
+function snapshotFormState(
+  value: string | undefined,
+  defaultValue: string,
+  hasDefaultValue: boolean,
+  sensitive: boolean,
+): CapturedNode["formState"] {
+  if (sensitive) {
+    if (value === undefined && !hasDefaultValue) return undefined;
+    return (value ?? defaultValue) === "" ? "empty" : "filled";
+  }
+  if (value === undefined) return undefined;
+  if (value === "") return "empty";
+  return value === defaultValue ? "default" : "filled";
 }
 
 const MAX_FORM_ENRICH_CONTROLS = 250;
@@ -166,9 +206,8 @@ function formStateBatchExpression(maxControls: number): string {
       return {
         state,
         sensitive,
-        defaultValue,
         placeholder,
-        ...(sensitive ? {} : { value: rawValue }),
+        ...(sensitive ? {} : { value: rawValue, defaultValue }),
       };
     };
     const collect = (doc) => {
@@ -210,10 +249,14 @@ function applyFormStates(nodes: CapturedNode[], states: CapturedFormState[]): vo
     index += 1;
     if (!state) continue;
     node.formState = state.state;
-    node.formDefaultValue = state.defaultValue ?? "";
     node.formPlaceholder = state.placeholder ?? "";
-    if (!state.sensitive && state.value !== undefined) {
-      node.formValue = state.value;
+    if (state.sensitive || isSensitiveFormControl(node)) {
+      delete node.formValue;
+      delete node.formDefaultValue;
+      delete node.attrs.value;
+    } else {
+      node.formDefaultValue = state.defaultValue ?? "";
+      if (state.value !== undefined) node.formValue = state.value;
     }
   }
 }
@@ -272,9 +315,8 @@ interface ParseDocumentResult {
 }
 
 interface FrameContext {
+  frameId?: string;
   ownerFrameBackendNodeId: number | null;
-  originInTop: { x: number; y: number };
-  clipRectInTop: Rect;
   scrollX: number;
   scrollY: number;
 }
@@ -291,38 +333,6 @@ function devicePixelRatio(metrics: LayoutMetricsReply): number {
   const dpr = layoutW / cssW;
   if (!Number.isFinite(dpr) || dpr <= 0) return 1;
   return dpr >= 1 ? dpr : 1;
-}
-
-function viewportRect(viewport: Viewport): Rect {
-  return { x: 0, y: 0, w: Math.max(0, viewport.width), h: Math.max(0, viewport.height) };
-}
-
-function intersectRects(a: Rect, b: Rect): Rect | null {
-  const x1 = Math.max(a.x, b.x);
-  const y1 = Math.max(a.y, b.y);
-  const x2 = Math.min(a.x + a.w, b.x + b.w);
-  const y2 = Math.min(a.y + a.h, b.y + b.h);
-  if (x2 <= x1 || y2 <= y1) return null;
-  return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
-}
-
-function rectInTop(localRect: Rect, context: FrameContext): Rect | null {
-  const translated = {
-    x: context.originInTop.x + localRect.x,
-    y: context.originInTop.y + localRect.y,
-    w: localRect.w,
-    h: localRect.h,
-  };
-  return intersectRects(translated, context.clipRectInTop);
-}
-
-function unclipRectInTop(localRect: Rect, context: FrameContext): Rect {
-  return {
-    x: context.originInTop.x + localRect.x,
-    y: context.originInTop.y + localRect.y,
-    w: localRect.w,
-    h: localRect.h,
-  };
 }
 
 function sparseIndexMap(sparse: SparseArray | undefined): Map<number, number> {
@@ -805,6 +815,10 @@ function parseDocumentNodes(
   const posCol = STYLE_COL.position;
   const peCol = STYLE_COL["pointer-events"];
   const cursorCol = STYLE_COL.cursor;
+  const inputValues = sparseIndexMap(dn.inputValue);
+  const textValues = sparseIndexMap(dn.textValue);
+  const checkedInputs = new Set(dn.inputChecked?.index ?? []);
+  const selectedOptions = new Set(dn.optionSelected?.index ?? []);
 
   // Collect visible text from #text child nodes so element CapturedNodes
   // carry a textContent value usable as a button/link label fallback.
@@ -855,7 +869,7 @@ function parseDocumentNodes(
           w: b[2] / dpr,
           h: b[3] / dpr,
         };
-        rect = rectInTop(localRect, context);
+        rect = context.ownerFrameBackendNodeId === null ? localRect : null;
       }
       paintOrder = dl?.paintOrders?.[li] ?? 0;
       const styleRow = dl?.styles?.[li] ?? [];
@@ -870,9 +884,24 @@ function parseDocumentNodes(
 
     const textContent = nodeTextContent.get(n);
 
+    const rawFormValueIndex = tag === "textarea" ? textValues.get(n) : inputValues.get(n);
+    const rawFormValue =
+      rawFormValueIndex !== undefined ? str(strings, rawFormValueIndex) : undefined;
+    const sensitive = isSensitiveFormControl({ tag, attrs });
+    const formDefaultValue = attrs.value ?? "";
+    const formValue = sensitive ? undefined : rawFormValue;
+    const formState = snapshotFormState(
+      rawFormValue,
+      formDefaultValue,
+      Object.prototype.hasOwnProperty.call(attrs, "value"),
+      sensitive,
+    );
+    if (sensitive) delete attrs.value;
+
     nodes.push({
       backendNodeId,
       parentBackendNodeId,
+      ...(context.frameId ? { frameId: context.frameId } : {}),
       ownerFrameBackendNodeId: context.ownerFrameBackendNodeId,
       tag,
       attrs,
@@ -883,6 +912,16 @@ function parseDocumentNodes(
       pointerEvents,
       cursor,
       textContent,
+      ...(formValue !== undefined ? { formValue } : {}),
+      ...(tag === "input" || tag === "textarea"
+        ? {
+            formPlaceholder: attrs.placeholder ?? "",
+            ...(!sensitive ? { formDefaultValue } : {}),
+            ...(formState ? { formState } : {}),
+          }
+        : {}),
+      ...(checkedInputs.has(n) ? { formValue: "true", formState: "filled" } : {}),
+      ...(selectedOptions.has(n) ? { formValue: attrs.value ?? textContent ?? "" } : {}),
     });
   }
   return { nodes, excludedBackendNodeIds };
@@ -890,6 +929,8 @@ function parseDocumentNodes(
 
 interface ParseFrameDocumentsResult {
   iframeNodes: CapturedIframeNodes;
+  frameOwnerBackendNodeIds: Map<string, number>;
+  frameParentIds: Map<string, string>;
   excludedBackendNodeIds: Set<number>;
 }
 
@@ -898,18 +939,20 @@ function parseChildFrameDocuments(
   strings: string[],
   dpr: number,
   parentDocIndex: number,
-  parentNodes: CapturedNode[],
   parentContext: FrameContext,
   visited = new Set<number>(),
 ): ParseFrameDocumentsResult {
   const iframeNodes: CapturedIframeNodes = new Map();
+  const frameOwnerBackendNodeIds = new Map<string, number>();
+  const frameParentIds = new Map<string, string>();
   const excludedBackendNodeIds = new Set<number>();
   const parentDoc = documents[parentDocIndex];
   const cdi = sparseIndexMap(parentDoc?.nodes?.contentDocumentIndex);
-  if (cdi.size === 0) return { iframeNodes, excludedBackendNodeIds };
+  if (cdi.size === 0) {
+    return { iframeNodes, frameOwnerBackendNodeIds, frameParentIds, excludedBackendNodeIds };
+  }
 
   const parentBackendIds = parentDoc?.nodes?.backendNodeId ?? [];
-  const parentNodeByBackendId = new Map(parentNodes.map((node) => [node.backendNodeId, node]));
 
   for (const [nodeArrayIdx, childDocIndex] of cdi) {
     if (visited.has(childDocIndex)) continue;
@@ -917,20 +960,10 @@ function parseChildFrameDocuments(
     if (!childDoc) continue;
     const iframeBackendId = parentBackendIds[nodeArrayIdx];
     if (iframeBackendId === undefined) continue;
-    const iframeNode = parentNodeByBackendId.get(iframeBackendId);
-    if (!iframeNode?.localRect) continue;
-
-    const iframeRectInTop = unclipRectInTop(iframeNode.localRect, parentContext);
-    const childClip = intersectRects(iframeRectInTop, parentContext.clipRectInTop);
-    if (!childClip) {
-      iframeNodes.set(iframeBackendId, []);
-      continue;
-    }
 
     const childContext: FrameContext = {
+      frameId: snapshotFrameId(childDoc, strings),
       ownerFrameBackendNodeId: iframeBackendId,
-      originInTop: { x: iframeRectInTop.x, y: iframeRectInTop.y },
-      clipRectInTop: childClip,
       scrollX: childDoc.scrollOffsetX ?? 0,
       scrollY: childDoc.scrollOffsetY ?? 0,
     };
@@ -938,6 +971,10 @@ function parseChildFrameDocuments(
     nextVisited.add(childDocIndex);
     const parsed = parseDocumentNodes(childDoc, strings, dpr, childContext);
     iframeNodes.set(iframeBackendId, parsed.nodes);
+    if (childContext.frameId) {
+      frameOwnerBackendNodeIds.set(childContext.frameId, iframeBackendId);
+      if (parentContext.frameId) frameParentIds.set(childContext.frameId, parentContext.frameId);
+    }
     for (const id of parsed.excludedBackendNodeIds) excludedBackendNodeIds.add(id);
 
     const nested = parseChildFrameDocuments(
@@ -945,17 +982,22 @@ function parseChildFrameDocuments(
       strings,
       dpr,
       childDocIndex,
-      parsed.nodes,
       childContext,
       nextVisited,
     );
     for (const [nestedFrameId, nestedNodes] of nested.iframeNodes) {
       iframeNodes.set(nestedFrameId, nestedNodes);
     }
+    for (const [frameId, ownerBackendNodeId] of nested.frameOwnerBackendNodeIds) {
+      frameOwnerBackendNodeIds.set(frameId, ownerBackendNodeId);
+    }
+    for (const [frameId, parentFrameId] of nested.frameParentIds) {
+      frameParentIds.set(frameId, parentFrameId);
+    }
     for (const id of nested.excludedBackendNodeIds) excludedBackendNodeIds.add(id);
   }
 
-  return { iframeNodes, excludedBackendNodeIds };
+  return { iframeNodes, frameOwnerBackendNodeIds, frameParentIds, excludedBackendNodeIds };
 }
 
 export async function captureViewModel(
@@ -998,9 +1040,8 @@ export async function captureViewModel(
   }
 
   const topContext: FrameContext = {
+    frameId: snapshotFrameId(doc0, strings),
     ownerFrameBackendNodeId: null,
-    originInTop: { x: 0, y: 0 },
-    clipRectInTop: viewportRect(viewport),
     scrollX,
     scrollY,
   };
@@ -1008,7 +1049,7 @@ export async function captureViewModel(
   const nodes = mainParsed.nodes;
   const excludedBackendNodeIds = new Set(mainParsed.excludedBackendNodeIds);
 
-  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, nodes, topContext);
+  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, topContext);
   const iframeNodes = frameParsed.iframeNodes;
   for (const id of frameParsed.excludedBackendNodeIds) {
     excludedBackendNodeIds.add(id);
@@ -1022,5 +1063,27 @@ export async function captureViewModel(
     : [];
   throwIfAborted(options.signal);
 
-  return { nodes, viewport, iframeNodes, surfaceProbes, excludedBackendNodeIds };
+  const frameNodes = new Map<string, CapturedNode[]>();
+  if (topContext.frameId) frameNodes.set(topContext.frameId, nodes);
+  for (const iframeFrameNodes of iframeNodes.values()) {
+    const frameId = iframeFrameNodes.find((node) => node.frameId)?.frameId;
+    if (frameId) frameNodes.set(frameId, iframeFrameNodes);
+  }
+  for (const [frameId, ownerBackendNodeId] of frameParsed.frameOwnerBackendNodeIds) {
+    if (!frameNodes.has(frameId)) {
+      frameNodes.set(frameId, iframeNodes.get(ownerBackendNodeId) ?? []);
+    }
+  }
+
+  return {
+    nodes,
+    viewport,
+    iframeNodes,
+    frameNodes,
+    frameOwnerBackendNodeIds: frameParsed.frameOwnerBackendNodeIds,
+    frameParentIds: frameParsed.frameParentIds,
+    ...(topContext.frameId ? { rootFrameId: topContext.frameId } : {}),
+    surfaceProbes,
+    excludedBackendNodeIds,
+  };
 }
