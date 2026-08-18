@@ -58,7 +58,16 @@ function selection(values: string[], labels?: string[]): Array<{ value: string; 
   }));
 }
 
-function reduceDraft(draft: RecordingDraftStep, id: number, redactValues: boolean): StepV3 | null {
+interface ReduceDraftOptions {
+  includeTabSwitches: boolean;
+  redactValues: boolean;
+}
+
+function reduceDraft(
+  draft: RecordingDraftStep,
+  id: number,
+  options: ReduceDraftOptions,
+): StepV3 | null {
   if (!shouldIncludeDraft(draft)) return null;
   const state = draft.preStateId ?? draft.postStateId;
   const resultState = draft.postStateId ?? draft.preStateId;
@@ -68,6 +77,8 @@ function reduceDraft(draft: RecordingDraftStep, id: number, redactValues: boolea
   switch (draft.op) {
     case "navigate":
       return { op: "navigate", ...common, to: draft.url, cause: navigationCause(draft) };
+    case "switch_tab":
+      return options.includeTabSwitches ? { op: "switch_tab", ...common } : null;
     case "click":
       return {
         op: "click",
@@ -81,7 +92,7 @@ function reduceDraft(draft: RecordingDraftStep, id: number, redactValues: boolea
         target: draft.matchedTarget ?? unmatchedTarget(draft.captureTarget),
       };
     case "fill":
-      const fillIsRedacted = redactValues || draft.redacted === true;
+      const fillIsRedacted = options.redactValues || draft.redacted === true;
       return {
         op: "fill",
         ...common,
@@ -105,7 +116,7 @@ function reduceDraft(draft: RecordingDraftStep, id: number, redactValues: boolea
         op: "select",
         ...common,
         target: draft.matchedTarget ?? unmatchedTarget(draft.captureTarget),
-        ...(!redactValues ? { selection: selection(draft.values, draft.labels) } : {}),
+        ...(!options.redactValues ? { selection: selection(draft.values, draft.labels) } : {}),
       };
     case "scroll":
       return { op: "scroll", ...common };
@@ -119,12 +130,15 @@ export interface ReducedTraceV3 {
 
 export function reduceTraceStepsV3(
   steps: RecordingDraftStep[],
-  options: { redactValues?: boolean } = {},
+  options: { includeTabSwitches?: boolean; redactValues?: boolean } = {},
 ): ReducedTraceV3 {
   const output: StepV3[] = [];
   const stepIdByDraftId = new Map<number, number>();
   for (const { draft, draftIds } of collapseRedirects(steps)) {
-    const step = reduceDraft(draft, output.length + 1, options.redactValues ?? false);
+    const step = reduceDraft(draft, output.length + 1, {
+      includeTabSwitches: options.includeTabSwitches === true,
+      redactValues: options.redactValues === true,
+    });
     if (!step) continue;
     output.push(step);
     for (const draftId of draftIds) stepIdByDraftId.set(draftId, step.id);

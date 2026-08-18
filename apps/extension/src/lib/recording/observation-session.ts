@@ -28,7 +28,13 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function isTargeted(draft: RecordingDraftStep): draft is TargetedRecordingDraft {
-  return draft.op !== "navigate" && draft.op !== "scroll";
+  return (
+    draft.op === "click" ||
+    draft.op === "hover" ||
+    draft.op === "fill" ||
+    draft.op === "press" ||
+    draft.op === "select"
+  );
 }
 
 export class RecordingObservationSession {

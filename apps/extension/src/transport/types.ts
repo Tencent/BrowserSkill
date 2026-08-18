@@ -779,6 +779,7 @@ export interface SelectedOptionV3 {
 
 export type StepV3 =
   | ({ op: "navigate" } & StepCommonV3 & { to: string; cause: NavigationCause })
+  | ({ op: "switch_tab" } & StepCommonV3)
   | ({ op: "click" } & StepCommonV3 & { target: TargetDescriptorV3 })
   | ({ op: "hover" } & StepCommonV3 & { target: TargetDescriptorV3 })
   | ({ op: "fill" } & StepCommonV3 & {
@@ -821,6 +822,8 @@ export interface RecordStartParams {
   redact_values?: boolean;
   /** Omitted means v2; `3` requests a state-linked v3 trace. */
   trace_version?: number;
+  /** Client can decode the v3 `switch_tab` step variant. */
+  supports_tab_switch_steps?: boolean;
 }
 
 export interface RecordStartResult {

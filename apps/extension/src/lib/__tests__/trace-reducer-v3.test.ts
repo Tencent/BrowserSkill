@@ -33,6 +33,21 @@ describe("trace reducer v3", () => {
     expect(JSON.stringify(reduced.steps)).not.toContain("private-account-id");
   });
 
+  it("emits tab transitions only for callers that advertised support", () => {
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "switch_tab",
+        preStateId: "s1",
+        postStateId: "s2",
+      },
+    ];
+
+    expect(reduceTraceStepsV3(drafts).steps).toEqual([]);
+    expect(reduceTraceStepsV3(drafts, { includeTabSwitches: true }).steps).toEqual([
+      { op: "switch_tab", id: 1, state: "s1", result: { state: "s2" } },
+    ]);
+  });
+
   it("collapses redirect hops while retaining draft-to-step identity", () => {
     const drafts: RecordingDraftStep[] = [
       { op: "navigate", url: "https://example.com/start", preStateId: "s1", postStateId: "s2" },

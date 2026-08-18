@@ -1,6 +1,7 @@
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { StopReason, TraceV3 } from "@/transport/types";
 import type { DocumentSettleScope } from "./document-settle";
+import type { RegisteredObservation } from "./observation-capture";
 import { RecordingObservationSession } from "./observation-session";
 import { inferMissingPostStates, SettleController } from "./settle-controller";
 import { RecordingStateRegistry } from "./state-registry";
@@ -10,11 +11,11 @@ import type { RecordingDraftStep, StepAnnotation } from "./types";
 interface TabRecordingContext {
   session: RecordingObservationSession;
   settle: SettleController;
-  initialCapture: PendingInitialCapture | null;
+  pendingCapture: PendingCapture | null;
 }
 
-interface PendingInitialCapture {
-  promise: Promise<void>;
+interface PendingCapture {
+  promise: Promise<RegisteredObservation>;
   abort: AbortController;
 }
 
@@ -56,30 +57,69 @@ export class RecordingObservationRuntime {
         tabsApi: this.#tabsApi,
         tabId,
       }),
-      initialCapture: null,
+      pendingCapture: null,
     };
     this.#contexts.set(tabId, context);
     return context;
   }
 
-  async captureInitial(tabId: number): Promise<void> {
+  async #capture(tabId: number): Promise<RegisteredObservation> {
     const context = this.#context(tabId);
-    if (context.session.cursor.lastSettled) return;
-    if (context.initialCapture) return context.initialCapture.promise;
+    if (context.pendingCapture) return context.pendingCapture.promise;
 
     const abort = new AbortController();
-    let pending!: PendingInitialCapture;
+    let pending!: PendingCapture;
     const promise = context.session.capture(this.#cdp, this.#tabsApi, tabId, abort.signal);
     pending = {
       abort,
-      promise: promise
-        .then(() => {})
-        .finally(() => {
-          if (context.initialCapture === pending) context.initialCapture = null;
-        }),
+      promise: promise.finally(() => {
+        if (context.pendingCapture === pending) context.pendingCapture = null;
+      }),
     };
-    context.initialCapture = pending;
+    context.pendingCapture = pending;
     return pending.promise;
+  }
+
+  async captureInitial(tabId: number): Promise<void> {
+    const context = this.#context(tabId);
+    if (context.session.cursor.lastSettled) return;
+    await this.#capture(tabId);
+  }
+
+  async captureTabTransition(
+    fromTabId: number,
+    toTabId: number,
+  ): Promise<{ preStateId?: string; postStateId?: string; targetUrl?: string }> {
+    const from = this.#context(fromTabId);
+    await this.#flushContext(from);
+    if (!from.session.cursor.lastSettled) {
+      try {
+        await this.captureInitial(fromTabId);
+      } catch {
+        // A target-tab observation can still preserve the forward transition.
+      }
+    }
+
+    const to = this.#context(toTabId);
+    let target = to.session.cursor.lastSettled;
+    try {
+      target = await this.#capture(toTabId);
+    } catch {
+      // Reuse the last settled target state when a refresh races navigation.
+    }
+
+    const source = from.session.cursor.lastSettled;
+    return {
+      ...(source ? { preStateId: source.stateId } : {}),
+      ...(target ? { postStateId: target.stateId, targetUrl: target.url } : {}),
+    };
+  }
+
+  bindTabTransition(
+    draft: Extract<RecordingDraftStep, { op: "switch_tab" }>,
+    draftId: number,
+  ): void {
+    if (draft.preStateId) this.#registry.markStep(draft.preStateId, draftId);
   }
 
   async processDraft(
@@ -119,23 +159,27 @@ export class RecordingObservationRuntime {
     this.#context(tabId).settle.scheduleRedirect(drafts, url);
   }
 
-  async flushRedirects(): Promise<void> {
+  async #flushContext(context: TabRecordingContext): Promise<void> {
+    if (context.pendingCapture) await Promise.allSettled([context.pendingCapture.promise]);
+    await context.settle.flushRedirects();
+    await context.settle.flush();
+  }
+
+  async flushRedirects(tabId?: number): Promise<void> {
+    if (tabId !== undefined) {
+      await this.#contexts.get(tabId)?.settle.flushRedirects();
+      return;
+    }
     for (const context of this.#contexts.values()) await context.settle.flushRedirects();
   }
 
   async flush(): Promise<void> {
-    await Promise.allSettled(
-      [...this.#contexts.values()].flatMap((context) =>
-        context.initialCapture ? [context.initialCapture.promise] : [],
-      ),
-    );
-    await this.flushRedirects();
-    for (const context of this.#contexts.values()) await context.settle.flush();
+    for (const context of this.#contexts.values()) await this.#flushContext(context);
   }
 
   async settleTrailing(tabId: number, drafts: RecordingDraftStep[]): Promise<void> {
     const context = this.#context(tabId);
-    if (context.initialCapture) await Promise.allSettled([context.initialCapture.promise]);
+    if (context.pendingCapture) await Promise.allSettled([context.pendingCapture.promise]);
     if (!context.session.cursor.lastSettled) {
       try {
         await this.captureInitial(tabId);
@@ -149,7 +193,7 @@ export class RecordingObservationRuntime {
 
   cancel(): void {
     for (const context of this.#contexts.values()) {
-      context.initialCapture?.abort.abort();
+      context.pendingCapture?.abort.abort();
       context.settle.cancel();
     }
   }
@@ -161,6 +205,7 @@ export class RecordingObservationRuntime {
     startUrl?: string;
     stoppedBy: StopReason;
     bskVersion: string;
+    includeTabSwitches?: boolean;
   }): TraceV3 {
     return buildTraceV3({
       registry: this.#registry,
@@ -172,6 +217,7 @@ export class RecordingObservationRuntime {
       stoppedBy: input.stoppedBy,
       bskVersion: input.bskVersion,
       redactValues: this.#redactValues,
+      includeTabSwitches: input.includeTabSwitches,
     });
   }
 }

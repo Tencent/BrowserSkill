@@ -162,6 +162,7 @@ function toV2Step(
         effectForNavigation(step.navigatedTo, urlToId),
       );
     case "scroll":
+    case "switch_tab":
       return null;
   }
 }

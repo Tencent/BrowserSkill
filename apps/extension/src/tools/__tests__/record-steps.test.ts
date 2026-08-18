@@ -15,7 +15,12 @@ import {
 const AGENT_WINDOW_ID = 100;
 const TAB_ID = 4;
 const START_URL = "https://example.com/";
-const RECORD_START_V3 = { session_id: "abcd", url: START_URL, trace_version: 3 as const };
+const RECORD_START_V3 = {
+  session_id: "abcd",
+  url: START_URL,
+  trace_version: 3 as const,
+  supports_tab_switch_steps: true,
+};
 const stepSequenceByProducer = new Map<string, number>();
 
 function asTraceV3(trace: RecordedTrace): TraceV3 {
@@ -48,6 +53,7 @@ function chromeEvent<T extends (...args: never[]) => unknown>() {
 
 function installChrome() {
   const runtimeOnMessage = chromeEvent<RuntimeListener>();
+  const tabsOnActivated = chromeEvent<(activeInfo: chrome.tabs.TabActiveInfo) => unknown>();
   const webNavigationOnCompleted =
     chromeEvent<(details: chrome.webNavigation.WebNavigationFramedCallbackDetails) => unknown>();
   const webNavigationOnCommitted =
@@ -57,7 +63,7 @@ function installChrome() {
   vi.stubGlobal("chrome", {
     runtime: { onMessage: runtimeOnMessage },
     tabs: {
-      onActivated: chromeEvent(),
+      onActivated: tabsOnActivated,
       onCreated: chromeEvent(),
       onUpdated: chromeEvent(),
     },
@@ -66,7 +72,7 @@ function installChrome() {
       onCommitted: webNavigationOnCommitted,
     },
   });
-  return { runtimeOnMessage, webNavigationOnCompleted, webNavigationOnCommitted };
+  return { runtimeOnMessage, tabsOnActivated, webNavigationOnCompleted, webNavigationOnCommitted };
 }
 
 function fakeManager() {
@@ -118,7 +124,10 @@ type FakeCdp = CdpRunner & {
 const LONG_IDLE_MS = 10_000;
 
 /** AX-only page: DOMSnapshot calls throw so capture falls back to the AX tree. */
-function makeFakeCdp(trees?: unknown[], options?: { failCaptures?: boolean }): FakeCdp {
+function makeFakeCdp(
+  trees?: unknown[],
+  options?: { failCaptures?: boolean; treesByTab?: Record<number, unknown> },
+): FakeCdp {
   type EventListener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => void;
   const events: EventListener[] = [];
   const script = [...(trees ?? [])];
@@ -153,6 +162,8 @@ function makeFakeCdp(trees?: unknown[], options?: { failCaptures?: boolean }): F
     "Accessibility.enable": () => ({}),
     "Accessibility.getFullAXTree": (_params, _tabId) => {
       if (failing) throw new Error("Execution context was destroyed");
+      const tabTree = options?.treesByTab?.[_tabId];
+      if (tabTree) return tabTree;
       if (script.length === 0) return axTree("Example Domain", ["Submit"]);
       return script.length === 1 ? script[0] : script.shift();
     },
@@ -202,6 +213,31 @@ function makeTabsApi() {
   };
 }
 
+function makeMultiTabsApi(tabs: chrome.tabs.Tab[]) {
+  const byId = new Map(tabs.flatMap((tab) => (typeof tab.id === "number" ? [[tab.id, tab]] : [])));
+  return {
+    get: async (tabId: number) => {
+      const tab = byId.get(tabId);
+      if (!tab) throw new Error(`tab ${tabId} closed`);
+      return tab;
+    },
+    query: async (query: chrome.tabs.QueryInfo) =>
+      [...byId.values()].filter(
+        (tab) =>
+          (query.windowId === undefined || tab.windowId === query.windowId) &&
+          (query.active === undefined || tab.active === query.active),
+      ),
+    activate(tabId: number) {
+      for (const tab of byId.values()) tab.active = tab.id === tabId;
+    },
+    goTo(tabId: number, url: string, title: string) {
+      const tab = byId.get(tabId);
+      if (!tab) throw new Error(`tab ${tabId} closed`);
+      Object.assign(tab, { url, title });
+    },
+  };
+}
+
 /** Outlast a settle on a quiet page plus the per-tab observation cooldown. */
 function settleWait(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 800));
@@ -212,16 +248,19 @@ function runtimeOnMessageEmit(
   requestId: string,
   step: unknown,
   tabId = TAB_ID,
-): void {
+  active = true,
+): ReturnType<typeof vi.fn> {
   const producerId = `test-producer-${tabId}`;
   const producerKey = `${requestId}:${producerId}`;
   const sequence = (stepSequenceByProducer.get(producerKey) ?? 0) + 1;
   stepSequenceByProducer.set(producerKey, sequence);
+  const sendResponse = vi.fn();
   chromeApi.runtimeOnMessage.emit(
     { type: RECORD_STEP, requestId, producerId, sequence, step },
-    { tab: { id: tabId } } as chrome.runtime.MessageSender,
-    () => {},
+    { tab: { id: tabId, active } } as chrome.runtime.MessageSender,
+    sendResponse,
   );
+  return sendResponse;
 }
 
 describe("recorded user steps reach the exported trace", () => {
@@ -1172,5 +1211,336 @@ describe("recorded user steps reach the exported trace", () => {
       { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
     );
     expect(result).toMatchObject({ code: "invalid_params" });
+  });
+
+  it("records tab transitions and binds actions to each tab's observation", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const secondUrl = "https://example.com/second";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+        title: "First tab",
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: secondUrl,
+        title: "Second tab",
+      } as chrome.tabs.Tab,
+    ]);
+    const cdp = makeFakeCdp(undefined, {
+      treesByTab: {
+        [TAB_ID]: axTree("First tab", ["First action"]),
+        5: axTree("Second tab", ["Second action"]),
+      },
+    });
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    attachRecordStepListener(deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+    runtimeOnMessageEmit(
+      chromeApi,
+      requestId,
+      {
+        op: "click",
+        page_url: secondUrl,
+        target: { role: "button", name: "Second action", tag: "button" },
+      },
+      5,
+    );
+    await settleWait();
+
+    tabsApi.activate(TAB_ID);
+    chromeApi.tabsOnActivated.emit({ tabId: TAB_ID, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+    runtimeOnMessageEmit(chromeApi, requestId, {
+      op: "click",
+      page_url: START_URL,
+      target: { role: "button", name: "First action", tag: "button" },
+    });
+    await settleWait();
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    const stateUrl = (stateId: string) => trace.states.find((state) => state.id === stateId)?.url;
+    const switches = trace.steps.filter((step) => step.op === "switch_tab");
+    const clicks = trace.steps.filter((step) => step.op === "click");
+
+    expect(switches).toHaveLength(2);
+    expect(clicks).toHaveLength(2);
+    expect(stateUrl(switches[0]!.state)).toBe(START_URL);
+    expect(stateUrl(switches[0]!.result.state)).toBe(secondUrl);
+    expect(stateUrl(clicks[0]!.state)).toBe(secondUrl);
+    expect(stateUrl(switches[1]!.result.state)).toBe(START_URL);
+    expect(stateUrl(clicks[1]!.state)).toBe(START_URL);
+  });
+
+  it("keeps switch_tab internal when the v3 caller did not advertise support", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: "https://example.com/second",
+      } as chrome.tabs.Tab,
+    ]);
+    const deps = { tabsApi, sendToTab: vi.fn(async () => ({ ok: true })), cdp: makeFakeCdp() };
+
+    await handleRecordStart(
+      manager,
+      { session_id: "abcd", url: START_URL, trace_version: 3 },
+      deps,
+    );
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.steps.some((step) => step.op === "switch_tab")).toBe(false);
+  });
+
+  it("keeps the latest rapid tab activation when an earlier rearm acknowledges late", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeMultiTabsApi(
+      [TAB_ID, 5, 6].map(
+        (id) =>
+          ({
+            id,
+            windowId: AGENT_WINDOW_ID,
+            active: id === TAB_ID,
+            status: "complete",
+            url: id === TAB_ID ? START_URL : `https://example.com/tab-${id}`,
+          }) as chrome.tabs.Tab,
+      ),
+    );
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let announceSecond!: () => void;
+    const secondStarted = new Promise<void>((resolve) => {
+      announceSecond = resolve;
+    });
+    const sendToTab = vi.fn(async (tabId: number, message: unknown) => {
+      if ((message as { type?: string }).type === RECORD_START && tabId === 5) {
+        announceSecond();
+        await secondGate;
+      }
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await secondStarted;
+    tabsApi.activate(6);
+    chromeApi.tabsOnActivated.emit({ tabId: 6, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+    releaseSecond();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    const switches = trace.steps.filter((step) => step.op === "switch_tab");
+    const stateUrl = (stateId: string) => trace.states.find((state) => state.id === stateId)?.url;
+    expect(switches).toHaveLength(1);
+    expect(stateUrl(switches[0]!.result.state)).toBe("https://example.com/tab-6");
+  });
+
+  it("keeps pending action settles scoped to their tab during an immediate switch", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const secondUrl = "https://example.com/second";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: secondUrl,
+      } as chrome.tabs.Tab,
+    ]);
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    attachRecordStepListener(deps);
+    runtimeOnMessageEmit(chromeApi, requestId, {
+      op: "click",
+      page_url: START_URL,
+      target: { role: "button", name: "First action", tag: "button" },
+    });
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    runtimeOnMessageEmit(
+      chromeApi,
+      requestId,
+      {
+        op: "click",
+        page_url: secondUrl,
+        target: { role: "button", name: "Second action", tag: "button" },
+      },
+      5,
+    );
+    await settleWait();
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    const stateUrl = (stateId: string) => trace.states.find((state) => state.id === stateId)?.url;
+
+    expect(trace.steps.map((step) => step.op)).toEqual(["click", "switch_tab", "click"]);
+    expect(stateUrl(trace.steps[0]!.result.state)).toBe(START_URL);
+    expect(stateUrl(trace.steps[1]!.result.state)).toBe(secondUrl);
+    expect(stateUrl(trace.steps[2]!.state)).toBe(secondUrl);
+  });
+
+  it("tracks the same navigation URL independently for each tab", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: "https://example.com/second",
+      } as chrome.tabs.Tab,
+    ]);
+    const deps = { tabsApi, sendToTab: vi.fn(async () => ({ ok: true })), cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+    tabsApi.goTo(5, START_URL, "Same URL in second tab");
+    chromeApi.webNavigationOnCommitted.emit({
+      tabId: 5,
+      frameId: 0,
+      url: START_URL,
+      transitionType: "typed",
+      transitionQualifiers: ["from_address_bar"],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    await settleWait();
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(
+      trace.steps.filter((step) => step.op === "navigate" && step.to === START_URL),
+    ).toHaveLength(1);
+  });
+
+  it("drops late input and frame navigation from an inactive tab", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const secondUrl = "https://example.com/second";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: secondUrl,
+      } as chrome.tabs.Tab,
+    ]);
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    attachRecordStepListener(deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await settleWait();
+    const lateAck = runtimeOnMessageEmit(
+      chromeApi,
+      requestId,
+      {
+        op: "fill",
+        page_url: START_URL,
+        target: { role: "textbox", name: "Draft", tag: "input" },
+        value: "late",
+      },
+      TAB_ID,
+      false,
+    );
+    expect(lateAck).toHaveBeenCalledWith({ ok: true, sequence: 1 });
+    chromeApi.webNavigationOnCommitted.emit({
+      tabId: TAB_ID,
+      frameId: 0,
+      url: "https://example.com/late",
+      transitionType: "link",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    chromeApi.webNavigationOnCommitted.emit({
+      tabId: 5,
+      frameId: 7,
+      url: "https://frame.example/late",
+      transitionType: "link",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(trace.steps.map((step) => step.op)).toEqual(["switch_tab"]);
   });
 });
