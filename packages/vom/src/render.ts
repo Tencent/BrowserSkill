@@ -6,6 +6,7 @@ import type {
   Rect,
   VomNode,
   VomOptions,
+  VomRef,
   VomResult,
   VomScene,
 } from "./types";
@@ -503,12 +504,18 @@ function isContextBoundary(node: VomNode): boolean {
   );
 }
 
+function sharesContextScope(node: VomNode, candidate: VomNode): boolean {
+  return node.contextScopeId === candidate.contextScopeId;
+}
+
 function collectWeakLabelsFromSubtree(
   node: VomNode,
+  target: VomNode,
   nodeName: string,
   state: RenderState,
   labels: string[],
 ): void {
+  if (!sharesContextScope(target, node)) return;
   if (isVomReferenceNode(node)) return;
   const label = weakLabelContext(node, nodeName);
   if (label) {
@@ -516,7 +523,7 @@ function collectWeakLabelsFromSubtree(
     return;
   }
   for (const child of state.children.get(node.id) ?? []) {
-    collectWeakLabelsFromSubtree(child, nodeName, state, labels);
+    collectWeakLabelsFromSubtree(child, target, nodeName, state, labels);
     if (labels.length >= MAX_HANDLE_CONTEXT_ITEMS) return;
   }
 }
@@ -532,6 +539,7 @@ function collectOwnedContext(
   while (current !== null && guard <= state.parentMap.size) {
     const parent = state.nodesById.get(current);
     if (!parent) break;
+    if (!sharesContextScope(node, parent)) break;
     const label = contextLabel(parent, nodeName);
     if (label) contexts.push({ text: label, source: "owned", order: contexts.length });
     current = state.parentMap.get(current) ?? null;
@@ -553,12 +561,12 @@ function collectSameContainerContext(
     const siblings = state.children.get(parentId) ?? [];
     for (const sibling of siblings) {
       if (sibling.id === childId) break;
-      collectWeakLabelsFromSubtree(sibling, nodeName, state, labels);
+      collectWeakLabelsFromSubtree(sibling, node, nodeName, state, labels);
       while (labels.length > MAX_HANDLE_CONTEXT_ITEMS) labels.shift();
     }
 
     const parent = state.nodesById.get(parentId);
-    if (!parent || isContextBoundary(parent)) break;
+    if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
     childId = parentId;
     parentId = state.parentMap.get(parentId) ?? null;
     guard += 1;
@@ -578,6 +586,7 @@ function collectDomContext(
 
   for (const candidate of state.nodesById.values()) {
     if (candidate.id === node.id) continue;
+    if (!sharesContextScope(node, candidate)) continue;
     if (isContextBoundary(candidate) && !ancestorIds.includes(candidate.id)) continue;
     const parentId = candidate.domParentId;
     if (parentId === undefined || parentId === null || !ancestors.has(parentId)) continue;
@@ -627,8 +636,10 @@ function renderNodeLine(
   }
   const placeholder = cleaned(node.placeholder);
   if (placeholder) line += ` placeholder=${JSON.stringify(placeholder)}`;
+  const sensitiveHasValue =
+    rawValue !== undefined || node.inputState === "filled" || node.inputState === "default";
   const value = node.sensitive
-    ? rawValue !== undefined
+    ? sensitiveHasValue
       ? SENSITIVE_MASK
       : undefined
     : rawValue?.slice(0, MAX_VALUE_LENGTH);
@@ -684,7 +695,7 @@ function shouldSkipRedundantChildren(node: VomNode, state: RenderState): boolean
 
 interface RenderState {
   lines: string[];
-  refs: Array<{ ref: string; backendNodeId: number }>;
+  refs: VomRef[];
   nextRef: number;
   tokens: number;
   maxDepth: number;
@@ -764,7 +775,11 @@ function renderTree(
     state.lines.push(line);
     state.tokens = nextTokens;
     if (ref) {
-      state.refs.push({ ref, backendNodeId: node.id });
+      state.refs.push({
+        ref,
+        backendNodeId: node.backendNodeId ?? node.id,
+        ...(node.frameId ? { frameId: node.frameId } : {}),
+      });
       state.nextRef += 1;
     }
 
@@ -855,29 +870,75 @@ function activeRegionCandidatePriority(node: VomNode, viewportCoverage: number):
   return 1;
 }
 
+function paintLineageByFrame(
+  node: VomNode,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+): Map<string | undefined, VomNode> {
+  const lineage = new Map<string | undefined, VomNode>();
+  let current: VomNode | undefined = node;
+  let guard = 0;
+  while (current && guard <= parentMap.size) {
+    if (!lineage.has(current.frameId)) lineage.set(current.frameId, current);
+    const parentId: number | null = parentMap.get(current.id) ?? null;
+    current = parentId === null ? undefined : nodesById.get(parentId);
+    guard += 1;
+  }
+  return lineage;
+}
+
+/** Resolve both nodes to the nearest document where their paint order is comparable. */
+function comparablePaintNodes(
+  target: VomNode,
+  blocker: VomNode,
+  parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
+): { target: VomNode; blocker: VomNode } | null {
+  if (target.frameId === blocker.frameId) return { target, blocker };
+  const targetLineage = paintLineageByFrame(target, parentMap, nodesById);
+  let blockerInFrame: VomNode | undefined = blocker;
+  let guard = 0;
+  while (blockerInFrame && guard <= parentMap.size) {
+    const targetInFrame = targetLineage.get(blockerInFrame.frameId);
+    if (targetInFrame) return { target: targetInFrame, blocker: blockerInFrame };
+    const parentId: number | null = parentMap.get(blockerInFrame.id) ?? null;
+    blockerInFrame = parentId === null ? undefined : nodesById.get(parentId);
+    guard += 1;
+  }
+  return null;
+}
+
 function isBlockedByRegion(
   target: VomNode,
   blocker: VomNode,
   parentMap: Map<number, number | null>,
+  nodesById: Map<number, VomNode>,
   viewportCoverage: number,
 ): boolean {
   if (target.id === blocker.id) return false;
   if (isAncestorOf(parentMap, blocker.id, target.id)) return false;
   if (isAncestorOf(parentMap, target.id, blocker.id)) return false;
   if (!target.rect || !blocker.rect) return false;
+  const paintNodes = comparablePaintNodes(target, blocker, parentMap, nodesById);
+  if (!paintNodes) return false;
 
   const points = interactionPoints(target.rect);
 
   if (
     viewportCoverage < 0.9 &&
-    target.paintOrder >= blocker.paintOrder &&
+    paintNodes.target.paintOrder >= paintNodes.blocker.paintOrder &&
     points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y))
   ) {
     return false;
   }
 
-  if (blocker.paintOrder < target.paintOrder) return false;
-  if (blocker.paintOrder === target.paintOrder && blocker.id <= target.id) return false;
+  if (paintNodes.blocker.paintOrder < paintNodes.target.paintOrder) return false;
+  if (
+    paintNodes.blocker.paintOrder === paintNodes.target.paintOrder &&
+    paintNodes.blocker.id <= paintNodes.target.id
+  ) {
+    return false;
+  }
   if (viewportCoverage >= 0.9) return true;
 
   return points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y));
@@ -901,6 +962,7 @@ function collectDescendantsOfIds(nodes: VomNode[], roots: Set<number>): Set<numb
 
 function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
   const parentMap = buildParentMap(nodes);
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const candidates = nodes
     .filter(isPositionedRegionCandidate)
     .map((node) => {
@@ -917,7 +979,7 @@ function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
   for (const target of nodes) {
     if (!isVomReferenceNode(target)) continue;
     const blocked = candidates.some((candidate) =>
-      isBlockedByRegion(target, candidate.node, parentMap, candidate.viewportCoverage),
+      isBlockedByRegion(target, candidate.node, parentMap, nodesById, candidate.viewportCoverage),
     );
     if (blocked) blockedRoots.add(target.id);
   }
@@ -972,7 +1034,7 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
 export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult {
   const nodes = applyVomInteractionRecovery(scene.nodes);
   const renderScene = { ...scene, nodes };
-  const layer = detectBlockingLayer(nodes, scene.viewport);
+  const layer = detectBlockingLayer(nodes, scene.viewport, scene.rootFrameId);
   if (layer) return renderDoubleLayer(renderScene, layer, options);
   const visibleNodes = options.activeRegionPolicy ? applyActiveRegionPolicy(nodes, scene) : nodes;
 

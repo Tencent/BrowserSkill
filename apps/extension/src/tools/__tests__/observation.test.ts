@@ -5,6 +5,7 @@ import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridg
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import {
+  buildFrameVomScene,
   buildVomScene,
   type CdpAxNode,
   handleGetHtml,
@@ -508,6 +509,284 @@ describe("handleScreenshot overlay suppression", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildVomScene", () => {
+  it("merges multiple sibling and nested frames without mixing their targets", () => {
+    const node = (
+      backendNodeId: number,
+      parentBackendNodeId: number | null,
+      frameId: string,
+      tag: string,
+      attrs: Record<string, string> = {},
+    ): CapturedNode => ({
+      backendNodeId,
+      parentBackendNodeId,
+      frameId,
+      tag,
+      attrs,
+      rect: { x: 0, y: 0, w: 100, h: 30 },
+      localRect: { x: 0, y: 0, w: 100, h: 30 },
+      paintOrder: 1,
+      position: "static",
+      pointerEvents: "auto",
+    });
+    const mainNodes = [
+      node(1, null, "main", "body"),
+      node(10, 1, "main", "iframe", { title: "First" }),
+      node(20, 1, "main", "iframe", { title: "Second" }),
+    ];
+    const firstNodes = [
+      node(100, null, "first", "body"),
+      node(101, 100, "first", "button", { "aria-label": "First action" }),
+    ];
+    const secondNodes = [
+      node(200, null, "second", "body"),
+      node(201, 200, "second", "h2"),
+      node(210, 200, "second", "iframe", { title: "Nested" }),
+    ];
+    const nestedNodes = [
+      node(300, null, "nested", "body"),
+      node(301, 300, "nested", "input", { placeholder: "Nested field" }),
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 1200, height: 800 },
+      nodes: mainNodes,
+      iframeNodes: new Map([
+        [10, firstNodes],
+        [20, secondNodes],
+        [210, nestedNodes],
+      ]),
+      frameNodes: new Map([
+        ["main", mainNodes],
+        ["first", firstNodes],
+        ["second", secondNodes],
+        ["nested", nestedNodes],
+      ]),
+      frameOwnerBackendNodeIds: new Map([
+        ["first", 10],
+        ["second", 20],
+        ["nested", 210],
+      ]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+    const axNode = (
+      nodeId: string,
+      backendDOMNodeId: number,
+      role: string,
+      parentId?: string,
+      name?: string,
+    ): CdpAxNode => ({
+      nodeId,
+      backendDOMNodeId,
+      role: { type: "role", value: role },
+      ...(parentId ? { parentId } : {}),
+      ...(name ? { name: { type: "computedString", value: name } } : {}),
+    });
+    const result = buildFrameVomScene(
+      [
+        {
+          frameId: "main",
+          contextScopeId: "main",
+          domNodes: mainNodes,
+          axNodes: [
+            axNode("root", 1, "RootWebArea"),
+            axNode("frame-1", 10, "Iframe", "root", "First"),
+            axNode("frame-2", 20, "Iframe", "root", "Second"),
+          ],
+        },
+        {
+          frameId: "first",
+          contextScopeId: "first",
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+          domNodes: firstNodes,
+          axNodes: [
+            axNode("root", 100, "RootWebArea"),
+            axNode("button", 101, "button", "root", "First action"),
+          ],
+        },
+        {
+          frameId: "second",
+          contextScopeId: "second",
+          parentFrameId: "main",
+          ownerBackendNodeId: 20,
+          domNodes: secondNodes,
+          axNodes: [
+            axNode("root", 200, "RootWebArea"),
+            axNode("heading", 201, "heading", "root", "Second heading"),
+            axNode("nested-frame", 210, "Iframe", "root", "Nested"),
+          ],
+        },
+        {
+          frameId: "nested",
+          contextScopeId: "nested",
+          parentFrameId: "second",
+          ownerBackendNodeId: 210,
+          domNodes: nestedNodes,
+          axNodes: [
+            axNode("root", 300, "RootWebArea"),
+            axNode("input", 301, "textbox", "root", "Nested field"),
+          ],
+        },
+      ],
+      captured,
+    );
+
+    const rendered = renderVom(result);
+    expect(rendered.text).toContain('Iframe "First"');
+    expect(rendered.text).toContain('@e1 button "First action"');
+    expect(rendered.text).toContain('heading "Second heading"');
+    expect(rendered.text).toContain('Iframe "Nested"');
+    expect(rendered.text).toContain('textbox "Nested field"');
+    expect(rendered.refs.find((ref) => ref.backendNodeId === 101)?.frameId).toBe("first");
+    expect(rendered.refs.find((ref) => ref.backendNodeId === 301)?.frameId).toBe("nested");
+
+    const firstAction = result.nodes.find((item) => item.backendNodeId === 101);
+    const nestedInput = result.nodes.find((item) => item.backendNodeId === 301);
+    expect(firstAction).toMatchObject({ frameId: "first", contextScopeId: "first" });
+    expect(nestedInput).toMatchObject({ frameId: "nested", contextScopeId: "nested" });
+    expect(nestedInput?.parentId).toBe(result.nodes.find((item) => item.backendNodeId === 210)?.id);
+  });
+
+  it("does not place a child document at the page root when its frame boundary is unresolved", () => {
+    const childNode: CapturedNode = {
+      backendNodeId: 101,
+      parentBackendNodeId: null,
+      frameId: "child",
+      tag: "button",
+      attrs: {},
+      rect: { x: 0, y: 0, w: 100, h: 30 },
+      paintOrder: 1,
+      position: "static",
+      pointerEvents: "auto",
+    };
+    const captured: CapturedViewModel = {
+      viewport: { width: 800, height: 600 },
+      nodes: [],
+      iframeNodes: new Map(),
+      frameNodes: new Map([["child", [childNode]]]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+
+    const result = buildFrameVomScene(
+      [
+        {
+          frameId: "main",
+          contextScopeId: "main",
+          domNodes: [],
+          axNodes: [],
+        },
+        {
+          frameId: "child",
+          contextScopeId: "child",
+          parentFrameId: "main",
+          domNodes: [childNode],
+          axNodes: [
+            {
+              nodeId: "button",
+              frameId: "child",
+              backendDOMNodeId: 101,
+              role: { type: "role", value: "button" },
+              name: { type: "computedString", value: "Child action" },
+            },
+          ],
+        },
+      ],
+      captured,
+    );
+
+    expect(result.nodes).toEqual([]);
+  });
+
+  it("keeps AX-only frame content attached to its iframe boundary", () => {
+    const mainNodes: CapturedNode[] = [
+      {
+        backendNodeId: 1,
+        parentBackendNodeId: null,
+        frameId: "main",
+        tag: "body",
+        attrs: {},
+        rect: { x: 0, y: 0, w: 800, h: 600 },
+        paintOrder: 0,
+        position: "static",
+        pointerEvents: "auto",
+      },
+      {
+        backendNodeId: 10,
+        parentBackendNodeId: 1,
+        frameId: "main",
+        tag: "iframe",
+        attrs: { title: "Remote" },
+        rect: { x: 100, y: 100, w: 400, h: 300 },
+        paintOrder: 1,
+        position: "static",
+        pointerEvents: "auto",
+      },
+    ];
+    const captured: CapturedViewModel = {
+      viewport: { width: 800, height: 600 },
+      nodes: mainNodes,
+      iframeNodes: new Map(),
+      frameNodes: new Map([
+        ["main", mainNodes],
+        ["child", []],
+      ]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+
+    const result = buildFrameVomScene(
+      [
+        {
+          frameId: "main",
+          contextScopeId: "main",
+          domNodes: mainNodes,
+          axNodes: [
+            {
+              nodeId: "main-root",
+              backendDOMNodeId: 1,
+              role: { type: "role", value: "RootWebArea" },
+            },
+            {
+              nodeId: "frame-owner",
+              parentId: "main-root",
+              backendDOMNodeId: 10,
+              role: { type: "role", value: "Iframe" },
+              name: { type: "computedString", value: "Remote" },
+            },
+          ],
+        },
+        {
+          frameId: "child",
+          contextScopeId: "child",
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+          domNodes: [],
+          axNodes: [
+            {
+              nodeId: "child-root",
+              backendDOMNodeId: 100,
+              role: { type: "role", value: "RootWebArea" },
+            },
+            {
+              nodeId: "child-button",
+              parentId: "child-root",
+              backendDOMNodeId: 101,
+              role: { type: "role", value: "button" },
+              name: { type: "computedString", value: "AX fallback action" },
+            },
+          ],
+        },
+      ],
+      captured,
+    );
+
+    const childButton = result.nodes.find((node) => node.backendNodeId === 101);
+    expect(childButton).toMatchObject({ frameId: "child", contextScopeId: "child" });
+    expect(childButton?.parentId).toBe(result.nodes.find((node) => node.backendNodeId === 10)?.id);
+    expect(renderVom(result).text).toContain('@e1 button "AX fallback action"');
+  });
+
   it("joins AX semantics with captured geometry by backendDOMNodeId", () => {
     const axNodes: CdpAxNode[] = [
       {
@@ -816,6 +1095,7 @@ describe("buildVomScene", () => {
         parentId: "2",
         role: { type: "role", value: "textbox" },
         name: { type: "x", value: "输入密码" },
+        value: { value: "iframe-secret" },
         backendDOMNodeId: 202,
         properties: [{ name: "inputType", value: { value: "password" } }],
       },
@@ -870,6 +1150,10 @@ describe("buildVomScene", () => {
 
     expect(passwordNodes).toHaveLength(1);
     expect(passwordNodes[0]).toEqual(expect.objectContaining({ id: 202, sensitive: true }));
+    expect(passwordNodes[0].value).toBeUndefined();
+    const rendered = renderVom(buildVomScene(axNodes, captured)).text;
+    expect(rendered).toContain('textbox "输入密码" [filled] ="•••"');
+    expect(rendered).not.toContain("iframe-secret");
   });
 
   it("keeps unnamed iframe controls but skips unnamed iframe links", () => {

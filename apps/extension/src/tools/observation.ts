@@ -50,6 +50,7 @@ import {
   captureViewModel,
   collectOverlayExcludedBackendIds,
 } from "./vom/capture";
+import { type CapturedFrameDocument, captureFrameData } from "./vom/frame-capture";
 
 // ---------------------------------------------------------------------------
 // Shared helpers (legacy aliases — observation.ts kept exporting these
@@ -352,6 +353,7 @@ export type CdpRunner = SharedCdpRunner;
 /** Subset of CDP `AXNode` we care about — see `Accessibility.AXNode`. */
 export interface CdpAxNode {
   nodeId: string;
+  frameId?: string;
   parentId?: string;
   backendDOMNodeId?: number;
   ignored?: boolean;
@@ -584,7 +586,7 @@ function iframeNameFor(node: CapturedNode): string | undefined {
 function isRenderableIframeControl(node: CapturedNode): boolean {
   const tag = normalizeTag(node.tag);
   if (!IFRAME_RENDERABLE_TAGS.has(tag)) return false;
-  if (!node.rect) return false;
+  if (!node.localRect && !node.rect) return false;
   if (node.pointerEvents === "none") return false;
   if ((node.attrs.type ?? "").toLowerCase() === "hidden") return false;
 
@@ -756,7 +758,12 @@ function applyCapturedSignals(
   signals: VomNodeDomSignals,
 ): VomNode {
   if (!capturedNode) return node;
-  const attrs = capturedNode.attrs;
+  const attrs =
+    node.sensitive && Object.prototype.hasOwnProperty.call(capturedNode.attrs, "value")
+      ? Object.fromEntries(
+          Object.entries(capturedNode.attrs).filter(([name]) => name.toLowerCase() !== "value"),
+        )
+      : capturedNode.attrs;
   const text = cleanAttr(capturedNode.textContent);
   const nearbyText = nearbyTextFor(capturedNode, signals.childrenByParentId);
   const placeholder = cleanAttr(capturedNode.formPlaceholder) ?? cleanAttr(attrs.placeholder);
@@ -823,8 +830,7 @@ function vomNodeFromCaptured(
   signals: VomNodeDomSignals,
 ): VomNode {
   const sensitive = isSensitive(capturedNode);
-  const value =
-    capturedNode.formValue ?? (sensitive ? (capturedNode.attrs.value ?? "") : undefined);
+  const value = sensitive ? undefined : capturedNode.formValue;
   const tag = normalizeTag(capturedNode.tag);
   const node = applyCapturedSignals(
     {
@@ -860,8 +866,17 @@ function axVomNode(
 ): VomNode {
   const role = axString(axNode.role);
   const capturedValue = capturedNode?.formValue;
-  const value = capturedValue ?? axValue(axNode.value);
+  const sourceValue = capturedValue ?? axValue(axNode.value);
   const signalsForNode = axSignals.get(axNode.nodeId);
+  const sensitive = isSensitive(capturedNode) || signalsForNode?.sensitive === true;
+  const value = sensitive ? undefined : sourceValue;
+  const inputState =
+    inputStateFor(capturedNode, sourceValue) ??
+    (sensitive && ["textbox", "searchbox"].includes(role?.toLowerCase() ?? "")
+      ? sourceValue === undefined || sourceValue === ""
+        ? "empty"
+        : "filled"
+      : undefined);
   let name = FORM_CONTROL_TAGS.has(normalizeTag(capturedNode?.tag))
     ? formControlName(capturedNode, axString(axNode.name), axSiblingLabel(axNode, axById), signals)
     : (axString(axNode.name) ?? signalsForNode?.aggregatedText);
@@ -877,8 +892,8 @@ function axVomNode(
     position: capturedNode?.position || "static",
     pointerEvents: capturedNode?.pointerEvents || "auto",
     modal: isModalSignal(axNode, capturedNode),
-    sensitive: isSensitive(capturedNode) || signalsForNode?.sensitive === true,
-    inputState: inputStateFor(capturedNode, value),
+    sensitive,
+    inputState,
   };
   if (role) node.role = role;
   if (name) node.name = name;
@@ -1141,6 +1156,8 @@ export interface BuildVomSceneOptions {
   pageUrl?: string;
 }
 
+export type VomFrameDocument = CapturedFrameDocument<CdpAxNode>;
+
 function externalHrefHost(
   href: string | undefined,
   pageUrl: string | undefined,
@@ -1229,6 +1246,119 @@ export function buildVomScene(
   return {
     viewport: captured.viewport,
     nodes,
+    ...(surfaces.length > 0 ? { surfaces } : {}),
+    ...(activeScopeBlocks.length > 0 ? { activeScopeBlocks } : {}),
+  };
+}
+
+export function buildFrameVomScene(
+  documents: VomFrameDocument[],
+  captured: CapturedViewModel,
+  options: BuildVomSceneOptions = {},
+): VomScene {
+  const documentByFrameId = new Map(documents.map((document) => [document.frameId, document]));
+  const rootFrameId =
+    captured.rootFrameId ?? documents.find((document) => !document.parentFrameId)?.frameId;
+  const orderedFrameIds = [
+    ...(rootFrameId ? [rootFrameId] : []),
+    ...documents.map((document) => document.frameId),
+  ].filter((frameId, index, all) => all.indexOf(frameId) === index);
+
+  const localScenes = new Map<string, VomScene>();
+  for (const frameId of orderedFrameIds) {
+    const document = documentByFrameId.get(frameId);
+    if (!document) continue;
+    localScenes.set(
+      frameId,
+      buildVomScene(
+        document.axNodes,
+        {
+          viewport: captured.viewport,
+          nodes: document.domNodes,
+          iframeNodes: new Map(),
+          surfaceProbes: frameId === rootFrameId ? captured.surfaceProbes : [],
+          excludedBackendNodeIds:
+            frameId === rootFrameId ? captured.excludedBackendNodeIds : new Set(),
+        },
+        { pageUrl: options.pageUrl },
+      ),
+    );
+  }
+
+  const sceneIdByFrameAndBackend = new Map<string, number>();
+  let nextSceneId = 1;
+  for (const [frameId, scene] of localScenes) {
+    for (const node of scene.nodes) {
+      sceneIdByFrameAndBackend.set(`${frameId}:${node.id}`, nextSceneId);
+      nextSceneId += 1;
+    }
+  }
+
+  const nodes: VomNode[] = [];
+  const surfaces: CondSurface[] = [];
+  const activeScopeBlocks: ActiveScopeBlock[] = [];
+
+  for (const [frameId, scene] of localScenes) {
+    const document = documentByFrameId.get(frameId);
+    const ownerBackendNodeId = document?.ownerBackendNodeId;
+    const parentFrameId = document?.parentFrameId;
+    const ownerSceneId =
+      ownerBackendNodeId !== undefined && parentFrameId
+        ? sceneIdByFrameAndBackend.get(`${parentFrameId}:${ownerBackendNodeId}`)
+        : undefined;
+    if (frameId !== rootFrameId && ownerSceneId === undefined) continue;
+
+    const suppressedRoots = new Set(
+      frameId === rootFrameId
+        ? []
+        : scene.nodes
+            .filter(
+              (node) =>
+                node.parentId === null &&
+                ["rootwebarea", "webarea"].includes(node.role?.toLowerCase() ?? ""),
+            )
+            .map((node) => node.id),
+    );
+
+    for (const node of scene.nodes) {
+      if (suppressedRoots.has(node.id)) continue;
+      const sceneNodeId = sceneIdByFrameAndBackend.get(`${frameId}:${node.id}`) as number;
+      let parentId =
+        node.parentId !== null
+          ? sceneIdByFrameAndBackend.get(`${frameId}:${node.parentId}`)
+          : ownerSceneId;
+      if (node.parentId !== null && suppressedRoots.has(node.parentId)) parentId = ownerSceneId;
+      const remapId = (id: number) => sceneIdByFrameAndBackend.get(`${frameId}:${id}`);
+      nodes.push({
+        ...node,
+        id: sceneNodeId,
+        backendNodeId: node.id,
+        frameId,
+        contextScopeId: document?.contextScopeId ?? frameId,
+        parentId: parentId ?? null,
+        ...(node.domParentId !== undefined
+          ? { domParentId: node.domParentId === null ? null : (remapId(node.domParentId) ?? null) }
+          : {}),
+        ...(node.domAncestorIds
+          ? { domAncestorIds: node.domAncestorIds.flatMap((id) => remapId(id) ?? []) }
+          : {}),
+      });
+    }
+
+    for (const surface of scene.surfaces ?? []) {
+      const triggerId = sceneIdByFrameAndBackend.get(`${frameId}:${surface.triggerId}`);
+      if (triggerId !== undefined) surfaces.push({ ...surface, triggerId });
+    }
+    for (const block of scene.activeScopeBlocks ?? []) {
+      const triggerId = sceneIdByFrameAndBackend.get(`${frameId}:${block.triggerId}`);
+      if (triggerId !== undefined) activeScopeBlocks.push({ ...block, triggerId });
+    }
+  }
+
+  return {
+    viewport: captured.viewport,
+    nodes,
+    ...(rootFrameId ? { rootFrameId } : {}),
     ...(surfaces.length > 0 ? { surfaces } : {}),
     ...(activeScopeBlocks.length > 0 ? { activeScopeBlocks } : {}),
   };
@@ -1447,15 +1577,6 @@ async function handleVomObservation(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     throwIfAborted(signal, toolName);
-    await deps.cdp.send<unknown>(target.tabId, "Accessibility.enable", {});
-    throwIfAborted(signal, toolName);
-    const result = await deps.cdp.send<{ nodes: CdpAxNode[] }>(
-      target.tabId,
-      "Accessibility.getFullAXTree",
-      {},
-    );
-    throwIfAborted(signal, toolName);
-    const axNodes = result.nodes ?? [];
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
     const captured = await captureForVom(
@@ -1466,7 +1587,17 @@ async function handleVomObservation(
       signal,
     );
     throwIfAborted(signal, toolName);
-    const scene = buildVomScene(axNodes, captured, { pageUrl: target.url });
+    const frameDocuments = await captureFrameData<CdpAxNode>(
+      deps.cdp,
+      target.tabId,
+      captured,
+      signal,
+    );
+    throwIfAborted(signal, toolName);
+    const scene =
+      captured.rootFrameId && captured.frameNodes?.size
+        ? buildFrameVomScene(frameDocuments, captured, { pageUrl: target.url })
+        : buildVomScene(frameDocuments[0]?.axNodes ?? [], captured, { pageUrl: target.url });
     const rendered = renderVom(scene, {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
@@ -1475,7 +1606,7 @@ async function handleVomObservation(
     throwIfAborted(signal, toolName);
     ctx.refStore.replace(
       rendered.refs.map(
-        (r) => [r.ref, { backendNodeId: r.backendNodeId, tabId: target.tabId }] as const,
+        (ref) => [ref.ref, { backendNodeId: ref.backendNodeId, tabId: target.tabId }] as const,
       ),
     );
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
