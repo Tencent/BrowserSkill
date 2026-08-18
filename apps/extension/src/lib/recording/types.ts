@@ -69,6 +69,7 @@ export type RecordingDraftStep =
       DraftTarget &
       DraftNavigationEffect)
   | ({ op: "scroll" } & DraftStateLink)
+  | ({ op: "switch_tab" } & DraftStateLink)
   | ({
       op: "navigate";
       url: string;

@@ -39,6 +39,9 @@ pub struct RecordStartParams {
     /// Desired trace export format. Omitted means v2; `3` requests v3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trace_version: Option<u32>,
+    /// Client can decode the v3 `switch_tab` step variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_tab_switch_steps: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -424,6 +427,19 @@ mod tests {
     }
 
     #[test]
+    fn step_switch_tab_round_trips() {
+        let step = StepV3::SwitchTab {
+            common: sample_common(2, "s2", "s5"),
+        };
+        let v = serde_json::to_value(&step).unwrap();
+        assert_eq!(v["op"], "switch_tab");
+        assert_eq!(v["state"], "s2");
+        assert_eq!(v["result"]["state"], "s5");
+        let round: StepV3 = serde_json::from_value(v).unwrap();
+        assert_eq!(round, step);
+    }
+
+    #[test]
     fn trace_v3_round_trips() {
         let trace = sample_trace();
         let v = serde_json::to_value(&trace).unwrap();
@@ -463,10 +479,12 @@ mod tests {
             max_page_tokens: None,
             redact_values: None,
             trace_version: None,
+            supports_tab_switch_steps: None,
         };
         let legacy_value = serde_json::to_value(legacy).unwrap();
         assert!(legacy_value.get("trace_version").is_none());
         assert!(legacy_value.get("max_page_tokens").is_none());
+        assert!(legacy_value.get("supports_tab_switch_steps").is_none());
 
         let v3 = RecordStartParams {
             session_id: "session".into(),
@@ -476,11 +494,13 @@ mod tests {
             max_page_tokens: Some(4_000),
             redact_values: Some(true),
             trace_version: Some(TRACE_VERSION_V3),
+            supports_tab_switch_steps: Some(true),
         };
         let v3_value = serde_json::to_value(v3).unwrap();
         assert_eq!(v3_value["trace_version"], TRACE_VERSION_V3);
         assert_eq!(v3_value["max_page_tokens"], 4_000);
         assert_eq!(v3_value["redact_values"], true);
+        assert_eq!(v3_value["supports_tab_switch_steps"], true);
     }
 
     #[test]

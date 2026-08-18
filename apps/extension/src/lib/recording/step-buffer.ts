@@ -4,6 +4,10 @@ import type { RecordingDraftStep, TargetMatchHint } from "./types";
 
 export interface RecordingStepBuffer {
   steps: RecordingDraftStep[];
+  navigation: RecordingNavigationCursor;
+}
+
+export interface RecordingNavigationCursor {
   currentUrl?: string;
   pendingNavigation: boolean;
   pendingNavigationDeadline?: number;
@@ -87,22 +91,23 @@ export function observeRecordedNavigation(
   transitionType?: string,
   transitionQualifiers?: string[],
 ): NavigationObserveResult {
-  if (!url || url === buffer.currentUrl) return { kind: "noop" };
-  buffer.currentUrl = url;
+  const navigation = buffer.navigation;
+  if (!url || url === navigation.currentUrl) return { kind: "noop" };
+  navigation.currentUrl = url;
 
   const pendingIsCurrent =
-    buffer.pendingNavigation &&
-    (buffer.pendingNavigationDeadline === undefined ||
-      buffer.pendingNavigationDeadline >= Date.now());
+    navigation.pendingNavigation &&
+    (navigation.pendingNavigationDeadline === undefined ||
+      navigation.pendingNavigationDeadline >= Date.now());
 
   if (causedByAction === true || (causedByAction === undefined && pendingIsCurrent)) {
-    buffer.pendingNavigation = false;
-    buffer.pendingNavigationDeadline = undefined;
+    navigation.pendingNavigation = false;
+    navigation.pendingNavigationDeadline = undefined;
     const annotatedIndex = annotateLastStepNavigation(buffer, url);
     if (annotatedIndex >= 0) return { kind: "annotated", index: annotatedIndex };
   } else {
-    buffer.pendingNavigation = false;
-    buffer.pendingNavigationDeadline = undefined;
+    navigation.pendingNavigation = false;
+    navigation.pendingNavigationDeadline = undefined;
   }
 
   if (hasRedirectQualifier(transitionQualifiers)) {
@@ -135,14 +140,14 @@ export function appendRecordedPayload(
     return result.kind === "appended" ? result.index : null;
   }
   const step = toDraftStep(
-    { ...payload, page_url: payload.page_url ?? buffer.currentUrl },
+    { ...payload, page_url: payload.page_url ?? buffer.navigation.currentUrl },
     targetHint,
   );
   if (!step) return null;
   buffer.steps.push(step);
   if (step.op === "click" || step.op === "press" || step.op === "select" || step.op === "fill") {
-    buffer.pendingNavigation = payload.expects_navigation === true;
-    buffer.pendingNavigationDeadline = buffer.pendingNavigation
+    buffer.navigation.pendingNavigation = payload.expects_navigation === true;
+    buffer.navigation.pendingNavigationDeadline = buffer.navigation.pendingNavigation
       ? Date.now() + NAVIGATION_TRIGGER_WINDOW_MS
       : undefined;
   }

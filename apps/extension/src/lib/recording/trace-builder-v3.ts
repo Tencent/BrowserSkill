@@ -40,8 +40,12 @@ export function buildTraceV3(input: {
   stoppedBy: StopReason;
   bskVersion: string;
   redactValues?: boolean;
+  includeTabSwitches?: boolean;
 }): TraceV3 {
-  const reduced = reduceTraceStepsV3(input.drafts, { redactValues: input.redactValues });
+  const reduced = reduceTraceStepsV3(input.drafts, {
+    includeTabSwitches: input.includeTabSwitches,
+    redactValues: input.redactValues,
+  });
   const entries = publishedEntries(input.registry, reduced.steps);
   const publishedId = new Map(entries.map((entry, index) => [entry.id, `s${index + 1}`]));
   const annotationsByState = new Map<string, StepAnnotation[]>();

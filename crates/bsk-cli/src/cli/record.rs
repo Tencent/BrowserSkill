@@ -115,6 +115,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         max_page_tokens: args.max_page_tokens,
         redact_values: Some(args.redact_values),
         trace_version: Some(TRACE_VERSION_V3),
+        supports_tab_switch_steps: Some(true),
     };
     let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),
