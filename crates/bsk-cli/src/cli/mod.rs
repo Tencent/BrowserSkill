@@ -25,6 +25,7 @@ pub mod record;
 pub mod record_state;
 pub mod render_error;
 pub mod screenshot;
+pub mod search;
 pub mod session;
 pub mod snapshot;
 pub mod status;
@@ -48,6 +49,7 @@ use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
 use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
+use crate::cli::search::SearchArgs;
 use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
@@ -193,6 +195,9 @@ pub enum Command {
 
     /// Record user actions into a semantic `trace.json` textbook for LLMs.
     Record(RecordCmd),
+
+    /// Search the web using You.com API for additional context.
+    Search(SearchArgs),
 }
 
 #[derive(Debug, Clone, Args, Default)]

@@ -102,6 +102,37 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, format),
         Command::RequestHelp(args) => cli::human_loop::dispatch(args, format),
         Command::Record(cmd) => cli::record::dispatch(cmd, format),
+        Command::Search(args) => {
+            let response = cli::search::dispatch(args)?;
+            if format == Format::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&response)
+                        .map_err(|e| CliError::Local(anyhow::Error::from(e)))?
+                );
+            } else {
+                println!("Search Results for: {}", response.query);
+                println!("Found {} results:", response.results.len());
+                println!();
+                for (i, result) in response.results.iter().enumerate() {
+                    println!("{}. {}", i + 1, result.title);
+                    println!("   {}", result.url);
+                    println!("   {}", result.snippet);
+                    if let Some(content) = &result.raw_content {
+                        println!(
+                            "   Raw content: {}...",
+                            if content.len() > 100 {
+                                &content[..100]
+                            } else {
+                                content
+                            }
+                        );
+                    }
+                    println!();
+                }
+            }
+            Ok(())
+        }
     }
 }
 
