@@ -3,61 +3,133 @@ import type { CdpRunner } from "../../shared";
 import type { CapturedNode, CapturedViewModel } from "../capture";
 import { captureFrameData } from "../frame-capture";
 
-function node(frameId: string, backendNodeId: number): CapturedNode {
+function ownerNode(backendNodeId: number, x: number): CapturedNode {
   return {
     backendNodeId,
-    parentBackendNodeId: null,
-    frameId,
-    tag: "div",
+    parentBackendNodeId: 1,
+    frameId: "main",
+    ownerFrameBackendNodeId: null,
+    tag: "iframe",
     attrs: {},
-    rect: null,
-    localRect: { x: 0, y: 0, w: 20, h: 20 },
-    paintOrder: 0,
+    rect: { x, y: 100, w: 300, h: 200 },
+    localRect: { x, y: 100, w: 300, h: 200 },
+    paintOrder: 1,
     position: "static",
     pointerEvents: "auto",
   };
 }
 
+function childSnapshot(frameId: string, backendNodeId: number) {
+  const strings = [frameId, "body", "button", "static", "auto", "pointer"];
+  return {
+    strings,
+    documents: [
+      {
+        frameId,
+        nodes: {
+          parentIndex: [-1, 0],
+          nodeName: [1, 2],
+          backendNodeId: [backendNodeId - 1, backendNodeId],
+          attributes: [[], []],
+        },
+        layout: {
+          nodeIndex: [0, 1],
+          styles: [
+            [3, 4, 4],
+            [3, 4, 5],
+          ],
+          bounds: [
+            [0, 0, 300, 200],
+            [10, 20, 100, 40],
+          ],
+          paintOrders: [0, 1],
+        },
+      },
+    ],
+  };
+}
+
 describe("captureFrameData", () => {
-  it("captures AX trees for every same-target frame found in the DOM snapshot", async () => {
+  it("captures and positions multiple OOPIF documents missing from the root snapshot", async () => {
+    const leftOwner = ownerNode(10, 50);
+    const rightOwner = ownerNode(20, 500);
     const captured: CapturedViewModel = {
-      nodes: [node("main", 1)],
+      nodes: [leftOwner, rightOwner],
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map([[10, [node("child", 101)]]]),
-      frameNodes: new Map([
-        ["main", [node("main", 1)]],
-        ["child", [node("child", 101)]],
-      ]),
-      frameOwnerBackendNodeIds: new Map([["child", 10]]),
-      frameParentIds: new Map([["child", "main"]]),
+      iframeNodes: new Map(),
+      frameNodes: new Map([["main", [leftOwner, rightOwner]]]),
+      frameOwnerBackendNodeIds: new Map(),
       rootFrameId: "main",
       excludedBackendNodeIds: new Set(),
     };
-    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
-      if (method === "Accessibility.enable") return {};
-      if (method === "Accessibility.getFullAXTree") {
-        const frameId = (params as { frameId?: string })?.frameId ?? "main";
-        return {
-          nodes: [
-            {
-              nodeId: `${frameId}-root`,
-              frameId,
-              backendDOMNodeId: frameId === "main" ? 1 : 101,
-            },
-          ],
-        };
+    const sendToTarget = vi.fn(async (target, method) => {
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 300, clientHeight: 200, pageX: 0, pageY: 0 } };
       }
+      if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return target.sessionId === "left-session"
+          ? childSnapshot("left", 101)
+          : childSnapshot("right", 201);
+      }
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
       throw new Error(`unexpected ${method}`);
     });
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method, params) => {
+        if (method === "Accessibility.enable") return {};
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        if (method === "DOM.getBoxModel") {
+          const backendNodeId = (params as { backendNodeId?: number })?.backendNodeId;
+          const x = backendNodeId === 10 ? 50 : 500;
+          return { model: { content: [x, 100, x + 300, 100, x + 300, 300, x, 300] } };
+        }
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        }
+        throw new Error(`unexpected root ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          {
+            frameId: "left",
+            parentFrameId: "main",
+            ownerBackendNodeId: 10,
+            target: { tabId: 4, sessionId: "left-session" },
+          },
+          {
+            frameId: "right",
+            parentFrameId: "main",
+            ownerBackendNodeId: 20,
+            target: { tabId: 4, sessionId: "right-session" },
+          },
+        ],
+      })),
+    };
 
-    const documents = await captureFrameData({ send } as CdpRunner, 4, captured);
+    const trees = await captureFrameData(cdp, 4, captured);
 
-    expect(send).toHaveBeenCalledWith(4, "Accessibility.enable", {});
-    expect(documents.map((document) => document.frameId)).toEqual(["main", "child"]);
-    expect(documents.find((document) => document.frameId === "child")).toMatchObject({
-      parentFrameId: "main",
-      ownerBackendNodeId: 10,
-      axNodes: [{ nodeId: "child-root", frameId: "child", backendDOMNodeId: 101 }],
-    });
+    expect(trees.map((tree) => tree.frameId)).toEqual(["main", "left", "right"]);
+    expect(
+      captured.frameNodes?.get("left")?.find((node) => node.backendNodeId === 101)?.rect,
+    ).toEqual({ x: 60, y: 120, w: 100, h: 40 });
+    expect(
+      captured.frameNodes?.get("right")?.find((node) => node.backendNodeId === 201)?.rect,
+    ).toEqual({ x: 510, y: 120, w: 100, h: 40 });
+    expect(captured.frameOwnerBackendNodeIds).toEqual(
+      new Map([
+        ["left", 10],
+        ["right", 20],
+      ]),
+    );
+    expect(captured.frameParentIds).toEqual(
+      new Map([
+        ["left", "main"],
+        ["right", "main"],
+      ]),
+    );
   });
 });

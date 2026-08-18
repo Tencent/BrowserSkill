@@ -32,6 +32,7 @@ describe("help-bridge", () => {
         prompt: "log in",
         displayMode: "compact",
         selectors: ["#login"],
+        rects: [{ top: 10, left: 20, width: 100, height: 40 }],
         timeoutMs: 1000,
       }),
     ).toBe(true);

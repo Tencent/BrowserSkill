@@ -698,7 +698,7 @@ describe("captureViewModel", () => {
     const { nodes } = await captureViewModel(cdp, 4);
     const div = nodes.find((n) => n.backendNodeId === 12);
     expect(div?.localRect?.y).toBe(-200);
-    expect(div?.rect).toMatchObject({ y: -200, h: 800 });
+    expect(div?.rect).toMatchObject({ y: 0, h: 600 });
   });
 
   it("normalizes device-pixel bounds by devicePixelRatio", async () => {
@@ -919,7 +919,7 @@ describe("captureViewModel", () => {
     expect(input?.attrs.type).toBe("text");
     expect(input?.ownerFrameBackendNodeId).toBe(13);
     expect(input?.localRect).toEqual({ x: 0, y: 0, w: 200, h: 40 });
-    expect(input?.rect).toBeNull();
+    expect(input?.rect).toEqual({ x: 100, y: 300, w: 200, h: 40 });
     expect(rootFrameId).toBe("main-frame");
     expect(frameNodes?.get("child-frame")).toBe(subNodes);
     expect(frameOwnerBackendNodeIds?.get("child-frame")).toBe(13);
@@ -1091,10 +1091,10 @@ describe("captureViewModel", () => {
     const input = iframeNodes.get(23)?.find((n) => n.backendNodeId === 31);
 
     expect(nestedIframe?.localRect).toEqual({ x: 5, y: 6, w: 100, h: 80 });
-    expect(nestedIframe?.rect).toBeNull();
+    expect(nestedIframe?.rect).toEqual({ x: 15, y: 26, w: 100, h: 80 });
     expect(input?.ownerFrameBackendNodeId).toBe(23);
     expect(input?.localRect).toEqual({ x: 1, y: 2, w: 40, h: 20 });
-    expect(input?.rect).toBeNull();
+    expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
   });
 
   it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {

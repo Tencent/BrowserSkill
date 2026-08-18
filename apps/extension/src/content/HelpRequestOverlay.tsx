@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { HelpHighlightRect } from "@/lib/help-bridge";
 import logoUrl from "../../assets/logo.png";
 
 export interface HelpRequestData {
@@ -19,6 +20,10 @@ export interface HelpRequestData {
   displayMode?: "full" | "compact";
   /** CSS selectors to scroll to + flash-highlight. */
   selectors: string[];
+  /** Pre-resolved top-viewport rectangles, used for cross-frame targets. */
+  rects?: HelpHighlightRect[];
+  /** Re-resolve cross-frame rectangles after scroll, resize, or layout changes. */
+  refreshRects?: () => Promise<HelpHighlightRect[] | undefined>;
   onContinue: (note: string) => void;
   onCancel: () => void;
 }
@@ -49,6 +54,7 @@ const PANEL_WIDTH = 420;
 const FALLBACK_PANEL_H = 180;
 const FALLBACK_PANEL_H_COLLAPSED = 44;
 const EMPTY_SELECTORS: string[] = [];
+const EMPTY_RECTS: HelpHighlightRect[] = [];
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -179,6 +185,8 @@ export function HelpRequestOverlay({ request }: Props) {
   const { t } = useTranslation("extension");
   const isCompact = request?.displayMode === "compact";
   const effectiveSelectors = isCompact ? EMPTY_SELECTORS : (request?.selectors ?? EMPTY_SELECTORS);
+  const [liveRects, setLiveRects] = useState<HelpHighlightRect[] | null>(null);
+  const effectiveRects = isCompact ? EMPTY_RECTS : (liveRects ?? request?.rects ?? EMPTY_RECTS);
   const [note, setNote] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [boxes, setBoxes] = useState<Box[]>([]);
@@ -201,6 +209,7 @@ export function HelpRequestOverlay({ request }: Props) {
   // Reset the note and collapse state whenever a new request appears.
   useEffect(() => {
     setNote("");
+    setLiveRects(null);
     setCollapsed(false);
     placementRef.current = null;
     setDragPos(null);
@@ -208,6 +217,32 @@ export function HelpRequestOverlay({ request }: Props) {
     userMovedRef.current = false;
     dragStartRef.current = null;
   }, [request?.id]);
+
+  useEffect(() => {
+    if (!request || isCompact || !request.refreshRects) return;
+    let disposed = false;
+    let resolving = false;
+    const refresh = async () => {
+      if (resolving) return;
+      resolving = true;
+      try {
+        const rects = await request.refreshRects?.();
+        if (!disposed && rects) setLiveRects(rects);
+      } finally {
+        resolving = false;
+      }
+    };
+    const onViewportChange = () => void refresh();
+    window.addEventListener("scroll", onViewportChange, true);
+    window.addEventListener("resize", onViewportChange);
+    const interval = window.setInterval(onViewportChange, 500);
+    return () => {
+      disposed = true;
+      window.removeEventListener("scroll", onViewportChange, true);
+      window.removeEventListener("resize", onViewportChange);
+      window.clearInterval(interval);
+    };
+  }, [request, isCompact]);
 
   // Scroll the first matched target into view once per distinct request id.
   useLayoutEffect(() => {
@@ -231,7 +266,7 @@ export function HelpRequestOverlay({ request }: Props) {
       return;
     }
     const update = () => {
-      const nextBoxes = measure(effectiveSelectors);
+      const nextBoxes = [...measure(effectiveSelectors), ...effectiveRects];
       setBoxes((prev) => (boxesEqual(prev, nextBoxes) ? prev : nextBoxes));
     };
     update();
@@ -243,7 +278,7 @@ export function HelpRequestOverlay({ request }: Props) {
       window.removeEventListener("resize", update);
       window.clearInterval(interval);
     };
-  }, [request, effectiveSelectors]);
+  }, [request, effectiveSelectors, effectiveRects]);
 
   const onHeaderPointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>) => {
@@ -305,7 +340,7 @@ export function HelpRequestOverlay({ request }: Props) {
       return;
     }
     if (userMovedRef.current) return;
-    const measured = boxes.length > 0 ? boxes : measure(effectiveSelectors);
+    const measured = boxes.length > 0 ? boxes : [...measure(effectiveSelectors), ...effectiveRects];
     const anchor = unionBox(measured);
     const banner = bannerRef.current;
     if (!anchor || !banner) {
@@ -329,7 +364,7 @@ export function HelpRequestOverlay({ request }: Props) {
     }
     const nextPos = placePanel(anchor, panelW, panelH, placementRef.current.placement);
     setPanelPos((prev) => (panelPosEqual(prev, nextPos) ? prev : nextPos));
-  }, [request, boxes, collapsed, isCompact, effectiveSelectors]);
+  }, [request, boxes, collapsed, isCompact, effectiveSelectors, effectiveRects]);
 
   if (!request) return null;
 

@@ -46,6 +46,25 @@ describe("lookupSnapshotRef", () => {
 });
 
 describe("resolveSnapshotRef", () => {
+  it("preserves the frame and child session needed to route iframe refs", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+
+    const expected = {
+      backendNodeId: 1234,
+      refKey: "e3",
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    };
+    expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
+    expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
+  });
+
   it("returns not_found for unknown ref", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

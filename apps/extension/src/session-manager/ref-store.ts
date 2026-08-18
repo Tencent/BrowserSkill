@@ -1,9 +1,10 @@
 /**
- * Per-session map from `@e<N>` snapshot refs to CDP `backendNodeId`.
+ * Per-session map from `@e<N>` snapshot refs to a CDP node address.
  *
  * Each fresh `tool.snapshot` resets the store: M6 will call
- * `replace(...)` with the new ref → backendNodeId pairs. Tools like
- * `tool.click` consume the store via `resolve("@e1")`.
+ * `replace(...)` with the new ref → node address pairs. A node address
+ * includes the owning flat CDP session/frame when the element lives in
+ * an OOPIF; tools resolve live geometry from that identity at call time.
  *
  * Refs are session-scoped (§7): looking up a ref in the wrong session
  * returns `null`, never silently leaks. Storing values in different
@@ -15,10 +16,19 @@ export type BackendNodeId = number;
 export interface RefEntry {
   backendNodeId: BackendNodeId;
   tabId: number | null;
+  frameId?: string;
+  cdpSessionId?: string;
   generation: number;
 }
 
-type RefInput = BackendNodeId | { backendNodeId: BackendNodeId; tabId: number };
+export type RefInput =
+  | BackendNodeId
+  | {
+      backendNodeId: BackendNodeId;
+      tabId: number;
+      frameId?: string;
+      cdpSessionId?: string;
+    };
 
 export class RefStore {
   private readonly map = new Map<string, RefEntry>();
@@ -44,7 +54,7 @@ export class RefStore {
   }
 
   /**
-   * Replace the entire store with a new ref → backendNodeId mapping.
+   * Replace the entire store with a new ref → CDP node identity mapping.
    * Used after every fresh `tool.snapshot`.
    */
   replace(entries: Iterable<readonly [string, RefInput]>): void {
@@ -53,10 +63,20 @@ export class RefStore {
     for (const [ref, input] of entries) this.map.set(normaliseRef(ref), this.entry(input));
   }
 
-  set(ref: string, id: BackendNodeId, opts: { tabId?: number } = {}): void {
+  set(
+    ref: string,
+    id: BackendNodeId,
+    opts: {
+      tabId?: number;
+      frameId?: string;
+      cdpSessionId?: string;
+    } = {},
+  ): void {
     this.map.set(normaliseRef(ref), {
       backendNodeId: id,
       tabId: opts.tabId ?? null,
+      ...(opts.frameId ? { frameId: opts.frameId } : {}),
+      ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
       generation: this.generation,
     });
   }
@@ -80,6 +100,8 @@ export class RefStore {
     return {
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
+      ...(input.frameId ? { frameId: input.frameId } : {}),
+      ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
       generation: this.generation,
     };
   }

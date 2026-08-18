@@ -31,6 +31,15 @@ import type {
   NetworkEntryKind,
   NetworkResult,
 } from "@/transport/types";
+import {
+  buildFrameGraph,
+  type CdpFrameGraph,
+  type CdpFrameTreeNode,
+  type CdpFrameTreeSource,
+  type CdpTarget,
+} from "./frame-graph";
+
+export type CdpDebuggee = chrome.debugger.Debuggee & { sessionId?: string };
 
 /**
  * Minimal slice of `chrome.debugger` the rest of the extension
@@ -38,21 +47,15 @@ import type {
  * fake without monkey-patching the real `chrome` global.
  */
 export interface CdpDebuggerApi {
-  attach(target: chrome.debugger.Debuggee, requiredVersion: string): Promise<void>;
-  detach(target: chrome.debugger.Debuggee): Promise<void>;
-  sendCommand(
-    target: chrome.debugger.Debuggee,
-    method: string,
-    commandParams?: object,
-  ): Promise<unknown>;
+  attach(target: CdpDebuggee, requiredVersion: string): Promise<void>;
+  detach(target: CdpDebuggee): Promise<void>;
+  sendCommand(target: CdpDebuggee, method: string, commandParams?: object): Promise<unknown>;
   /**
    * Fires for every CDP event (`Page.lifecycleEvent`, `DOM.documentUpdated`,
    * …). The first callback argument is the source debuggee; the second
    * is the CDP method name; the third is the payload.
    */
-  onEvent: chrome.events.Event<
-    (source: chrome.debugger.Debuggee, method: string, params: unknown) => void
-  >;
+  onEvent: chrome.events.Event<(source: CdpDebuggee, method: string, params: unknown) => void>;
   /**
    * Fires when Chrome unilaterally detaches us — most commonly because
    * the tab navigated to a chrome:// URL or the user clicked
@@ -110,6 +113,8 @@ const MAX_CONSOLE_STACK_FRAMES = 20;
 const MAX_NETWORK_BUFFER = 200;
 const MAX_NETWORK_FIELD_LENGTH = 4096;
 const MAX_NETWORK_REQUEST_META = 1024;
+const FRAME_DISCOVERY_TIMEOUT_MS = 1000;
+const FRAME_DISCOVERY_QUIET_MS = 20;
 
 interface ParsedDialogOpening {
   type: JavaScriptDialogType;
@@ -131,6 +136,27 @@ interface NetworkRequestMeta {
   truncated: boolean;
 }
 
+interface FrameDiscoveryState {
+  sessions: Set<string>;
+  pending: Set<Promise<void>>;
+  generation: number;
+}
+
+async function settleBeforeDeadline(promises: Promise<void>[], deadline: number): Promise<boolean> {
+  if (promises.length === 0) return true;
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = await Promise.race([
+    Promise.allSettled(promises).then(() => false),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(true), remaining);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return !timedOut;
+}
+
 /**
  * Wrapper around `chrome.debugger` that owns the "attach once per
  * tabId" cache and exposes typed `send<T>()`.
@@ -149,10 +175,12 @@ export class ChromiumCdp {
   private readonly networkSequences = new Map<number, number>();
   private readonly networkDomainsEnabledTabs = new Set<number>();
   private readonly networkRequestMeta = new Map<number, Map<string, NetworkRequestMeta>>();
+  private readonly frameDiscovery = new Map<number, FrameDiscoveryState>();
   private detachSubscription: { dispose(): void } | null = null;
   private dialogSubscription: { dispose(): void } | null = null;
   private consoleSubscription: { dispose(): void } | null = null;
   private networkSubscription: { dispose(): void } | null = null;
+  private frameTargetSubscription: { dispose(): void } | null = null;
 
   constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
     this.api = api;
@@ -160,6 +188,7 @@ export class ChromiumCdp {
     this.bindDialogHandler();
     this.bindConsoleHandler();
     this.bindNetworkHandler();
+    this.bindFrameTargetHandler();
   }
 
   /** Attach to `tabId` if we haven't already in this driver. */
@@ -177,6 +206,9 @@ export class ChromiumCdp {
         await this.enableConsoleDomains(tabId);
         await this.enableNetworkDomainBestEffort(tabId);
         this.attachedTabs.add(tabId);
+        await this.enableFrameDiscovery({ tabId }).catch((err) => {
+          console.debug("[bsk cdp] frame discovery unavailable", { tabId, err });
+        });
       } catch (err) {
         // A CDP domain enable failed after the raw attach succeeded
         // (e.g. `Page.enable` rejects because the tab just navigated to
@@ -220,6 +252,73 @@ export class ChromiumCdp {
     } catch (err) {
       throw normalizeError(err);
     }
+  }
+
+  async sendToTarget<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T> {
+    if (!this.attachedTabs.has(target.tabId)) {
+      await this.ensureAttached(target.tabId);
+    }
+    try {
+      return (await this.api.sendCommand(target, method, params ?? {})) as T;
+    } catch (err) {
+      throw normalizeError(err);
+    }
+  }
+
+  async getFrameGraph(tabId: number): Promise<CdpFrameGraph> {
+    await this.ensureAttached(tabId);
+    await this.enableFrameDiscovery({ tabId }).catch(() => {});
+    await this.drainFrameAttachTasks(tabId);
+
+    const sources: CdpFrameTreeSource[] = [];
+    const root = await this.sendToTarget<{ frameTree?: CdpFrameTreeNode }>(
+      { tabId },
+      "Page.getFrameTree",
+      {},
+    );
+    if (root.frameTree) sources.push({ target: { tabId }, tree: root.frameTree });
+
+    const sessions = [...(this.frameDiscovery.get(tabId)?.sessions ?? [])];
+    const childTrees = await Promise.all(
+      sessions.map(async (sessionId): Promise<CdpFrameTreeSource | null> => {
+        const target = { tabId, sessionId };
+        try {
+          const reply = await this.sendToTarget<{ frameTree?: CdpFrameTreeNode }>(
+            target,
+            "Page.getFrameTree",
+            {},
+          );
+          return reply.frameTree ? { target, tree: reply.frameTree } : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    for (const source of childTrees) {
+      if (source) sources.push(source);
+    }
+
+    const graph = buildFrameGraph(sources);
+    if (!graph) throw new Error("Page.getFrameTree returned no root frame");
+    const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
+    await Promise.all(
+      graph.frames.map(async (frame) => {
+        if (!frame.parentFrameId) return;
+        const parent = frameById.get(frame.parentFrameId);
+        if (!parent) return;
+        try {
+          const owner = await this.sendToTarget<{ backendNodeId?: number }>(
+            parent.target,
+            "DOM.getFrameOwner",
+            { frameId: frame.frameId },
+          );
+          if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
+        } catch {
+          // The frame may have navigated between tree capture and owner lookup.
+        }
+      }),
+    );
+    return graph;
   }
 
   /** Return a cursor marking the current dialog sequence for `tabId`. */
@@ -332,6 +431,7 @@ export class ChromiumCdp {
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
     this.clearNetworkState(tabId);
+    this.clearFrameState(tabId);
     try {
       await this.api.detach({ tabId });
     } catch (err) {
@@ -354,7 +454,7 @@ export class ChromiumCdp {
   }
 
   /** Subscribe to all CDP events. Returned disposable removes the listener. */
-  onEvent(handler: (source: chrome.debugger.Debuggee, method: string, params: unknown) => void): {
+  onEvent(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
     dispose(): void;
   } {
     this.api.onEvent.addListener(handler);
@@ -378,6 +478,7 @@ export class ChromiumCdp {
     this.networkSequences.clear();
     this.networkDomainsEnabledTabs.clear();
     this.networkRequestMeta.clear();
+    this.frameDiscovery.clear();
     await Promise.all(
       tabs.map(async (tabId) => {
         try {
@@ -428,9 +529,104 @@ export class ChromiumCdp {
     }
   }
 
+  private async enableFrameDiscovery(target: CdpTarget): Promise<void> {
+    await this.api.sendCommand(target, "Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+      filter: [{ type: "iframe", exclude: false }],
+    });
+  }
+
+  private bindFrameTargetHandler(): void {
+    if (this.frameTargetSubscription) return;
+    const listener = (source: CdpDebuggee, method: string, params: unknown) => {
+      const tabId = source.tabId;
+      if (typeof tabId !== "number") return;
+      const raw = (params ?? {}) as Record<string, unknown>;
+      const sessionId = typeof raw.sessionId === "string" ? raw.sessionId : undefined;
+      if (!sessionId) return;
+
+      if (method === "Target.detachedFromTarget") {
+        const state = this.frameDiscovery.get(tabId);
+        if (state?.sessions.delete(sessionId)) state.generation += 1;
+        return;
+      }
+      if (method !== "Target.attachedToTarget") return;
+      const targetInfo = raw.targetInfo as { type?: string } | undefined;
+      if (targetInfo?.type && targetInfo.type !== "iframe") return;
+
+      const state = this.frameDiscoveryState(tabId);
+      if (state.sessions.has(sessionId)) return;
+      state.sessions.add(sessionId);
+      state.generation += 1;
+
+      const task = this.initializeFrameTarget({ tabId, sessionId });
+      state.pending.add(task);
+      void task.finally(() => {
+        state.pending.delete(task);
+      });
+    };
+    this.api.onEvent.addListener(listener);
+    this.frameTargetSubscription = {
+      dispose: () => this.api.onEvent.removeListener(listener),
+    };
+  }
+
+  private async initializeFrameTarget(target: CdpTarget): Promise<void> {
+    try {
+      await this.enableFrameDiscovery(target);
+    } catch (err) {
+      const state = this.frameDiscovery.get(target.tabId);
+      if (state?.sessions.delete(target.sessionId as string)) state.generation += 1;
+      console.debug("[bsk cdp] child frame target initialization failed", { target, err });
+    }
+  }
+
+  private async drainFrameAttachTasks(tabId: number): Promise<void> {
+    const deadline = Date.now() + FRAME_DISCOVERY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const state = this.frameDiscovery.get(tabId);
+      const generation = state?.generation ?? 0;
+      if (state?.pending.size && !(await settleBeforeDeadline([...state.pending], deadline))) break;
+
+      // Target.setAutoAttach may enqueue the next attachedToTarget event after
+      // its command promise settles. Wait for a short quiet window, then finish
+      // only if neither the state object nor its generation changed.
+      const quietTime = Math.min(FRAME_DISCOVERY_QUIET_MS, deadline - Date.now());
+      if (quietTime <= 0) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, quietTime));
+      const current = this.frameDiscovery.get(tabId);
+      if (
+        current === state &&
+        (current?.generation ?? 0) === generation &&
+        !current?.pending.size
+      ) {
+        return;
+      }
+    }
+    console.debug("[bsk cdp] frame discovery did not reach quiescence before timeout", { tabId });
+  }
+
+  private frameDiscoveryState(tabId: number): FrameDiscoveryState {
+    const existing = this.frameDiscovery.get(tabId);
+    if (existing) return existing;
+    const created: FrameDiscoveryState = {
+      sessions: new Set(),
+      pending: new Set(),
+      generation: 0,
+    };
+    this.frameDiscovery.set(tabId, created);
+    return created;
+  }
+
+  private clearFrameState(tabId: number): void {
+    this.frameDiscovery.delete(tabId);
+  }
+
   private bindDialogHandler(): void {
     if (this.dialogSubscription) return;
-    const listener = (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
+    const listener = (source: CdpDebuggee, method: string, params: unknown) => {
       if (method !== "Page.javascriptDialogOpening") return;
       const tabId = source.tabId;
       if (typeof tabId !== "number") return;
@@ -614,6 +810,7 @@ export class ChromiumCdp {
         this.clearDialogState(source.tabId);
         this.clearConsoleState(source.tabId);
         this.clearNetworkState(source.tabId);
+        this.clearFrameState(source.tabId);
       }
     };
     this.api.onDetach.addListener(listener);
@@ -632,6 +829,8 @@ export class ChromiumCdp {
     this.consoleSubscription = null;
     this.networkSubscription?.dispose();
     this.networkSubscription = null;
+    this.frameTargetSubscription?.dispose();
+    this.frameTargetSubscription = null;
   }
 
   /** Detach tabs only when no other live session has claimed them. */

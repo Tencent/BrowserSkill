@@ -16,6 +16,13 @@ export const HELP_ACK = "bsk-help-ack";
 export const HELP_QUERY = "bsk-help-query";
 export const HELP_FINISH = "bsk-help-finish";
 
+export interface HelpHighlightRect {
+  top: number;
+  left: number;
+  width: number;
+  height: number;
+}
+
 export interface HelpRequestMessage {
   type: typeof HELP_REQUEST;
   requestId: string;
@@ -26,6 +33,8 @@ export interface HelpRequestMessage {
   displayMode?: "full" | "compact";
   /** CSS selectors to scroll to + flash-highlight (may be empty). */
   selectors: string[];
+  /** Top-viewport rectangles for targets that cannot be represented by a root selector. */
+  rects?: HelpHighlightRect[];
   timeoutMs: number;
 }
 
@@ -74,6 +83,16 @@ export function isHelpRequestMessage(msg: unknown): msg is HelpRequestMessage {
     (m.displayMode === undefined || m.displayMode === "full" || m.displayMode === "compact") &&
     Array.isArray(m.selectors) &&
     m.selectors.every((selector) => typeof selector === "string") &&
+    (m.rects === undefined ||
+      (Array.isArray(m.rects) &&
+        m.rects.every(
+          (rect) =>
+            typeof rect === "object" &&
+            rect !== null &&
+            ["top", "left", "width", "height"].every((key) =>
+              Number.isFinite((rect as Record<string, unknown>)[key]),
+            ),
+        ))) &&
     typeof m.timeoutMs === "number"
   );
 }
