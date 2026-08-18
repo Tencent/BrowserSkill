@@ -657,7 +657,9 @@ export interface EmulateResult {
 }
 
 // --------------------------------------------------------------------------
-// Semantic record payloads — mirror bsk-protocol record.rs
+// Semantic record payloads — legacy Trace v2 shapes (`Trace`/`Step`) mirror
+// bsk-protocol record_v2.rs; Trace v3 shapes (`TraceV3`/`StepV3`) mirror
+// record.rs (note: in Rust, `Trace` is the v3 shape).
 // --------------------------------------------------------------------------
 
 export const TRACE_VERSION = 3;
