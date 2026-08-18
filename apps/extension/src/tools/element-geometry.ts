@@ -1,9 +1,15 @@
-// Shared CDP helpers for scrolling nodes into view and computing
-// viewport-space bounding rectangles. Used by interaction tools (click
-// centre) and observation tools (element screenshot clip).
+// Resolve and scroll nodes inside one CDP target. Cross-frame projection
+// belongs to frame-geometry.ts.
 
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
+import {
+  parseCdpQuad,
+  polygonBounds,
+  type Region,
+  rectPolygon,
+  type ViewportRect,
+} from "./geometry";
 import { type CdpRunner, isRpcError } from "./shared";
 
 const ELEMENT_NOT_VISIBLE_MESSAGE =
@@ -11,45 +17,6 @@ const ELEMENT_NOT_VISIBLE_MESSAGE =
 
 function elementNotVisibleError(): RpcError {
   return rpcError("permission_denied", "element_not_visible", ELEMENT_NOT_VISIBLE_MESSAGE);
-}
-
-/** Viewport-space axis-aligned bounding box for CDP `Page.captureScreenshot` clip. */
-export interface ViewportRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-/**
- * Compute the axis-aligned bounding box of an 8-double CDP content
- * quad / box-model polygon. Exported for unit tests.
- */
-export function quadBoundingRect(quad: number[]): ViewportRect | null {
-  if (quad.length !== 8) return null;
-  const xs = [quad[0], quad[2], quad[4], quad[6]];
-  const ys = [quad[1], quad[3], quad[5], quad[7]];
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xs);
-  const minY = Math.min(...ys);
-  const maxY = Math.max(...ys);
-  const width = maxX - minX;
-  const height = maxY - minY;
-  if (width <= 0 || height <= 0) return null;
-  return { x: minX, y: minY, width, height };
-}
-
-function rectToQuad(rect: ViewportRect): number[] {
-  return [
-    rect.x,
-    rect.y,
-    rect.x + rect.width,
-    rect.y,
-    rect.x + rect.width,
-    rect.y + rect.height,
-    rect.x,
-    rect.y + rect.height,
-  ];
 }
 
 /**
@@ -112,52 +79,24 @@ export async function scrollNodeIntoView(
   }
 }
 
-/**
- * Viewport-space bounding box for `backendNodeId`. Prefers
- * `DOM.getContentQuads`, then `DOM.getBoxModel`, then the union of
- * visible descendant client rects for zero-size overflow containers.
- */
-export async function nodeBoundingRect(
+function validCdpRegion(quads: number[][] | undefined): Region {
+  return (quads ?? []).flatMap((raw) => {
+    const polygon = parseCdpQuad(raw);
+    return polygon && polygonBounds(polygon) ? [polygon] : [];
+  });
+}
+
+async function resolveVisibleContentRegion(
   cdp: CdpRunner,
   tabId: number,
   backendNodeId: number,
-): Promise<ViewportRect | RpcError> {
-  const polygons = await visibleContentPolygons(cdp, tabId, backendNodeId);
-  if (isRpcError(polygons)) return polygons;
-  const bounds = polygons.flatMap((polygon) => quadBoundingRect(polygon) ?? []);
-  const x = Math.min(...bounds.map((rect) => rect.x));
-  const y = Math.min(...bounds.map((rect) => rect.y));
-  const right = Math.max(...bounds.map((rect) => rect.x + rect.width));
-  const bottom = Math.max(...bounds.map((rect) => rect.y + rect.height));
-  return { x, y, width: right - x, height: bottom - y };
-}
-
-/**
- * Compute the centroid of a CDP content quad. Quads are reported as
- * 8 doubles in clockwise order: (x1, y1, x2, y2, x3, y3, x4, y4).
- */
-export function quadCentre(quad: number[]): { x: number; y: number } {
-  const x = (quad[0] + quad[4]) / 2;
-  const y = (quad[1] + quad[5]) / 2;
-  return { x, y };
-}
-
-/** Centre of a `DOM.getBoxModel` `content` polygon (also 8 doubles). */
-export function boxCentre(box: number[]): { x: number; y: number } {
-  return quadCentre(box);
-}
-
-async function visibleContentPolygons(
-  cdp: CdpRunner,
-  tabId: number,
-  backendNodeId: number,
-): Promise<number[][] | RpcError> {
+): Promise<Region | RpcError> {
   try {
     const quads = await cdp.send<{ quads?: number[][] }>(tabId, "DOM.getContentQuads", {
       backendNodeId,
     });
-    const visible = quads.quads?.filter((quad) => quad.length === 8 && quadBoundingRect(quad));
-    if (visible && visible.length > 0) return visible;
+    const visible = validCdpRegion(quads.quads);
+    if (visible.length > 0) return visible;
   } catch (err) {
     console.debug("[bsk element-geometry] getContentQuads failed", err);
   }
@@ -166,25 +105,32 @@ async function visibleContentPolygons(
       backendNodeId,
     });
     const content = box.model?.content;
-    if (content && content.length === 8 && quadBoundingRect(content)) return [content];
+    const fallback = validCdpRegion(content ? [content] : undefined);
+    if (fallback.length > 0) return fallback;
   } catch (err) {
     console.debug("[bsk element-geometry] getBoxModel failed", err);
   }
   const descendantRect = await descendantBoundingRect(cdp, tabId, backendNodeId);
-  if (descendantRect) return [rectToQuad(descendantRect)];
+  if (descendantRect) {
+    return [
+      rectPolygon({
+        x: descendantRect.x,
+        y: descendantRect.y,
+        w: descendantRect.width,
+        h: descendantRect.height,
+      }),
+    ];
+  }
   return elementNotVisibleError();
 }
 
-/**
- * Return a live content quad for a backend node in the target's own viewport.
- * Frame-aware callers can project this quad through the owning frame chain.
- */
-export async function nodeContentQuads(
+/** Resolve every visible content region in the node's target-local viewport. */
+export async function nodeContentRegion(
   cdp: CdpRunner,
   tabId: number,
   backendNodeId: number,
-): Promise<number[][] | RpcError> {
-  return visibleContentPolygons(cdp, tabId, backendNodeId);
+): Promise<Region | RpcError> {
+  return resolveVisibleContentRegion(cdp, tabId, backendNodeId);
 }
 
 async function descendantBoundingRect(
@@ -256,21 +202,4 @@ function parseViewportRect(value: unknown): ViewportRect | null {
   }
   if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
   return { x, y, width, height };
-}
-
-/**
- * Get the click point for `backendNodeId`. Prefers
- * `DOM.getContentQuads` (richer for rotated / transformed elements);
- * falls back to `DOM.getBoxModel`, then visible descendant bounds.
- * Returns `permission_denied` with "element not visible" when every
- * geometry path comes back empty / fails.
- */
-export async function nodeCentre(
-  cdp: CdpRunner,
-  tabId: number,
-  backendNodeId: number,
-): Promise<{ x: number; y: number } | RpcError> {
-  const polygons = await visibleContentPolygons(cdp, tabId, backendNodeId);
-  if (isRpcError(polygons)) return polygons;
-  return quadCentre(polygons[0]);
 }

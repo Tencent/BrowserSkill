@@ -1057,7 +1057,6 @@ export async function captureViewModel(
     frameId: snapshotFrameId(doc0, strings),
     ownerFrameBackendNodeId: null,
     projection: {
-      sourceViewport: viewport,
       sourceClips: [],
       edges: [],
       topViewport: viewport,

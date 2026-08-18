@@ -1,6 +1,6 @@
 import { type CdpFrame, type CdpFrameGraph, type CdpTarget } from "@/browser-driver/frame-graph";
 import type { RpcError } from "@/transport/types";
-import { nodeContentQuads, scrollNodeIntoView, type ViewportRect } from "./element-geometry";
+import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import {
   clipPolygon,
   type GeometryProjection,
@@ -8,20 +8,17 @@ import {
   type Polygon,
   type ProjectiveEdge,
   parseCdpQuad,
-  polygonBounds,
+  polygonArea,
   polygonCentroid,
   projectRegionToViewport,
   type Quad,
   type Region,
   rectPolygon,
+  regionBounds,
   type Size,
+  type ViewportRect,
 } from "./geometry";
 import { type CdpRunner, cdpRunnerForTarget, isRpcError, sendToCdpTarget } from "./shared";
-
-export type { Point, Quad, Region } from "./geometry";
-export { parseCdpQuad } from "./geometry";
-
-export type FrameProjection = GeometryProjection;
 
 export interface NodeAddress {
   target: CdpTarget;
@@ -124,7 +121,7 @@ export async function resolveFrameProjection(
   cdp: CdpRunner,
   graph: CdpFrameGraph,
   frameId: string,
-): Promise<FrameProjection | null> {
+): Promise<GeometryProjection | null> {
   const byId = frameMap(graph);
   const frame = byId.get(frameId);
   if (!frame) return null;
@@ -154,7 +151,7 @@ export async function resolveFrameProjection(
 
   const topViewport =
     edges.length === 0 ? sourceViewport : await targetViewport(cdp, targetRoot.target);
-  return topViewport ? { sourceViewport, sourceClips, edges, topViewport } : null;
+  return topViewport ? { sourceClips, edges, topViewport } : null;
 }
 
 async function loadFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFrameGraph | null> {
@@ -215,9 +212,8 @@ export async function scrollElementAndFramesIntoView(
 function largestRegion(regions: Region): Polygon | null {
   let largest: { polygon: Polygon; area: number } | null = null;
   for (const polygon of regions) {
-    const bounds = polygonBounds(polygon);
-    if (!bounds) continue;
-    const area = bounds.width * bounds.height;
+    const area = polygonArea(polygon);
+    if (area <= 0) continue;
     if (!largest || area > largest.area) largest = { polygon, area };
   }
   return largest?.polygon ?? null;
@@ -241,16 +237,12 @@ export async function resolveNodeGeometry(
       if (scrollError) return scrollError;
     }
 
-    const local = await nodeContentQuads(
+    const localRegion = await nodeContentRegion(
       cdpRunnerForTarget(cdp, address.target),
       tabId,
       address.backendNodeId,
     );
-    if (isRpcError(local)) return local;
-    const localRegion = local
-      .map((quad) => parseCdpQuad(quad))
-      .filter((quad): quad is Quad => quad !== null);
-    if (localRegion.length === 0) return geometryError("DOM returned no valid content regions");
+    if (isRpcError(localRegion)) return localRegion;
 
     const graph = address.frameId ? await loadFrameGraph(cdp, tabId) : null;
     if (address.target.sessionId && !address.frameId) {
@@ -276,7 +268,7 @@ export async function resolveNodeGeometry(
         .filter((polygon) => polygon.length >= 3);
     }
 
-    const topBounds = polygonBounds(topVisibleRegions.flat());
+    const topBounds = regionBounds(topVisibleRegions);
     const actionRegion = largestRegion(topVisibleRegions);
     const actionPoint = actionRegion ? polygonCentroid(actionRegion) : null;
     if (!topBounds || !actionPoint) {

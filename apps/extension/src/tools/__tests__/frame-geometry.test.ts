@@ -1,15 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { type Quad, resolveFrameProjection, resolveNodeGeometry } from "../frame-geometry";
+import { resolveFrameProjection, resolveNodeGeometry } from "../frame-geometry";
 import {
   clipPolygon,
+  polygonArea,
   polygonBounds,
   projectAndClipRegion,
   projectUnitPoint,
+  type Quad,
   rectPolygon,
+  regionBounds,
 } from "../geometry";
 import type { CdpRunner } from "../shared";
 
 describe("frame geometry projection", () => {
+  it("keeps region bounds separate from polygon area", () => {
+    const region = [
+      rectPolygon({ x: 0, y: 0, w: 10, h: 10 }),
+      rectPolygon({ x: 20, y: 5, w: 5, h: 5 }),
+    ];
+    expect(regionBounds(region)).toEqual({ x: 0, y: 0, width: 25, height: 10 });
+    expect(polygonArea(region[0])).toBe(100);
+  });
+
   it("maps through the iframe content box instead of its border box", () => {
     const contentQuad: Quad = [
       { x: 204, y: 306 },

@@ -1,25 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { nodeBoundingRect, quadBoundingRect } from "../element-geometry";
+import { nodeContentRegion } from "../element-geometry";
 import type { CdpRunner } from "../shared";
 
-describe("quadBoundingRect", () => {
-  it("computes axis-aligned bounds from an 8-double quad", () => {
-    expect(quadBoundingRect([10, 20, 110, 20, 110, 60, 10, 60])).toEqual({
-      x: 10,
-      y: 20,
-      width: 100,
-      height: 40,
-    });
+describe("nodeContentRegion", () => {
+  it("rejects invalid content quads before using the box model fallback", async () => {
+    const send = async (_tabId: number, method: string) => {
+      if (method === "DOM.getContentQuads") return { quads: [[0, 0, 0, 0, 0, 0, 0, 0]] };
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [5, 10, 25, 10, 25, 30, 5, 30] } };
+      }
+      throw new Error(`unexpected CDP call ${method}`);
+    };
+
+    await expect(nodeContentRegion({ send: send as CdpRunner["send"] }, 7, 555)).resolves.toEqual([
+      [
+        { x: 5, y: 10 },
+        { x: 25, y: 10 },
+        { x: 25, y: 30 },
+        { x: 5, y: 30 },
+      ],
+    ]);
   });
 
-  it("returns null for degenerate quads", () => {
-    expect(quadBoundingRect([0, 0, 0, 0, 0, 0, 0, 0])).toBeNull();
-    expect(quadBoundingRect([1, 2, 3])).toBeNull();
-  });
-});
-
-describe("nodeBoundingRect", () => {
-  it("unions every visible content fragment", async () => {
+  it("preserves every visible content fragment", async () => {
     const send = async () => ({
       quads: [
         [10, 20, 60, 20, 60, 40, 10, 40],
@@ -30,12 +33,20 @@ describe("nodeBoundingRect", () => {
       send: send as CdpRunner["send"],
     };
 
-    await expect(nodeBoundingRect(cdp, 7, 555)).resolves.toEqual({
-      x: 10,
-      y: 20,
-      width: 80,
-      height: 60,
-    });
+    await expect(nodeContentRegion(cdp, 7, 555)).resolves.toEqual([
+      [
+        { x: 10, y: 20 },
+        { x: 60, y: 20 },
+        { x: 60, y: 40 },
+        { x: 10, y: 40 },
+      ],
+      [
+        { x: 15, y: 50 },
+        { x: 90, y: 50 },
+        { x: 90, y: 80 },
+        { x: 15, y: 80 },
+      ],
+    ]);
   });
 
   it("falls back to visible descendant bounds for zero-size containers", async () => {
@@ -57,12 +68,14 @@ describe("nodeBoundingRect", () => {
     };
     const cdp = { send: send as CdpRunner["send"] };
 
-    await expect(nodeBoundingRect(cdp, 7, 555)).resolves.toEqual({
-      x: 242,
-      y: 468,
-      width: 769,
-      height: 180,
-    });
+    await expect(nodeContentRegion(cdp, 7, 555)).resolves.toEqual([
+      [
+        { x: 242, y: 468 },
+        { x: 1011, y: 468 },
+        { x: 1011, y: 648 },
+        { x: 242, y: 648 },
+      ],
+    ]);
     expect(calls.map((c) => c.method)).toEqual([
       "DOM.getContentQuads",
       "DOM.getBoxModel",

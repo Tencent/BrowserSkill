@@ -1,6 +1,6 @@
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
-import { type FrameProjection, resolveFrameProjection } from "../frame-geometry";
-import { projectRectToViewport } from "../geometry";
+import { resolveFrameProjection } from "../frame-geometry";
+import { type GeometryProjection, projectRectToViewport } from "../geometry";
 import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
 import { type CapturedNode, type CapturedViewModel, captureViewModel } from "./capture";
 import {
@@ -31,7 +31,10 @@ async function discoverFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFra
   }
 }
 
-function transformFrameNodes(nodes: CapturedNode[], projection: FrameProjection): CapturedNode[] {
+function transformFrameNodes(
+  nodes: CapturedNode[],
+  projection: GeometryProjection,
+): CapturedNode[] {
   return nodes.map((node) => ({
     ...node,
     rect: (() => {

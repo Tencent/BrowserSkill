@@ -29,7 +29,7 @@ import type {
   SelectResult,
 } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
-import { backendNodeToObject, boxCentre, nodeCentre, quadCentre } from "./element-geometry";
+import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
 import {
@@ -1107,9 +1107,6 @@ export async function handleSelect(
 
 export const __testing__ = {
   DEFAULT_TIMEOUT_MS,
-  quadCentre,
-  boxCentre,
   resolveBackendNode,
-  nodeCentre,
   isFillable,
 };

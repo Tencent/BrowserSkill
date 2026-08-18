@@ -1,5 +1,3 @@
-import type { ViewportRect } from "./element-geometry";
-
 export interface Point {
   x: number;
   y: number;
@@ -14,6 +12,13 @@ export interface Size {
   height: number;
 }
 
+export interface ViewportRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface ProjectiveEdge {
   sourceViewport: Size;
   destinationQuad: Quad;
@@ -21,7 +26,6 @@ export interface ProjectiveEdge {
 }
 
 export interface GeometryProjection {
-  sourceViewport: Size;
   sourceClips: Polygon[];
   edges: ProjectiveEdge[];
   topViewport: Size;
@@ -175,6 +179,14 @@ export function polygonBounds(points: Polygon): ViewportRect | null {
   return { x, y, width: right - x, height: bottom - y };
 }
 
+export function regionBounds(region: Region): ViewportRect | null {
+  return polygonBounds(region.flat());
+}
+
+export function polygonArea(points: Polygon): number {
+  return Math.abs(polygonSignedArea(points));
+}
+
 export function polygonCentroid(points: Polygon): Point | null {
   if (points.length < 3) return null;
   let twiceArea = 0;
@@ -231,7 +243,7 @@ export function projectRectToViewport(
   projection: GeometryProjection,
 ): ViewportRect | null {
   if (!rect) return null;
-  return polygonBounds(projectRegionToViewport([rectPolygon(rect)], projection).flat());
+  return regionBounds(projectRegionToViewport([rectPolygon(rect)], projection));
 }
 
 export function childFrameProjection(
@@ -240,7 +252,6 @@ export function childFrameProjection(
 ): GeometryProjection {
   const destinationQuad = rectPolygon(ownerRectInParent);
   return {
-    sourceViewport: { width: ownerRectInParent.w, height: ownerRectInParent.h },
     sourceClips: [],
     edges: [
       {
