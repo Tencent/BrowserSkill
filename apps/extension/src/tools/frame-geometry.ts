@@ -188,6 +188,24 @@ async function scrollFrameOwners(
   return null;
 }
 
+async function scrollElementWithFrameGraph(
+  cdp: CdpRunner,
+  tabId: number,
+  target: CdpTarget,
+  backendNodeId: number,
+  frameId: string | undefined,
+  graph: CdpFrameGraph | null,
+): Promise<RpcError | null> {
+  if (frameId) {
+    if (!graph) return geometryError(`could not resolve frame graph for ${frameId}`);
+    const error = await scrollFrameOwners(cdp, tabId, graph, frameId);
+    if (error) return error;
+  } else if (target.sessionId) {
+    return geometryError("an OOPIF node address requires frameId");
+  }
+  return scrollNodeIntoView(cdpRunnerForTarget(cdp, target), tabId, backendNodeId);
+}
+
 export async function scrollElementAndFramesIntoView(
   cdp: CdpRunner,
   tabId: number,
@@ -195,18 +213,8 @@ export async function scrollElementAndFramesIntoView(
   backendNodeId: number,
   frameId?: string,
 ): Promise<RpcError | null> {
-  if (frameId) {
-    const graph = await loadFrameGraph(cdp, tabId);
-    if (graph) {
-      const error = await scrollFrameOwners(cdp, tabId, graph, frameId);
-      if (error) return error;
-    } else {
-      return geometryError(`could not resolve frame graph for ${frameId}`);
-    }
-  } else if (target.sessionId) {
-    return geometryError("an OOPIF node address requires frameId");
-  }
-  return scrollNodeIntoView(cdpRunnerForTarget(cdp, target), tabId, backendNodeId);
+  const graph = frameId ? await loadFrameGraph(cdp, tabId) : null;
+  return scrollElementWithFrameGraph(cdp, tabId, target, backendNodeId, frameId, graph);
 }
 
 function largestRegion(regions: Region): Polygon | null {
@@ -226,13 +234,22 @@ export async function resolveNodeGeometry(
   options: { scrollIntoView?: boolean } = {},
 ): Promise<ResolvedNodeGeometry | RpcError> {
   try {
+    if (address.target.sessionId && !address.frameId) {
+      return geometryError("an OOPIF node address requires frameId");
+    }
+    const graph = address.frameId ? await loadFrameGraph(cdp, tabId) : null;
+    if (address.frameId && !graph) {
+      return geometryError(`could not resolve frame graph for ${address.frameId}`);
+    }
+
     if (options.scrollIntoView) {
-      const scrollError = await scrollElementAndFramesIntoView(
+      const scrollError = await scrollElementWithFrameGraph(
         cdp,
         tabId,
         address.target,
         address.backendNodeId,
         address.frameId,
+        graph,
       );
       if (scrollError) return scrollError;
     }
@@ -243,14 +260,6 @@ export async function resolveNodeGeometry(
       address.backendNodeId,
     );
     if (isRpcError(localRegion)) return localRegion;
-
-    const graph = address.frameId ? await loadFrameGraph(cdp, tabId) : null;
-    if (address.target.sessionId && !address.frameId) {
-      return geometryError("an OOPIF node address requires frameId");
-    }
-    if (address.frameId && !graph) {
-      return geometryError(`could not resolve frame graph for ${address.frameId}`);
-    }
 
     let topVisibleRegions: Region;
     if (address.frameId && graph) {

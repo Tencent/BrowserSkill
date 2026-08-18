@@ -7,6 +7,7 @@ import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
+import { createHelpRequestData } from "@/content/help-request";
 import overlayCss from "@/content/overlay.css?inline";
 import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
 import { RecordOverlay } from "@/content/RecordOverlay";
@@ -344,17 +345,7 @@ export default defineContentScript({
 
       if (isHelpRequestMessage(message)) {
         const helpMsg = message as HelpRequestMessage;
-        const previousHelp = overlays.setAgentHelpRequest({
-          id: helpMsg.requestId,
-          prompt: helpMsg.prompt,
-          ...(helpMsg.title ? { title: helpMsg.title } : {}),
-          ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
-          selectors: helpMsg.selectors,
-          rects: helpMsg.rects,
-          onContinue: (note: string) =>
-            void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
-          onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),
-        });
+        const previousHelp = mountHelpRequest(helpMsg);
         if (previousHelp && previousHelp.id !== helpMsg.requestId) {
           void sendHelpFinish(previousHelp.id, "cancelled");
         }
@@ -407,26 +398,18 @@ export default defineContentScript({
       });
     }
 
-    function mountHelpRequest(helpMsg: Omit<HelpRequestMessage, "type">): void {
-      overlays.setAgentHelpRequest({
-        id: helpMsg.requestId,
-        prompt: helpMsg.prompt,
-        ...(helpMsg.title ? { title: helpMsg.title } : {}),
-        ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
-        selectors: helpMsg.selectors,
-        rects: helpMsg.rects,
-        refreshRects: async () => {
-          const response = (await chrome.runtime.sendMessage({
-            type: HELP_QUERY,
-          })) as HelpQueryResponse | undefined;
-          return response?.active && response.request?.requestId === helpMsg.requestId
-            ? response.request.rects
-            : undefined;
-        },
-        onContinue: (note: string) =>
-          void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
-        onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),
-      });
+    function mountHelpRequest(helpMsg: Omit<HelpRequestMessage, "type">) {
+      return overlays.setAgentHelpRequest(
+        createHelpRequestData(helpMsg, {
+          finish: (requestId, outcome, note) => {
+            void sendHelpFinish(requestId, outcome, note);
+          },
+          query: () =>
+            chrome.runtime.sendMessage({ type: HELP_QUERY }) as Promise<
+              HelpQueryResponse | undefined
+            >,
+        }),
+      );
     }
 
     async function queryActiveHelpWithRetry(): Promise<void> {

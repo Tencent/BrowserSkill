@@ -172,6 +172,58 @@ describe("frame geometry projection", () => {
     });
   });
 
+  it("reuses one frame graph while scrolling and projecting live geometry", async () => {
+    const getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child",
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+        }
+        if (method === "DOM.getBoxModel") {
+          return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+        }
+        throw new Error(`unexpected root command ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (_target, method) => {
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+        }
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
+        }
+        throw new Error(`unexpected child command ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph,
+    };
+
+    await expect(
+      resolveNodeGeometry(
+        cdp,
+        4,
+        {
+          target: { tabId: 4, sessionId: "child-session" },
+          frameId: "child",
+          backendNodeId: 101,
+        },
+        { scrollIntoView: true },
+      ),
+    ).resolves.not.toMatchObject({ code: expect.any(String) });
+    expect(getFrameGraph).toHaveBeenCalledOnce();
+  });
+
   it("clips live geometry to same-target iframe ancestors", async () => {
     const cdp: CdpRunner = {
       send: vi.fn(async (_tabId, method) => {
