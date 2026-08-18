@@ -13,7 +13,7 @@
 </p>
 
 **BrowserSkill** connects Cursor, Claude Code, Codex, OpenClaw, CodeBuddy,
-WorkBuddy, Pi, Hermes Agent, and other shell-capable AI agents to your already logged-in
+WorkBuddy, Pi, Hermes Agent, DeepSeek Harness, and other AI agents to your already logged-in
 browser.
 
 Need the agent to touch a tab you already have open? It must borrow that tab
@@ -123,7 +123,8 @@ internal variants and install paths.
 
 Other shell-capable agent harnesses are supported too. Copy
 [`skill/SKILL.md`](skill/SKILL.md) into your harness's skills directory as
-`browser-skill/SKILL.md` to install the skill manually.
+`browser-skill/SKILL.md` to install the skill manually. DeepSeek Harness uses a
+dedicated plugin instead — see [DeepSeek Harness plugin](#deepseek-harness-plugin).
 
 </details>
 
@@ -131,6 +132,16 @@ Start a new Agent session and write a prompt that needs the browser, for example
 
 ```text
 /browser-skill open example.com and summarize what is on the page.
+```
+
+## DeepSeek Harness plugin
+
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
+injects native `browser_*` tools (no shelling out to `bsk`) and a live Web UI
+overlay of each Agent Window.
+
+```sh
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 ```
 
 ## How It Works
@@ -166,7 +177,9 @@ flowchart TB
 
 The agent never talks to the browser directly. It asks the `bsk` CLI to perform a
 browser task; the local daemon routes that request to the extension; the
-extension runs it in an Agent Window.
+extension runs it in an Agent Window. DeepSeek Harness takes the same path
+through the [plugin](#deepseek-harness-plugin): the agent calls injected
+`browser_*` tools, and the plugin invokes `bsk` on its behalf.
 
 ## For Developers
 
@@ -176,6 +189,7 @@ The repository is a Cargo + pnpm workspace:
 - `crates/bsk-protocol` — shared wire types and JSON schemas
 - `apps/extension` — browser extension
 - `packages/ui` and `packages/i18n` — shared extension UI support
+- `packages/dsh-plugin-browserskill` — DeepSeek Harness plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`)
 
 ## License
 
