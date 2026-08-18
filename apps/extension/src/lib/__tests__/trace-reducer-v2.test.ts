@@ -27,6 +27,17 @@ describe("shouldRecordPress", () => {
 });
 
 describe("reduceTraceSteps", () => {
+  it("does not expose internal tab transitions in trace v2", () => {
+    const trace = reduceTraceSteps([
+      {
+        op: "switch_tab",
+        preStateId: "s1",
+        postStateId: "s2",
+      },
+    ]);
+    expect(trace.steps).toEqual([]);
+  });
+
   it("builds steps with pages dictionary and page id references", () => {
     const drafts: RecordingDraftStep[] = [
       {

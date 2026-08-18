@@ -29,6 +29,13 @@
     "session_id": {
       "type": "string"
     },
+    "supports_tab_switch_steps": {
+      "description": "Client can decode the v3 `switch_tab` step variant.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "tab_id": {
       "type": [
         "integer",

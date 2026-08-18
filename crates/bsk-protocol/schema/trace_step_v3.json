@@ -48,6 +48,36 @@
         "id",
         "op",
         "result",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "switch_tab"
+          ]
+        },
+        "result": {
+          "$ref": "#/definitions/StepResultV3"
+        },
+        "state": {
+          "description": "Observation id immediately before this action.",
+          "type": "string"
+        }
+      }
+    },
+    {
+      "description": "Fields shared by every step variant (flattened in JSON).",
+      "type": "object",
+      "required": [
+        "id",
+        "op",
+        "result",
         "state",
         "target"
       ],

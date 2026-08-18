@@ -126,6 +126,10 @@ pub enum StepV3 {
         to: String,
         cause: NavigationCause,
     },
+    SwitchTab {
+        #[serde(flatten)]
+        common: StepCommonV3,
+    },
     Click {
         #[serde(flatten)]
         common: StepCommonV3,
@@ -336,6 +340,19 @@ mod tests {
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["op"], "navigate");
         assert_eq!(v["cause"], "user_typed");
+        let round: StepV3 = serde_json::from_value(v).unwrap();
+        assert_eq!(round, step);
+    }
+
+    #[test]
+    fn step_switch_tab_round_trips() {
+        let step = StepV3::SwitchTab {
+            common: sample_common(2, "s2", "s5"),
+        };
+        let v = serde_json::to_value(&step).unwrap();
+        assert_eq!(v["op"], "switch_tab");
+        assert_eq!(v["state"], "s2");
+        assert_eq!(v["result"]["state"], "s5");
         let round: StepV3 = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
