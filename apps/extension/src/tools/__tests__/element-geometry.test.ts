@@ -19,6 +19,25 @@ describe("quadBoundingRect", () => {
 });
 
 describe("nodeBoundingRect", () => {
+  it("unions every visible content fragment", async () => {
+    const send = async () => ({
+      quads: [
+        [10, 20, 60, 20, 60, 40, 10, 40],
+        [15, 50, 90, 50, 90, 80, 15, 80],
+      ],
+    });
+    const cdp: CdpRunner = {
+      send: send as CdpRunner["send"],
+    };
+
+    await expect(nodeBoundingRect(cdp, 7, 555)).resolves.toEqual({
+      x: 10,
+      y: 20,
+      width: 80,
+      height: 60,
+    });
+  });
+
   it("falls back to visible descendant bounds for zero-size containers", async () => {
     const calls: Array<{ method: string; params?: object }> = [];
     const send = async (_tabId: number, method: string, params?: object) => {

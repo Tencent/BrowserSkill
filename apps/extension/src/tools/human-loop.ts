@@ -8,6 +8,7 @@ import {
   HELP_REQUEST,
   type HelpCancelMessage,
   type HelpFinishMessage,
+  type HelpHighlightRect,
   type HelpQueryResponse,
   type HelpRequestMessage,
   isHelpAckMessage,
@@ -25,6 +26,7 @@ import type {
   ResolvedTarget,
   RpcError,
 } from "@/transport/types";
+import { resolveNodeGeometry } from "./frame-geometry";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -37,7 +39,6 @@ import {
 import { lookupSnapshotRef } from "./snapshot-ref";
 
 const DEFAULT_HELP_TIMEOUT_MS = 300_000;
-const HELP_ATTR = "data-bsk-help";
 const HELP_SEND_RETRIES = 3;
 const HELP_SEND_RETRY_DELAY_MS = 350;
 const HELP_REARM_DEBOUNCE_MS = 150;
@@ -74,6 +75,7 @@ interface ActiveHelpRequest {
   title?: string;
   targets: HelpTarget[];
   selectors: string[];
+  rects: HelpHighlightRect[];
   timeoutMs: number;
   notificationId: string;
   resolvedTargets?: ResolvedTarget[];
@@ -134,6 +136,7 @@ function helpRequestMessage(help: ActiveHelpRequest, tabId: number): HelpRequest
     ...(help.title ? { title: help.title } : {}),
     displayMode: isPrimaryTab ? "full" : "compact",
     selectors: isPrimaryTab ? help.selectors : [],
+    rects: isPrimaryTab ? help.rects : [],
     timeoutMs: help.timeoutMs,
   };
 }
@@ -165,33 +168,6 @@ async function sendHelpRequestWithAck(
   throw lastError ?? new Error("failed to show help overlay");
 }
 
-async function tagRefTarget(
-  cdp: CdpRunner,
-  tabId: number,
-  backendNodeId: number,
-  index: number,
-): Promise<string | null> {
-  let objectId: string | undefined;
-  try {
-    const resolved = await cdp.send<{ object?: { objectId?: string } }>(tabId, "DOM.resolveNode", {
-      backendNodeId,
-    });
-    objectId = resolved.object?.objectId;
-    if (!objectId) return null;
-    await cdp.send(tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: `function(){ this.setAttribute("${HELP_ATTR}", "${index}"); }`,
-    });
-    return `[${HELP_ATTR}="${index}"]`;
-  } catch {
-    return null;
-  } finally {
-    if (objectId) {
-      await cdp.send(tabId, "Runtime.releaseObject", { objectId }).catch(() => {});
-    }
-  }
-}
-
 async function selectorExists(
   cdp: CdpRunner,
   tabId: number,
@@ -209,36 +185,22 @@ async function selectorExists(
   }
 }
 
-async function clearRefTags(cdp: CdpRunner | undefined, tabId: number): Promise<void> {
-  if (!cdp) return;
-  try {
-    const doc = await cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
-      depth: 0,
-    });
-    const rootId = doc.root?.nodeId;
-    if (rootId === undefined) return;
-    const { nodeIds } = await cdp.send<{ nodeIds: number[] }>(tabId, "DOM.querySelectorAll", {
-      nodeId: rootId,
-      selector: `[${HELP_ATTR}]`,
-    });
-    for (const nodeId of nodeIds ?? []) {
-      await cdp.send(tabId, "DOM.removeAttribute", { nodeId, name: HELP_ATTR }).catch(() => {});
-    }
-  } catch {
-    // Best-effort cleanup.
-  }
-}
-
 async function resolveHelpTargets(
   ctx: ReturnType<SessionManager["get"]>,
   tabId: number,
   targets: HelpTarget[],
   deps: RequestHelpDeps,
-): Promise<{ selectors: string[]; resolvedTargets?: ResolvedTarget[] }> {
+  options: { scrollIntoView: boolean },
+): Promise<{
+  selectors: string[];
+  rects: HelpHighlightRect[];
+  resolvedTargets?: ResolvedTarget[];
+}> {
   const selectors: string[] = [];
+  const rects: HelpHighlightRect[] = [];
   const resolved: ResolvedTarget[] = [];
   let rootNodeId: number | undefined;
-  if (deps.cdp && targets.length > 0) {
+  if (deps.cdp && targets.some((target) => Boolean(target.selector))) {
     try {
       const doc = await deps.cdp.send<{ root?: { nodeId?: number } }>(tabId, "DOM.getDocument", {
         depth: 0,
@@ -262,28 +224,55 @@ async function resolveHelpTargets(
       resolved.push({ matched, selector: tgt.selector });
     } else if (tgt.ref) {
       const looked = ctx ? lookupSnapshotRef(ctx, tgt.ref, tabId) : null;
-      const backendNodeId = looked?.backendNodeId ?? null;
-      let sel: string | null = null;
-      if (backendNodeId !== null && deps.cdp) {
-        sel = await tagRefTarget(deps.cdp, tabId, backendNodeId, i);
+      let rect: HelpHighlightRect | null = null;
+      if (looked && deps.cdp) {
+        const target = {
+          tabId,
+          ...(looked.cdpSessionId ? { sessionId: looked.cdpSessionId } : {}),
+        };
+        const geometry = await resolveNodeGeometry(
+          deps.cdp,
+          tabId,
+          {
+            target,
+            backendNodeId: looked.backendNodeId,
+            ...(looked.frameId ? { frameId: looked.frameId } : {}),
+          },
+          { scrollIntoView: options.scrollIntoView },
+        );
+        if (!isRpcError(geometry)) {
+          rect = {
+            top: geometry.topBounds.y,
+            left: geometry.topBounds.x,
+            width: geometry.topBounds.width,
+            height: geometry.topBounds.height,
+          };
+        }
       }
-      if (sel) selectors.push(sel);
-      resolved.push({ matched: sel !== null, ref: tgt.ref });
+      if (rect) rects.push(rect);
+      resolved.push({
+        matched: rect !== null,
+        ref: tgt.ref,
+      });
     }
   }
 
-  return { selectors, resolvedTargets: resolved.length > 0 ? resolved : undefined };
+  return { selectors, rects, resolvedTargets: resolved.length > 0 ? resolved : undefined };
 }
 
-async function refreshHelpTargets(help: ActiveHelpRequest): Promise<void> {
-  await clearRefTags(help.deps.cdp, help.primaryTabId);
-  const { selectors, resolvedTargets } = await resolveHelpTargets(
+async function refreshHelpTargets(
+  help: ActiveHelpRequest,
+  options: { scrollIntoView: boolean } = { scrollIntoView: true },
+): Promise<void> {
+  const { selectors, rects, resolvedTargets } = await resolveHelpTargets(
     help.ctx,
     help.primaryTabId,
     help.targets,
     help.deps,
+    options,
   );
   help.selectors = selectors;
+  help.rects = rects;
   help.resolvedTargets = resolvedTargets;
 }
 
@@ -294,12 +283,7 @@ async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
   const tabsToCancel = new Set([help.primaryTabId, ...help.overlayTabIds]);
   await Promise.all(
     [...tabsToCancel].map((tabId) =>
-      Promise.all([
-        clearRefTags(help.deps.cdp, tabId),
-        help.deps
-          .sendToTab(tabId, { type: HELP_CANCEL, requestId: help.requestId })
-          .catch(() => {}),
-      ]),
+      help.deps.sendToTab(tabId, { type: HELP_CANCEL, requestId: help.requestId }).catch(() => {}),
     ),
   );
 }
@@ -476,7 +460,9 @@ function attachHelpRuntimeListener(deps: RequestHelpDeps): () => void {
           sendResponse({ active: false });
           return;
         }
-        if (tabId === help.primaryTabId) await refreshHelpTargets(help);
+        if (tabId === help.primaryTabId) {
+          await refreshHelpTargets(help, { scrollIntoView: false });
+        }
         help.overlayTabIds.add(tabId);
         sendResponse({
           active: true,
@@ -486,6 +472,7 @@ function attachHelpRuntimeListener(deps: RequestHelpDeps): () => void {
             ...(help.title ? { title: help.title } : {}),
             displayMode: tabId === help.primaryTabId ? "full" : "compact",
             selectors: tabId === help.primaryTabId ? help.selectors : [],
+            rects: tabId === help.primaryTabId ? help.rects : [],
             timeoutMs: help.timeoutMs,
           },
         });
@@ -686,7 +673,13 @@ export async function handleRequestHelp(
   if (deps.autoAttachLifecycle !== false) ensureHelpLifecycleListeners(deps);
   const tabId = target.tabId;
   const initialTargets = params.targets ?? [];
-  const { selectors, resolvedTargets } = await resolveHelpTargets(ctx, tabId, initialTargets, deps);
+  const { selectors, rects, resolvedTargets } = await resolveHelpTargets(
+    ctx,
+    tabId,
+    initialTargets,
+    deps,
+    { scrollIntoView: true },
+  );
 
   await deps.windows.update(target.windowId, { focused: true }).catch(() => {});
   await deps.activateTab(tabId).catch(() => {});
@@ -729,6 +722,7 @@ export async function handleRequestHelp(
       ...(params.title ? { title: params.title } : {}),
       targets: initialTargets,
       selectors,
+      rects,
       timeoutMs,
       notificationId,
       resolvedTargets,

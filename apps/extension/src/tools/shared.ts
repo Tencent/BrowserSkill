@@ -6,7 +6,8 @@
 // exactly the same sandbox + visibility rules as the M6 observation
 // handlers (review parity).
 
-import type { DialogCursor } from "@/browser-driver/chromium-cdp";
+import type { CdpDebuggee, DialogCursor } from "@/browser-driver/chromium-cdp";
+import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
@@ -51,9 +52,11 @@ export type { DialogCursor };
  */
 export interface CdpRunner {
   send<T = unknown>(tabId: number, method: string, params?: object): Promise<T>;
+  sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;
+  getFrameGraph?(tabId: number): Promise<CdpFrameGraph>;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
-  onEvent?(handler: (source: chrome.debugger.Debuggee, method: string, params: unknown) => void): {
+  onEvent?(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
     dispose(): void;
   };
   dialogCursor?(tabId: number): DialogCursor;
@@ -66,6 +69,25 @@ export interface CdpRunner {
     maxTextChars: number,
     includeStack: boolean,
   ): ConsoleResult;
+}
+
+export function sendToCdpTarget<T = unknown>(
+  cdp: CdpRunner,
+  target: CdpTarget,
+  method: string,
+  params?: object,
+): Promise<T> {
+  if (target.sessionId && cdp.sendToTarget) {
+    return cdp.sendToTarget<T>(target, method, params);
+  }
+  return cdp.send<T>(target.tabId, method, params);
+}
+
+export function cdpRunnerForTarget(cdp: CdpRunner, target: CdpTarget): CdpRunner {
+  return {
+    send: <T = unknown>(_tabId: number, method: string, params?: object) =>
+      sendToCdpTarget<T>(cdp, target, method, params),
+  };
 }
 
 export interface BufferedReadBounds {

@@ -350,6 +350,7 @@ export default defineContentScript({
           ...(helpMsg.title ? { title: helpMsg.title } : {}),
           ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
           selectors: helpMsg.selectors,
+          rects: helpMsg.rects,
           onContinue: (note: string) =>
             void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
           onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),
@@ -413,6 +414,15 @@ export default defineContentScript({
         ...(helpMsg.title ? { title: helpMsg.title } : {}),
         ...(helpMsg.displayMode ? { displayMode: helpMsg.displayMode } : {}),
         selectors: helpMsg.selectors,
+        rects: helpMsg.rects,
+        refreshRects: async () => {
+          const response = (await chrome.runtime.sendMessage({
+            type: HELP_QUERY,
+          })) as HelpQueryResponse | undefined;
+          return response?.active && response.request?.requestId === helpMsg.requestId
+            ? response.request.rects
+            : undefined;
+        },
         onContinue: (note: string) =>
           void sendHelpFinish(helpMsg.requestId, "continued", note.trim() ? note : undefined),
         onCancel: () => void sendHelpFinish(helpMsg.requestId, "cancelled"),

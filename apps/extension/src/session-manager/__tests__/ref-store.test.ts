@@ -33,4 +33,19 @@ describe("RefStore", () => {
     expect(s.resolve("@e11")).toBe(11);
     expect(s.size()).toBe(2);
   });
+
+  it("preserves the child CDP session as part of ref identity", () => {
+    const s = new RefStore();
+    s.set("e1", 42, {
+      tabId: 7,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    expect(s.resolveEntry("e1")).toMatchObject({
+      backendNodeId: 42,
+      tabId: 7,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+  });
 });

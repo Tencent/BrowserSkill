@@ -7,6 +7,7 @@
 import type { Rect, Viewport } from "@browser-skill/vom";
 import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
+import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
 import type { CdpRunner } from "../shared";
 
 const REQUESTED_STYLES = ["position", "pointer-events", "cursor"] as const;
@@ -22,9 +23,9 @@ export interface CapturedNode {
   ownerFrameBackendNodeId?: number | null;
   tag: string;
   attrs: Record<string, string>;
-  /** Top-level viewport geometry when this node belongs to the root document. */
+  /** Top-level viewport-relative CSS px, clipped to the owning frame viewport. */
   rect: Rect | null;
-  /** Owning document viewport-relative CSS px. */
+  /** Frame-local viewport-relative CSS px before top-level projection. */
   localRect?: Rect | null;
   paintOrder: number;
   position: string;
@@ -317,6 +318,7 @@ interface ParseDocumentResult {
 interface FrameContext {
   frameId?: string;
   ownerFrameBackendNodeId: number | null;
+  projection: GeometryProjection | null;
   scrollX: number;
   scrollY: number;
 }
@@ -869,7 +871,10 @@ function parseDocumentNodes(
           w: b[2] / dpr,
           h: b[3] / dpr,
         };
-        rect = context.ownerFrameBackendNodeId === null ? localRect : null;
+        const bounds = context.projection
+          ? projectRectToViewport(localRect, context.projection)
+          : null;
+        rect = bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null;
       }
       paintOrder = dl?.paintOrders?.[li] ?? 0;
       const styleRow = dl?.styles?.[li] ?? [];
@@ -939,6 +944,7 @@ function parseChildFrameDocuments(
   strings: string[],
   dpr: number,
   parentDocIndex: number,
+  parentNodes: CapturedNode[],
   parentContext: FrameContext,
   visited = new Set<number>(),
 ): ParseFrameDocumentsResult {
@@ -953,6 +959,7 @@ function parseChildFrameDocuments(
   }
 
   const parentBackendIds = parentDoc?.nodes?.backendNodeId ?? [];
+  const parentNodeByBackendId = new Map(parentNodes.map((node) => [node.backendNodeId, node]));
 
   for (const [nodeArrayIdx, childDocIndex] of cdi) {
     if (visited.has(childDocIndex)) continue;
@@ -960,10 +967,16 @@ function parseChildFrameDocuments(
     if (!childDoc) continue;
     const iframeBackendId = parentBackendIds[nodeArrayIdx];
     if (iframeBackendId === undefined) continue;
+    const iframeNode = parentNodeByBackendId.get(iframeBackendId);
+    const projection =
+      parentContext.projection && iframeNode?.localRect
+        ? childFrameProjection(parentContext.projection, iframeNode.localRect)
+        : null;
 
     const childContext: FrameContext = {
       frameId: snapshotFrameId(childDoc, strings),
       ownerFrameBackendNodeId: iframeBackendId,
+      projection,
       scrollX: childDoc.scrollOffsetX ?? 0,
       scrollY: childDoc.scrollOffsetY ?? 0,
     };
@@ -982,6 +995,7 @@ function parseChildFrameDocuments(
       strings,
       dpr,
       childDocIndex,
+      parsed.nodes,
       childContext,
       nextVisited,
     );
@@ -1042,6 +1056,12 @@ export async function captureViewModel(
   const topContext: FrameContext = {
     frameId: snapshotFrameId(doc0, strings),
     ownerFrameBackendNodeId: null,
+    projection: {
+      sourceViewport: viewport,
+      sourceClips: [],
+      edges: [],
+      topViewport: viewport,
+    },
     scrollX,
     scrollY,
   };
@@ -1049,7 +1069,7 @@ export async function captureViewModel(
   const nodes = mainParsed.nodes;
   const excludedBackendNodeIds = new Set(mainParsed.excludedBackendNodeIds);
 
-  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, topContext);
+  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, nodes, topContext);
   const iframeNodes = frameParsed.iframeNodes;
   for (const id of frameParsed.excludedBackendNodeIds) {
     excludedBackendNodeIds.add(id);

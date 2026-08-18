@@ -30,6 +30,9 @@ function makeFakeCdp(handlers: Record<string, (params: unknown) => unknown>) {
   const sendImpl = async (tabId: number, method: string, params?: object) => {
     sent.push({ tabId, method, params });
     const h = handlers[method];
+    if (!h && method === "Page.getLayoutMetrics") {
+      return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+    }
     if (!h) throw new Error(`unexpected CDP call ${method}`);
     return h(params);
   };
@@ -162,6 +165,63 @@ describe("handleClick", () => {
       button: "left",
       clickCount: 2,
     });
+  });
+
+  it("resolves frame refs in their CDP session and dispatches input in top coordinates", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({
+      "Input.dispatchMouseEvent": () => ({}),
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getBoxModel": () => ({
+        model: { content: [204, 306, 604, 306, 604, 506, 204, 506] },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 99,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
+    fake.cdp.sendToTarget = vi.fn(async (target, method) => {
+      targetCalls.push({ sessionId: target.sessionId, method });
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+      }
+      throw new Error(`unexpected child CDP call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // The iframe content box starts at (204, 306) after its border and is scaled 2x.
+    expect(res).toMatchObject({ x: 324, y: 386 });
+    expect(targetCalls).toEqual([
+      { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
+      { sessionId: "child-session", method: "DOM.getContentQuads" },
+      { sessionId: "child-session", method: "Page.getLayoutMetrics" },
+    ]);
+    expect(fake.sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(3);
   });
 
   it("enables overlay bypass before mouse events when overlay blocks the click point", async () => {

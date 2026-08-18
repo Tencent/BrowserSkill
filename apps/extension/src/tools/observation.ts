@@ -13,6 +13,7 @@ import {
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
   withOverlaysHiddenForCapture,
@@ -30,8 +31,8 @@ import type {
   SnapshotResult,
 } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
-import { nodeBoundingRect, scrollNodeIntoView } from "./element-geometry";
 import { rpcError } from "./errors";
+import { resolveNodeGeometry } from "./frame-geometry";
 import {
   type ChromeTabsApi,
   enforceToolTargetScope,
@@ -40,6 +41,7 @@ import {
   type ResolvedTargetTab,
   resolveCdpAccessibleTargetTab,
   type CdpRunner as SharedCdpRunner,
+  sendToCdpTarget,
   normaliseRef as sharedNormaliseRef,
   type ToolEffect,
 } from "./shared";
@@ -163,26 +165,30 @@ function throwIfAborted(signal: AbortSignal | undefined, tool: string): void {
 async function captureElementScreenshot(
   cdp: SharedCdpRunner,
   tabId: number,
+  target: CdpTarget,
   backendNodeId: number,
+  frameId?: string,
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
-  const scrollErr = await scrollNodeIntoView(cdp, tabId, backendNodeId);
-  if (scrollErr) return scrollErr;
+  const geometry = await resolveNodeGeometry(
+    cdp,
+    tabId,
+    { target, backendNodeId, ...(frameId ? { frameId } : {}) },
+    { scrollIntoView: true },
+  );
+  if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
-
-  const rectOrErr = await nodeBoundingRect(cdp, tabId, backendNodeId);
-  if (isRpcError(rectOrErr)) return rectOrErr;
-  if (signal?.aborted) return cancelled("screenshot");
+  const rect = geometry.topBounds;
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
       format: "png",
       clip: {
-        x: rectOrErr.x,
-        y: rectOrErr.y,
-        width: rectOrErr.width,
-        height: rectOrErr.height,
+        x: rect.x,
+        y: rect.y,
+        width: rect.width,
+        height: rect.height,
         scale: 1,
       },
     });
@@ -192,8 +198,8 @@ async function captureElementScreenshot(
       return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
     }
     const dims = parsePngDimensions(image_base64) ?? {
-      width: Math.round(rectOrErr.width),
-      height: Math.round(rectOrErr.height),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
     };
     return { image_base64, width: dims.width, height: dims.height };
   } catch (err) {
@@ -297,9 +303,21 @@ export async function handleScreenshot(
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
     if (signal?.aborted) return cancelled("screenshot");
     const cdp = deps.cdp;
+    const nodeTarget = {
+      tabId: target.tabId,
+      ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
+    };
     const captured = await withOverlaysHiddenForCapture(
       target.tabId,
-      () => captureElementScreenshot(cdp, target.tabId, node.backendNodeId, signal),
+      () =>
+        captureElementScreenshot(
+          cdp,
+          target.tabId,
+          nodeTarget,
+          node.backendNodeId,
+          node.frameId,
+          signal,
+        ),
       deps.sendToTab,
     );
     if (isRpcError(captured)) return captured;
@@ -1280,7 +1298,7 @@ export function buildFrameVomScene(
           excludedBackendNodeIds:
             frameId === rootFrameId ? captured.excludedBackendNodeIds : new Set(),
         },
-        { pageUrl: options.pageUrl },
+        { pageUrl: document.url ?? options.pageUrl },
       ),
     );
   }
@@ -1452,9 +1470,15 @@ export async function handleGetHtml(
     if (params.ref) {
       const resolved = resolveSnapshotRef(ctx, params.ref, target.tabId);
       if (isRpcError(resolved)) return resolved;
-      const resp = await deps.cdp.send<{ outerHTML?: string }>(target.tabId, "DOM.getOuterHTML", {
-        backendNodeId: resolved.backendNodeId,
-      });
+      const resp = await sendToCdpTarget<{ outerHTML?: string }>(
+        deps.cdp,
+        {
+          tabId: target.tabId,
+          ...(resolved.cdpSessionId ? { sessionId: resolved.cdpSessionId } : {}),
+        },
+        "DOM.getOuterHTML",
+        { backendNodeId: resolved.backendNodeId },
+      );
       throwIfAborted(signal, "get_html");
       html = resp.outerHTML ?? "";
     } else {
@@ -1604,10 +1628,22 @@ async function handleVomObservation(
       activeRegionPolicy: true,
     });
     throwIfAborted(signal, toolName);
+    const targetByFrameId = new Map(
+      frameDocuments.map((document) => [document.frameId, document.target]),
+    );
     ctx.refStore.replace(
-      rendered.refs.map(
-        (ref) => [ref.ref, { backendNodeId: ref.backendNodeId, tabId: target.tabId }] as const,
-      ),
+      rendered.refs.map((ref) => {
+        const refTarget = ref.frameId ? targetByFrameId.get(ref.frameId) : undefined;
+        return [
+          ref.ref,
+          {
+            backendNodeId: ref.backendNodeId,
+            tabId: target.tabId,
+            ...(ref.frameId ? { frameId: ref.frameId } : {}),
+            ...(refTarget?.sessionId ? { cdpSessionId: refTarget.sessionId } : {}),
+          },
+        ] as const;
+      }),
     );
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       text: rendered.text,

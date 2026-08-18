@@ -1,5 +1,5 @@
 // Snapshot ref resolution — normalise `@eN` / `eN`, look up
-// `backendNodeId` via the session RefStore, and build stable
+// compound CDP node identity via the session RefStore, and build stable
 // `ref_not_found` errors for hard-failure tool paths.
 
 import type { SessionContext } from "@/session-manager/manager";
@@ -10,6 +10,13 @@ import { rpcError } from "./errors";
 export interface SnapshotRefLookup {
   backendNodeId: number;
   refKey: string;
+  frameId?: string;
+  cdpSessionId?: string;
+}
+
+function refEntryForTab(ctx: SessionContext, refKey: string, tabId: number) {
+  const entry = ctx.refStore.resolveEntry(refKey);
+  return entry?.tabId === tabId ? entry : null;
 }
 
 /**
@@ -23,9 +30,14 @@ export function lookupSnapshotRef(
   tabId: number,
 ): SnapshotRefLookup | null {
   const refKey = normaliseRef(ref);
-  const backendNodeId = ctx.refStore.resolve(refKey, { tabId });
-  if (backendNodeId === null) return null;
-  return { backendNodeId, refKey };
+  const entry = refEntryForTab(ctx, refKey, tabId);
+  if (!entry) return null;
+  return {
+    backendNodeId: entry.backendNodeId,
+    refKey,
+    ...(entry.frameId ? { frameId: entry.frameId } : {}),
+    ...(entry.cdpSessionId ? { cdpSessionId: entry.cdpSessionId } : {}),
+  };
 }
 
 /**
@@ -37,7 +49,7 @@ export function resolveSnapshotRef(
   ctx: SessionContext,
   ref: string,
   tabId: number,
-): { backendNodeId: number; refKey: string } | RpcError {
+): SnapshotRefLookup | RpcError {
   const looked = lookupSnapshotRef(ctx, ref, tabId);
   if (looked === null) {
     return rpcError(

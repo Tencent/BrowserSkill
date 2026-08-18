@@ -63,6 +63,9 @@ function makeFakeCdp(handlers: Record<string, (params?: object) => unknown>) {
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
     sent.push({ method, params });
     const handler = handlers[method];
+    if (!handler && method === "Page.getLayoutMetrics") {
+      return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+    }
     if (!handler) throw new Error(`unexpected CDP call ${method}`);
     return handler(params);
   });
@@ -586,6 +589,7 @@ describe("buildVomScene", () => {
         {
           frameId: "main",
           contextScopeId: "main",
+          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             axNode("root", 1, "RootWebArea"),
@@ -598,6 +602,7 @@ describe("buildVomScene", () => {
           contextScopeId: "first",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
+          target: { tabId: 7, sessionId: "session-first" },
           domNodes: firstNodes,
           axNodes: [
             axNode("root", 100, "RootWebArea"),
@@ -609,6 +614,7 @@ describe("buildVomScene", () => {
           contextScopeId: "second",
           parentFrameId: "main",
           ownerBackendNodeId: 20,
+          target: { tabId: 7, sessionId: "session-second" },
           domNodes: secondNodes,
           axNodes: [
             axNode("root", 200, "RootWebArea"),
@@ -621,6 +627,7 @@ describe("buildVomScene", () => {
           contextScopeId: "nested",
           parentFrameId: "second",
           ownerBackendNodeId: 210,
+          target: { tabId: 7, sessionId: "session-nested" },
           domNodes: nestedNodes,
           axNodes: [
             axNode("root", 300, "RootWebArea"),
@@ -673,6 +680,7 @@ describe("buildVomScene", () => {
         {
           frameId: "main",
           contextScopeId: "main",
+          target: { tabId: 7 },
           domNodes: [],
           axNodes: [],
         },
@@ -680,6 +688,7 @@ describe("buildVomScene", () => {
           frameId: "child",
           contextScopeId: "child",
           parentFrameId: "main",
+          target: { tabId: 7 },
           domNodes: [childNode],
           axNodes: [
             {
@@ -740,6 +749,7 @@ describe("buildVomScene", () => {
         {
           frameId: "main",
           contextScopeId: "main",
+          target: { tabId: 7 },
           domNodes: mainNodes,
           axNodes: [
             {
@@ -761,6 +771,7 @@ describe("buildVomScene", () => {
           contextScopeId: "child",
           parentFrameId: "main",
           ownerBackendNodeId: 10,
+          target: { tabId: 7, sessionId: "child-session" },
           domNodes: [],
           axNodes: [
             {
@@ -3405,6 +3416,32 @@ describe("handleGetHtml", () => {
     expect(res.html).toBe("<button>x</button>");
     // Never called DOM.getDocument when ref is provided.
     expect(deps.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads a frame ref through its child CDP session", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e7", 4242, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const deps = makeDeps({});
+    const sendToTarget = vi.fn(async (target, method, params) => {
+      expect(target).toEqual({ tabId: 4, sessionId: "child-session" });
+      expect(method).toBe("DOM.getOuterHTML");
+      expect(params).toEqual({ backendNodeId: 4242 });
+      return { outerHTML: "<button>frame</button>" };
+    });
+    (deps.cdp as CdpRunner).sendToTarget = sendToTarget as unknown as NonNullable<
+      CdpRunner["sendToTarget"]
+    >;
+
+    const res = await handleGetHtml(sm, { session_id: "aa11", ref: "@e7" }, deps);
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.html).toBe("<button>frame</button>");
+    expect(deps.send).not.toHaveBeenCalled();
   });
 
   it("returns not_found when a ref belongs to another tab", async () => {

@@ -122,10 +122,14 @@ export async function nodeBoundingRect(
   tabId: number,
   backendNodeId: number,
 ): Promise<ViewportRect | RpcError> {
-  const polygon = await visibleContentPolygon(cdp, tabId, backendNodeId);
-  if (isRpcError(polygon)) return polygon;
-  // visibleContentPolygon only returns quads with positive area.
-  return quadBoundingRect(polygon)!;
+  const polygons = await visibleContentPolygons(cdp, tabId, backendNodeId);
+  if (isRpcError(polygons)) return polygons;
+  const bounds = polygons.flatMap((polygon) => quadBoundingRect(polygon) ?? []);
+  const x = Math.min(...bounds.map((rect) => rect.x));
+  const y = Math.min(...bounds.map((rect) => rect.y));
+  const right = Math.max(...bounds.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...bounds.map((rect) => rect.y + rect.height));
+  return { x, y, width: right - x, height: bottom - y };
 }
 
 /**
@@ -143,17 +147,17 @@ export function boxCentre(box: number[]): { x: number; y: number } {
   return quadCentre(box);
 }
 
-async function visibleContentPolygon(
+async function visibleContentPolygons(
   cdp: CdpRunner,
   tabId: number,
   backendNodeId: number,
-): Promise<number[] | RpcError> {
+): Promise<number[][] | RpcError> {
   try {
     const quads = await cdp.send<{ quads?: number[][] }>(tabId, "DOM.getContentQuads", {
       backendNodeId,
     });
-    const quad = quads.quads?.find((q) => q.length === 8 && quadBoundingRect(q) !== null);
-    if (quad) return quad;
+    const visible = quads.quads?.filter((quad) => quad.length === 8 && quadBoundingRect(quad));
+    if (visible && visible.length > 0) return visible;
   } catch (err) {
     console.debug("[bsk element-geometry] getContentQuads failed", err);
   }
@@ -162,13 +166,25 @@ async function visibleContentPolygon(
       backendNodeId,
     });
     const content = box.model?.content;
-    if (content && content.length === 8 && quadBoundingRect(content)) return content;
+    if (content && content.length === 8 && quadBoundingRect(content)) return [content];
   } catch (err) {
     console.debug("[bsk element-geometry] getBoxModel failed", err);
   }
   const descendantRect = await descendantBoundingRect(cdp, tabId, backendNodeId);
-  if (descendantRect) return rectToQuad(descendantRect);
+  if (descendantRect) return [rectToQuad(descendantRect)];
   return elementNotVisibleError();
+}
+
+/**
+ * Return a live content quad for a backend node in the target's own viewport.
+ * Frame-aware callers can project this quad through the owning frame chain.
+ */
+export async function nodeContentQuads(
+  cdp: CdpRunner,
+  tabId: number,
+  backendNodeId: number,
+): Promise<number[][] | RpcError> {
+  return visibleContentPolygons(cdp, tabId, backendNodeId);
 }
 
 async function descendantBoundingRect(
@@ -254,7 +270,7 @@ export async function nodeCentre(
   tabId: number,
   backendNodeId: number,
 ): Promise<{ x: number; y: number } | RpcError> {
-  const polygon = await visibleContentPolygon(cdp, tabId, backendNodeId);
-  if (isRpcError(polygon)) return polygon;
-  return quadCentre(polygon);
+  const polygons = await visibleContentPolygons(cdp, tabId, backendNodeId);
+  if (isRpcError(polygons)) return polygons;
+  return quadCentre(polygons[0]);
 }

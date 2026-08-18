@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
+import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
   const listeners = new Set<(...args: TArgs) => void>();
@@ -14,7 +14,7 @@ function fakeChromeEvent<TArgs extends unknown[]>() {
 }
 
 function fakeApi() {
-  const onEvent = fakeChromeEvent<[chrome.debugger.Debuggee, string, unknown]>();
+  const onEvent = fakeChromeEvent<[CdpDebuggee, string, unknown]>();
   const onDetach = fakeChromeEvent<[chrome.debugger.Debuggee, string]>();
   const api: CdpDebuggerApi = {
     attach: vi.fn(async () => {}),
@@ -29,6 +29,135 @@ function fakeApi() {
 }
 
 describe("ChromiumCdp", () => {
+  it("discovers multiple iframe targets and recursively routes nested OOPIF commands", async () => {
+    const { api, onEvent } = fakeApi();
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        target: chrome.debugger.Debuggee & { sessionId?: string },
+        method: string,
+        params?: { frameId?: string },
+      ) => {
+        if (method === "DOM.getFrameOwner") {
+          return { backendNodeId: params?.frameId === "nested" ? 300 : 200 };
+        }
+        if (method !== "Page.getFrameTree") return {};
+        if (target.sessionId === "right-session") {
+          return {
+            frameTree: {
+              frame: { id: "right", url: "https://right.test" },
+              childFrames: [
+                { frame: { id: "nested", parentId: "right", url: "https://nested.test" } },
+              ],
+            },
+          };
+        }
+        if (target.sessionId === "nested-session") {
+          return { frameTree: { frame: { id: "nested", url: "https://nested.test" } } };
+        }
+        return {
+          frameTree: {
+            frame: { id: "main", url: "https://app.test" },
+            childFrames: [
+              { frame: { id: "left", parentId: "main", url: "https://left.test" } },
+              {
+                frame: { id: "right", parentId: "main", url: "https://right.test" },
+                childFrames: [
+                  { frame: { id: "nested", parentId: "right", url: "https://nested.test" } },
+                ],
+              },
+            ],
+          },
+        };
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(4);
+    onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "right-session" });
+    onEvent.fire({ tabId: 4 } as chrome.debugger.Debuggee, "Target.attachedToTarget", {
+      sessionId: "nested-session",
+    });
+
+    const graph = await cdp.getFrameGraph(4);
+
+    expect(graph.frames).toHaveLength(4);
+    expect(graph.frames.find((frame) => frame.frameId === "left")?.target).toEqual({ tabId: 4 });
+    expect(graph.frames.find((frame) => frame.frameId === "right")?.target.sessionId).toBe(
+      "right-session",
+    );
+    expect(graph.frames.find((frame) => frame.frameId === "nested")?.target.sessionId).toBe(
+      "nested-session",
+    );
+    expect(graph.frames.find((frame) => frame.frameId === "right")?.ownerBackendNodeId).toBe(200);
+    expect(graph.frames.find((frame) => frame.frameId === "nested")?.ownerBackendNodeId).toBe(300);
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      { tabId: 4, sessionId: "right-session" },
+      "DOM.getFrameOwner",
+      { frameId: "nested" },
+    );
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      { tabId: 4, sessionId: "nested-session" },
+      "Target.setAutoAttach",
+      expect.objectContaining({ flatten: true }),
+    );
+  });
+
+  it("waits for recursively attached iframe targets without a depth limit", async () => {
+    const { api, onEvent } = fakeApi();
+    const depth = 6;
+    const scheduled = new Set<string>();
+    const nestedTree = (index: number): Record<string, unknown> => ({
+      frame: {
+        id: index === 0 ? "main" : `frame-${index}`,
+        ...(index > 0 ? { parentId: index === 1 ? "main" : `frame-${index - 1}` } : {}),
+      },
+      ...(index < depth ? { childFrames: [nestedTree(index + 1)] } : {}),
+    });
+    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
+      async (target: CdpDebuggee, method: string, params?: { frameId?: string }) => {
+        if (method === "Target.setAutoAttach") {
+          const parentIndex = target.sessionId
+            ? Number(target.sessionId.replace("session-", ""))
+            : 0;
+          const nextIndex = parentIndex + 1;
+          const key = `${target.sessionId ?? "root"}:${nextIndex}`;
+          if (nextIndex <= depth && !scheduled.has(key)) {
+            scheduled.add(key);
+            setTimeout(() => {
+              onEvent.fire(
+                { tabId: 4, ...(target.sessionId ? { sessionId: target.sessionId } : {}) },
+                "Target.attachedToTarget",
+                {
+                  sessionId: `session-${nextIndex}`,
+                  targetInfo: { type: "iframe" },
+                },
+              );
+            }, 5);
+          }
+          return {};
+        }
+        if (method === "Page.getFrameTree") {
+          if (!target.sessionId) return { frameTree: nestedTree(0) };
+          const index = Number(target.sessionId.replace("session-", ""));
+          return { frameTree: nestedTree(index) };
+        }
+        if (method === "DOM.getFrameOwner") {
+          return { backendNodeId: Number(params?.frameId?.replace("frame-", "")) + 100 };
+        }
+        return {};
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+
+    const graph = await cdp.getFrameGraph(4);
+
+    expect(graph.frames).toHaveLength(depth + 1);
+    for (let index = 1; index <= depth; index += 1) {
+      expect(
+        graph.frames.find((frame) => frame.frameId === `frame-${index}`)?.target.sessionId,
+      ).toBe(`session-${index}`);
+    }
+  });
+
   it("coalesces concurrent attach calls for the same tab", async () => {
     const { api } = fakeApi();
     let releaseAttach!: () => void;

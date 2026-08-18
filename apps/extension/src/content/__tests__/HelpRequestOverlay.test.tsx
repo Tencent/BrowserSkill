@@ -1,6 +1,6 @@
 import { i18n } from "@browser-skill/i18n";
 import { I18nextProvider } from "@browser-skill/i18n/react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type HelpRequestData, HelpRequestOverlay } from "../HelpRequestOverlay";
@@ -36,6 +36,36 @@ describe("HelpRequestOverlay", () => {
   it("renders the prompt", () => {
     renderOverlay(baseRequest());
     expect(screen.getByText("Please complete the captcha")).toBeTruthy();
+  });
+
+  it("renders explicit viewport rectangles for cross-frame targets", () => {
+    const { container } = renderOverlay(
+      baseRequest({ rects: [{ top: 30, left: 40, width: 120, height: 50 }] }),
+    );
+    const highlight = container.querySelector<HTMLElement>("[data-slot='help-highlight']");
+    expect(highlight?.style.top).toBe("30px");
+    expect(highlight?.style.left).toBe("40px");
+    expect(highlight?.style.width).toBe("120px");
+    expect(highlight?.style.height).toBe("50px");
+  });
+
+  it("re-resolves cross-frame rectangles after the viewport changes", async () => {
+    const refreshRects = vi.fn(async () => [{ top: 80, left: 90, width: 140, height: 60 }]);
+    const { container } = renderOverlay(
+      baseRequest({
+        rects: [{ top: 30, left: 40, width: 120, height: 50 }],
+        refreshRects,
+      }),
+    );
+
+    window.dispatchEvent(new Event("scroll"));
+
+    await waitFor(() => {
+      const highlight = container.querySelector<HTMLElement>("[data-slot='help-highlight']");
+      expect(highlight?.style.top).toBe("80px");
+      expect(highlight?.style.left).toBe("90px");
+    });
+    expect(refreshRects).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the inactive render stable", () => {

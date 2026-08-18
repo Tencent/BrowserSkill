@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
+import { RefStore } from "@/session-manager/ref-store";
 import type { RequestHelpParams } from "@/transport/types";
 import { handleRequestHelp, type RequestHelpDeps, resetHelpLifecycleForTests } from "../human-loop";
 
@@ -50,11 +51,10 @@ function installHelpLifecycleChrome() {
 }
 
 function fakeManager(sessionId: string, agentWindowId: number, tabId: number) {
+  const refStore = new RefStore();
   const mgr = {
     get: (id: string) =>
-      id === sessionId
-        ? { sessionId, agentWindowId, refStore: { resolve: () => null }, borrowedTabs: new Map() }
-        : null,
+      id === sessionId ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map() } : null,
     findByWindowId: (wid: number) => (wid === agentWindowId ? { sessionId } : null),
   } as unknown as SessionManager;
   return mgr;
@@ -339,26 +339,23 @@ describe("handleRequestHelp", () => {
 
     ac.abort();
     await expect(pending).resolves.toMatchObject({ code: "cancelled" });
-    expect(cdpSend).toHaveBeenCalledWith(
-      5,
-      "DOM.querySelectorAll",
-      expect.objectContaining({ selector: "[data-bsk-help]" }),
-    );
-    expect(cdpSend).toHaveBeenCalledWith(
-      6,
-      "DOM.querySelectorAll",
-      expect.objectContaining({ selector: "[data-bsk-help]" }),
+    expect(cdpSend).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "DOM.removeAttribute",
+      expect.anything(),
     );
   });
 
-  it("tags ref targets via CDP and reports them matched", async () => {
+  it("resolves ref targets to explicit viewport rectangles without mutating the page", async () => {
+    const refStore = new RefStore();
+    refStore.set("e1", 42, { tabId: 5 });
     const mgr = {
       get: (id: string) =>
         id === "abcd"
           ? {
               sessionId: "abcd",
               agentWindowId: 99,
-              refStore: { resolve: () => 42 },
+              refStore,
               borrowedTabs: new Map(),
             }
           : null,
@@ -366,7 +363,17 @@ describe("handleRequestHelp", () => {
     } as unknown as SessionManager;
     const deps = baseDeps({
       cdp: {
-        send: vi.fn(async () => ({ object: { objectId: "obj-1" } })),
+        send: vi.fn(async (_tabId, method) => {
+          if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+          if (method === "DOM.scrollIntoViewIfNeeded") return {};
+          if (method === "DOM.getContentQuads") {
+            return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+          }
+          if (method === "Page.getLayoutMetrics") {
+            return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+          }
+          throw new Error(`unexpected ${method}`);
+        }),
       } as unknown as RequestHelpDeps["cdp"],
     });
     const res = await handleRequestHelp(
@@ -375,12 +382,95 @@ describe("handleRequestHelp", () => {
       deps,
     );
     const sentMsg = (deps.sendToTab as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(sentMsg.selectors).toContain('[data-bsk-help="0"]');
+    expect(sentMsg.selectors).toEqual([]);
+    expect(sentMsg.rects).toEqual([{ top: 20, left: 10, width: 100, height: 40 }]);
     expect(res).toMatchObject({
       outcome: "continued",
       tab_id: 5,
-      resolved_targets: [{ matched: true, ref: "@e1" }],
+      resolved_targets: [
+        {
+          matched: true,
+          ref: "@e1",
+        },
+      ],
     });
+  });
+
+  it("projects an OOPIF ref through its live content quad for the help overlay", async () => {
+    const mgr = {
+      get: (id: string) =>
+        id === "abcd"
+          ? {
+              sessionId: "abcd",
+              agentWindowId: 99,
+              refStore: {
+                resolveEntry: () => ({
+                  backendNodeId: 42,
+                  tabId: 5,
+                  frameId: "child",
+                  cdpSessionId: "child-session",
+                  generation: 1,
+                }),
+              },
+              borrowedTabs: new Map(),
+            }
+          : null,
+      findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
+    } as unknown as SessionManager;
+    const send = vi.fn(async (_tabId, method) => {
+      if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getBoxModel") {
+        return { model: { content: [204, 306, 604, 306, 604, 506, 204, 506] } };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      }
+      throw new Error(`unexpected root ${method}`);
+    });
+    const sendToTarget = vi.fn(async (_target, method) => {
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+      }
+      throw new Error(`unexpected child ${method}`);
+    });
+    const deps = baseDeps({
+      cdp: {
+        send,
+        sendToTarget,
+        getFrameGraph: vi.fn(async () => ({
+          rootFrameId: "main",
+          frames: [
+            { frameId: "main", target: { tabId: 5 } },
+            {
+              frameId: "child",
+              parentFrameId: "main",
+              ownerBackendNodeId: 99,
+              target: { tabId: 5, sessionId: "child-session" },
+            },
+          ],
+        })),
+      } as unknown as NonNullable<RequestHelpDeps["cdp"]>,
+    });
+
+    const res = await handleRequestHelp(
+      mgr,
+      baseParams({ tab_id: 5, targets: [{ ref: "@e1" }] }),
+      deps,
+    );
+
+    const sentMsg = (deps.sendToTab as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(sentMsg.rects).toEqual([{ top: 346, left: 224, width: 200, height: 80 }]);
+    expect(res).toMatchObject({ resolved_targets: [{ matched: true, ref: "@e1" }] });
+    expect(sendToTarget).toHaveBeenCalledWith(
+      { tabId: 5, sessionId: "child-session" },
+      "DOM.getContentQuads",
+      { backendNodeId: 42 },
+    );
   });
 
   it("reports ref target unmatched when ref does not resolve", async () => {
@@ -398,16 +488,15 @@ describe("handleRequestHelp", () => {
   });
 
   it("reports ref target unmatched when ref is for another tab", async () => {
+    const refStore = new RefStore();
+    refStore.set("e1", 42, { tabId: 4 });
     const mgr = {
       get: (id: string) =>
         id === "abcd"
           ? {
               sessionId: "abcd",
               agentWindowId: 99,
-              refStore: {
-                resolve: (ref: string, opts: { tabId?: number }) =>
-                  ref === "e1" && opts.tabId === 4 ? 42 : null,
-              },
+              refStore,
               borrowedTabs: new Map(),
             }
           : null,
