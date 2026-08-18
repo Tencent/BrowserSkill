@@ -92,7 +92,7 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
             version: "131.0".into(),
         },
         min_compatible_peer: Some("0.1.0-dev.0".parse().unwrap()),
-        min_compatible_protocol: Some("1.1".into()),
+        min_compatible_protocol: Some("1.0".into()),
         label: "Test".into(),
     };
     let req = RequestFrame {
