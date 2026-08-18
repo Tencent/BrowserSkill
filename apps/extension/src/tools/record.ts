@@ -15,22 +15,27 @@ import {
   type RecordQueryResponse,
   type RecordStartAck,
   type RecordStartMessage,
+  type RecordStepAck,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import { RecordingObservationRuntime } from "@/lib/recording/recording-runtime";
 import { appendRecordedPayload, observeRecordedNavigation } from "@/lib/recording/step-buffer";
 import { buildTraceV2 } from "@/lib/recording/trace-reducer-v2";
 import type { RecordingDraftStep } from "@/lib/recording/types";
 import type { SessionManager } from "@/session-manager/manager";
+import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   RecordAwaitParams,
   RecordAwaitResult,
+  RecordedTrace,
   RecordStartParams,
   RecordStartResult,
   RecordStopParams,
   RecordStopResult,
   RpcError,
-  TraceV2,
+  StopReason,
 } from "@/transport/types";
+import { TRACE_VERSION_V3 } from "@/transport/types";
 import { handleNavigate } from "./navigation";
 import {
   type CdpRunner,
@@ -50,14 +55,32 @@ interface ActiveRecording {
   steps: RecordingDraftStep[];
   startedAt: string;
   startedAtMs: number;
-  finishPromise: Promise<TraceV2>;
-  resolveFinish: (trace: TraceV2) => void;
+  traceVersion: 2 | 3;
+  finishPromise: Promise<RecordedTrace>;
+  resolveFinish: (trace: RecordedTrace) => void;
   rejectFinish: (err: Error) => void;
   settled: boolean;
-  finishing: boolean;
+  finishAttempt: Promise<RecordedTrace | null> | null;
   currentUrl?: string;
   pendingNavigation: boolean;
   pendingNavigationDeadline?: number;
+  observation: RecordingObservationRuntime | null;
+  stoppedBy: StopReason;
+  /** Navigation callbacks tracked from event receipt through action enqueue. */
+  navigationCallbacks: Set<Promise<void>>;
+  /** Synchronous intake gate closed only after finish drains to stability. */
+  acceptingNavigation: boolean;
+  /**
+   * Serializes step appends with navigation observation so a click is always
+   * in `steps` before a same-turn `webNavigation` tries to annotate it.
+   */
+  actionQueue: Promise<void>;
+  /** Last accepted sequence for each content-script document producer. */
+  lastStepSequenceByProducer: Map<string, number>;
+}
+
+function enqueueRecordingAction(recording: ActiveRecording, task: () => Promise<void>): void {
+  recording.actionQueue = recording.actionQueue.then(task, task).catch(() => {});
 }
 
 const recordings = new Map<string, ActiveRecording>();
@@ -77,6 +100,9 @@ function makeRequestId(tabId: number): string {
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+/** Recording producer version mirrored into trace.recorder.bsk. */
+export const BSK_TRACE_VERSION = EXTENSION_VERSION;
 
 /** Injectable http(s) landing page when `tool.record_start` omits `url`. */
 export const RECORD_DEFAULT_START_URL = "https://example.com/";
@@ -154,13 +180,48 @@ async function sendRecordStartWithAck(
   throw lastError ?? new Error("failed to start recording in content script");
 }
 
-function buildTrace(recording: ActiveRecording): TraceV2 {
+function negotiatedTraceVersion(params: RecordStartParams): 2 | 3 | RpcError {
+  if (params.trace_version === undefined) return 2;
+  if (params.trace_version === TRACE_VERSION_V3) return 3;
+  return {
+    code: "invalid_params",
+    message: `unsupported trace_version ${params.trace_version}; supported values are omitted (v2) or ${TRACE_VERSION_V3} (v3)`,
+  };
+}
+
+function buildTrace(recording: ActiveRecording): RecordedTrace {
+  if (recording.traceVersion === 3 && recording.observation) {
+    return recording.observation.buildTrace({
+      drafts: recording.steps,
+      startedAt: recording.startedAt,
+      purpose: recording.purpose,
+      startUrl: recording.startUrl,
+      stoppedBy: recording.stoppedBy,
+      bskVersion: BSK_TRACE_VERSION,
+    });
+  }
+  if (recording.traceVersion === 3) {
+    throw new Error("trace v3 observation runtime is unavailable");
+  }
   return buildTraceV2({
     steps: recording.steps,
     startedAt: recording.startedAt,
     ...(recording.startUrl ? { startUrl: recording.startUrl } : {}),
     ...(recording.purpose ? { purpose: recording.purpose } : {}),
   });
+}
+
+async function processRecordedStep(
+  recording: ActiveRecording,
+  draftIndex: number,
+  tabId: number,
+): Promise<void> {
+  if (!recording.observation) return;
+  try {
+    await recording.observation.processDraft(tabId, recording.steps, draftIndex);
+  } catch (err) {
+    console.warn(`[bsk record] observation failed for step ${draftIndex + 1}`, err);
+  }
 }
 
 export interface RecordDeps {
@@ -237,16 +298,41 @@ export function releaseBrowserObservationListenersIfIdle(): void {
   detachBrowserObservation = null;
 }
 
-export function attachRecordStepListener(): () => void {
+export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): () => void {
   const listener = (
     message: unknown,
-    _sender: chrome.runtime.MessageSender,
-    _sendResponse: () => void,
+    sender: chrome.runtime.MessageSender,
+    sendResponse: (response: RecordStepAck) => void,
   ) => {
     if (!isRecordStepMessage(message)) return false;
     for (const recording of recordings.values()) {
       if (recording.requestId !== message.requestId) continue;
-      appendRecordedPayload(recording, message.step);
+      const sourceTabId = sender.tab?.id ?? recording.tabId;
+      const producerKey = `${sourceTabId}:${message.producerId}`;
+      const expectedSequence = (recording.lastStepSequenceByProducer.get(producerKey) ?? 0) + 1;
+      if (message.sequence < expectedSequence) {
+        sendResponse({ ok: true, sequence: message.sequence });
+        return false;
+      }
+      if (message.sequence > expectedSequence) {
+        sendResponse({
+          ok: false,
+          expectedSequence,
+          error: `out-of-order recorded step ${message.sequence}`,
+        });
+        return false;
+      }
+
+      recording.lastStepSequenceByProducer.set(producerKey, message.sequence);
+      enqueueRecordingAction(recording, async () => {
+        await recording.observation?.flushRedirects();
+        const targetHint = message.step.geometry ? { geometry: message.step.geometry } : undefined;
+        const draftIndex = appendRecordedPayload(recording, message.step, targetHint);
+        if (draftIndex !== null) {
+          await processRecordedStep(recording, draftIndex, sourceTabId);
+        }
+      });
+      sendResponse({ ok: true, sequence: message.sequence });
       return false;
     }
     return false;
@@ -428,11 +514,60 @@ export function attachRecordTabListener(deps: RecordDeps = getDefaultDeps()): ()
 }
 
 export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps()): () => void {
-  const observeMainFrame = (tabId: number, url?: string, causedByAction?: boolean) => {
+  const observeMainFrame = (
+    tabId: number,
+    url?: string,
+    causedByAction?: boolean,
+    transitionType?: string,
+    transitionQualifiers?: string[],
+  ) => {
+    if (!url) return;
+    const direct = findRecordingByTabId(tabId);
+    const candidates = direct
+      ? direct.acceptingNavigation
+        ? [direct]
+        : []
+      : [...recordings.values()].filter(
+          (recording) => !recording.settled && recording.acceptingNavigation,
+        );
+    if (candidates.length === 0) return;
+
+    let resolveTracked!: () => void;
+    const tracked = new Promise<void>((resolve) => {
+      resolveTracked = resolve;
+    });
+    for (const candidate of candidates) candidate.navigationCallbacks.add(tracked);
+
     void (async () => {
-      const recording = await findRecordingForTab(tabId, deps);
-      if (recording && url) {
-        observeRecordedNavigation(recording, url, causedByAction);
+      try {
+        const recording = await findRecordingForTab(tabId, deps);
+        if (!recording || !recording.acceptingNavigation || !candidates.includes(recording)) {
+          return;
+        }
+        enqueueRecordingAction(recording, async () => {
+          const result = observeRecordedNavigation(
+            recording,
+            url,
+            causedByAction,
+            transitionType,
+            transitionQualifiers,
+          );
+          if (result.kind === "coalesce_redirect") {
+            recording.observation?.scheduleRedirect(tabId, recording.steps, result.url);
+            return;
+          }
+
+          if (result.kind === "noop") return;
+          recording.observation?.clearRedirect(tabId);
+          if (result.kind === "appended") {
+            await processRecordedStep(recording, result.index, tabId);
+          } else {
+            recording.observation?.scheduleSettle(tabId, recording.steps, result.index);
+          }
+        });
+      } finally {
+        for (const candidate of candidates) candidate.navigationCallbacks.delete(tracked);
+        resolveTracked();
       }
     })();
   };
@@ -454,18 +589,13 @@ export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps
       details: chrome.webNavigation.WebNavigationTransitionCallbackDetails,
     ) => {
       if (details.frameId !== 0) return;
-      const causedByAction =
-        details.transitionType === "link" || details.transitionType === "form_submit"
-          ? true
-          : details.transitionType === "typed" ||
-              details.transitionType === "auto_bookmark" ||
-              details.transitionType === "generated" ||
-              details.transitionType === "keyword" ||
-              details.transitionType === "keyword_generated" ||
-              details.transitionType === "reload"
-            ? false
-            : undefined;
-      observeMainFrame(details.tabId, details.url, causedByAction);
+      observeMainFrame(
+        details.tabId,
+        details.url,
+        undefined,
+        details.transitionType,
+        details.transitionQualifiers,
+      );
     };
     chrome.webNavigation.onCompleted.addListener(completedListener);
     chrome.webNavigation.onCommitted?.addListener(committedListener);
@@ -481,6 +611,26 @@ export function attachRecordNavigationListener(deps: RecordDeps = getDefaultDeps
   };
   chrome.tabs.onUpdated.addListener(listener);
   return () => chrome.tabs.onUpdated.removeListener(listener);
+}
+
+const MAX_FINISH_DRAIN_ROUNDS = 10;
+
+async function drainRecordingToStability(recording: ActiveRecording): Promise<boolean> {
+  for (let round = 0; round < MAX_FINISH_DRAIN_ROUNDS; round += 1) {
+    await Promise.all([...recording.navigationCallbacks]);
+    const actionTail = recording.actionQueue;
+    await actionTail;
+    await recording.observation?.flush();
+
+    if (recording.navigationCallbacks.size === 0 && recording.actionQueue === actionTail) {
+      // No event or promise continuation can interleave with this synchronous
+      // check-and-close, so work accepted before the cutoff is fully drained.
+      recording.acceptingNavigation = false;
+      return true;
+    }
+  }
+  console.warn("[bsk record] navigation/action queues did not stabilize at stop");
+  return false;
 }
 
 export function attachRecordQueryListener(deps: RecordDeps = getDefaultDeps()): () => void {
@@ -523,23 +673,50 @@ async function finishRecordingByRequest(
     if (recording.requestId !== requestId || recording.settled) continue;
     const match = await findRecordingForTab(tabId, deps);
     if (match !== recording) continue;
-    await finishRecording(sessionId, deps);
+    await finishRecording(sessionId, deps, "user_finish");
     return;
   }
 }
 
-async function finishRecording(sessionId: string, deps: RecordDeps): Promise<TraceV2 | null> {
+async function finishRecording(
+  sessionId: string,
+  deps: RecordDeps,
+  stoppedBy: StopReason,
+): Promise<RecordedTrace | null> {
   const recording = recordings.get(sessionId);
-  if (!recording || recording.settled || recording.finishing) return null;
-  recording.finishing = true;
+  if (!recording || recording.settled) return null;
+  if (recording.finishAttempt) return recording.finishAttempt;
+  recording.stoppedBy = stoppedBy;
 
+  const attempt = finishRecordingAttempt(sessionId, recording, deps);
+  recording.finishAttempt = attempt;
+  try {
+    return await attempt;
+  } finally {
+    if (!recording.settled) {
+      recording.finishAttempt = null;
+    }
+  }
+}
+
+async function finishRecordingAttempt(
+  sessionId: string,
+  recording: ActiveRecording,
+  deps: RecordDeps,
+): Promise<RecordedTrace | null> {
   await clearRearmTimersForRecording(recording, deps);
   try {
+    // Disposing content capture may commit a final dirty fill. Flush content
+    // first so all resulting RECORD_STEP messages enter actionQueue before it
+    // and the observation queues are drained.
     await stopRecordingOnAllAgentTabs(recording, deps);
   } catch {
-    recording.finishing = false;
     return null;
   }
+  if (!(await drainRecordingToStability(recording))) {
+    return null;
+  }
+  await recording.observation?.settleTrailing(recording.tabId, recording.steps);
 
   recording.settled = true;
   recordings.delete(sessionId);
@@ -554,6 +731,15 @@ export async function handleRecordStart(
   params: RecordStartParams,
   deps: RecordDeps = getDefaultDeps(),
 ): Promise<RecordStartResult | RpcError> {
+  const traceVersionOrErr = negotiatedTraceVersion(params);
+  if (typeof traceVersionOrErr !== "number") return traceVersionOrErr;
+  if (traceVersionOrErr === 3 && !deps.cdp) {
+    return {
+      code: "protocol_error",
+      message: "trace v3 recording requires an active CDP connection",
+    };
+  }
+
   const ctxOrErr = lookupSession(manager, params, "record_start");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -570,14 +756,16 @@ export async function handleRecordStart(
   // on the destination page can RECORD_QUERY → rearm → show RecordOverlay
   // instead of flashing ControlOverlay ("Agent 正在控制").
   const requestId = makeRequestId(target.tabId);
-  let resolveFinish!: (trace: TraceV2) => void;
+  let resolveFinish!: (trace: RecordedTrace) => void;
   let rejectFinish!: (err: Error) => void;
-  const finishPromise = new Promise<TraceV2>((resolve, reject) => {
+  const finishPromise = new Promise<RecordedTrace>((resolve, reject) => {
     resolveFinish = resolve;
     rejectFinish = reject;
   });
   const navigateUrl = params.url ?? RECORD_DEFAULT_START_URL;
   const startedAtMs = Date.now();
+  const maxPageTokens = params.max_page_tokens;
+  const redactValues = params.redact_values ?? false;
   recordings.set(params.session_id, {
     requestId,
     tabId: target.tabId,
@@ -587,20 +775,36 @@ export async function handleRecordStart(
     steps: [],
     startedAt: new Date(startedAtMs).toISOString(),
     startedAtMs,
+    traceVersion: traceVersionOrErr,
     finishPromise,
     resolveFinish,
     rejectFinish,
     settled: false,
-    finishing: false,
+    finishAttempt: null,
     currentUrl: navigateUrl,
     pendingNavigation: false,
     pendingNavigationDeadline: undefined,
+    observation:
+      traceVersionOrErr === 3 && deps.cdp
+        ? new RecordingObservationRuntime({
+            cdp: deps.cdp,
+            tabsApi: deps.tabsApi,
+            maxTokens: maxPageTokens,
+            redactValues,
+          })
+        : null,
+    stoppedBy: "user_finish",
+    navigationCallbacks: new Set(),
+    acceptingNavigation: true,
+    actionQueue: Promise.resolve(),
+    lastStepSequenceByProducer: new Map(),
   });
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
   ensureBrowserObservationListeners(deps);
 
   const abortPending = async (notifyContent: boolean) => {
+    recordings.get(params.session_id)?.observation?.cancel();
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
     if (notifyContent) {
@@ -727,6 +931,17 @@ export async function handleRecordStart(
     };
   }
 
+  if (active.observation) {
+    const activeRecording = recordings.get(params.session_id);
+    if (activeRecording) {
+      try {
+        await activeRecording.observation?.captureInitial(target.tabId);
+      } catch {
+        // Proceed without initial observation; steps may be dropped by reducer.
+      }
+    }
+  }
+
   {
     const cancelled = await abortIfCancelled(true);
     if (cancelled) return cancelled;
@@ -751,7 +966,7 @@ export async function handleRecordStop(
     };
   }
 
-  const trace = await finishRecording(params.session_id, deps);
+  const trace = await finishRecording(params.session_id, deps, "cli_stop");
   if (!trace) {
     return {
       code: "protocol_error",
@@ -781,9 +996,9 @@ export async function handleRecordAwait(
     return { code: "cancelled", message: "record_await aborted" };
   }
 
-  const outcome = await new Promise<{ trace: TraceV2 } | { error: RpcError }>((resolve) => {
+  const outcome = await new Promise<{ trace: RecordedTrace } | { error: RpcError }>((resolve) => {
     let settled = false;
-    const finish = (result: { trace: TraceV2 } | { error: RpcError }) => {
+    const finish = (result: { trace: RecordedTrace } | { error: RpcError }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
@@ -825,6 +1040,7 @@ export function clearRecordingForSession(sessionId: string): void {
   }
   void clearRearmTimersForRecording(recording, getDefaultDeps());
   if (!recording.settled) {
+    recording.observation?.cancel();
     recording.settled = true;
     recording.rejectFinish(new Error("recording cleared"));
   }

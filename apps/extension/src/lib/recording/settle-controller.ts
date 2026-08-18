@@ -212,6 +212,7 @@ export class SettleController {
       url: finalUrl,
       pageUrl: finalUrl,
       cause: "browser",
+      transitionQualifiers: ["server_redirect"],
       preStateId: this.#session.cursor.lastSettled?.stateId,
     };
     drafts.push(draft);
