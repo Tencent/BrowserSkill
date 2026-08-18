@@ -26,7 +26,7 @@ function handshake(
 }
 
 describe("computeConnectedState (protocol-based compat)", () => {
-  it("returns connected when protocol strings match", () => {
+  it("returns connected when daemon protocol equals extension protocol", () => {
     expect(computeConnectedState(handshake("1.1", "1.0"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
       kind: "connected",
     });
