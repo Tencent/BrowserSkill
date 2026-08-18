@@ -1,6 +1,5 @@
 //! `bsk record start|stop` — capture user actions in the Agent Window.
 
-use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,16 +7,20 @@ use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult, RecordStopParams,
-    RecordStopResult, RecordedTrace,
+    RecordStopResult, RecordedTrace, TRACE_VERSION_V3,
 };
 use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
+
+mod export;
+
 use crate::cli::business_rpc;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_state;
 use crate::cli::session::{SessionStartOptions, start_session, stop_session};
+use export::{ExportMeta, export_recorded_trace, states_dir_for_output, trace_json_path};
 
 /// Max wait for the user to click 结束 in the browser (24 hours).
 const RECORD_AWAIT_TIMEOUT_MS: u32 = 86_400_000;
@@ -58,15 +61,25 @@ pub struct RecordStartArgs {
     #[arg(long)]
     pub purpose: Option<String>,
 
-    /// Output path for the trace JSON (default `./trace.json`).
-    #[arg(long, default_value = "trace.json")]
+    /// Max VOM tokens per page observation file (default 3000).
+    #[arg(long = "max-page-tokens")]
+    pub max_page_tokens: Option<u32>,
+
+    /// Redact all form values in page observations (`[filled]` only).
+    #[arg(long = "redact-values")]
+    pub redact_values: bool,
+
+    /// Output directory for the trace bundle (default `./trace`).
+    /// Writes `<dir>/trace.json` and `<dir>/states/*.txt`.
+    #[arg(long, default_value = "trace")]
     pub output: PathBuf,
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct RecordStopArgs {
-    /// Output path for the trace JSON (default `./trace.json`).
-    #[arg(long, default_value = "trace.json")]
+    /// Output directory for the trace bundle (default `./trace`).
+    /// Writes `<dir>/trace.json` and `<dir>/states/*.txt`.
+    #[arg(long, default_value = "trace")]
     pub output: PathBuf,
 }
 
@@ -98,6 +111,9 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         tab_id: args.tab_id,
         url: args.url,
         purpose: args.purpose.clone(),
+        max_page_tokens: args.max_page_tokens,
+        redact_values: Some(args.redact_values),
+        trace_version: Some(TRACE_VERSION_V3),
     };
     let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),
@@ -142,8 +158,8 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     // Keep write/render inside a Result so `?` cannot skip session teardown.
     let run_result: Result<(), CliError> = match await_result {
         Ok(result) => (|| {
-            write_trace_file(&args.output, &result.trace)?;
-            render_finish(&result.trace, &args.output, format)
+            let exported = export_recorded_trace(&args.output, &result.trace)?;
+            render_finish(&result.trace, &args.output, &exported, format)
         })(),
         Err(err) => Err(err),
     };
@@ -161,19 +177,20 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     let session_id = state.session_id.clone();
 
+    let params = RecordStopParams {
+        session_id: session_id.clone(),
+    };
+    let result = business_rpc::call::<RecordStopParams, RecordStopResult>(
+        info.sock_path.clone(),
+        "record-stop",
+        Method::ToolRecordStop,
+        Some(params),
+        TOOL_IPC_TIMEOUT,
+    )?;
+
     let run_result: Result<(), CliError> = (|| {
-        let params = RecordStopParams {
-            session_id: session_id.clone(),
-        };
-        let result = business_rpc::call::<RecordStopParams, RecordStopResult>(
-            info.sock_path.clone(),
-            "record-stop",
-            Method::ToolRecordStop,
-            Some(params),
-            TOOL_IPC_TIMEOUT,
-        )?;
-        write_trace_file(&args.output, &result.trace)?;
-        render_stop(&result, &args.output, format)
+        let exported = export_recorded_trace(&args.output, &result.trace)?;
+        render_stop(&result, &args.output, &exported, format)
     })();
 
     let session_stop_result = stop_session(info.sock_path, &session_id);
@@ -190,43 +207,66 @@ fn record_await_ipc_timeout(timeout_ms: u32) -> Duration {
         .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
-fn write_trace_file(output: &PathBuf, trace: &RecordedTrace) -> Result<(), CliError> {
-    let json = serde_json::to_string_pretty(trace)
-        .context("serialize trace JSON")
-        .map_err(CliError::Local)?;
-    if let Some(parent) = output.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create output directory {}", parent.display()))
-                .map_err(CliError::Local)?;
-        }
-    }
-    fs::write(output, format!("{json}\n"))
-        .with_context(|| format!("write trace to {}", output.display()))
-        .map_err(CliError::Local)?;
-    Ok(())
-}
-
-fn render_finish(trace: &RecordedTrace, output: &PathBuf, format: Format) -> Result<(), CliError> {
+fn render_finish(
+    trace: &RecordedTrace,
+    output_dir: &PathBuf,
+    exported: &ExportMeta,
+    format: Format,
+) -> Result<(), CliError> {
+    let trace_path = trace_json_path(output_dir);
     match format {
         Format::Json => {
+            let payload = match trace {
+                RecordedTrace::V3(t) => serde_json::json!({
+                    "output": output_dir,
+                    "trace_json": trace_path,
+                    "trace_version": exported.trace_version,
+                    "states_dir": exported.states_dir,
+                    "trace": t,
+                    "window_closed": true,
+                }),
+                RecordedTrace::V2(t) => serde_json::json!({
+                    "output": output_dir,
+                    "trace_json": trace_path,
+                    "trace_version": exported.trace_version,
+                    "states_dir": null,
+                    "trace": t,
+                    "window_closed": true,
+                }),
+            };
             println!(
                 "{}",
-                serde_json::to_string(&serde_json::json!({
-                    "output": output,
-                    "trace": trace,
-                    "window_closed": true,
-                }))
-                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+                serde_json::to_string(&payload).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
             );
         }
-        Format::Human => {
-            let step_count = match trace {
-                RecordedTrace::V2(trace) => trace.steps.len(),
-                RecordedTrace::V3(trace) => trace.steps.len(),
-            };
-            println!("saved {step_count} steps to {}", output.display());
-        }
+        Format::Human => match trace {
+            RecordedTrace::V3(t) => {
+                let states_dir = exported
+                    .states_dir
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| states_dir_for_output(output_dir).display().to_string());
+                println!(
+                    "saved {} steps to {} and {} states to {}",
+                    t.steps.len(),
+                    trace_path.display(),
+                    t.states.len(),
+                    states_dir
+                );
+            }
+            RecordedTrace::V2(t) => {
+                if exported.v2_fallback {
+                    eprintln!(
+                        "note: extension returned trace v2 (no page observations); update the BrowserSkill extension for v3 bundles"
+                    );
+                }
+                println!(
+                    "saved {} steps to {} (trace v2)",
+                    t.steps.len(),
+                    trace_path.display()
+                );
+            }
+        },
     }
     Ok(())
 }
@@ -234,9 +274,10 @@ fn render_finish(trace: &RecordedTrace, output: &PathBuf, format: Format) -> Res
 fn render_stop(
     result: &RecordStopResult,
     output: &PathBuf,
+    exported: &ExportMeta,
     format: Format,
 ) -> Result<(), CliError> {
-    render_finish(&result.trace, output, format)
+    render_finish(&result.trace, output, exported, format)
 }
 
 #[cfg(test)]
@@ -244,23 +285,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_output_is_trace_json() {
+    fn default_output_is_trace_dir() {
         let args = RecordStopArgs {
-            output: PathBuf::from("trace.json"),
+            output: PathBuf::from("trace"),
         };
-        assert_eq!(args.output, PathBuf::from("trace.json"));
+        assert_eq!(args.output, PathBuf::from("trace"));
     }
 
     #[test]
-    fn start_args_default_output_is_trace_json() {
+    fn start_args_default_output_is_trace_dir() {
         let args = RecordStartArgs {
             browser: None,
             tab_id: None,
             url: None,
             purpose: None,
-            output: PathBuf::from("trace.json"),
+            max_page_tokens: None,
+            redact_values: false,
+            output: PathBuf::from("trace"),
         };
-        assert_eq!(args.output, PathBuf::from("trace.json"));
+        assert_eq!(args.output, PathBuf::from("trace"));
     }
 
     #[test]
