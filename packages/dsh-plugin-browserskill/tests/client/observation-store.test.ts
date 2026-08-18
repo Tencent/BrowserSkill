@@ -9,15 +9,23 @@ const OBS_IDLE: SessionObservation = { sessionId: "s1", action: "idle", since: 1
 const OBS_BUSY: SessionObservation = { sessionId: "s1", action: "clicking", since: 2000 };
 
 function harness(state: SessionObservation[] = []) {
-  const fetches: { url: string; init?: { method?: string; body?: string } }[] = [];
+  const fetches: {
+    url: string;
+    init?: { method?: string; body?: string; headers?: Record<string, string> };
+  }[] = [];
   const esInstances: EventSourceLike[] = [];
-  const fetchFn = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
-    fetches.push({ url, init });
-    if (url === "/bsk-observation/state") {
-      return { ok: true, json: async () => ({ sessions: state }) };
-    }
-    return { ok: true, json: async () => ({ interrupted: true }) };
-  });
+  const fetchFn = vi.fn(
+    async (
+      url: string,
+      init?: { method?: string; body?: string; headers?: Record<string, string> },
+    ) => {
+      fetches.push({ url, init });
+      if (url === "/bsk-observation/state") {
+        return { ok: true, json: async () => ({ sessions: state }) };
+      }
+      return { ok: true, json: async () => ({ interrupted: true }) };
+    },
+  );
   const eventSourceFactory = (url: string) => {
     const es: EventSourceLike = { onmessage: null, close: vi.fn() };
     esInstances.push(es);
@@ -89,7 +97,9 @@ describe("ObservationClientStore", () => {
     expect(await store.interrupt()).toBe(true);
     expect(await store.interrupt("s1")).toBe(true);
     const calls = fetches.filter((f) => f.url === "/bsk-observation/interrupt");
+    expect(calls[0].init?.headers?.["content-type"]).toBe("application/json");
     expect(JSON.parse(calls[0].init?.body ?? "")).toEqual({});
+    expect(calls[1].init?.headers?.["content-type"]).toBe("application/json");
     expect(JSON.parse(calls[1].init?.body ?? "")).toEqual({ sessionId: "s1" });
   });
 

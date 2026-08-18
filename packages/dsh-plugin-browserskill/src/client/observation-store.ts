@@ -20,7 +20,7 @@ export interface EventSourceLike {
 export interface ObservationClientDeps {
   fetchFn: (
     url: string,
-    init?: { method?: string; body?: string },
+    init?: { method?: string; body?: string; headers?: Record<string, string> },
   ) => Promise<{
     ok: boolean;
     json(): Promise<unknown>;
@@ -282,6 +282,7 @@ export class ObservationClientStore {
     try {
       const res = await this.deps.fetchFn(INTERRUPT_URL, {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(sessionId === undefined ? {} : { sessionId }),
       });
       if (!res.ok) return false;
