@@ -1,16 +1,18 @@
 /**
  * ObservationService: per-owned-session live observation state for the PiP
- * overlay — current action, page url, and a breathing thumbnail carried by
- * attachment reference. Strict ownership boundary applies throughout: only
- * sessions in the plugin's SessionRegistry (owned by construction) ever get
- * an observation entry, and interrupt/kill paths can only reach children this
- * plugin spawned.
+ * overlay — current action, page url, and a breathing thumbnail identified by
+ * an ephemeral frame id. Frames live in a per-session 2-slot ring in process
+ * memory (never the durable attachment store). Strict ownership boundary
+ * applies throughout: only sessions in the plugin's SessionRegistry (owned by
+ * construction) ever get an observation entry, and interrupt/kill paths can
+ * only reach children this plugin spawned.
  *
  * Observation traffic isolation: thumbnail captures run through the runner
  * directly (never through the tool-level instrumentation), emit no action
  * events, and never move the registry's current pointer.
  */
 
+import { createHash } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,7 +30,7 @@ export interface SessionObservation {
   action: string;
   /** Epoch ms when the current action started (elapsed time is client-side). */
   since: number;
-  /** Latest thumbnail, by attachment-store reference (never bytes on the wire). */
+  /** Latest thumbnail id (ephemeral, plugin-owned; never bytes on the wire). */
   thumbnailAttachmentId?: string;
   /** Summary of the most recent failed action (drives the red status dot). */
   lastError?: string;
@@ -52,28 +54,6 @@ export interface ObservationOptions {
   idleIntervalMs: number;
 }
 
-/** Structural view of the optional attachment seam (absent in headless compositions). */
-interface AttachmentLike {
-  saveImage(input: {
-    data: Uint8Array;
-    mediaType: string;
-    name?: string;
-  }): Promise<ImageAttachmentRefLike>;
-  readImage(
-    ref: ImageAttachmentRefLike,
-  ): Promise<{ data: Uint8Array; attachment: ImageAttachmentRefLike }>;
-}
-
-/** The attachment reference fields the store verifies reads against. */
-export interface ImageAttachmentRefLike {
-  attachmentId: unknown;
-  mediaType: string;
-  bytes: number;
-  width: number;
-  height: number;
-  name?: string;
-}
-
 /** Injectable clock/scheduler bits for tests. */
 export interface ObservationScheduler {
   setTimeout: (fn: () => void, ms: number) => unknown;
@@ -94,6 +74,8 @@ const DEFAULT_SCHEDULER: ObservationScheduler = {
 
 /** Max consecutive capture failures before a session drops to the idle cadence. */
 const FAILURE_BACKOFF_THRESHOLD = 3;
+/** Current + previous frame, so an in-flight HTTP fetch of the old id still lands. */
+const FRAME_RING_SIZE = 2;
 
 export class ObservationService {
   private readonly observations = new Map<string, SessionObservation>();
@@ -102,8 +84,14 @@ export class ObservationService {
   private readonly captureInFlight = new Set<string>();
   private readonly captureFailures = new Map<string, number>();
   private readonly lastActivity = new Map<string, number>();
-  /** attachmentId → full reference (the store requires it for verified reads). */
-  private readonly thumbRefs = new Map<string, ImageAttachmentRefLike>();
+  /** Ephemeral frame id → PNG bytes. Only the live ring members are present. */
+  private readonly frames = new Map<string, { data: Uint8Array; mediaType: string }>();
+  /** sessionId → oldest-first frame ids, length ≤ FRAME_RING_SIZE. */
+  private readonly rings = new Map<string, string[]>();
+  /** sessionId → sha256 of the current frame (skip republish when unchanged). */
+  private readonly hashes = new Map<string, string>();
+  /** sessionId → last issued sequence number. */
+  private readonly seqs = new Map<string, number>();
   /** Consecutive capture failures across ALL sessions (daemon-level signal). */
   private globalFailures = 0;
   private available = true;
@@ -179,10 +167,7 @@ export class ObservationService {
     this.cancelCapture(sessionId);
     this.captureFailures.delete(sessionId);
     this.lastActivity.delete(sessionId);
-    const entry = this.observations.get(sessionId);
-    if (entry?.thumbnailAttachmentId !== undefined) {
-      this.thumbRefs.delete(entry.thumbnailAttachmentId);
-    }
+    this.dropSessionFrames(sessionId);
     if (this.observations.delete(sessionId)) {
       this.emit({
         type: "remove",
@@ -243,24 +228,17 @@ export class ObservationService {
   }
 
   /**
-   * Read one captured thumbnail back through the store's verified path.
-   * Powers the plugin's own HTTP thumbnail route — frames are plugin-owned
-   * runtime data, never referenced by any session log, so the
-   * session-authorized client RPC cannot serve them.
+   * Read one captured thumbnail from the in-process ring. Powers the plugin's
+   * own HTTP thumbnail route — frames are plugin-owned runtime data, never
+   * referenced by any session log, so the session-authorized client RPC
+   * cannot serve them.
    */
   async readThumbnail(
     attachmentId: string,
   ): Promise<{ data: Uint8Array; mediaType: string } | undefined> {
-    const ref = this.thumbRefs.get(attachmentId);
-    if (ref === undefined) return undefined;
-    const attachments = this.deps.ctx.get("attachments") as AttachmentLike | undefined;
-    if (attachments === undefined) return undefined;
-    try {
-      const stored = await attachments.readImage(ref);
-      return { data: stored.data, mediaType: ref.mediaType };
-    } catch {
-      return undefined;
-    }
+    const frame = this.frames.get(attachmentId);
+    if (frame === undefined) return undefined;
+    return { data: frame.data, mediaType: frame.mediaType };
   }
 
   /** Tear down all state and timers (plugin dispose). */
@@ -271,7 +249,10 @@ export class ObservationService {
     this.captureInFlight.clear();
     this.captureFailures.clear();
     this.lastActivity.clear();
-    this.thumbRefs.clear();
+    this.frames.clear();
+    this.rings.clear();
+    this.hashes.clear();
+    this.seqs.clear();
     this.observations.clear();
     this.emit({ type: "reset" });
     this.listeners.clear();
@@ -313,8 +294,8 @@ export class ObservationService {
 
   /**
    * Capture one frame: `bsk screenshot --json` through the runner, bytes into
-   * the attachment store, reference onto the observation. Runs OUTSIDE the
-   * tool instrumentation on purpose — no action events, no registry writes.
+   * the in-process ring, id onto the observation. Runs OUTSIDE the tool
+   * instrumentation on purpose — no action events, no registry writes.
    * Failures keep the previous frame and back off silently.
    */
   private async capture(sessionId: string): Promise<void> {
@@ -322,11 +303,6 @@ export class ObservationService {
     const current = this.observations.get(sessionId);
     if (current === undefined || current.dead === true) return;
     if (this.captureInFlight.has(sessionId)) return;
-    const attachments = this.deps.ctx.get("attachments") as AttachmentLike | undefined;
-    if (attachments === undefined) {
-      // No attachment store (headless composition): thumbnails stay absent.
-      return;
-    }
     this.captureInFlight.add(sessionId);
     // One fixed scratch path per session (overwritten each frame) and always
     // unlinked after the bytes are read — /tmp must not grow without bound.
@@ -355,23 +331,12 @@ export class ObservationService {
       const reply = JSON.parse(result.stdout) as { path?: string };
       writtenPath = reply.path ?? outPath;
       const data = await readFile(writtenPath);
-      const ref = await attachments.saveImage({
-        data,
-        mediaType: "image/png",
-        name: `observation-${sessionId}.png`,
-      });
       const entry = this.observations.get(sessionId);
       if (entry === undefined) return;
       this.captureFailures.delete(sessionId);
       this.globalFailures = 0;
       this.setAvailable(true);
-      // Drop the replaced frame's reference — the store keeps the bytes, but
-      // this map (and the old id's read path) must not grow without bound.
-      if (entry.thumbnailAttachmentId !== undefined) {
-        this.thumbRefs.delete(entry.thumbnailAttachmentId);
-      }
-      this.thumbRefs.set(String(ref.attachmentId), ref);
-      this.put({ ...entry, thumbnailAttachmentId: String(ref.attachmentId) });
+      this.publishFrame(sessionId, entry, data);
     } catch {
       // Silent by design: keep the previous frame, count toward backoff.
       this.captureFailures.set(sessionId, (this.captureFailures.get(sessionId) ?? 0) + 1);
@@ -383,6 +348,33 @@ export class ObservationService {
       if (!this.disposed && this.observations.has(sessionId)) this.scheduleCapture(sessionId);
     }
   }
+
+  /** Insert a new frame, or no-op when the PNG bytes match the current one. */
+  private publishFrame(sessionId: string, entry: SessionObservation, data: Uint8Array): void {
+    const hash = createHash("sha256").update(data).digest("hex");
+    if (this.hashes.get(sessionId) === hash) return;
+    const seq = (this.seqs.get(sessionId) ?? 0) + 1;
+    this.seqs.set(sessionId, seq);
+    const id = `obs-${sessionId}-${seq}`;
+    this.frames.set(id, { data, mediaType: "image/png" });
+    this.hashes.set(sessionId, hash);
+    const ring = this.rings.get(sessionId) ?? [];
+    ring.push(id);
+    while (ring.length > FRAME_RING_SIZE) {
+      const evicted = ring.shift();
+      if (evicted !== undefined) this.frames.delete(evicted);
+    }
+    this.rings.set(sessionId, ring);
+    this.put({ ...entry, thumbnailAttachmentId: id });
+  }
+
+  private dropSessionFrames(sessionId: string): void {
+    for (const id of this.rings.get(sessionId) ?? []) this.frames.delete(id);
+    this.rings.delete(sessionId);
+    this.hashes.delete(sessionId);
+    this.seqs.delete(sessionId);
+  }
+
   /** Mark a session dead: grey it out, stop asking for frames, keep the entry for the strip. */
   private markDead(sessionId: string): void {
     const entry = this.observations.get(sessionId);

@@ -58,7 +58,12 @@ interface FakeRunner extends BskRunner {
 
 /** Runner that answers screenshot with a real temp PNG and records kills. */
 function fakeRunner(
-  opts: { screenshotFails?: boolean; screenshotNotFound?: boolean; killCount?: number } = {},
+  opts: {
+    screenshotFails?: boolean;
+    screenshotNotFound?: boolean;
+    killCount?: number;
+    screenshotBytes?: () => Uint8Array;
+  } = {},
 ): FakeRunner {
   const calls: FakeRunner["calls"] = [];
   const killed: string[] = [];
@@ -82,7 +87,7 @@ function fakeRunner(
         }
         const outIndex = args.indexOf("--out") + 1;
         const out = args[outIndex];
-        writeFileSync(out, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        writeFileSync(out, opts.screenshotBytes?.() ?? Buffer.from([0x89, 0x50, 0x4e, 0x47]));
         return {
           code: 0,
           stdout: JSON.stringify({
@@ -108,38 +113,20 @@ function fakeRunner(
   };
 }
 
-function fakeCtx(attachments?: unknown) {
-  return { get: (key: string) => (key === "attachments" ? attachments : undefined) } as never;
+function fakeCtx() {
+  return { get: () => undefined } as never;
 }
 
 function setup(opts: {
   runner?: FakeRunner;
-  attachments?: unknown;
   registry?: SessionRegistry;
   scheduler?: ReturnType<typeof fakeScheduler>;
 }) {
   const registry = opts.registry ?? new SessionRegistry(5);
   const runner = opts.runner ?? fakeRunner();
   const scheduler = opts.scheduler ?? fakeScheduler();
-  const attachments =
-    "attachments" in opts
-      ? opts.attachments
-      : {
-          saveImage: async (input: { data: Uint8Array; name?: string }) => ({
-            attachmentId: "att-1",
-            mediaType: "image/png",
-            bytes: input.data.byteLength,
-            width: 4,
-            height: 4,
-            name: input.name,
-          }),
-          readImage: async (ref: { attachmentId: unknown }) => ({
-            data: new Uint8Array([1, 2, 3]),
-            attachment: ref,
-          }),
-        };
   const service = new ObservationService({
-    ctx: fakeCtx(attachments),
+    ctx: fakeCtx(),
     runner,
     registry,
     queue: new KeyedExecutor(),
@@ -155,11 +142,6 @@ function setup(opts: {
 function own(registry: SessionRegistry, sessionId: string): void {
   registry.reserveStart();
   registry.completeStart({ sessionId, startedAtMs: 1 });
-}
-
-async function flushMicrotasks(): Promise<void> {
-  // setImmediate yields to the poll phase so real fs reads inside capture() settle.
-  for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
 }
 
 /** Poll until the condition holds (capture completion is real async I/O). */
@@ -218,7 +200,7 @@ describe("thumbnail cadence", () => {
     expect(scheduler.pending()).toEqual([0]);
     scheduler.runNext();
     await waitFor(() => captures() === 1 && scheduler.pending().length === 1);
-    expect(service.getState()[0].thumbnailAttachmentId).toBe("att-1");
+    expect(service.getState()[0].thumbnailAttachmentId).toBe("obs-s1-1");
     // Just captured with fresh activity: next frame on the fast cadence.
     expect(scheduler.pending()).toEqual([1500]);
     scheduler.runNext();
@@ -259,14 +241,14 @@ describe("thumbnail cadence", () => {
     expect(service.getState()[0].thumbnailAttachmentId).toBeUndefined();
   });
 
-  it("stays silent without an attachment store (headless composition)", async () => {
+  it("captures frames without an attachment store", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner();
-    const { service } = setup({ runner, scheduler, attachments: undefined });
+    const { service } = setup({ runner, scheduler });
     service.addSession("s1");
     scheduler.runNext();
-    await flushMicrotasks();
-    expect(runner.calls.filter((c) => c.args[0] === "screenshot")).toHaveLength(0);
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1");
+    expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/png");
   });
 });
 
@@ -286,7 +268,7 @@ describe("observation traffic isolation", () => {
     const captureEvent = captureEvents[0];
     if (captureEvent.type !== "upsert") throw new Error("unreachable");
     expect(captureEvent.session?.action).toBe("idle");
-    expect(captureEvent.session?.thumbnailAttachmentId).toBe("att-1");
+    expect(captureEvent.session?.thumbnailAttachmentId).toBe("obs-s1-1");
     // …and the registry's current pointer never moved through observation.
     expect(registry.current()).toBe("s1");
     expect(registry.list()[0].startedAtMs).toBe(1);
@@ -551,9 +533,9 @@ describe("thumbnail read-back", () => {
     service.addSession("s1");
     scheduler.runNext();
     await waitFor(() => service.getState()[0]?.thumbnailAttachmentId !== undefined);
-    const frame = await service.readThumbnail("att-1");
+    const frame = await service.readThumbnail("obs-s1-1");
     expect(frame?.mediaType).toBe("image/png");
-    expect([...(frame?.data ?? [])]).toEqual([1, 2, 3]);
+    expect([...(frame?.data ?? [])]).toEqual([0x89, 0x50, 0x4e, 0x47]);
     expect(await service.readThumbnail("nope")).toBeUndefined();
     service.dispose();
   });
@@ -598,47 +580,65 @@ describe("scratch files and thumbnail references", () => {
     service.dispose();
   });
 
-  it("drops the replaced frame reference and clears it on remove", async () => {
-    let counter = 0;
-    const attachments = {
-      saveImage: async (input: { data: Uint8Array; name?: string }) => {
-        counter += 1;
-        return {
-          attachmentId: `att-${counter}`,
-          mediaType: "image/png",
-          bytes: input.data.byteLength,
-          width: 4,
-          height: 4,
-          name: input.name,
-        };
-      },
-      readImage: async (ref: { attachmentId: unknown }) => ({
-        data: new Uint8Array([1, 2, 3]),
-        attachment: ref,
-      }),
-    };
+  it("keeps the last two distinct frames and evicts the third", async () => {
+    let n = 0;
+    const runner = fakeRunner({
+      screenshotBytes: () => Uint8Array.from([0x89, 0x50, 0x4e, 0x47, n++]),
+    });
     const scheduler = fakeScheduler();
-    const { service } = setup({ scheduler, attachments });
+    const { service } = setup({ scheduler, runner });
     service.addSession("s1");
     scheduler.runNext();
     await waitFor(
       () =>
-        service.getState()[0]?.thumbnailAttachmentId === "att-1" &&
+        service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1" &&
         scheduler.pending().length === 1,
     );
     service.endAction("s1");
     scheduler.runNext();
     await waitFor(
       () =>
-        service.getState()[0]?.thumbnailAttachmentId === "att-2" &&
+        service.getState()[0]?.thumbnailAttachmentId === "obs-s1-2" &&
         scheduler.pending().length === 1,
     );
-    // the replaced frame's read path is gone
-    expect(await service.readThumbnail("att-1")).toBeUndefined();
-    expect((await service.readThumbnail("att-2"))?.mediaType).toBe("image/png");
-    // removing the session clears its live reference too
+    expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/png");
+    expect((await service.readThumbnail("obs-s1-2"))?.mediaType).toBe("image/png");
+    service.endAction("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0]?.thumbnailAttachmentId === "obs-s1-3" &&
+        scheduler.pending().length === 1,
+    );
+    expect(await service.readThumbnail("obs-s1-1")).toBeUndefined();
+    expect((await service.readThumbnail("obs-s1-2"))?.mediaType).toBe("image/png");
+    expect((await service.readThumbnail("obs-s1-3"))?.mediaType).toBe("image/png");
     service.removeSession("s1");
-    expect(await service.readThumbnail("att-2")).toBeUndefined();
+    expect(await service.readThumbnail("obs-s1-2")).toBeUndefined();
+    expect(await service.readThumbnail("obs-s1-3")).toBeUndefined();
+    service.dispose();
+  });
+
+  it("reuses the current frame id when the PNG bytes are unchanged", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner();
+    const { service } = setup({ scheduler, runner });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1" &&
+        scheduler.pending().length === 1,
+    );
+    service.endAction("s1");
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        runner.calls.filter((c) => c.args[0] === "screenshot").length >= 2 &&
+        scheduler.pending().length === 1,
+    );
+    expect(service.getState()[0]?.thumbnailAttachmentId).toBe("obs-s1-1");
+    expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/png");
     service.dispose();
   });
 });

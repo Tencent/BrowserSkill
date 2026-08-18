@@ -733,6 +733,10 @@ describe("observation action instrumentation timing", () => {
     const navigateGate = new Promise<void>((resolve) => {
       releaseNavigate = resolve;
     });
+    let releaseSnapshot!: () => void;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
     const runner: BskRunner = {
       async run(args: string[]): Promise<BskRunResult> {
         if (args[0] === "session") {
@@ -753,6 +757,21 @@ describe("observation action instrumentation timing", () => {
             timedOut: false,
             aborted: false,
           };
+        }
+        if (args[0] === "snapshot") {
+          await snapshotGate;
+          return {
+            code: 0,
+            stdout: JSON.stringify({ text: "ok", ref_count: 0, tab_id: 7, truncated: false }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
+        // Observation captures share the session queue; fail them fast so they
+        // cannot stall the action-label assertions.
+        if (args[0] === "screenshot") {
+          return { code: 1, stdout: "", stderr: "skip", timedOut: false, aborted: false };
         }
         return {
           code: 0,
@@ -792,6 +811,7 @@ describe("observation action instrumentation timing", () => {
     await vi.waitFor(() =>
       expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("snapshotting"),
     );
+    releaseSnapshot();
     await b;
     await vi.waitFor(() =>
       expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("idle"),
