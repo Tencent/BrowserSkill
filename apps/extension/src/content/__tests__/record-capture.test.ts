@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RECORD_STOP, type RecordStepPayload } from "@/lib/record-bridge";
+import { RECORD_START, RECORD_STOP, type RecordStepPayload } from "@/lib/record-bridge";
 import { handleRecordContentMessage, startRecordCapture } from "../record-capture";
 
 vi.stubGlobal("chrome", {
   runtime: {
-    sendMessage: vi.fn(() => Promise.resolve()),
+    sendMessage: vi.fn((message: { sequence?: number }) =>
+      Promise.resolve({ ok: true, sequence: message.sequence }),
+    ),
   },
 });
 
@@ -95,6 +97,66 @@ describe("handleRecordContentMessage stop/cancel", () => {
     expect(needsAsync).toBe(false);
     expect(dispose).not.toHaveBeenCalled();
     expect(onStop).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed STOP retryable and redelivers its recorded step", async () => {
+    document.body.innerHTML = `<label for="retry">Draft</label><input id="retry" />`;
+    const sendMessage = vi.mocked(chrome.runtime.sendMessage);
+    sendMessage.mockReset();
+    sendMessage.mockRejectedValueOnce(new Error("service worker unavailable"));
+    sendMessage.mockRejectedValueOnce(new Error("service worker still unavailable"));
+    sendMessage.mockResolvedValueOnce({ ok: true, sequence: 1 });
+
+    let activeRequestId: string | null = null;
+    let capture: ReturnType<typeof startRecordCapture> | null = null;
+    const onStop = vi.fn();
+    const dispatch = (
+      message:
+        | { type: typeof RECORD_START; requestId: string; startedAtMs?: number }
+        | { type: typeof RECORD_STOP; requestId: string },
+      sendResponse?: (response: unknown) => void,
+    ) =>
+      handleRecordContentMessage(
+        message,
+        {
+          activeRequestId,
+          capture,
+          setActiveRequestId: (id) => {
+            activeRequestId = id;
+          },
+          setCapture: (next) => {
+            capture = next;
+          },
+          onStart: vi.fn(),
+          onStop,
+        },
+        sendResponse,
+      );
+
+    dispatch({ type: RECORD_START, requestId: "rec-retry" });
+    const input = document.querySelector("input")!;
+    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    input.value = "dirty final value";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+
+    const firstResponse = vi.fn();
+    expect(dispatch({ type: RECORD_STOP, requestId: "rec-retry" }, firstResponse)).toBe(true);
+    await vi.waitFor(() =>
+      expect(firstResponse).toHaveBeenCalledWith({
+        ok: false,
+        error: "failed to deliver one or more recorded steps",
+      }),
+    );
+    expect(activeRequestId).toBe("rec-retry");
+    expect(onStop).not.toHaveBeenCalled();
+
+    const retryResponse = vi.fn();
+    expect(dispatch({ type: RECORD_STOP, requestId: "rec-retry" }, retryResponse)).toBe(true);
+    await vi.waitFor(() => expect(retryResponse).toHaveBeenCalledWith({ ok: true }));
+
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(activeRequestId).toBeNull();
+    expect(onStop).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -228,6 +290,7 @@ describe("record-capture semantic", () => {
     expect(steps[0]).toMatchObject({
       op: "hover",
       target: { role: "button", name: "Open user navigation menu" },
+      geometry: { tag: "button", rect: { x: 900, y: 8, w: 32, h: 32 } },
     });
     expect(steps[1]).toMatchObject({
       op: "click",
