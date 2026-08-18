@@ -1,5 +1,6 @@
 import type { NavigationCause, StepV3 } from "@/transport/types";
 import { shouldIncludeDraft } from "./draft-policy";
+import { hasRedirectQualifier } from "./navigation-policy";
 import { unmatchedTarget } from "./target-matcher";
 import type { RecordingDraftStep } from "./types";
 
@@ -8,7 +9,6 @@ interface CollapsedDraft {
   draftIds: number[];
 }
 
-const REDIRECT_QUALIFIERS = new Set(["client_redirect", "server_redirect"]);
 const TRANSITION_CAUSES: Record<string, NavigationCause> = {
   typed: "user_typed",
   generated: "user_typed",
@@ -22,7 +22,7 @@ const TRANSITION_CAUSES: Record<string, NavigationCause> = {
 };
 
 function isRedirect(step: Extract<RecordingDraftStep, { op: "navigate" }>): boolean {
-  return (step.transitionQualifiers ?? []).some((qualifier) => REDIRECT_QUALIFIERS.has(qualifier));
+  return hasRedirectQualifier(step.transitionQualifiers);
 }
 
 function collapseRedirects(steps: RecordingDraftStep[]): CollapsedDraft[] {

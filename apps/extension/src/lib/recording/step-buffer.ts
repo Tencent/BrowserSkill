@@ -1,5 +1,6 @@
 import type { RecordStepPayload } from "../record-bridge";
-import type { RecordingDraftStep } from "./types";
+import { hasRedirectQualifier } from "./navigation-policy";
+import type { RecordingDraftStep, TargetMatchHint } from "./types";
 
 export interface RecordingStepBuffer {
   steps: RecordingDraftStep[];
@@ -10,33 +11,29 @@ export interface RecordingStepBuffer {
 
 const NAVIGATION_TRIGGER_WINDOW_MS = 3_000;
 
-function toDraftStep(payload: RecordStepPayload): RecordingDraftStep | null {
+function toDraftStep(
+  payload: RecordStepPayload,
+  targetHint?: TargetMatchHint,
+): RecordingDraftStep | null {
   const pageUrl = payload.page_url;
+  const common = {
+    ...(pageUrl ? { pageUrl } : {}),
+    ...(targetHint ? { targetHint } : {}),
+  };
   switch (payload.op) {
     case "click":
-      return payload.target
-        ? {
-            op: "click",
-            captureTarget: payload.target,
-            ...(pageUrl ? { pageUrl } : {}),
-          }
-        : null;
+      return payload.target ? { op: "click", captureTarget: payload.target, ...common } : null;
     case "hover":
-      return payload.target
-        ? {
-            op: "hover",
-            captureTarget: payload.target,
-            ...(pageUrl ? { pageUrl } : {}),
-          }
-        : null;
+      return payload.target ? { op: "hover", captureTarget: payload.target, ...common } : null;
     case "fill":
       return payload.target
         ? {
             op: "fill",
             captureTarget: payload.target,
             value: payload.value ?? "",
+            ...(payload.commit ? { commit: payload.commit } : {}),
             ...(payload.redacted ? { redacted: true } : {}),
-            ...(pageUrl ? { pageUrl } : {}),
+            ...common,
           }
         : null;
     case "press":
@@ -46,7 +43,7 @@ function toDraftStep(payload: RecordStepPayload): RecordingDraftStep | null {
             key: payload.key,
             ...(payload.target ? { captureTarget: payload.target } : {}),
             ...(payload.modifiers?.length ? { modifiers: payload.modifiers } : {}),
-            ...(pageUrl ? { pageUrl } : {}),
+            ...common,
           }
         : null;
     case "select":
@@ -56,7 +53,7 @@ function toDraftStep(payload: RecordStepPayload): RecordingDraftStep | null {
             captureTarget: payload.target,
             values: payload.values,
             ...(payload.labels?.length ? { labels: payload.labels } : {}),
-            ...(pageUrl ? { pageUrl } : {}),
+            ...common,
           }
         : null;
     case "navigate":
@@ -64,26 +61,35 @@ function toDraftStep(payload: RecordStepPayload): RecordingDraftStep | null {
   }
 }
 
-function annotateLastStepNavigation(buffer: RecordingStepBuffer, url: string): boolean {
-  for (let i = buffer.steps.length - 1; i >= 0; i -= 1) {
-    const step = buffer.steps[i];
+function annotateLastStepNavigation(buffer: RecordingStepBuffer, url: string): number {
+  for (let index = buffer.steps.length - 1; index >= 0; index -= 1) {
+    const step = buffer.steps[index];
     if (!step) continue;
-    if (step.op === "click" || step.op === "press" || step.op === "select") {
-      buffer.steps[i] = { ...step, navigatedTo: url };
-      return true;
+    if (step.op === "click" || step.op === "press" || step.op === "select" || step.op === "fill") {
+      step.navigatedTo = url;
+      return index;
     }
     break;
   }
-  return false;
+  return -1;
 }
+
+export type NavigationObserveResult =
+  | { kind: "noop" }
+  | { kind: "annotated"; index: number }
+  | { kind: "appended"; index: number }
+  | { kind: "coalesce_redirect"; url: string };
 
 export function observeRecordedNavigation(
   buffer: RecordingStepBuffer,
   url: string,
   causedByAction?: boolean,
-): void {
-  if (!url || url === buffer.currentUrl) return;
+  transitionType?: string,
+  transitionQualifiers?: string[],
+): NavigationObserveResult {
+  if (!url || url === buffer.currentUrl) return { kind: "noop" };
   buffer.currentUrl = url;
+
   const pendingIsCurrent =
     buffer.pendingNavigation &&
     (buffer.pendingNavigationDeadline === undefined ||
@@ -92,40 +98,47 @@ export function observeRecordedNavigation(
   if (causedByAction === true || (causedByAction === undefined && pendingIsCurrent)) {
     buffer.pendingNavigation = false;
     buffer.pendingNavigationDeadline = undefined;
-    if (!annotateLastStepNavigation(buffer, url)) {
-      buffer.steps.push({
-        op: "navigate",
-        url,
-        pageUrl: url,
-      });
-    }
-    return;
+    const annotatedIndex = annotateLastStepNavigation(buffer, url);
+    if (annotatedIndex >= 0) return { kind: "annotated", index: annotatedIndex };
+  } else {
+    buffer.pendingNavigation = false;
+    buffer.pendingNavigationDeadline = undefined;
   }
 
-  buffer.pendingNavigation = false;
-  buffer.pendingNavigationDeadline = undefined;
+  if (hasRedirectQualifier(transitionQualifiers)) {
+    return { kind: "coalesce_redirect", url };
+  }
   buffer.steps.push({
     op: "navigate",
     url,
     pageUrl: url,
+    transitionType,
+    transitionQualifiers,
   });
+  return { kind: "appended", index: buffer.steps.length - 1 };
 }
 
 export function appendRecordedPayload(
   buffer: RecordingStepBuffer,
   payload: RecordStepPayload,
-): void {
+  targetHint?: TargetMatchHint,
+): number | null {
   if (payload.op === "navigate") {
-    if (payload.url) {
-      observeRecordedNavigation(buffer, payload.url, payload.navigation_caused_by_action);
-    }
-    return;
+    if (!payload.url) return null;
+    const result = observeRecordedNavigation(
+      buffer,
+      payload.url,
+      payload.navigation_caused_by_action,
+      payload.transitionType,
+      payload.transitionQualifiers,
+    );
+    return result.kind === "appended" ? result.index : null;
   }
-  const step = toDraftStep({
-    ...payload,
-    page_url: payload.page_url ?? buffer.currentUrl,
-  });
-  if (!step) return;
+  const step = toDraftStep(
+    { ...payload, page_url: payload.page_url ?? buffer.currentUrl },
+    targetHint,
+  );
+  if (!step) return null;
   buffer.steps.push(step);
   if (step.op === "click" || step.op === "press" || step.op === "select" || step.op === "fill") {
     buffer.pendingNavigation = payload.expects_navigation === true;
@@ -133,4 +146,5 @@ export function appendRecordedPayload(
       ? Date.now() + NAVIGATION_TRIGGER_WINDOW_MS
       : undefined;
   }
+  return buffer.steps.length - 1;
 }

@@ -221,6 +221,13 @@ pub struct RecordStartParams {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_page_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redact_values: Option<bool>,
+    /// Desired trace export format. Omitted means v2; `3` requests v3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -511,6 +518,36 @@ mod tests {
         assert!(v.get("unmatched").is_none());
         assert!(v["target"].get("ctx").is_none());
         assert!(v["target"].get("unmatched").is_none());
+    }
+
+    #[test]
+    fn record_start_trace_options_are_explicit_and_optional() {
+        let legacy = RecordStartParams {
+            session_id: "session".into(),
+            tab_id: None,
+            url: None,
+            purpose: None,
+            max_page_tokens: None,
+            redact_values: None,
+            trace_version: None,
+        };
+        let legacy_value = serde_json::to_value(legacy).unwrap();
+        assert!(legacy_value.get("trace_version").is_none());
+        assert!(legacy_value.get("max_page_tokens").is_none());
+
+        let v3 = RecordStartParams {
+            session_id: "session".into(),
+            tab_id: None,
+            url: None,
+            purpose: None,
+            max_page_tokens: Some(4_000),
+            redact_values: Some(true),
+            trace_version: Some(TRACE_VERSION_V3),
+        };
+        let v3_value = serde_json::to_value(v3).unwrap();
+        assert_eq!(v3_value["trace_version"], TRACE_VERSION_V3);
+        assert_eq!(v3_value["max_page_tokens"], 4_000);
+        assert_eq!(v3_value["redact_values"], true);
     }
 
     #[test]
