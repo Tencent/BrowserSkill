@@ -12,7 +12,7 @@
   <a href="README.md">English</a> · 中文
 </p>
 
-**BrowserSkill** 把 Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent 等支持 Shell 的 AI Agent 连接到你已登录的浏览器。
+**BrowserSkill** 把 Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent、DeepSeek Harness 等 AI Agent 连接到你已登录的浏览器。
 
 需要 Agent 操作你已打开的标签页？必须显式借用该标签，任务结束后归还，其余浏览器窗口不受影响。
 
@@ -102,7 +102,7 @@ bsk install-skill
 
 用 <kbd>Space</kbd> 选择需要安装的 Agent harness，然后按 <kbd>Enter</kbd> 安装 skill。运行 `bsk install-skill --list` 可查看 internal 变体及安装路径。
 
-其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。
+其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。DeepSeek Harness 走独立插件，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
 
 </details>
 
@@ -110,6 +110,14 @@ bsk install-skill
 
 ```text
 /browser-skill open example.com and summarize what is on the page.
+```
+
+## DeepSeek Harness 插件
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：注入原生 `browser_*` 工具（无需再通过 Shell 调用 `bsk`），并在 Web UI 中实时观察每个 Agent Window。
+
+```sh
+dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 ```
 
 ## 工作原理
@@ -143,7 +151,7 @@ flowchart TB
   style UserWindows fill:#f8fafc,stroke:#cbd5e1,color:#334155
 ```
 
-Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。
+Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
 
 ## 面向开发者
 
@@ -153,6 +161,7 @@ Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；
 - `crates/bsk-protocol` — 共享协议类型与 JSON Schema
 - `apps/extension` — 浏览器扩展
 - `packages/ui` 和 `packages/i18n` — 扩展 UI 共享支持
+- `packages/dsh-plugin-browserskill` — DeepSeek Harness 插件（`@wxg-prc-cpg/browser-skill-dsh-plugin`）
 
 ## 许可证
 

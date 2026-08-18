@@ -1,0 +1,105 @@
+name: Release dsh plugin
+
+on:
+  push:
+    tags:
+      - dsh-plugin-v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dsh-plugin-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PACKAGE_NAME: "@wxg-prc-cpg/browser-skill-dsh-plugin"
+  PACKAGE_DIR: packages/dsh-plugin-browserskill
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve plugin version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').version")"
+          else
+            VERSION="${GITHUB_REF_NAME#dsh-plugin-v}"
+          fi
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=dsh-plugin-v${VERSION}" >> "$GITHUB_OUTPUT"
+
+  guard:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify tag matches package.json name and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG_NAME="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').name")"
+          PKG_VERSION="$(node -p "require('./${{ env.PACKAGE_DIR }}/package.json').version")"
+          RELEASE_VERSION="${{ needs.resolve.outputs.version }}"
+          if [ "$PKG_NAME" != "$PACKAGE_NAME" ]; then
+            echo "package.json name (${PKG_NAME}) does not match expected ${PACKAGE_NAME}"
+            exit 1
+          fi
+          if [ "$PKG_VERSION" != "$RELEASE_VERSION" ]; then
+            echo "${PACKAGE_DIR}/package.json version (${PKG_VERSION}) does not match release version (${RELEASE_VERSION})"
+            exit 1
+          fi
+          echo "Version guard passed: ${PKG_NAME}@${RELEASE_VERSION}"
+
+  publish:
+    needs: [resolve, guard]
+    runs-on: ubuntu-latest
+    # Secret NPM_TOKEN is stored on the GitHub Environment also named NPM_TOKEN.
+    environment: NPM_TOKEN
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+          scope: "@wxg-prc-cpg"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck plugin
+        run: pnpm --filter "${{ env.PACKAGE_NAME }}" typecheck
+
+      - name: Test plugin
+        run: pnpm --filter "${{ env.PACKAGE_NAME }}" test
+
+      - name: Publish to npm
+        working-directory: ${{ env.PACKAGE_DIR }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::Environment secret NPM_TOKEN is not configured"
+            exit 1
+          fi
+          pnpm publish --access public --no-git-checks
+          echo "Published ${PACKAGE_NAME}@${{ needs.resolve.outputs.version }}"

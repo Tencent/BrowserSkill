@@ -1,0 +1,5 @@
+lib/
+src/client/bsk-ui.nomodule.css
+.bsk-ui.input.css
+.bsk-ui.raw.css
+src/skill-content.generated.ts
