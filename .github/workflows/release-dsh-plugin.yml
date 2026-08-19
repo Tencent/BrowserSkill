@@ -66,8 +66,8 @@ jobs:
   publish:
     needs: [resolve, guard]
     runs-on: ubuntu-latest
-    # Secret NPM_TOKEN is stored on the GitHub Environment also named NPM_TOKEN.
-    environment: NPM_TOKEN
+    # Secret NPM_TOKEN is stored on the "npm-publish" GitHub Environment.
+    environment: npm-publish
     permissions:
       contents: read
     steps:

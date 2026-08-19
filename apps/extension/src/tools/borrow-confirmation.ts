@@ -250,9 +250,10 @@ const DEFAULT_NOTIFICATION_COPY: BorrowNotificationCopy = {
 // URL injection-eligibility test
 // ---------------------------------------------------------------------------
 
-const CHROME_WEB_STORE_RES = [
+const EXTENSION_STORE_RES = [
   /^https:\/\/chrome\.google\.com\/webstore/i,
   /^https:\/\/chromewebstore\.google\.com/i,
+  /^https:\/\/microsoftedge\.microsoft\.com\/addons/i,
 ];
 
 /**
@@ -264,14 +265,15 @@ const CHROME_WEB_STORE_RES = [
  *   - `ftp://` no longer hosts content scripts reliably in modern Chrome.
  *   - `about:` / `chrome:` / `chrome-extension:` / `edge:` / `devtools:` /
  *     `view-source:` / `data:` / `blob:` are blocked by the platform.
- *   - The Chrome Web Store (both legacy and new domains) is also blocked.
+ *   - Extension storefronts are blocked by their own browser: the Chrome Web
+ *     Store (legacy and new domains) under Chrome, and Edge Add-ons under Edge.
  *
  * Mirrors the implicit scheme list documented in
  * https://developer.chrome.com/docs/extensions/develop/concepts/match-patterns.
  */
 export function isInjectableContentScriptUrl(url: string | undefined): boolean {
   if (!url) return false;
-  for (const re of CHROME_WEB_STORE_RES) {
+  for (const re of EXTENSION_STORE_RES) {
     if (re.test(url)) return false;
   }
   return /^https?:\/\//i.test(url);

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { basename, dirname, resolve as resolvePath } from "node:path";
 import { transform } from "lightningcss";
 import { defineConfig, type UserConfig } from "tsdown";
+import pkg from "./package.json" with { type: "json" };
 
 /**
  * Two build faces of the dual-face package:
@@ -33,7 +34,10 @@ const VENDORED_LIBRARY = /^@deepseek-ai\/(cosmokit|schemastery)(\/|$)/;
 
 const CSS_VIRTUAL_PREFIX = "\0bsk-css:";
 const CSS_VIRTUAL_SUFFIX = ".mjs";
-const CLIENT_ID = "dsh-plugin-browserskill";
+// The web shell resolves client bundles from its module table by package name
+// (dsh's own bundles register the same way), so this must never drift from
+// package.json.
+const CLIENT_ID = pkg.name;
 
 const client: UserConfig = {
   name: `${CLIENT_ID}/client`,

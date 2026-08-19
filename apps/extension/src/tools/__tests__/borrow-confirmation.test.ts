@@ -612,4 +612,14 @@ describe("isInjectableContentScriptUrl", () => {
     ).toBe(false);
     expect(isInjectableContentScriptUrl("https://chromewebstore.google.com/")).toBe(false);
   });
+
+  it("rejects the Edge Add-ons store", () => {
+    expect(
+      isInjectableContentScriptUrl(
+        "https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg",
+      ),
+    ).toBe(false);
+    // Non-store paths on the same host stay injectable.
+    expect(isInjectableContentScriptUrl("https://microsoftedge.microsoft.com/")).toBe(true);
+  });
 });
