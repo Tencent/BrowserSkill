@@ -1,75 +1,196 @@
 import { describe, expect, it } from "vitest";
-import { buildTraceV2, shouldRecordPress } from "@/lib/trace-reducer-v2";
-import type { DraftTraceStep } from "@/transport/types";
+import type { RecordingDraftStep } from "@/lib/recording/types";
+import { shouldRecordPress } from "../recording/draft-policy";
+import { buildTraceV2 } from "../recording/trace-reducer-v2";
 
-describe("trace-reducer-v2", () => {
-  it("drops scroll and bare character press steps", () => {
-    const steps: DraftTraceStep[] = [
+function reduceTraceSteps(steps: RecordingDraftStep[], startUrl?: string) {
+  return buildTraceV2({
+    steps,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    ...(startUrl ? { startUrl } : {}),
+  });
+}
+
+describe("shouldRecordPress", () => {
+  it("keeps Enter and Escape", () => {
+    expect(shouldRecordPress("Enter")).toBe(true);
+    expect(shouldRecordPress("Escape")).toBe(true);
+  });
+
+  it("drops modifiers, clipboard shortcuts, and bare typing", () => {
+    expect(shouldRecordPress("Meta")).toBe(false);
+    expect(shouldRecordPress("c", ["meta"])).toBe(false);
+    expect(shouldRecordPress("a", ["ctrl"])).toBe(false);
+    expect(shouldRecordPress("x")).toBe(false);
+    expect(shouldRecordPress("中")).toBe(false);
+  });
+});
+
+describe("reduceTraceSteps", () => {
+  it("builds steps with pages dictionary and page id references", () => {
+    const drafts: RecordingDraftStep[] = [
       {
-        op: "scroll",
-        page_url: "https://example.com/",
+        op: "navigate",
+        url: "https://example.com/search?q=hello&utm_source=x",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
+      },
+      {
+        op: "fill",
+        captureTarget: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
+        value: "browser skill",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
+      },
+      {
+        op: "press",
+        key: "Enter",
+        captureTarget: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
+        navigatedTo: "https://example.com/results/42",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
+      },
+      {
+        op: "click",
+        captureTarget: { tag: "button", role: "button", name: "发布" },
+        navigatedTo: "https://example.com/p/99",
+        pageUrl: "https://example.com/results/42",
       },
       {
         op: "press",
         key: "a",
-        page_url: "https://example.com/",
+        pageUrl: "https://example.com/p/99",
       },
     ];
-    const trace = buildTraceV2({
-      steps,
-      startedAt: "2026-01-01T00:00:00.000Z",
-      startUrl: "https://example.com/",
+
+    const { pages, steps } = reduceTraceSteps(
+      drafts,
+      "https://example.com/search?q=hello&utm_source=x",
+    );
+    expect(JSON.stringify(steps)).not.toContain("parameters");
+    expect(JSON.stringify(steps)).not.toContain("intent");
+    expect(JSON.stringify(steps)).not.toContain("summary");
+    expect(steps.map((s) => s.op)).toEqual(["navigate", "fill", "press", "click"]);
+    expect(pages.map((p) => p.url)).toEqual([
+      "https://example.com/search?q=hello&utm_source=x",
+      "https://example.com/results/42",
+      "https://example.com/p/99",
+    ]);
+
+    expect(steps[0]).toMatchObject({
+      id: 1,
+      op: "navigate",
+      page: "p1",
+      to: "https://example.com/search?q=hello&utm_source=x",
     });
-    expect(trace.steps).toHaveLength(0);
-    expect(trace.pages).toHaveLength(1);
+
+    expect(steps[1]).toMatchObject({
+      op: "fill",
+      page: "p1",
+      value: "browser skill",
+    });
+
+    expect(steps[2]).toMatchObject({
+      op: "press",
+      key: "Enter",
+      page: "p1",
+      effect: { navigated_to: "p2" },
+    });
+
+    expect(steps[3]).toMatchObject({
+      op: "click",
+      page: "p2",
+      effect: { navigated_to: "p3" },
+    });
   });
 
-  it("preserves hover steps supported by protocol v2", () => {
-    const trace = buildTraceV2({
-      steps: [
+  it("collapses consecutive navigations", () => {
+    const { steps } = reduceTraceSteps([
+      { op: "navigate", url: "https://a.example/redirect1" },
+      { op: "navigate", url: "https://a.example/final" },
+    ]);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatchObject({
+      op: "navigate",
+      to: "https://a.example/final",
+    });
+  });
+
+  it("keeps committed empty fill steps", () => {
+    const { steps } = reduceTraceSteps(
+      [
         {
-          op: "hover",
-          target: { unmatched: true },
-          captureTarget: { tag: "button", role: "button", name: "结束" },
-          page_url: "https://example.com/",
+          op: "fill",
+          captureTarget: { tag: "input", role: "textbox", name: "Search query" },
+          value: "",
+          pageUrl: "https://example.com/search",
         },
       ],
-      startedAt: "2026-01-01T00:00:00.000Z",
-      startUrl: "https://example.com/",
-    });
+      "https://example.com/search",
+    );
 
-    expect(trace.steps).toEqual([
+    expect(steps).toEqual([
       expect.objectContaining({
-        op: "hover",
-        target: expect.objectContaining({ tag: "button", name: "结束" }),
+        op: "fill",
+        value: "",
       }),
     ]);
   });
 
-  it("maps captureTarget to v2 target with required tag", () => {
-    const steps: DraftTraceStep[] = [
-      {
-        op: "click",
-        target: { unmatched: true },
-        captureTarget: { tag: "button", role: "button", name: "Submit" },
-        page_url: "https://example.com/",
-      },
-    ];
-    const trace = buildTraceV2({
-      steps,
-      startedAt: "2026-01-01T00:00:00.000Z",
-      startUrl: "https://example.com/",
+  it("maps select navigatedTo onto effect.navigatedTo (page id)", () => {
+    const { pages, steps } = reduceTraceSteps(
+      [
+        {
+          op: "select",
+          captureTarget: { tag: "select", role: "combobox", name: "分类" },
+          values: ["tech"],
+          labels: ["技术"],
+          navigatedTo: "https://example.com/list?cat=tech",
+          pageUrl: "https://example.com/list",
+        },
+      ],
+      "https://example.com/list",
+    );
+    expect(pages.map((p) => p.url)).toEqual([
+      "https://example.com/list",
+      "https://example.com/list?cat=tech",
+    ]);
+    expect(steps[0]).toMatchObject({
+      op: "select",
+      page: "p1",
+      selection: [{ value: "tech", label: "技术" }],
+      effect: { navigated_to: "p2" },
     });
-    expect(trace.steps).toHaveLength(1);
-    expect(trace.steps[0]?.op).toBe("click");
-    if (trace.steps[0]?.op === "click") {
-      expect(trace.steps[0].target.tag).toBe("button");
-      expect(trace.steps[0].target.name).toBe("Submit");
-    }
-    expect("version" in trace).toBe(false);
   });
 
-  it("records Enter presses", () => {
-    expect(shouldRecordPress("Enter")).toBe(true);
+  it("keeps hover steps before menu clicks", () => {
+    const { steps } = reduceTraceSteps(
+      [
+        {
+          op: "hover",
+          captureTarget: { tag: "span", role: "button", name: "Account" },
+          pageUrl: "https://example.com/app",
+        },
+        {
+          op: "click",
+          captureTarget: { tag: "a", role: "link", name: "Profile" },
+          pageUrl: "https://example.com/app",
+        },
+      ],
+      "https://example.com/app",
+    );
+    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
+    expect(steps[0]).toMatchObject({
+      op: "hover",
+      page: "p1",
+      target: { name: "Account" },
+    });
+  });
+
+  it("resolveTraceStartUrl prefers explicit start URL", () => {
+    expect(
+      buildTraceV2({
+        steps: [{ op: "navigate", url: "https://example.com/other" }],
+        startedAt: "2026-01-01T00:00:00.000Z",
+        startUrl: "https://example.com/start",
+      }).entry.start_url,
+    ).toBe("https://example.com/start");
   });
 });
