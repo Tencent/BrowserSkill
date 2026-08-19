@@ -54,7 +54,8 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 
 <br>
 
-先安装 CLI，再从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 安装浏览器扩展。
+先安装 CLI，再从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
+或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装浏览器扩展。
 
 #### 1. 安装 `bsk` CLI
 
@@ -64,8 +65,11 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
 ```
 
-**Windows**：从 [最新 CLI release](https://github.com/Tencent/BrowserSkill/releases/latest)
-下载 `bsk-v<version>-x86_64-pc-windows-msvc.zip`，解压后将 `bsk.exe` 加入 `PATH`。
+**Windows**（PowerShell，安装到 `~/.local/bin`）：
+
+```powershell
+irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
+```
 
 验证二进制：
 
@@ -75,7 +79,14 @@ bsk --version
 
 #### 2. 安装浏览器扩展
 
-从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 安装 BrowserSkill。
+在对应浏览器的商店安装 BrowserSkill：
+
+| 浏览器 | 商店页面 |
+| --- | --- |
+| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
+| Microsoft Edge | [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+
+其他基于 Chromium 的浏览器，安装 Chrome Web Store 版本即可。
 
 #### 3. 安装 skill
 
@@ -114,11 +125,16 @@ bsk install-skill
 
 ## DeepSeek Harness 插件
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：注入原生 `browser_*` 工具（无需再通过 Shell 调用 `bsk`），并在 Web UI 中实时观察每个 Agent Window。
+在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它会注入原生 `browser_*` 工具（无需再通过 Shell 调用 `bsk`），并在 Web UI 中实时观察每个 Agent Window。
+
+把它装进某个 dsh profile，然后启动该 profile：
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh --profile web
 ```
+
+插件自带 skill，所以在 dsh 下无需执行 `bsk install-skill`；但 `bsk` CLI 和浏览器扩展仍是前置条件。工具清单、配置项与观察浮层见[插件 README](packages/dsh-plugin-browserskill/README.md)。
 
 ## 工作原理
 

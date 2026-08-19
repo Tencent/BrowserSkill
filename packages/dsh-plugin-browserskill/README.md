@@ -6,7 +6,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) tool
 [BrowserSkill](https://github.com/Tencent/BrowserSkill) (`bsk`) browser automation to the model.
 
 Each tool maps to one `bsk <cmd> --json` invocation: the plugin spawns the bsk CLI, parses its
-structured JSON output, and returns a canonical typed value. The bsk daemon, browser, and Chrome
+structured JSON output, and returns a canonical typed value. The bsk daemon, browser, and browser
 extension keep owning the actual browser control — this package is a thin, well-typed bridge.
 
 ## Tools
@@ -64,9 +64,10 @@ dsh plugin --profile <name> add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile <name>
 ```
 
-Prerequisite: the `bsk` CLI must be installed and on `PATH`, and the BrowserSkill Chrome extension
-must be connected — see the [BrowserSkill README](https://github.com/Tencent/BrowserSkill). When bsk
-is missing, tool calls fail with install guidance instead of a bare spawn error.
+Prerequisite: the `bsk` CLI must be installed and on `PATH`, and the BrowserSkill browser extension
+(Chrome or Edge) must be connected — see the
+[BrowserSkill README](https://github.com/Tencent/BrowserSkill). When bsk is missing, tool calls fail
+with install guidance instead of a bare spawn error.
 
 ## Configuration
 

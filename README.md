@@ -67,7 +67,8 @@ Set up browser-skill on this machine by following https://raw.githubusercontent.
 
 <br>
 
-Install the CLI, then install the extension from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi).
+Install the CLI, then install the extension from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
+or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg).
 
 #### 1. Install the `bsk` CLI
 
@@ -91,7 +92,14 @@ bsk --version
 
 #### 2. Install the browser extension
 
-Install BrowserSkill from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi).
+Install BrowserSkill from your browser's store:
+
+| Browser | Store listing |
+| --- | --- |
+| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
+| Microsoft Edge | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+
+On other Chromium-based browsers, install the Chrome Web Store build.
 
 #### 3. Install the skill
 
@@ -136,13 +144,23 @@ Start a new Agent session and write a prompt that needs the browser, for example
 
 ## DeepSeek Harness plugin
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that
-injects native `browser_*` tools (no shelling out to `bsk`) and a live Web UI
+Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?
+BrowserSkill ships a first-class dsh plugin on npm as
+[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin).
+It injects native `browser_*` tools (no shelling out to `bsk`) and a live Web UI
 overlay of each Agent Window.
+
+Add it to a dsh profile, then start that profile:
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
+dsh --profile web
 ```
+
+The plugin carries its own copy of the skill, so `bsk install-skill` is not needed
+for dsh — but the `bsk` CLI and the browser extension are still prerequisites. See
+the [plugin README](packages/dsh-plugin-browserskill/README.md) for the tool list,
+configuration, and the observation overlay.
 
 ## How It Works
 

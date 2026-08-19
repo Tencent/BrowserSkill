@@ -18,6 +18,12 @@ use crate::daemon::state::PROTOCOL_VERSION;
 const EXTENSION_STORE_URL: &str =
     "https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi";
 
+/// Edge Add-ons listing for the browser-skill extension.
+const EXTENSION_STORE_URL_EDGE: &str = "https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg";
+
+/// Store listings highlighted in repair hints, in the order they appear.
+const EXTENSION_STORE_URLS: [&str; 2] = [EXTENSION_STORE_URL, EXTENSION_STORE_URL_EDGE];
+
 /// Status of a single doctor check. `Ok` / `Fail` are the legacy two
 /// states; `NotApplicable` (review M2) is reported as "N/A" in human
 /// output and as `"status": "na"` in `--json` output, so a check that
@@ -420,7 +426,10 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
         CheckResult::fail(
             name,
             "0 browsers connected",
-            format!("install the extension from {EXTENSION_STORE_URL} and load it in Chromium"),
+            format!(
+                "install the extension from {EXTENSION_STORE_URL} (Chrome) \
+                 or {EXTENSION_STORE_URL_EDGE} (Edge) and load it in the browser"
+            ),
         )
     }
 }
@@ -428,17 +437,14 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
 /// Highlight known URLs in repair hints for terminal output. Plain
 /// text is preserved in `--json` and in stored [`CheckResult::hint`].
 fn style_hint(hint: &str) -> String {
-    if !hint.contains(EXTENSION_STORE_URL) {
-        return hint.to_string();
+    let mut styled = hint.to_string();
+    for url in EXTENSION_STORE_URLS {
+        if !styled.contains(url) {
+            continue;
+        }
+        styled = styled.replace(url, &style(url).cyan().bold().underlined().to_string());
     }
-    hint.replace(
-        EXTENSION_STORE_URL,
-        &style(EXTENSION_STORE_URL)
-            .cyan()
-            .bold()
-            .underlined()
-            .to_string(),
-    )
+    styled
 }
 
 fn render_human(checks: &[CheckResult]) {
@@ -504,6 +510,26 @@ mod m2_tests {
             hint.contains(EXTENSION_STORE_URL),
             "hint should include Chrome Web Store URL: {hint}"
         );
+        assert!(
+            hint.contains(EXTENSION_STORE_URL_EDGE),
+            "hint should include Edge Add-ons URL: {hint}"
+        );
+    }
+
+    #[test]
+    fn style_hint_preserves_every_store_url() {
+        let hint = check_extension_connected(Some(&fake_status(Vec::new(), Vec::new())))
+            .hint
+            .expect("extension disconnected should include a hint");
+        let styled = style_hint(&hint);
+        // Whether or not the terminal accepts colors, styling must never drop or
+        // mangle a URL the user has to click.
+        for url in EXTENSION_STORE_URLS {
+            assert!(
+                styled.contains(url),
+                "styled hint should still contain {url}: {styled}"
+            );
+        }
     }
 
     #[test]

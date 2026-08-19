@@ -34,13 +34,17 @@ where only `extension connected` fails is expected; go to Step 3.
 ## 3. Open the extension install page
 
 If `extension connected` is `FAIL` (`0 browsers connected`), the user likely
-has not installed or enabled the browser extension yet. Open the
-[Chrome Web Store install page](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
-in the user's browser, then tell the user:
+has not installed or enabled the browser extension yet. Open the install page
+matching the user's browser —
+[Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
+for Chrome and other Chromium browsers,
+[Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
+for Microsoft Edge — then tell the user:
 
 > Install **BrowserSkill** from the
-> [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi),
-> open the popup, and wait until it turns green. Reply when done.
+> [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
+> (or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
+> on Edge), open the popup, and wait until it turns green. Reply when done.
 
 If opening the page fails, give the user the same link. Then run `bsk doctor`
 once more. All `ok`/`na` → tell the user it's ready.
