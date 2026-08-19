@@ -12,21 +12,7 @@ import {
   hasDirectHoverInteractiveSignal,
   hasStrongHoverExpansionSignal,
 } from "@/lib/hover-trigger-policy";
-import {
-  isRecordCancelMessage,
-  isRecordStartMessage,
-  isRecordStopMessage,
-  RECORD_CANCEL,
-  RECORD_START,
-  RECORD_STEP,
-  RECORD_STOP,
-  type RecordCancelMessage,
-  type RecordStartAck,
-  type RecordStartMessage,
-  type RecordStepPayload,
-  type RecordStopAck,
-  type RecordStopMessage,
-} from "@/lib/record-bridge";
+import type { RecordStepPayload } from "@/lib/record-bridge";
 import { shouldRecordPress } from "@/lib/recording/draft-policy";
 import {
   closestHoverSurfaceCandidate,
@@ -36,18 +22,6 @@ import {
   isHoverSurfaceCandidateElement,
   isLikelyHoverSurfaceOwner,
 } from "./record-hover-surface";
-import { RecordStepDelivery } from "./record-step-delivery";
-
-const stepDeliveries = new Map<string, RecordStepDelivery>();
-const pendingStopFlushes = new Map<string, Promise<RecordStopAck>>();
-
-function deliveryFor(requestId: string): RecordStepDelivery {
-  const existing = stepDeliveries.get(requestId);
-  if (existing) return existing;
-  const created = new RecordStepDelivery(requestId);
-  stepDeliveries.set(requestId, created);
-  return created;
-}
 
 export interface RecordCaptureController {
   dispose(): void;
@@ -385,6 +359,7 @@ function scheduleInputCompletionCommit(
 export function startRecordCapture(
   _requestId: string,
   sendStep: (step: RecordStepPayload) => void,
+  options: { captureNavigation?: boolean } = {},
 ): RecordCaptureController {
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
@@ -921,26 +896,33 @@ export function startRecordCapture(
   document.addEventListener("change", onChange, true);
   document.addEventListener("keydown", onKeyDown, true);
 
-  const urlObserver = new MutationObserver(() => emitNavigateIfChanged());
-  urlObserver.observe(document, { subtree: true, childList: true });
+  const captureNavigation = options.captureNavigation ?? true;
+  const urlObserver = captureNavigation
+    ? new MutationObserver(() => emitNavigateIfChanged())
+    : null;
+  urlObserver?.observe(document, { subtree: true, childList: true });
   const onUrlEvent = () => emitNavigateIfChanged();
   // Wrap: passing commitFillSession directly would forward the DOM event as
   // the `commit` argument and stamp it onto the recorded fill step.
   const onPageHide = () => commitFillSession();
-  window.addEventListener("hashchange", onUrlEvent);
-  window.addEventListener("popstate", onUrlEvent);
+  if (captureNavigation) {
+    window.addEventListener("hashchange", onUrlEvent);
+    window.addEventListener("popstate", onUrlEvent);
+  }
   window.addEventListener("pagehide", onPageHide);
 
   const originalPushState = history.pushState;
   const originalReplaceState = history.replaceState;
-  history.pushState = function (...args: Parameters<History["pushState"]>) {
-    originalPushState.apply(this, args);
-    emitNavigateIfChanged(navigationActionPending ? true : undefined);
-  };
-  history.replaceState = function (...args: Parameters<History["replaceState"]>) {
-    originalReplaceState.apply(this, args);
-    emitNavigateIfChanged(navigationActionPending ? true : undefined);
-  };
+  if (captureNavigation) {
+    history.pushState = function (...args: Parameters<History["pushState"]>) {
+      originalPushState.apply(this, args);
+      emitNavigateIfChanged(navigationActionPending ? true : undefined);
+    };
+    history.replaceState = function (...args: Parameters<History["replaceState"]>) {
+      originalReplaceState.apply(this, args);
+      emitNavigateIfChanged(navigationActionPending ? true : undefined);
+    };
+  }
 
   return {
     dispose() {
@@ -954,99 +936,16 @@ export function startRecordCapture(
       document.removeEventListener("compositionend", onCompositionEnd, true);
       document.removeEventListener("change", onChange, true);
       document.removeEventListener("keydown", onKeyDown, true);
-      urlObserver.disconnect();
-      window.removeEventListener("hashchange", onUrlEvent);
-      window.removeEventListener("popstate", onUrlEvent);
+      urlObserver?.disconnect();
+      if (captureNavigation) {
+        window.removeEventListener("hashchange", onUrlEvent);
+        window.removeEventListener("popstate", onUrlEvent);
+      }
       window.removeEventListener("pagehide", onPageHide);
-      history.pushState = originalPushState;
-      history.replaceState = originalReplaceState;
+      if (captureNavigation) {
+        history.pushState = originalPushState;
+        history.replaceState = originalReplaceState;
+      }
     },
   };
 }
-
-export type RecordContentMessage = RecordStartMessage | RecordStopMessage | RecordCancelMessage;
-
-export function isRecordContentMessage(msg: unknown): msg is RecordContentMessage {
-  return isRecordStartMessage(msg) || isRecordStopMessage(msg) || isRecordCancelMessage(msg);
-}
-
-export function handleRecordContentMessage(
-  message: RecordContentMessage,
-  state: {
-    activeRequestId: string | null;
-    capture: RecordCaptureController | null;
-    setActiveRequestId(id: string | null): void;
-    setCapture(capture: RecordCaptureController | null): void;
-    onStart(requestId: string, startedAtMs?: number): void;
-    onStop(): void;
-  },
-  sendResponse?: (response: RecordStartAck | RecordStopAck) => void,
-): boolean {
-  if (isRecordStartMessage(message)) {
-    const delivery = deliveryFor(message.requestId);
-    state.capture?.dispose();
-    state.setCapture(
-      startRecordCapture(message.requestId, (step) => {
-        delivery.enqueue(step);
-      }),
-    );
-    state.setActiveRequestId(message.requestId);
-    state.onStart(message.requestId, message.startedAtMs);
-    sendResponse?.({ ok: true });
-    return sendResponse !== undefined;
-  }
-
-  if (isRecordStopMessage(message) || isRecordCancelMessage(message)) {
-    // Require an active recording that matches this requestId — otherwise a
-    // stray STOP/CANCEL (e.g. after teardown) would still run finishStop and
-    // clear overlay state even though nothing was capturing.
-    if (!state.activeRequestId || state.activeRequestId !== message.requestId) {
-      return false;
-    }
-    state.capture?.dispose();
-    state.setCapture(null);
-    const finishStop = () => {
-      state.onStop();
-      state.setActiveRequestId(null);
-    };
-    if (isRecordStopMessage(message) && sendResponse) {
-      const existingFlush = pendingStopFlushes.get(message.requestId);
-      if (existingFlush) {
-        void existingFlush.then(sendResponse);
-        return true;
-      }
-
-      const flush = deliveryFor(message.requestId)
-        .flush()
-        .then((succeeded): RecordStopAck => {
-          if (succeeded) {
-            stepDeliveries.delete(message.requestId);
-            finishStop();
-          }
-          return succeeded
-            ? { ok: true }
-            : {
-                ok: false,
-                error: "failed to deliver one or more recorded steps",
-              };
-        });
-      pendingStopFlushes.set(message.requestId, flush);
-      void flush.then(sendResponse).finally(() => {
-        if (pendingStopFlushes.get(message.requestId) === flush) {
-          pendingStopFlushes.delete(message.requestId);
-        }
-      });
-      return true;
-    }
-    if (isRecordCancelMessage(message)) {
-      stepDeliveries.delete(message.requestId);
-      pendingStopFlushes.delete(message.requestId);
-    }
-    finishStop();
-    return false;
-  }
-
-  return false;
-}
-
-export { RECORD_CANCEL, RECORD_START, RECORD_STEP, RECORD_STOP };

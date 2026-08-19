@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RECORD_START, RECORD_STOP, type RecordStepPayload } from "@/lib/record-bridge";
-import { handleRecordContentMessage, startRecordCapture } from "../record-capture";
+import type { RecordStepPayload } from "@/lib/record-bridge";
+import { startRecordCapture } from "../record-capture";
 
 vi.stubGlobal("chrome", {
   runtime: {
@@ -47,118 +47,6 @@ function mouseOver(el: Element): void {
 function click(el: Element): void {
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
 }
-
-describe("handleRecordContentMessage stop/cancel", () => {
-  it("ignores STOP when no recording is active", () => {
-    const dispose = vi.fn();
-    const onStop = vi.fn();
-    const setActiveRequestId = vi.fn();
-    const setCapture = vi.fn();
-    const sendResponse = vi.fn();
-
-    const needsAsync = handleRecordContentMessage(
-      { type: RECORD_STOP, requestId: "rec-stale" },
-      {
-        activeRequestId: null,
-        capture: { dispose },
-        setActiveRequestId,
-        setCapture,
-        onStart: vi.fn(),
-        onStop,
-      },
-      sendResponse,
-    );
-
-    expect(needsAsync).toBe(false);
-    expect(dispose).not.toHaveBeenCalled();
-    expect(onStop).not.toHaveBeenCalled();
-    expect(setActiveRequestId).not.toHaveBeenCalled();
-    expect(setCapture).not.toHaveBeenCalled();
-    expect(sendResponse).not.toHaveBeenCalled();
-  });
-
-  it("ignores STOP for a mismatched requestId", () => {
-    const dispose = vi.fn();
-    const onStop = vi.fn();
-
-    const needsAsync = handleRecordContentMessage(
-      { type: RECORD_STOP, requestId: "rec-other" },
-      {
-        activeRequestId: "rec-1",
-        capture: { dispose },
-        setActiveRequestId: vi.fn(),
-        setCapture: vi.fn(),
-        onStart: vi.fn(),
-        onStop,
-      },
-      vi.fn(),
-    );
-
-    expect(needsAsync).toBe(false);
-    expect(dispose).not.toHaveBeenCalled();
-    expect(onStop).not.toHaveBeenCalled();
-  });
-
-  it("keeps a failed STOP retryable and redelivers its recorded step", async () => {
-    document.body.innerHTML = `<label for="retry">Draft</label><input id="retry" />`;
-    const sendMessage = vi.mocked(chrome.runtime.sendMessage);
-    sendMessage.mockReset();
-    sendMessage.mockRejectedValueOnce(new Error("service worker unavailable"));
-    sendMessage.mockRejectedValueOnce(new Error("service worker still unavailable"));
-    sendMessage.mockResolvedValueOnce({ ok: true, sequence: 1 });
-
-    let activeRequestId: string | null = null;
-    let capture: ReturnType<typeof startRecordCapture> | null = null;
-    const onStop = vi.fn();
-    const dispatch = (
-      message:
-        | { type: typeof RECORD_START; requestId: string; startedAtMs?: number }
-        | { type: typeof RECORD_STOP; requestId: string },
-      sendResponse?: (response: unknown) => void,
-    ) =>
-      handleRecordContentMessage(
-        message,
-        {
-          activeRequestId,
-          capture,
-          setActiveRequestId: (id) => {
-            activeRequestId = id;
-          },
-          setCapture: (next) => {
-            capture = next;
-          },
-          onStart: vi.fn(),
-          onStop,
-        },
-        sendResponse,
-      );
-
-    dispatch({ type: RECORD_START, requestId: "rec-retry" });
-    const input = document.querySelector("input")!;
-    input.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
-    input.value = "dirty final value";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-
-    const firstResponse = vi.fn();
-    expect(dispatch({ type: RECORD_STOP, requestId: "rec-retry" }, firstResponse)).toBe(true);
-    await vi.waitFor(() =>
-      expect(firstResponse).toHaveBeenCalledWith({
-        ok: false,
-        error: "failed to deliver one or more recorded steps",
-      }),
-    );
-    expect(activeRequestId).toBe("rec-retry");
-    expect(onStop).not.toHaveBeenCalled();
-
-    const retryResponse = vi.fn();
-    expect(dispatch({ type: RECORD_STOP, requestId: "rec-retry" }, retryResponse)).toBe(true);
-    await vi.waitFor(() => expect(retryResponse).toHaveBeenCalledWith({ ok: true }));
-
-    expect(sendMessage).toHaveBeenCalledTimes(3);
-    expect(activeRequestId).toBeNull();
-    expect(onStop).toHaveBeenCalledTimes(1);
-  });
-});
 
 describe("record-capture semantic", () => {
   let steps: RecordStepPayload[];
@@ -234,6 +122,19 @@ describe("record-capture semantic", () => {
     expect(steps.filter((s) => s.op === "press")).toEqual([
       expect.objectContaining({ op: "press", key: "Enter" }),
     ]);
+  });
+
+  it("does not emit page navigation from a child Document capture", () => {
+    const originalUrl = location.href;
+    const capture = startRecordCapture("rec-child", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    history.pushState({}, "", "#inside-frame");
+    expect(steps).toEqual([]);
+
+    capture.dispose();
+    history.replaceState({}, "", originalUrl);
   });
 
   it("does not record clicks on anonymous layout divs", () => {
