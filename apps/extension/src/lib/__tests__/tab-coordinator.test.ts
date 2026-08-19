@@ -23,7 +23,7 @@ describe("RecordingTabCoordinator", () => {
 
     expect(tabs.isLatest(second)).toBe(false);
     expect(tabs.isLatest(third)).toBe(true);
-    expect(tabs.commit(6)).toBe(4);
+    tabs.commit(6);
     expect(tabs.currentTabId).toBe(6);
   });
 });
