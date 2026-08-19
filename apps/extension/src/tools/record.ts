@@ -17,11 +17,11 @@ import {
   type RecordStartMessage,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
-import { appendRecordedPayload, observeRecordedNavigation } from "@/lib/recording-step-buffer";
-import { reduceTraceSteps, resolveTraceStartUrl } from "@/lib/trace-reducer";
+import { appendRecordedPayload, observeRecordedNavigation } from "@/lib/recording/step-buffer";
+import { buildTraceV2 } from "@/lib/recording/trace-reducer-v2";
+import type { RecordingDraftStep } from "@/lib/recording/types";
 import type { SessionManager } from "@/session-manager/manager";
 import type {
-  DraftTraceStep,
   RecordAwaitParams,
   RecordAwaitResult,
   RecordStartParams,
@@ -47,7 +47,7 @@ interface ActiveRecording {
   agentWindowId: number;
   startUrl?: string;
   purpose?: string;
-  steps: DraftTraceStep[];
+  steps: RecordingDraftStep[];
   startedAt: string;
   startedAtMs: number;
   finishPromise: Promise<TraceV2>;
@@ -155,16 +155,12 @@ async function sendRecordStartWithAck(
 }
 
 function buildTrace(recording: ActiveRecording): TraceV2 {
-  const { pages, steps } = reduceTraceSteps(recording.steps, recording.startUrl);
-  const startUrl = resolveTraceStartUrl(recording.steps, recording.startUrl, pages);
-  return {
+  return buildTraceV2({
+    steps: recording.steps,
+    startedAt: recording.startedAt,
+    ...(recording.startUrl ? { startUrl: recording.startUrl } : {}),
     ...(recording.purpose ? { purpose: recording.purpose } : {}),
-    recorded_at: new Date().toISOString(),
-    started_at: recording.startedAt,
-    entry: { start_url: startUrl },
-    pages,
-    steps,
-  };
+  });
 }
 
 export interface RecordDeps {

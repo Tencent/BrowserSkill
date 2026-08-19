@@ -743,48 +743,6 @@ export interface StepCommonV2 {
   effect?: StepEffectV2;
 }
 
-/** Capture/buffer draft before v2 reduction. */
-export type DraftTraceStep =
-  | {
-      op: "click";
-      target: TargetDescriptorV2;
-      navigated_to?: string;
-      page_url?: string;
-    }
-  | {
-      op: "hover";
-      target: TargetDescriptorV2;
-      page_url?: string;
-    }
-  | {
-      op: "fill";
-      target: TargetDescriptorV2;
-      value: string;
-      redacted?: boolean;
-      page_url?: string;
-    }
-  | {
-      op: "press";
-      key: string;
-      target?: TargetDescriptorV2;
-      modifiers?: KeyModifier[];
-      navigated_to?: string;
-      page_url?: string;
-    }
-  | {
-      op: "select";
-      target: TargetDescriptorV2;
-      values: string[];
-      labels?: string[];
-      navigated_to?: string;
-      page_url?: string;
-    }
-  | {
-      op: "navigate";
-      url: string;
-      page_url?: string;
-    };
-
 /** Exported record-only step (trace v2). */
 export type StepV2 =
   | ({ op: "navigate" } & StepCommonV2 & { to: string })

@@ -1,0 +1,62 @@
+import { describe, expect, it } from "vitest";
+import { TRACE_VERSION_V3, VOM_FORMAT_VERSION } from "@/transport/types";
+import { RecordingStateRegistry } from "../recording/state-registry";
+import { buildTraceV3 } from "../recording/trace-builder-v3";
+import { reduceTraceStepsV3 } from "../recording/trace-reducer-v3";
+import type { RecordingDraftStep } from "../recording/types";
+
+describe("trace reducer v3", () => {
+  it("collapses redirect hops while retaining draft-to-step identity", () => {
+    const drafts: RecordingDraftStep[] = [
+      { op: "navigate", url: "https://example.com/start", preStateId: "s1", postStateId: "s2" },
+      {
+        op: "navigate",
+        url: "https://example.com/final",
+        transitionQualifiers: ["server_redirect"],
+        preStateId: "s2",
+        postStateId: "s3",
+      },
+    ];
+    const before = structuredClone(drafts);
+    const reduced = reduceTraceStepsV3(drafts);
+
+    expect(drafts).toEqual(before);
+    expect(reduced.steps).toEqual([
+      expect.objectContaining({
+        id: 1,
+        op: "navigate",
+        state: "s1",
+        to: "https://example.com/final",
+        result: { state: "s3" },
+      }),
+    ]);
+    expect(reduced.stepIdByDraftId.get(1)).toBe(1);
+    expect(reduced.stepIdByDraftId.get(2)).toBe(1);
+  });
+
+  it("builds the wire model from protocol constants", () => {
+    const registry = new RecordingStateRegistry();
+    const state = registry.register({ url: "https://example.com", rawVomText: "@vom 1" });
+    const trace = buildTraceV3({
+      registry,
+      drafts: [
+        {
+          op: "click",
+          captureTarget: { tag: "button", role: "button", name: "Save" },
+          preStateId: state.id,
+          postStateId: state.id,
+        },
+      ],
+      startedAt: "2026-08-12T00:00:00.000Z",
+      stoppedBy: "user_finish",
+      bskVersion: "test",
+    });
+
+    expect(trace.version).toBe(TRACE_VERSION_V3);
+    expect(trace.recorder.vom).toBe(VOM_FORMAT_VERSION);
+    expect(trace.steps[0]).toMatchObject({
+      op: "click",
+      target: { role: "button", name: "Save", unmatched: true },
+    });
+  });
+});
