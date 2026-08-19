@@ -165,8 +165,9 @@
   color: var(--destructive);
 }
 
-/* Hover the wrap (not just :hover on the button) so the tooltip target and
-   the left-corner resize overlay still light the icon up. */
+/* Hover the wrap (not just :hover on the button) so the tooltip target
+   lights the icon up too. The corner resize handles sit above this bar, so
+   the outer sliver of the corner-most buttons starts a resize instead. */
 .tool-wrap:hover .tool-button:not(:disabled) {
   color: var(--foreground);
   background: var(--accent);
@@ -203,13 +204,16 @@
   right: 0;
 }
 
-/* Invisible hit targets — no grip glyph; all four corners resize. */
+/* Invisible hit targets — no grip glyph; all four corners resize. Must sit
+   above the bottom .actions bar (z-index 3): it spans the full card width
+   and would otherwise swallow every pointer event aimed at the sw/se
+   corners. The top corners already win because .header is not positioned. */
 .resize-handle {
   position: absolute;
   width: 16px;
   height: 16px;
   touch-action: none;
-  z-index: 2;
+  z-index: 4;
 }
 
 .resize-handle[data-corner="nw"] {
