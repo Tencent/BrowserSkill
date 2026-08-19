@@ -10,6 +10,7 @@ vi.mock("../recording/observation-capture", async (importOriginal) => {
 
 import { ObservationNodeIndex } from "../recording/observation-capture";
 import { RecordingObservationRuntime } from "../recording/recording-runtime";
+import type { RecordingDraftStep } from "../recording/types";
 
 function observation(url = "https://example.com/") {
   return {
@@ -148,5 +149,54 @@ describe("RecordingObservationRuntime", () => {
       targetUrl: "https://example.com/second",
     });
     expect(captureRecordingObservation.mock.calls.map(([input]) => input.tabId)).toEqual([4, 5]);
+  });
+
+  it("binds an iframe draft to its marked CDP Document scope", async () => {
+    captureRecordingObservation.mockResolvedValueOnce({
+      ...observation(),
+      index: new ObservationNodeIndex({
+        rootFrameId: "root",
+        frames: [
+          {
+            frameId: "child",
+            target: { tabId: 7, sessionId: "oopif-session" },
+            recordingDocumentId: "producer-1",
+          },
+        ],
+        matchNodes: [
+          {
+            backendNodeId: 42,
+            frameId: "child",
+            tag: "button",
+            rect: { x: 410, y: 20, w: 100, h: 30 },
+            localRect: { x: 10, y: 20, w: 100, h: 30 },
+          },
+        ],
+        refs: [{ ref: "e1", backendNodeId: 42, frameId: "child", line: 1 }],
+      }),
+    });
+    const recording = runtime();
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "click" as const,
+        captureTarget: { tag: "button", role: "button", name: "Save" },
+        targetHint: {
+          geometry: { rect: { x: 10, y: 20, w: 100, h: 30 }, tag: "button" },
+        },
+      },
+    ];
+
+    await recording.captureInitial(7);
+    await recording.processDraft(7, drafts, 0, "producer-1");
+    recording.cancel();
+
+    const draft = drafts[0];
+    expect(draft?.op).toBe("click");
+    if (!draft || draft.op !== "click") throw new Error("expected click draft");
+    expect(draft.targetHint).toMatchObject({
+      frameId: "child",
+      geometrySpace: "local",
+    });
+    expect(draft.matchedTarget?.ref).toBe("e1");
   });
 });
