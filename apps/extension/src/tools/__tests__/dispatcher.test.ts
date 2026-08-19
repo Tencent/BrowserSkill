@@ -8,6 +8,10 @@ import type {
   RequestFrame,
 } from "@/transport/types";
 import { ToolDispatcher } from "../dispatcher";
+import {
+  resetBrowserObservationForTests,
+  setBrowserObservationAttachForTests,
+} from "../record";
 
 type TestDispatcherCdp = NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["cdp"]>;
 
@@ -44,7 +48,70 @@ function makeRequest(method: string, params: unknown): RequestFrame {
 
 describe("ToolDispatcher", () => {
   afterEach(() => {
+    resetBrowserObservationForTests();
     vi.unstubAllGlobals();
+  });
+
+  it("uses the configured recording runtime for start and stop", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    await sessions.start("aa11");
+    const tab = {
+      id: 7,
+      windowId: 4242,
+      active: true,
+      status: "complete",
+      url: "https://example.com/start",
+    } as chrome.tabs.Tab;
+    const frameCoordinator = {
+      begin: vi.fn(),
+      armTab: vi.fn(async () => true),
+      sourceFor: vi.fn(() => null),
+      stop: vi.fn(async () => true),
+      cancel: vi.fn(),
+    };
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+    setBrowserObservationAttachForTests(
+      () => () => {},
+      () => () => {},
+    );
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      recording: {
+        tabsApi: {
+          get: vi.fn(async () => tab),
+          query: vi.fn(async () => [tab]),
+        },
+        frameCoordinator,
+        sendToTab,
+      },
+    });
+    dispatcher.start();
+
+    deliver(
+      makeRequest("tool.record_start", {
+        session_id: "aa11",
+        url: "https://example.com/start",
+      }),
+    );
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, recording: true } });
+    expect(frameCoordinator.begin).toHaveBeenCalledOnce();
+    expect(frameCoordinator.armTab).toHaveBeenCalledWith(expect.any(String), 7);
+
+    deliver({ id: "r-2", method: "tool.record_stop", params: { session_id: "aa11" } });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+
+    expect(frameCoordinator.stop).toHaveBeenCalledOnce();
+    expect(sent[1]).toMatchObject({ id: "r-2", result: { trace: { steps: [] } } });
   });
 
   it("routes tool.session_start to the SessionManager and replies with the window id", async () => {
