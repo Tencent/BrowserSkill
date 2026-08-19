@@ -26,7 +26,7 @@ use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
     sessions::{StopSessionError, forget_session, stop_session},
-    state::{DaemonState, PROTOCOL_VERSION},
+    state::DaemonState,
     ws,
 };
 
@@ -297,7 +297,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             ws_port,
             sock_path: sock_path.clone(),
             daemon_version: env!("CARGO_PKG_VERSION"),
-            protocol_version: PROTOCOL_VERSION,
+            protocol_version: "1.0",
         };
         let handler = ipc::full_handler(status, Arc::clone(&state));
 

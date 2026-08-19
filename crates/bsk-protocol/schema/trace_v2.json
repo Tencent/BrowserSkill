@@ -16,7 +16,7 @@
     "pages": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/PageRef"
+        "$ref": "#/definitions/PageRefV2"
       }
     },
     "purpose": {
@@ -54,7 +54,7 @@
         "shift"
       ]
     },
-    "PageRef": {
+    "PageRefV2": {
       "description": "Page context dictionary entry — referenced by steps via `page` id.",
       "type": "object",
       "required": [
@@ -431,7 +431,6 @@
       }
     },
     "TraceEntry": {
-      "description": "Recording entry point — first URL the flow starts from.",
       "type": "object",
       "required": [
         "start_url"

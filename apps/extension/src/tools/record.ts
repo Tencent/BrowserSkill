@@ -29,7 +29,7 @@ import type {
   RecordStopParams,
   RecordStopResult,
   RpcError,
-  Trace,
+  TraceV2,
 } from "@/transport/types";
 import { handleNavigate } from "./navigation";
 import {
@@ -50,8 +50,8 @@ interface ActiveRecording {
   steps: DraftTraceStep[];
   startedAt: string;
   startedAtMs: number;
-  finishPromise: Promise<Trace>;
-  resolveFinish: (trace: Trace) => void;
+  finishPromise: Promise<TraceV2>;
+  resolveFinish: (trace: TraceV2) => void;
   rejectFinish: (err: Error) => void;
   settled: boolean;
   finishing: boolean;
@@ -154,7 +154,7 @@ async function sendRecordStartWithAck(
   throw lastError ?? new Error("failed to start recording in content script");
 }
 
-function buildTrace(recording: ActiveRecording): Trace {
+function buildTrace(recording: ActiveRecording): TraceV2 {
   const { pages, steps } = reduceTraceSteps(recording.steps, recording.startUrl);
   const startUrl = resolveTraceStartUrl(recording.steps, recording.startUrl, pages);
   return {
@@ -532,7 +532,7 @@ async function finishRecordingByRequest(
   }
 }
 
-async function finishRecording(sessionId: string, deps: RecordDeps): Promise<Trace | null> {
+async function finishRecording(sessionId: string, deps: RecordDeps): Promise<TraceV2 | null> {
   const recording = recordings.get(sessionId);
   if (!recording || recording.settled || recording.finishing) return null;
   recording.finishing = true;
@@ -574,9 +574,9 @@ export async function handleRecordStart(
   // on the destination page can RECORD_QUERY → rearm → show RecordOverlay
   // instead of flashing ControlOverlay ("Agent 正在控制").
   const requestId = makeRequestId(target.tabId);
-  let resolveFinish!: (trace: Trace) => void;
+  let resolveFinish!: (trace: TraceV2) => void;
   let rejectFinish!: (err: Error) => void;
-  const finishPromise = new Promise<Trace>((resolve, reject) => {
+  const finishPromise = new Promise<TraceV2>((resolve, reject) => {
     resolveFinish = resolve;
     rejectFinish = reject;
   });
@@ -785,9 +785,9 @@ export async function handleRecordAwait(
     return { code: "cancelled", message: "record_await aborted" };
   }
 
-  const outcome = await new Promise<{ trace: Trace } | { error: RpcError }>((resolve) => {
+  const outcome = await new Promise<{ trace: TraceV2 } | { error: RpcError }>((resolve) => {
     let settled = false;
-    const finish = (result: { trace: Trace } | { error: RpcError }) => {
+    const finish = (result: { trace: TraceV2 } | { error: RpcError }) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);

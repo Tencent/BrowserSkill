@@ -98,9 +98,6 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         tab_id: args.tab_id,
         url: args.url,
         purpose: args.purpose.clone(),
-        max_page_tokens: None,
-        redact_values: None,
-        trace_version: None,
     };
     let start_result = business_rpc::call::<RecordStartParams, RecordStartResult>(
         info.sock_path.clone(),

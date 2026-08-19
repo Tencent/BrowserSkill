@@ -86,7 +86,7 @@ async fn handshake_as_ext(ws: &mut TestWs) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.1".into(),
+        protocol_version: "1.0".into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -758,7 +758,7 @@ async fn connect_second_ext(
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.1".into(),
+        protocol_version: "1.0".into(),
         instance_id: instance_id.into(),
         browser: BrowserPeerInfo {
             name: "edge".into(),

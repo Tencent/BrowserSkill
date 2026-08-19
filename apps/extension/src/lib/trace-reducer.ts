@@ -1,4 +1,4 @@
-import type { DraftTraceStep, PageRef, SelectedOption, Step } from "@/transport/types";
+import type { DraftTraceStep, PageRefV2, SelectedOptionV2, StepV2 } from "@/transport/types";
 
 const CLIPBOARD_KEYS = new Set(["a", "c", "v", "x", "A", "C", "V", "X"]);
 const MODIFIER_ONLY_KEYS = new Set(["Meta", "Control", "Alt", "Shift", "OS", "Hyper", "Super"]);
@@ -60,7 +60,7 @@ function collectUrls(steps: DraftTraceStep[], startUrl?: string): string[] {
 function buildPageRegistry(
   steps: DraftTraceStep[],
   startUrl?: string,
-): { pages: PageRef[]; urlToId: Map<string, string> } {
+): { pages: PageRefV2[]; urlToId: Map<string, string> } {
   const urls = collectUrls(steps, startUrl);
   const urlToId = new Map<string, string>();
   const pages = urls.map((url, index) => {
@@ -90,19 +90,19 @@ function pageUrlForDraft(step: DraftTraceStep, fallbackUrl?: string): string | u
 function effectForNavigation(
   navigatedTo: string | undefined,
   urlToId: Map<string, string>,
-): Step["effect"] {
+): StepV2["effect"] {
   if (!navigatedTo) return undefined;
   const pageId = urlToId.get(navigatedTo);
   if (!pageId) return undefined;
   return { navigated_to: pageId };
 }
 
-function withEffect(step: Step, effect: Step["effect"]): Step {
+function withEffect(step: StepV2, effect: StepV2["effect"]): StepV2 {
   if (!effect) return step;
   return { ...step, effect };
 }
 
-function toSelection(values: string[], labels?: string[]): SelectedOption[] {
+function toSelection(values: string[], labels?: string[]): SelectedOptionV2[] {
   return values.map((value, index) => ({
     value,
     ...(labels?.[index] ? { label: labels[index] } : {}),
@@ -114,7 +114,7 @@ function toV2Step(
   id: number,
   urlToId: Map<string, string>,
   fallbackUrl?: string,
-): Step | null {
+): StepV2 | null {
   if (!shouldIncludeDraft(step)) return null;
 
   const pageUrl = pageUrlForDraft(step, fallbackUrl);
@@ -181,8 +181,8 @@ function toV2Step(
 }
 
 export interface ReducedTrace {
-  pages: PageRef[];
-  steps: Step[];
+  pages: PageRefV2[];
+  steps: StepV2[];
 }
 
 /**
@@ -192,7 +192,7 @@ export interface ReducedTrace {
 export function reduceTraceSteps(steps: DraftTraceStep[], startUrl?: string): ReducedTrace {
   const collapsed = collapseNavigations(steps);
   const { pages, urlToId } = buildPageRegistry(collapsed, startUrl);
-  const out: Step[] = [];
+  const out: StepV2[] = [];
   let id = 1;
   let lastUrl = startUrl;
   for (const draft of collapsed) {
@@ -210,7 +210,7 @@ export function reduceTraceSteps(steps: DraftTraceStep[], startUrl?: string): Re
 export function resolveTraceStartUrl(
   drafts: DraftTraceStep[],
   startUrl?: string,
-  pages?: PageRef[],
+  pages?: PageRefV2[],
 ): string {
   if (startUrl) return startUrl;
   const navigate = drafts.find((step): step is Extract<DraftTraceStep, { op: "navigate" }> => {
