@@ -187,8 +187,8 @@ git tag dsh-plugin-v0.1.0
 git push origin dsh-plugin-v0.1.0
 ```
 
-Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads
-`NPM_TOKEN` from the GitHub Environment of the same name.
+Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads the
+`NPM_TOKEN` secret from the `npm-publish` GitHub Environment.
 
 ## License
 
