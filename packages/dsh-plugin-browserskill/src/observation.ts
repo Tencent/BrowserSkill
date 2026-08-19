@@ -12,7 +12,7 @@
  * events, and never move the registry's current pointer.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,6 +78,7 @@ const FAILURE_BACKOFF_THRESHOLD = 3;
 const FRAME_RING_SIZE = 2;
 
 export class ObservationService {
+  private readonly scratchNamespace = randomUUID();
   private readonly observations = new Map<string, SessionObservation>();
   private readonly listeners = new Set<(event: ObservationEvent) => void>();
   private readonly captureTimers = new Map<string, unknown>();
@@ -304,9 +305,9 @@ export class ObservationService {
     if (current === undefined || current.dead === true) return;
     if (this.captureInFlight.has(sessionId)) return;
     this.captureInFlight.add(sessionId);
-    // One fixed scratch path per session (overwritten each frame) and always
-    // unlinked after the bytes are read — /tmp must not grow without bound.
-    const outPath = join(tmpdir(), `bsk-obs-${sessionId}.png`);
+    // Stable within this service, isolated from captures owned by other instances.
+    const sessionKey = createHash("sha256").update(sessionId).digest("hex").slice(0, 16);
+    const outPath = join(tmpdir(), `bsk-obs-${this.scratchNamespace}-${sessionKey}.png`);
     let writtenPath = outPath;
     try {
       const result = await this.deps.queue.run(sessionId, () =>

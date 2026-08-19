@@ -5,7 +5,7 @@
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   actionForLabel,
@@ -548,8 +548,12 @@ describe("scratch files and thumbnail references", () => {
     );
     const firstOut = runner.calls.filter((c) => c.args[0] === "screenshot").at(-1)?.args;
     const pathOf = (args: string[]) => args[args.indexOf("--out") + 1];
-    expect(pathOf(firstOut ?? [])).toBe(join(tmpdir(), "bsk-obs-s1.png"));
-    expect(existsSync(pathOf(firstOut ?? []))).toBe(false);
+    const firstPath = pathOf(firstOut ?? []);
+    expect(dirname(firstPath)).toBe(tmpdir());
+    expect(basename(firstPath)).toMatch(
+      /^bsk-obs-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-[0-9a-f]{16}\.png$/,
+    );
+    expect(existsSync(firstPath)).toBe(false);
     // second frame: same path, deleted again
     service.endAction("s1");
     scheduler.runNext();
@@ -559,9 +563,31 @@ describe("scratch files and thumbnail references", () => {
         scheduler.pending().length === 1,
     );
     const secondOut = runner.calls.filter((c) => c.args[0] === "screenshot").at(-1)?.args;
-    expect(pathOf(secondOut ?? [])).toBe(join(tmpdir(), "bsk-obs-s1.png"));
-    await waitFor(() => !existsSync(pathOf(secondOut ?? [])));
+    const secondPath = pathOf(secondOut ?? []);
+    expect(secondPath).toBe(firstPath);
+    await waitFor(() => !existsSync(secondPath));
     service.dispose();
+  });
+
+  it("isolates scratch paths between service instances", async () => {
+    const first = setup({ scheduler: fakeScheduler(), runner: fakeRunner() });
+    const second = setup({ scheduler: fakeScheduler(), runner: fakeRunner() });
+    first.service.addSession("s1");
+    second.service.addSession("s1");
+    first.scheduler.runNext();
+    second.scheduler.runNext();
+    await waitFor(
+      () =>
+        first.service.getState()[0]?.thumbnailAttachmentId !== undefined &&
+        second.service.getState()[0]?.thumbnailAttachmentId !== undefined,
+    );
+    const pathOf = (runner: FakeRunner) => {
+      const args = runner.calls.find((call) => call.args[0] === "screenshot")?.args ?? [];
+      return args[args.indexOf("--out") + 1];
+    };
+    expect(pathOf(first.runner)).not.toBe(pathOf(second.runner));
+    first.service.dispose();
+    second.service.dispose();
   });
 
   it("keeps the last two distinct frames and evicts the third", async () => {
