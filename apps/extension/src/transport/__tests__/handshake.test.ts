@@ -65,11 +65,6 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 }
 
 describe("performHandshake", () => {
-  it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("1.1");
-    expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.0");
-  });
-
   it("sends system.handshake with identity and both compat fields", async () => {
     let sentFrame: ProtocolFrame | null = null;
     const transport = fakeTransport((req) => {
@@ -79,7 +74,7 @@ describe("performHandshake", () => {
         result: {
           server: "browser-skill-daemon",
           version: "0.1.0",
-          protocol_version: "1.1",
+          protocol_version: "1.0",
           min_compatible_peer: "0.0.0",
           min_compatible_protocol: "1.0",
         },
@@ -134,8 +129,8 @@ describe("performHandshake", () => {
     const response = {
       server: "browser-skill-daemon",
       version: "0.1.0",
-      protocol_version: "1.1",
-      min_compatible_protocol: "1.1",
+      protocol_version: "1.0",
+      min_compatible_protocol: "1.0",
     } satisfies HandshakeResult;
     const transport = fakeTransport((req) => ({
       id: (req as { id: string }).id,
@@ -150,7 +145,7 @@ describe("performHandshake", () => {
     });
 
     expect(outcome.result.min_compatible_peer).toBeUndefined();
-    expect(outcome.result.min_compatible_protocol).toBe("1.1");
+    expect(outcome.result.min_compatible_protocol).toBe("1.0");
   });
 
   it("rejects when the daemon responds with an error", async () => {
@@ -183,9 +178,9 @@ describe("performHandshake", () => {
       result: {
         server: "browser-skill-daemon",
         version: "0.1.0",
-        protocol_version: "1.1",
+        protocol_version: "1.0",
         min_compatible_peer: "0.0.0",
-        min_compatible_protocol: "1.1",
+        min_compatible_protocol: "1.0",
       },
     });
     emit({
@@ -193,14 +188,14 @@ describe("performHandshake", () => {
       result: {
         server: "browser-skill-daemon",
         version: "0.1.0",
-        protocol_version: "1.1",
+        protocol_version: "1.0",
         min_compatible_peer: "0.0.0",
-        min_compatible_protocol: "1.1",
+        min_compatible_protocol: "1.0",
       },
     });
 
     await expect(pending).resolves.toMatchObject({
-      result: { server: "browser-skill-daemon", protocol_version: "1.1" },
+      result: { server: "browser-skill-daemon", protocol_version: "1.0" },
     });
   });
 

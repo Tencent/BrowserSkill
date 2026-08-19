@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Step",
+  "title": "StepV3",
   "description": "One recorded user action — discriminated union by `op`.",
   "oneOf": [
     {
@@ -30,7 +30,7 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
@@ -64,14 +64,14 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
           "type": "string"
         },
         "target": {
-          "$ref": "#/definitions/TargetDescriptor"
+          "$ref": "#/definitions/TargetDescriptorV3"
         }
       }
     },
@@ -98,14 +98,14 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
           "type": "string"
         },
         "target": {
-          "$ref": "#/definitions/TargetDescriptor"
+          "$ref": "#/definitions/TargetDescriptorV3"
         }
       }
     },
@@ -140,14 +140,14 @@
           "type": "boolean"
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
           "type": "string"
         },
         "target": {
-          "$ref": "#/definitions/TargetDescriptor"
+          "$ref": "#/definitions/TargetDescriptorV3"
         },
         "value": {
           "type": "string"
@@ -177,12 +177,12 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "selection": {
           "type": "array",
           "items": {
-            "$ref": "#/definitions/SelectedOption"
+            "$ref": "#/definitions/SelectedOptionV3"
           }
         },
         "state": {
@@ -190,7 +190,7 @@
           "type": "string"
         },
         "target": {
-          "$ref": "#/definitions/TargetDescriptor"
+          "$ref": "#/definitions/TargetDescriptorV3"
         }
       }
     },
@@ -229,7 +229,7 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
@@ -238,7 +238,7 @@
         "target": {
           "anyOf": [
             {
-              "$ref": "#/definitions/TargetDescriptor"
+              "$ref": "#/definitions/TargetDescriptorV3"
             },
             {
               "type": "null"
@@ -269,7 +269,7 @@
           ]
         },
         "result": {
-          "$ref": "#/definitions/StepResult"
+          "$ref": "#/definitions/StepResultV3"
         },
         "state": {
           "description": "Observation id immediately before this action.",
@@ -309,7 +309,7 @@
         "browser"
       ]
     },
-    "SelectedOption": {
+    "SelectedOptionV3": {
       "description": "One selected option (`select` op).",
       "type": "object",
       "required": [
@@ -327,7 +327,7 @@
         }
       }
     },
-    "StepResult": {
+    "StepResultV3": {
       "type": "object",
       "required": [
         "state"
@@ -338,7 +338,7 @@
         }
       }
     },
-    "TargetDescriptor": {
+    "TargetDescriptorV3": {
       "description": "Stable semantic handle for an interacted element within a page observation.",
       "type": "object",
       "properties": {

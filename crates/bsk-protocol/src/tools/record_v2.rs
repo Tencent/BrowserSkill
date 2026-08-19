@@ -1,13 +1,12 @@
 //! Trace v2 — record-only user-action log with `pages[]` and step `page` refs.
 //!
-//! Legacy wire format: no top-level `version` field. New peers omit
-//! `trace_version` on `record_start` to request this shape.
+//! Legacy wire format with no top-level `version` field.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::interaction::KeyModifier;
-use super::record::TraceEntry;
+use super::record_common::TraceEntry;
 
 /// Stable semantic handle for an interacted element (v2).
 ///
@@ -29,7 +28,7 @@ pub struct TargetDescriptorV2 {
 
 /// Page context dictionary entry — referenced by steps via `page` id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct PageRef {
+pub struct PageRefV2 {
     pub id: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,7 +115,7 @@ pub struct TraceV2 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
     pub entry: TraceEntry,
-    pub pages: Vec<PageRef>,
+    pub pages: Vec<PageRefV2>,
     pub steps: Vec<StepV2>,
 }
 
@@ -153,7 +152,7 @@ mod tests {
             entry: TraceEntry {
                 start_url: "https://example.com/".into(),
             },
-            pages: vec![PageRef {
+            pages: vec![PageRefV2 {
                 id: "p1".into(),
                 url: "https://example.com/".into(),
                 title: None,
