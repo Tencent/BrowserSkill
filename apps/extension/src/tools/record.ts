@@ -18,6 +18,11 @@ import {
   type RecordStepAck,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
+import {
+  type RecordFrameCoordinator,
+  type RecordingCaptureScope,
+  recordFrameCoordinator,
+} from "@/lib/recording/frame-coordinator";
 import { RecordingObservationRuntime } from "@/lib/recording/recording-runtime";
 import {
   appendRecordedPayload,
@@ -262,10 +267,11 @@ async function processRecordedStep(
   recording: ActiveRecording,
   draftIndex: number,
   tabId: number,
+  producerId?: string,
 ): Promise<void> {
   if (!recording.observation) return;
   try {
-    await recording.observation.processDraft(tabId, recording.steps, draftIndex);
+    await recording.observation.processDraft(tabId, recording.steps, draftIndex, producerId);
   } catch (err) {
     console.warn(`[bsk record] observation failed for step ${draftIndex + 1}`, err);
   }
@@ -278,6 +284,10 @@ export interface RecordDeps {
     msg: RecordStartMessage | RecordStopMessage | RecordCancelMessage,
   ): Promise<unknown>;
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+  frameCoordinator?: Pick<
+    RecordFrameCoordinator,
+    "begin" | "armTab" | "sourceFor" | "stop" | "cancel"
+  >;
   cdp?: CdpRunner;
   signal?: AbortSignal;
 }
@@ -288,6 +298,7 @@ function getDefaultDeps(): RecordDeps {
     defaultDeps = {
       tabsApi: chromeTabsApi,
       sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
+      frameCoordinator: recordFrameCoordinator,
     };
   }
   return defaultDeps;
@@ -354,9 +365,15 @@ export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): (
     if (!isRecordStepMessage(message)) return false;
     for (const recording of recordings.values()) {
       if (recording.requestId !== message.requestId) continue;
-      const sourceTabId = sender.tab?.id ?? recording.tabs.currentTabId;
+      const source: RecordingCaptureScope | null | undefined = deps.frameCoordinator
+        ? deps.frameCoordinator.sourceFor(message.requestId, message.producerId, sender)
+        : undefined;
+      if (deps.frameCoordinator && !source) return false;
+      const sourceTabId = source?.tabId ?? sender.tab?.id ?? recording.tabs.currentTabId;
       const sourceWasActive = sender.tab?.active ?? sourceTabId === recording.tabs.activeTabId;
-      const producerKey = `${sourceTabId}:${message.producerId}`;
+      const producerKey = source
+        ? `${source.tabId}:${source.documentId}:${source.producerId}`
+        : `${sourceTabId}:${message.producerId}`;
       const expectedSequence = (recording.lastStepSequenceByProducer.get(producerKey) ?? 0) + 1;
       if (message.sequence < expectedSequence) {
         sendResponse({ ok: true, sequence: message.sequence });
@@ -387,7 +404,7 @@ export function attachRecordStepListener(deps: RecordDeps = getDefaultDeps()): (
           targetHint,
         );
         if (draftIndex !== null) {
-          await processRecordedStep(recording, draftIndex, sourceTabId);
+          await processRecordedStep(recording, draftIndex, sourceTabId, source?.producerId);
         }
       });
       sendResponse({ ok: true, sequence: message.sequence });
@@ -469,6 +486,9 @@ async function stopRecordingOnAllAgentTabs(
   recording: ActiveRecording,
   deps: RecordDeps,
 ): Promise<void> {
+  if (deps.frameCoordinator && !(await deps.frameCoordinator.stop(recording.requestId))) {
+    throw new Error("failed to flush one or more recording documents");
+  }
   const stopMsg: RecordStopMessage = { type: RECORD_STOP, requestId: recording.requestId };
   let tabIds = [recording.tabs.currentTabId];
   try {
@@ -523,6 +543,10 @@ async function rearmRecording(
       startedAtMs: recording.startedAtMs,
     };
     try {
+      if (deps.frameCoordinator) {
+        const frameStarted = await deps.frameCoordinator.armTab(recording.requestId, targetTabId);
+        if (!frameStarted) throw new Error("recording document did not start");
+      }
       await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab, isFinishing);
       if (isFinishing()) return false;
       if (activation) {
@@ -860,12 +884,14 @@ export async function handleRecordStart(
     actionQueue: Promise.resolve(),
     lastStepSequenceByProducer: new Map(),
   });
+  deps.frameCoordinator?.begin(requestId, startedAtMs);
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
   ensureBrowserObservationListeners(deps);
 
   const abortPending = async (notifyContent: boolean) => {
     recordings.get(params.session_id)?.observation?.cancel();
+    deps.frameCoordinator?.cancel(requestId);
     recordings.delete(params.session_id);
     releaseBrowserObservationListenersIfIdle();
     if (notifyContent) {
@@ -982,6 +1008,10 @@ export async function handleRecordStart(
   const startMsg: RecordStartMessage = { type: RECORD_START, requestId, startedAtMs };
 
   try {
+    if (deps.frameCoordinator) {
+      const frameStarted = await deps.frameCoordinator.armTab(requestId, target.tabId);
+      if (!frameStarted) throw new Error("top recording document did not start");
+    }
     await sendRecordStartWithAck(target.tabId, startMsg, deps.sendToTab);
   } catch {
     await abortPending(true);
@@ -1101,6 +1131,7 @@ export function clearRecordingForSession(sessionId: string): void {
   }
   void clearRearmTimersForRecording(recording, getDefaultDeps());
   if (!recording.settled) {
+    getDefaultDeps().frameCoordinator?.cancel(recording.requestId);
     recording.observation?.cancel();
     recording.settled = true;
     recording.rejectFinish(new Error("recording cleared"));
