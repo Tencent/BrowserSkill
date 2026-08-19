@@ -1200,7 +1200,8 @@ describe("recorded user steps reach the exported trace", () => {
     const trace = (stopped as RecordStopResult).trace;
     expect("version" in trace).toBe(false);
     expect("pages" in trace && trace.pages.length).toBeGreaterThan(0);
-    expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["hover", "click"]);
+    // `hover` has no v2 counterpart on peers that negotiate v2.
+    expect("steps" in trace && trace.steps.map((step) => step.op)).toEqual(["click"]);
   });
 
   it("rejects unsupported trace_version values", async () => {

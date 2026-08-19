@@ -171,7 +171,7 @@ describe("reduceTraceSteps", () => {
     });
   });
 
-  it("keeps hover steps before menu clicks", () => {
+  it("drops hover steps, which only exist in trace v3", () => {
     const { steps } = reduceTraceSteps(
       [
         {
@@ -187,12 +187,7 @@ describe("reduceTraceSteps", () => {
       ],
       "https://example.com/app",
     );
-    expect(steps.map((s) => s.op)).toEqual(["hover", "click"]);
-    expect(steps[0]).toMatchObject({
-      op: "hover",
-      page: "p1",
-      target: { name: "Account" },
-    });
+    expect(steps.map((s) => s.op)).toEqual(["click"]);
   });
 
   it("resolveTraceStartUrl prefers explicit start URL", () => {
