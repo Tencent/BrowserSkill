@@ -14,8 +14,13 @@ function rectMatches(a: TargetGeometry["rect"], b: TargetGeometry["rect"]): bool
   return close(a.x, b.x) && close(a.y, b.y) && close(a.w, b.w) && close(a.h, b.h);
 }
 
-function candidateMatches(candidate: IndexedObservationNode, geometry: TargetGeometry): boolean {
-  return candidate.geometry.rect !== null && rectMatches(geometry.rect, candidate.geometry.rect);
+function candidateMatches(
+  candidate: IndexedObservationNode,
+  geometry: TargetGeometry,
+  geometrySpace: "top" | "local",
+): boolean {
+  const rect = geometrySpace === "local" ? candidate.geometry.localRect : candidate.geometry.rect;
+  return rect != null && rectMatches(geometry.rect, rect);
 }
 
 export function unmatchedTarget(fallback?: CaptureTargetDescriptor): TargetDescriptorV3 {
@@ -53,12 +58,17 @@ export function matchObservationTarget(input: {
   hint?: TargetMatchHint;
   fallback?: CaptureTargetDescriptor;
 }): TargetDescriptorV3 {
+  if (input.hint?.frameId === null) return unmatchedTarget(input.fallback);
   const frameId = input.hint?.frameId ?? input.observation.rootFrameId;
   const geometry = input.hint?.geometry;
   if (geometry) {
     const matches = input.observation.index
       .candidates(frameId, geometry.tag)
-      .filter((candidate) => candidate.ref && candidateMatches(candidate, geometry));
+      .filter(
+        (candidate) =>
+          candidate.ref &&
+          candidateMatches(candidate, geometry, input.hint?.geometrySpace ?? "top"),
+      );
     if (matches.length === 1) return descriptor(matches[0]!.ref!);
     const semanticMatches = matches.filter(
       (candidate) => candidate.ref && matchesSemantics(candidate.ref, input.fallback),

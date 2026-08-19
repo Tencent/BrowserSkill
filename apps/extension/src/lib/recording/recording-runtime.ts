@@ -126,7 +126,7 @@ export class RecordingObservationRuntime {
     tabId: number,
     drafts: RecordingDraftStep[],
     draftIndex: number,
-    scope?: DocumentSettleScope,
+    producerId?: string,
   ): Promise<void> {
     const draft = drafts[draftIndex];
     if (!draft) return;
@@ -137,6 +137,23 @@ export class RecordingObservationRuntime {
       } catch {
         // Post-action settle can still provide a usable state.
       }
+    }
+    const scope = producerId
+      ? context.session.cursor.lastSettled?.index.documentScope(producerId)
+      : undefined;
+    if (
+      producerId &&
+      (draft.op === "click" ||
+        draft.op === "hover" ||
+        draft.op === "fill" ||
+        draft.op === "press" ||
+        draft.op === "select")
+    ) {
+      draft.targetHint = {
+        ...(draft.targetHint ?? {}),
+        frameId: scope?.frameId ?? null,
+        geometrySpace: "local",
+      };
     }
     context.session.bindDraft(draft, draftIndex + 1, context.settle.hasPending);
     context.settle.schedule(drafts, draftIndex, scope);

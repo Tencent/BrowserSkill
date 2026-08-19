@@ -21,6 +21,7 @@ import {
   type OverlayMode,
 } from "@/lib/overlay-bridge";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
+import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
@@ -173,6 +174,7 @@ export default defineBackground(() => {
   const recordDeps = {
     tabsApi: chrome.tabs,
     cdp,
+    frameCoordinator: recordFrameCoordinator,
     sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
       chrome.tabs.sendMessage(tabId, msg),
     bypassOverlay: async (tabId: number, enabled: boolean) => {
@@ -192,6 +194,7 @@ export default defineBackground(() => {
   attachRecordStepListener(recordDeps);
   attachRecordFinishListener(recordDeps);
   attachRecordQueryListener(recordDeps);
+  recordFrameCoordinator.attach();
   if (typeof chrome.notifications?.onClicked?.addListener === "function") {
     attachBorrowNotificationClickHandler({
       onClicked: chrome.notifications.onClicked,
