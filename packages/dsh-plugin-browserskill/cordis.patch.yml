@@ -1,3 +1,5 @@
 - insert:
     - id: browserskill
-      name: dsh-plugin-browserskill
+      # Must be the published package name — the loader imports this specifier.
+      # Quoted because YAML reserves a leading '@' in plain scalars.
+      name: "@wxg-prc-cpg/browser-skill-dsh-plugin"

@@ -77,7 +77,7 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
 # cordis.patch.yml override example
 - insert:
     - id: browserskill
-      name: dsh-plugin-browserskill
+      name: "@wxg-prc-cpg/browser-skill-dsh-plugin"
       config:
         bskPath: bsk          # path to the bsk binary (default: resolve from PATH)
         defaultTimeoutMs: 120000
