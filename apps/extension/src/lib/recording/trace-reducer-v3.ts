@@ -69,6 +69,15 @@ function reduceDraft(
   options: ReduceDraftOptions,
 ): StepV3 | null {
   if (!shouldIncludeDraft(draft)) return null;
+  if (draft.op === "switch_tab") {
+    if (!options.includeTabSwitches || !draft.preStateId || !draft.postStateId) return null;
+    return {
+      op: "switch_tab",
+      id,
+      state: draft.preStateId,
+      result: { state: draft.postStateId },
+    };
+  }
   const state = draft.preStateId ?? draft.postStateId;
   const resultState = draft.postStateId ?? draft.preStateId;
   if (!state || !resultState) return null;
@@ -77,8 +86,6 @@ function reduceDraft(
   switch (draft.op) {
     case "navigate":
       return { op: "navigate", ...common, to: draft.url, cause: navigationCause(draft) };
-    case "switch_tab":
-      return options.includeTabSwitches ? { op: "switch_tab", ...common } : null;
     case "click":
       return {
         op: "click",

@@ -165,12 +165,8 @@ export class RecordingObservationRuntime {
     await context.settle.flush();
   }
 
-  async flushRedirects(tabId?: number): Promise<void> {
-    if (tabId !== undefined) {
-      await this.#contexts.get(tabId)?.settle.flushRedirects();
-      return;
-    }
-    for (const context of this.#contexts.values()) await context.settle.flushRedirects();
+  async flushRedirects(tabId: number): Promise<void> {
+    await this.#contexts.get(tabId)?.settle.flushRedirects();
   }
 
   async flush(): Promise<void> {

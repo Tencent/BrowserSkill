@@ -48,6 +48,15 @@ describe("trace reducer v3", () => {
     ]);
   });
 
+  it("does not export a tab transition without both observation endpoints", () => {
+    const sourceOnly: RecordingDraftStep = { op: "switch_tab", preStateId: "s1" };
+    const targetOnly: RecordingDraftStep = { op: "switch_tab", postStateId: "s2" };
+
+    expect(
+      reduceTraceStepsV3([sourceOnly, targetOnly], { includeTabSwitches: true }).steps,
+    ).toEqual([]);
+  });
+
   it("collapses redirect hops while retaining draft-to-step identity", () => {
     const drafts: RecordingDraftStep[] = [
       { op: "navigate", url: "https://example.com/start", preStateId: "s1", postStateId: "s2" },
