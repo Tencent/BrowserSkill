@@ -51,7 +51,12 @@ import {
   handleScreenshot,
   handleSnapshot,
 } from "./observation";
-import { handleRecordAwait, handleRecordStart, handleRecordStop } from "./record";
+import {
+  handleRecordAwait,
+  handleRecordStart,
+  handleRecordStop,
+  type RecordRuntimeDeps,
+} from "./record";
 import {
   handleSessionStart,
   handleSessionStop,
@@ -99,6 +104,7 @@ export interface DispatcherDeps {
   transport: Transport;
   sessions: SessionManager;
   cdp?: DispatcherCdpRunner;
+  recording?: RecordRuntimeDeps;
   /**
    * Invoked whenever a dispatched RPC may have changed the live
    * session set (currently `tool.session_start` and
@@ -134,6 +140,7 @@ export class ToolDispatcher {
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
   private readonly cdp?: DispatcherCdpRunner;
+  private readonly recording?: RecordRuntimeDeps;
   private readonly onSessionsChanged?: () => void;
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
@@ -153,6 +160,7 @@ export class ToolDispatcher {
     this.transport = deps.transport;
     this.sessions = deps.sessions;
     this.cdp = deps.cdp;
+    this.recording = deps.recording;
     this.onSessionsChanged = deps.onSessionsChanged;
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
     this.approveBorrow = deps.approveBorrow;
@@ -531,44 +539,26 @@ export class ToolDispatcher {
           signal,
         });
       case "tool.record_start":
-        return handleRecordStart(this.sessions, req.params as RecordStartParams, {
-          tabsApi: chromeTabsApi,
-          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
-          bypassOverlay: async (tabId, enabled) => {
-            try {
-              await chrome.tabs.sendMessage(tabId, {
-                type: OVERLAY_AUTOMATION_BYPASS,
-                enabled,
-              });
-            } catch {
-              // Content script may be unavailable on restricted pages.
-            }
-          },
-          ...(this.cdp ? { cdp: this.cdp } : {}),
-          signal,
-        });
+        return this.recording
+          ? handleRecordStart(this.sessions, req.params as RecordStartParams, {
+              ...this.recording,
+              signal,
+            })
+          : recordingRuntimeUnavailable();
       case "tool.record_stop":
-        return handleRecordStop(this.sessions, req.params as RecordStopParams, {
-          tabsApi: chromeTabsApi,
-          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
-          bypassOverlay: async (tabId, enabled) => {
-            try {
-              await chrome.tabs.sendMessage(tabId, {
-                type: OVERLAY_AUTOMATION_BYPASS,
-                enabled,
-              });
-            } catch {
-              // Content script may be unavailable on restricted pages.
-            }
-          },
-          signal,
-        });
+        return this.recording
+          ? handleRecordStop(this.sessions, req.params as RecordStopParams, {
+              ...this.recording,
+              signal,
+            })
+          : recordingRuntimeUnavailable();
       case "tool.record_await":
-        return handleRecordAwait(this.sessions, req.params as RecordAwaitParams, {
-          tabsApi: chromeTabsApi,
-          sendToTab: (tabId, msg) => chrome.tabs.sendMessage(tabId, msg),
-          signal,
-        });
+        return this.recording
+          ? handleRecordAwait(this.sessions, req.params as RecordAwaitParams, {
+              ...this.recording,
+              signal,
+            })
+          : recordingRuntimeUnavailable();
       default:
         return {
           code: "unknown_method",
@@ -702,6 +692,13 @@ function isRpcError(v: unknown): v is RpcError {
     "message" in v &&
     typeof (v as RpcError).code === "string"
   );
+}
+
+function recordingRuntimeUnavailable(): RpcError {
+  return {
+    code: "protocol_error",
+    message: "recording runtime is unavailable",
+  };
 }
 
 function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
