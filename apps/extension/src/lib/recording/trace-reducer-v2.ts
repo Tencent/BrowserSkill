@@ -119,14 +119,6 @@ function toV2Step(
         },
         effectForNavigation(step.navigatedTo, urlToId),
       );
-    case "hover":
-      if (!step.captureTarget) return null;
-      return {
-        op: "hover",
-        id,
-        page,
-        target: step.captureTarget,
-      };
     case "fill":
       if (!step.captureTarget) return null;
       return {
@@ -161,6 +153,9 @@ function toV2Step(
         },
         effectForNavigation(step.navigatedTo, urlToId),
       );
+    // `hover` only exists in Trace v3. Peers that negotiate v2 predate the
+    // step variant and fail to decode the whole result if we emit it.
+    case "hover":
     case "scroll":
     case "switch_tab":
       return null;
