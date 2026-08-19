@@ -8,10 +8,7 @@ import type {
   RequestFrame,
 } from "@/transport/types";
 import { ToolDispatcher } from "../dispatcher";
-import {
-  resetBrowserObservationForTests,
-  setBrowserObservationAttachForTests,
-} from "../record";
+import { resetBrowserObservationForTests, setBrowserObservationAttachForTests } from "../record";
 
 type TestDispatcherCdp = NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["cdp"]>;
 
