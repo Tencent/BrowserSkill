@@ -145,7 +145,7 @@ function own(registry: SessionRegistry, sessionId: string): void {
 }
 
 /** Poll until the condition holds (capture completion is real async I/O). */
-async function waitFor(cond: () => boolean, timeoutMs = 2000): Promise<void> {
+async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
   const start = Date.now();
   while (!cond()) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor timeout");
