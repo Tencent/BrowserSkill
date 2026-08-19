@@ -40,10 +40,8 @@ export class RecordingTabCoordinator {
     );
   }
 
-  commit(tabId: number): number {
-    const previousTabId = this.#currentTabId;
+  commit(tabId: number): void {
     this.#currentTabId = tabId;
-    return previousTabId;
   }
 
   navigation(tabId: number, fallbackUrl?: string): RecordingNavigationCursor {

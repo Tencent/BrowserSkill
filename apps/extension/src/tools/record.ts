@@ -91,6 +91,10 @@ function enqueueRecordingAction(
   return queued;
 }
 
+function isRecordingFinishing(recording: ActiveRecording): boolean {
+  return recording.settled || recording.finishAttempt !== null;
+}
+
 const recordings = new Map<string, ActiveRecording>();
 
 const RECORD_START_RETRIES = 3;
@@ -171,9 +175,11 @@ async function sendRecordStartWithAck(
   tabId: number,
   msg: RecordStartMessage,
   sendToTab: RecordDeps["sendToTab"],
+  cancelled?: () => boolean,
 ): Promise<void> {
   let lastError: unknown;
   for (let attempt = 0; attempt < RECORD_START_RETRIES; attempt += 1) {
+    if (cancelled?.()) throw new Error("record start cancelled");
     try {
       const response = await sendToTab(tabId, msg);
       if (isRecordStartAck(response)) return;
@@ -181,6 +187,7 @@ async function sendRecordStartWithAck(
     } catch (err) {
       lastError = err;
     }
+    if (cancelled?.()) throw new Error("record start cancelled");
     if (attempt + 1 < RECORD_START_RETRIES) {
       await sleep(RECORD_START_RETRY_DELAY_MS);
     }
@@ -508,20 +515,29 @@ async function rearmRecording(
   // content-script counter, and a single stop decrement left the ControlOverlay
   // stuck with pointer-events:none (page usable, Interrupt dead). RecordOverlay
   // already hides the control chrome while activeRecord is set.
+  const isFinishing = () => isRecordingFinishing(recording);
   for (let attempt = 0; attempt < RECORD_REARM_MAX_ATTEMPTS; attempt += 1) {
+    if (isFinishing()) return false;
     const startMsg: RecordStartMessage = {
       type: RECORD_START,
       requestId: recording.requestId,
       startedAtMs: recording.startedAtMs,
     };
     try {
-      await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab);
+      await sendRecordStartWithAck(targetTabId, startMsg, deps.sendToTab, isFinishing);
+      if (isFinishing()) return false;
       if (activation) {
         if (!recording.tabs.isLatest(activation)) return true;
-        await enqueueRecordingAction(recording, () => activateRecordingTab(recording, targetTabId));
+        await enqueueRecordingAction(recording, async () => {
+          if (isFinishing() || !recording.tabs.isLatest(activation)) {
+            return;
+          }
+          await activateRecordingTab(recording, targetTabId);
+        });
       }
       return true;
     } catch {
+      if (isFinishing()) return false;
       if (attempt + 1 < RECORD_REARM_MAX_ATTEMPTS) {
         await sleep(RECORD_REARM_RETRY_DELAY_MS);
       }
@@ -551,7 +567,7 @@ export function attachRecordTabListener(deps: RecordDeps = getDefaultDeps()): ()
     const windowId = tab.windowId;
     if (tabId === undefined || windowId === undefined) return;
     for (const recording of recordings.values()) {
-      if (recording.settled || recording.agentWindowId !== windowId) continue;
+      if (isRecordingFinishing(recording) || recording.agentWindowId !== windowId) continue;
       scheduleRearmForTab(tabId, deps);
       return;
     }
@@ -559,7 +575,8 @@ export function attachRecordTabListener(deps: RecordDeps = getDefaultDeps()): ()
 
   const onActivated = (activeInfo: chrome.tabs.TabActiveInfo) => {
     for (const recording of recordings.values()) {
-      if (recording.settled || recording.agentWindowId !== activeInfo.windowId) continue;
+      if (isRecordingFinishing(recording) || recording.agentWindowId !== activeInfo.windowId)
+        continue;
       const activation = recording.tabs.noteActivation(activeInfo.tabId);
       scheduleRearmForTab(activeInfo.tabId, deps, activation);
       return;

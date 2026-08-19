@@ -1376,6 +1376,62 @@ describe("recorded user steps reach the exported trace", () => {
     expect(stateUrl(switches[0]!.result.state)).toBe("https://example.com/tab-6");
   });
 
+  it("does not retry an in-flight tab rearm after recording stops", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: "https://example.com/second",
+      } as chrome.tabs.Tab,
+    ]);
+    let failRearm!: () => void;
+    const rearmGate = new Promise<never>((_resolve, reject) => {
+      failRearm = () => reject(new Error("rearm failed after stop"));
+    });
+    let announceRearm!: () => void;
+    const rearmStarted = new Promise<void>((resolve) => {
+      announceRearm = resolve;
+    });
+    const sendToTab = vi.fn(async (tabId: number, message: unknown) => {
+      if ((message as { type?: string }).type === RECORD_START && tabId === 5) {
+        announceRearm();
+        await rearmGate;
+      }
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp: makeFakeCdp() };
+
+    await handleRecordStart(manager, RECORD_START_V3, deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    await rearmStarted;
+
+    const stoppedPromise = handleRecordStop(manager, { session_id: "abcd" }, deps);
+    await vi.waitFor(() => {
+      expect(sendToTab).toHaveBeenCalledWith(5, expect.objectContaining({ type: RECORD_STOP }));
+    });
+    failRearm();
+    const stopped = await stoppedPromise;
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const startsForSecondTab = sendToTab.mock.calls.filter(
+      ([tabId, message]) => tabId === 5 && (message as { type?: string }).type === RECORD_START,
+    );
+    expect(startsForSecondTab).toHaveLength(1);
+    expect(asTraceV3((stopped as RecordStopResult).trace).steps).toHaveLength(0);
+  });
+
   it("keeps pending action settles scoped to their tab during an immediate switch", async () => {
     const chromeApi = installChrome();
     const manager = fakeManager();
