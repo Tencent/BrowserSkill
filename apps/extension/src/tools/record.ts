@@ -292,6 +292,10 @@ export interface RecordDeps {
   signal?: AbortSignal;
 }
 
+export type RecordRuntimeDeps = Omit<RecordDeps, "frameCoordinator" | "signal"> & {
+  frameCoordinator: NonNullable<RecordDeps["frameCoordinator"]>;
+};
+
 let defaultDeps: RecordDeps | null = null;
 function getDefaultDeps(): RecordDeps {
   if (!defaultDeps) {
