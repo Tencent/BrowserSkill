@@ -1,5 +1,5 @@
 /**
- * Build a semantic TargetDescriptor for an interacted element.
+ * Build a semantic capture descriptor for an interacted element.
  *
  * Trace steps are an LLM *textbook*: each click must say what to look for
  * on screen (usually a short visible name). Tag-only noise like
@@ -15,9 +15,6 @@ export interface CaptureTargetDescriptor {
   placeholder?: string;
   nearby_label?: string;
 }
-
-/** @deprecated Capture-time alias retained until the recorder integration migrates. */
-export type TargetDescriptor = CaptureTargetDescriptor;
 
 /** Max length for a label that is still a useful “find this on screen” hint. */
 const ACTIONABLE_LABEL_MAX = 48;

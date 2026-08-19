@@ -3,7 +3,7 @@
  * service worker and a tab's content script.
  */
 
-import type { TargetDescriptor } from "./describe-target";
+import type { CaptureTargetDescriptor } from "./describe-target";
 
 export const RECORD_START = "bsk-record-start";
 export const RECORD_STEP = "bsk-record-step";
@@ -42,7 +42,7 @@ export interface RecordStartMessage {
 
 export interface RecordStepPayload {
   op: "click" | "hover" | "fill" | "press" | "select" | "navigate";
-  target?: TargetDescriptor;
+  target?: CaptureTargetDescriptor;
   value?: string;
   key?: string;
   modifiers?: Array<"alt" | "ctrl" | "meta" | "shift">;
