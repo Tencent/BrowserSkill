@@ -114,8 +114,8 @@ fn main() {
     dump!(RequestHelpResult, "tool_request_help_result");
 
     dump!(TraceV2, "trace_v2");
-    dump!(Trace, "trace");
-    dump!(Step, "trace_step");
+    dump!(TraceV3, "trace");
+    dump!(StepV3, "trace_step");
     dump!(RecordStartParams, "tool_record_start_params");
     dump!(RecordStartResult, "tool_record_start_result");
     dump!(RecordStopParams, "tool_record_stop_params");

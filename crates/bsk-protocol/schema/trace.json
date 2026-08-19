@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Trace",
-  "description": "Persisted user-action trace exported by `tool.record_stop` / `await`.",
+  "title": "TraceV3",
+  "description": "Wire trace returned by `tool.record_stop` / `await`.",
   "type": "object",
   "required": [
     "entry",
@@ -37,13 +37,13 @@
     "states": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/TraceState"
+        "$ref": "#/definitions/TraceStateV3"
       }
     },
     "steps": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/Step"
+        "$ref": "#/definitions/StepV3"
       }
     },
     "stopped_by": {
@@ -103,7 +103,7 @@
         }
       }
     },
-    "SelectedOption": {
+    "SelectedOptionV3": {
       "description": "One selected option (`select` op).",
       "type": "object",
       "required": [
@@ -121,7 +121,18 @@
         }
       }
     },
-    "Step": {
+    "StepResultV3": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        }
+      }
+    },
+    "StepV3": {
       "description": "One recorded user action — discriminated union by `op`.",
       "oneOf": [
         {
@@ -151,7 +162,7 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
@@ -185,14 +196,14 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptor"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
@@ -219,14 +230,14 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptor"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
@@ -261,14 +272,14 @@
               "type": "boolean"
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptor"
+              "$ref": "#/definitions/TargetDescriptorV3"
             },
             "value": {
               "type": "string"
@@ -298,12 +309,12 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "selection": {
               "type": "array",
               "items": {
-                "$ref": "#/definitions/SelectedOption"
+                "$ref": "#/definitions/SelectedOptionV3"
               }
             },
             "state": {
@@ -311,7 +322,7 @@
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptor"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
@@ -350,7 +361,7 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
@@ -359,7 +370,7 @@
             "target": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/TargetDescriptor"
+                  "$ref": "#/definitions/TargetDescriptorV3"
                 },
                 {
                   "type": "null"
@@ -390,7 +401,7 @@
               ]
             },
             "result": {
-              "$ref": "#/definitions/StepResult"
+              "$ref": "#/definitions/StepResultV3"
             },
             "state": {
               "description": "Observation id immediately before this action.",
@@ -400,17 +411,6 @@
         }
       ]
     },
-    "StepResult": {
-      "type": "object",
-      "required": [
-        "state"
-      ],
-      "properties": {
-        "state": {
-          "type": "string"
-        }
-      }
-    },
     "StopReason": {
       "type": "string",
       "enum": [
@@ -418,7 +418,7 @@
         "cli_stop"
       ]
     },
-    "TargetDescriptor": {
+    "TargetDescriptorV3": {
       "description": "Stable semantic handle for an interacted element within a page observation.",
       "type": "object",
       "properties": {
@@ -452,7 +452,6 @@
       }
     },
     "TraceEntry": {
-      "description": "Recording entry point — first URL the flow starts from.",
       "type": "object",
       "required": [
         "start_url"
@@ -463,30 +462,21 @@
         }
       }
     },
-    "TraceState": {
+    "TraceStateV3": {
       "description": "Page observation dictionary entry — referenced by steps via `state` / `result.state`.",
       "type": "object",
       "required": [
+        "body",
         "id",
         "url"
       ],
       "properties": {
         "body": {
-          "description": "Wire-only: full page observation (front matter + VOM body + annotations).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "description": "Full page observation (front matter + VOM body + annotations).",
+          "type": "string"
         },
         "id": {
           "type": "string"
-        },
-        "page": {
-          "description": "Disk-only: filename under the bundle `pages/` directory.",
-          "type": [
-            "string",
-            "null"
-          ]
         },
         "title": {
           "type": [

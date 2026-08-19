@@ -8,11 +8,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use super::interaction::KeyModifier;
 
-pub use crate::record_v2::{
-    PageRef, SelectedOptionV2, StepCommonV2, StepEffectV2, StepV2, TargetDescriptorV2, TraceV2,
+pub use super::record_common::TraceEntry;
+pub use super::record_v2::{
+    PageRefV2, SelectedOptionV2, StepCommonV2, StepEffectV2, StepV2, TargetDescriptorV2, TraceV2,
 };
 
-pub const TRACE_VERSION: u32 = 3;
+pub const TRACE_VERSION_V3: u32 = 3;
 pub const TRACE_VERSION_V2: u32 = 2;
 pub const DEFAULT_TRACE_VERSION: u32 = 2;
 pub const VOM_FORMAT_VERSION: u32 = 1;
@@ -22,9 +23,9 @@ where
     D: Deserializer<'de>,
 {
     let version = u32::deserialize(deserializer)?;
-    if version != TRACE_VERSION {
+    if version != TRACE_VERSION_V3 {
         return Err(serde::de::Error::custom(format!(
-            "unsupported trace version {version} (expected {TRACE_VERSION})"
+            "unsupported trace version {version} (expected {TRACE_VERSION_V3})"
         )));
     }
     Ok(version)
@@ -33,7 +34,7 @@ where
 fn trace_v3_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
     schemars::schema::SchemaObject {
         instance_type: Some(schemars::schema::InstanceType::Integer.into()),
-        const_value: Some(serde_json::json!(TRACE_VERSION)),
+        const_value: Some(serde_json::json!(TRACE_VERSION_V3)),
         ..Default::default()
     }
     .into()
@@ -45,7 +46,7 @@ fn trace_v3_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars
 
 /// Stable semantic handle for an interacted element within a page observation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct TargetDescriptor {
+pub struct TargetDescriptorV3 {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "ref")]
     pub element_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,14 +60,8 @@ pub struct TargetDescriptor {
 }
 
 // ---------------------------------------------------------------------------
-// Trace envelope
+// Trace v3 envelope
 // ---------------------------------------------------------------------------
-
-/// Recording entry point — first URL the flow starts from.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct TraceEntry {
-    pub start_url: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecorderInfo {
@@ -83,42 +78,38 @@ pub enum StopReason {
 
 /// Page observation dictionary entry — referenced by steps via `state` / `result.state`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct TraceState {
+pub struct TraceStateV3 {
     pub id: String,
     pub url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Wire-only: full page observation (front matter + VOM body + annotations).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    /// Disk-only: filename under the bundle `pages/` directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub page: Option<String>,
+    /// Full page observation (front matter + VOM body + annotations).
+    pub body: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct StepResult {
+pub struct StepResultV3 {
     pub state: String,
 }
 
 /// Fields shared by every step variant (flattened in JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct StepCommon {
+pub struct StepCommonV3 {
     pub id: u32,
     /// Observation id immediately before this action.
     pub state: String,
-    pub result: StepResult,
+    pub result: StepResultV3,
 }
 
 // ---------------------------------------------------------------------------
-// Step op-specific payloads
+// Trace v3 step payloads
 // ---------------------------------------------------------------------------
 
 /// One selected option (`select` op).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct SelectedOption {
+pub struct SelectedOptionV3 {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -147,27 +138,27 @@ pub enum FillCommit {
 /// One recorded user action — discriminated union by `op`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
-pub enum Step {
+pub enum StepV3 {
     Navigate {
         #[serde(flatten)]
-        common: StepCommon,
+        common: StepCommonV3,
         to: String,
         cause: NavigationCause,
     },
     Click {
         #[serde(flatten)]
-        common: StepCommon,
-        target: TargetDescriptor,
+        common: StepCommonV3,
+        target: TargetDescriptorV3,
     },
     Hover {
         #[serde(flatten)]
-        common: StepCommon,
-        target: TargetDescriptor,
+        common: StepCommonV3,
+        target: TargetDescriptorV3,
     },
     Fill {
         #[serde(flatten)]
-        common: StepCommon,
-        target: TargetDescriptor,
+        common: StepCommonV3,
+        target: TargetDescriptorV3,
         value: String,
         commit: FillCommit,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -175,34 +166,34 @@ pub enum Step {
     },
     Select {
         #[serde(flatten)]
-        common: StepCommon,
-        target: TargetDescriptor,
+        common: StepCommonV3,
+        target: TargetDescriptorV3,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        selection: Vec<SelectedOption>,
+        selection: Vec<SelectedOptionV3>,
     },
     Press {
         #[serde(flatten)]
-        common: StepCommon,
+        common: StepCommonV3,
         key: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         modifiers: Option<Vec<KeyModifier>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        target: Option<TargetDescriptor>,
+        target: Option<TargetDescriptorV3>,
     },
     Scroll {
         #[serde(flatten)]
-        common: StepCommon,
+        common: StepCommonV3,
     },
 }
 
 // ---------------------------------------------------------------------------
-// Trace root
+// Trace v3 root
 // ---------------------------------------------------------------------------
 
-/// Persisted user-action trace exported by `tool.record_stop` / `await`.
+/// Wire trace returned by `tool.record_stop` / `await`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct Trace {
+pub struct TraceV3 {
     #[serde(deserialize_with = "deserialize_trace_v3_version")]
     #[schemars(schema_with = "trace_v3_version_schema")]
     pub version: u32,
@@ -214,8 +205,8 @@ pub struct Trace {
     pub stopped_by: StopReason,
     pub entry: TraceEntry,
     pub recorder: RecorderInfo,
-    pub states: Vec<TraceState>,
-    pub steps: Vec<Step>,
+    pub states: Vec<TraceStateV3>,
+    pub steps: Vec<StepV3>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,13 +222,6 @@ pub struct RecordStartParams {
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_page_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub redact_values: Option<bool>,
-    /// Desired trace export format. Omitted ⇒ v2; `3` ⇒ state-linked v3 bundle.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trace_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -255,13 +239,13 @@ pub struct RecordStopParams {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordedTrace {
     V2(TraceV2),
-    V3(Trace),
+    V3(TraceV3),
 }
 
 impl RecordedTrace {
     pub fn classify_value(v: &serde_json::Value) -> Result<Self, String> {
         if let Some(ver) = v.get("version").and_then(|x| x.as_u64()) {
-            if ver != u64::from(TRACE_VERSION) {
+            if ver != u64::from(TRACE_VERSION_V3) {
                 return Err(format!("unsupported trace version {ver}"));
             }
             if v.get("pages").is_some() {
@@ -280,24 +264,6 @@ impl RecordedTrace {
                 .map_err(|e| e.to_string());
         }
         Err("ambiguous or unparseable trace".into())
-    }
-
-    pub fn is_v3(&self) -> bool {
-        matches!(self, RecordedTrace::V3(_))
-    }
-
-    pub fn as_v3(&self) -> Option<&Trace> {
-        match self {
-            RecordedTrace::V3(t) => Some(t),
-            RecordedTrace::V2(_) => None,
-        }
-    }
-
-    pub fn as_v2(&self) -> Option<&TraceV2> {
-        match self {
-            RecordedTrace::V2(t) => Some(t),
-            RecordedTrace::V3(_) => None,
-        }
     }
 }
 
@@ -333,7 +299,7 @@ impl JsonSchema for RecordedTrace {
             subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
                 one_of: Some(vec![
                     generator.subschema_for::<TraceV2>(),
-                    generator.subschema_for::<Trace>(),
+                    generator.subschema_for::<TraceV3>(),
                 ]),
                 ..Default::default()
             })),
@@ -369,18 +335,18 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_common(id: u32, state: &str, result_state: &str) -> StepCommon {
-        StepCommon {
+    fn sample_common(id: u32, state: &str, result_state: &str) -> StepCommonV3 {
+        StepCommonV3 {
             id,
             state: state.into(),
-            result: StepResult {
+            result: StepResultV3 {
                 state: result_state.into(),
             },
         }
     }
 
-    fn sample_target() -> TargetDescriptor {
-        TargetDescriptor {
+    fn sample_target() -> TargetDescriptorV3 {
+        TargetDescriptorV3 {
             element_ref: Some("e21".into()),
             role: Some("button".into()),
             name: Some("发布".into()),
@@ -389,9 +355,9 @@ mod tests {
         }
     }
 
-    fn sample_trace() -> Trace {
-        Trace {
-            version: TRACE_VERSION,
+    fn sample_trace() -> TraceV3 {
+        TraceV3 {
+            version: TRACE_VERSION_V3,
             purpose: Some("把草稿商品发布上架".into()),
             started_at: Some("2026-08-10T02:10:41.080Z".into()),
             recorded_at: "2026-08-10T02:12:55.360Z".into(),
@@ -404,32 +370,30 @@ mod tests {
                 vom: VOM_FORMAT_VERSION,
             },
             states: vec![
-                TraceState {
+                TraceStateV3 {
                     id: "s1".into(),
                     url: "https://example.com/".into(),
                     title: Some("Example Domain".into()),
-                    body: None,
-                    page: Some("s1.vom.txt".into()),
+                    body: "@vom 1\nRootWebArea \"Example Domain\"".into(),
                     truncated: false,
                 },
-                TraceState {
+                TraceStateV3 {
                     id: "s2".into(),
                     url: "https://shop.example.com/products?status=draft".into(),
                     title: Some("商品管理".into()),
-                    body: None,
-                    page: Some("s2.vom.txt".into()),
+                    body: "@vom 1\nRootWebArea \"商品管理\"".into(),
                     truncated: false,
                 },
             ],
             steps: vec![
-                Step::Navigate {
+                StepV3::Navigate {
                     common: sample_common(1, "s1", "s2"),
                     to: "https://shop.example.com/products?status=draft".into(),
                     cause: NavigationCause::UserTyped,
                 },
-                Step::Fill {
+                StepV3::Fill {
                     common: sample_common(2, "s2", "s2"),
-                    target: TargetDescriptor {
+                    target: TargetDescriptorV3 {
                         element_ref: Some("e12".into()),
                         role: Some("textbox".into()),
                         name: Some("搜索商品".into()),
@@ -440,7 +404,7 @@ mod tests {
                     commit: FillCommit::Enter,
                     redacted: false,
                 },
-                Step::Click {
+                StepV3::Click {
                     common: sample_common(3, "s2", "s2"),
                     target: sample_target(),
                 },
@@ -450,7 +414,7 @@ mod tests {
 
     #[test]
     fn step_click_round_trips() {
-        let step = Step::Click {
+        let step = StepV3::Click {
             common: sample_common(1, "s1", "s2"),
             target: sample_target(),
         };
@@ -459,15 +423,15 @@ mod tests {
         assert_eq!(v.get("state").and_then(|v| v.as_str()), Some("s1"));
         assert_eq!(v["result"]["state"], "s2");
         assert_eq!(v["target"]["ref"], "e21");
-        let round: Step = serde_json::from_value(v).unwrap();
+        let round: StepV3 = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
 
     #[test]
     fn step_fill_with_commit_round_trips() {
-        let step = Step::Fill {
+        let step = StepV3::Fill {
             common: sample_common(2, "s2", "s3"),
-            target: TargetDescriptor {
+            target: TargetDescriptorV3 {
                 element_ref: Some("e12".into()),
                 role: Some("textbox".into()),
                 name: Some("搜索商品".into()),
@@ -482,15 +446,15 @@ mod tests {
         assert_eq!(v["op"], "fill");
         assert_eq!(v["commit"], "enter");
         assert!(v.get("redacted").is_none());
-        let round: Step = serde_json::from_value(v).unwrap();
+        let round: StepV3 = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
 
     #[test]
     fn step_fill_password_is_redacted() {
-        let step = Step::Fill {
+        let step = StepV3::Fill {
             common: sample_common(1, "s1", "s1"),
-            target: TargetDescriptor {
+            target: TargetDescriptorV3 {
                 element_ref: Some("e3".into()),
                 role: Some("textbox".into()),
                 name: Some("密码".into()),
@@ -508,7 +472,7 @@ mod tests {
 
     #[test]
     fn step_navigate_with_cause_round_trips() {
-        let step = Step::Navigate {
+        let step = StepV3::Navigate {
             common: sample_common(1, "s1", "s2"),
             to: "https://example.com".into(),
             cause: NavigationCause::UserTyped,
@@ -516,7 +480,7 @@ mod tests {
         let v = serde_json::to_value(&step).unwrap();
         assert_eq!(v["op"], "navigate");
         assert_eq!(v["cause"], "user_typed");
-        let round: Step = serde_json::from_value(v).unwrap();
+        let round: StepV3 = serde_json::from_value(v).unwrap();
         assert_eq!(round, step);
     }
 
@@ -528,15 +492,15 @@ mod tests {
         assert!(v.get("pages").is_none());
         assert_eq!(v["recorder"]["vom"], 1);
         assert_eq!(v["states"].as_array().unwrap().len(), 2);
-        let round: Trace = serde_json::from_value(v).unwrap();
+        let round: TraceV3 = serde_json::from_value(v).unwrap();
         assert_eq!(round, trace);
     }
 
     #[test]
     fn default_fields_are_omitted() {
-        let step = Step::Click {
+        let step = StepV3::Click {
             common: sample_common(1, "s1", "s1"),
-            target: TargetDescriptor {
+            target: TargetDescriptorV3 {
                 element_ref: Some("e1".into()),
                 role: Some("button".into()),
                 name: Some("OK".into()),
@@ -552,9 +516,9 @@ mod tests {
 
     #[test]
     fn unmatched_target_serializes_flag() {
-        let step = Step::Click {
+        let step = StepV3::Click {
             common: sample_common(1, "s1", "s2"),
-            target: TargetDescriptor {
+            target: TargetDescriptorV3 {
                 element_ref: None,
                 role: Some("button".into()),
                 name: Some("发布".into()),
@@ -628,7 +592,7 @@ mod tests {
             "steps": []
         });
         assert!(RecordedTrace::classify_value(&unsupported).is_err());
-        assert!(serde_json::from_value::<Trace>(unsupported).is_err());
+        assert!(serde_json::from_value::<TraceV3>(unsupported).is_err());
     }
 
     #[test]
@@ -639,7 +603,7 @@ mod tests {
             .expect("RecordedTrace schema should use oneOf");
 
         assert_eq!(variants.len(), 2);
-        let trace_schema = schema["definitions"]["Trace"].clone();
+        let trace_schema = schema["definitions"]["TraceV3"].clone();
         assert_eq!(trace_schema["properties"]["version"]["const"], 3);
     }
 
@@ -654,8 +618,8 @@ mod tests {
             "entry": { "start_url": "https://example.com/editor" },
             "recorder": { "bsk": "0.1.10", "vom": 1 },
             "states": [
-                { "id": "s1", "url": "https://example.com/editor", "page": "s1.vom.txt" },
-                { "id": "s2", "url": "https://example.com/p/99", "page": "s2.vom.txt" }
+                { "id": "s1", "url": "https://example.com/editor", "body": "@vom 1" },
+                { "id": "s2", "url": "https://example.com/p/99", "body": "@vom 1" }
             ],
             "steps": [
                 {
@@ -676,7 +640,7 @@ mod tests {
                 }
             ]
         });
-        let trace: Trace = serde_json::from_value(v).unwrap();
+        let trace: TraceV3 = serde_json::from_value(v).unwrap();
         assert_eq!(trace.version, 3);
         assert_eq!(trace.states.len(), 2);
         assert_eq!(trace.steps.len(), 2);
