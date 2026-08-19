@@ -48,6 +48,25 @@ describe("trace reducer v3", () => {
     ]);
   });
 
+  it("keeps hover steps before menu clicks", () => {
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "hover",
+        captureTarget: { tag: "span", role: "button", name: "Account" },
+        preStateId: "s1",
+        postStateId: "s1",
+      },
+      {
+        op: "click",
+        captureTarget: { tag: "a", role: "link", name: "Profile" },
+        preStateId: "s1",
+        postStateId: "s1",
+      },
+    ];
+
+    expect(reduceTraceStepsV3(drafts).steps.map((s) => s.op)).toEqual(["hover", "click"]);
+  });
+
   it("does not export a tab transition without both observation endpoints", () => {
     const sourceOnly: RecordingDraftStep = { op: "switch_tab", preStateId: "s1" };
     const targetOnly: RecordingDraftStep = { op: "switch_tab", postStateId: "s2" };
