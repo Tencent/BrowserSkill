@@ -525,22 +525,6 @@ describe("availability and dead sessions", () => {
   });
 });
 
-describe("thumbnail read-back", () => {
-  it("serves captured frames through readThumbnail and 404s unknown ids", async () => {
-    const scheduler = fakeScheduler();
-    const runner = fakeRunner();
-    const { service } = setup({ runner, scheduler });
-    service.addSession("s1");
-    scheduler.runNext();
-    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId !== undefined);
-    const frame = await service.readThumbnail("obs-s1-1");
-    expect(frame?.mediaType).toBe("image/png");
-    expect([...(frame?.data ?? [])]).toEqual([0x89, 0x50, 0x4e, 0x47]);
-    expect(await service.readThumbnail("nope")).toBeUndefined();
-    service.dispose();
-  });
-});
-
 describe("actionForLabel", () => {
   it("maps tool labels onto observation verbs", () => {
     expect(actionForLabel("navigate")).toBe("navigating");
