@@ -1594,8 +1594,8 @@ export interface CaptureVomObservationResult {
   text: string;
   refs: RenderedRef[];
   truncated: boolean;
-  captured: CapturedNode[];
-  documents: CapturedFrameDocument<CdpAxNode>[];
+  rootFrameId: string;
+  frameDocuments: CapturedFrameDocument<CdpAxNode>[];
   surfaceProbes?: CapturedSurfaceProbe[];
 }
 
@@ -1627,8 +1627,8 @@ export async function captureVomObservation(
     text: rendered.text,
     refs: rendered.refs,
     truncated: rendered.truncated,
-    captured: captured.nodes,
-    documents,
+    rootFrameId: captured.rootFrameId ?? documents[0]?.frameId ?? "root",
+    frameDocuments: documents,
     surfaceProbes: captured.surfaceProbes,
   };
 }
@@ -1664,7 +1664,7 @@ async function handleVomObservation(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
-    const rendered = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+    const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
@@ -1674,10 +1674,10 @@ async function handleVomObservation(
     });
     throwIfAborted(signal, toolName);
     const targetByFrameId = new Map(
-      rendered.documents.map((document) => [document.frameId, document.target]),
+      observation.frameDocuments.map((document) => [document.frameId, document.target]),
     );
     ctx.refStore.replace(
-      rendered.refs.map((ref) => {
+      observation.refs.map((ref) => {
         const refTarget = ref.frameId ? targetByFrameId.get(ref.frameId) : undefined;
         return [
           ref.ref,
@@ -1691,14 +1691,14 @@ async function handleVomObservation(
       }),
     );
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      text: rendered.text,
-      ref_count: rendered.refs.length,
+      text: observation.text,
+      ref_count: observation.refs.length,
       tab_id: target.tabId,
-      truncated: rendered.truncated,
+      truncated: observation.truncated,
       ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
         ? {
             debug: {
-              surface_probes: (rendered.surfaceProbes ?? []).map((probe) => ({
+              surface_probes: (observation.surfaceProbes ?? []).map((probe) => ({
                 trigger_backend_node_id: probe.triggerBackendNodeId,
                 ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
                 trigger_action: probe.triggerAction,

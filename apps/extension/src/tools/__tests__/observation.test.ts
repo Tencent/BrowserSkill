@@ -2913,6 +2913,124 @@ describe("handleSnapshot", () => {
     cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
   };
 
+  function makeFrameAwareDeps() {
+    const strings = ["html", "body", "iframe", "button", "title", "Remote", "static", "auto"];
+    const i = (value: string) => strings.indexOf(value);
+    const styles = [i("static"), i("auto"), i("auto")];
+    const snapshot = {
+      strings,
+      documents: [
+        {
+          frameId: "main",
+          nodes: {
+            parentIndex: [-1, 0, 1],
+            nodeName: [i("html"), i("body"), i("iframe")],
+            backendNodeId: [10, 11, 12],
+            attributes: [[], [], [i("title"), i("Remote")]],
+            contentDocumentIndex: { index: [2], value: [1] },
+          },
+          layout: {
+            nodeIndex: [0, 1, 2],
+            styles: [styles, styles, styles],
+            bounds: [
+              [0, 0, 1000, 800],
+              [0, 0, 1000, 800],
+              [100, 100, 400, 300],
+            ],
+            paintOrders: [0, 0, 1],
+          },
+        },
+        {
+          frameId: "child",
+          nodes: {
+            parentIndex: [-1, 0, 1],
+            nodeName: [i("html"), i("body"), i("button")],
+            backendNodeId: [20, 21, 22],
+            attributes: [[], [], []],
+          },
+          layout: {
+            nodeIndex: [0, 1, 2],
+            styles: [styles, styles, styles],
+            bounds: [
+              [0, 0, 400, 300],
+              [0, 0, 400, 300],
+              [20, 30, 120, 40],
+            ],
+            paintOrders: [0, 0, 1],
+          },
+        },
+      ],
+    };
+    const mainAx: CdpAxNode[] = [
+      {
+        nodeId: "main-root",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 11,
+        childIds: ["frame-owner"],
+      },
+      {
+        nodeId: "frame-owner",
+        parentId: "main-root",
+        role: { type: "role", value: "Iframe" },
+        name: { type: "computedString", value: "Remote" },
+        backendDOMNodeId: 12,
+      },
+    ];
+    const childAx: CdpAxNode[] = [
+      {
+        nodeId: "child-root",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 21,
+        childIds: ["child-button"],
+      },
+      {
+        nodeId: "child-button",
+        parentId: "child-root",
+        role: { type: "role", value: "button" },
+        name: { type: "computedString", value: "Frame action" },
+        backendDOMNodeId: 22,
+      },
+    ];
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Page.getLayoutMetrics") return VP_METRICS;
+      if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+      if (method === "Accessibility.getFullAXTree") return { nodes: mainAx };
+      throw new Error(`unexpected root CDP method ${method}`);
+    });
+    const sendToTarget = vi.fn(async (_target, method: string) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: childAx };
+      throw new Error(`unexpected child CDP method ${method}`);
+    });
+    const cdp = {
+      send: send as unknown as CdpRunner["send"],
+      sendToTarget: sendToTarget as unknown as NonNullable<CdpRunner["sendToTarget"]>,
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          {
+            frameId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 12,
+            target: { tabId: 4, sessionId: "child-session" },
+          },
+        ],
+      })),
+      trackSessionTab: vi.fn(),
+    } satisfies CdpRunner;
+    return {
+      cdp,
+      tabsApi: {
+        get: vi.fn(
+          async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+        ),
+        query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+      },
+    };
+  }
+
   it("exposes the frame-aware observation result for recording", async () => {
     const ax: CdpAxNode[] = [
       {
@@ -2944,8 +3062,43 @@ describe("handleSnapshot", () => {
       name: "Password",
       line: expect.any(Number),
     });
-    expect(result.captured.some((node) => node.backendNodeId === 13)).toBe(true);
-    expect(result.documents).toHaveLength(1);
+    expect(result.rootFrameId).toBe("root");
+    expect(result.frameDocuments).toHaveLength(1);
+    expect(result.frameDocuments[0]?.domNodes.some((node) => node.backendNodeId === 13)).toBe(true);
+  });
+
+  it("keeps frame documents and rendered refs on the same frame identity", async () => {
+    const deps = makeFrameAwareDeps();
+
+    const result = await captureVomObservation(deps.cdp, 4, "https://example.com");
+
+    expect(result.rootFrameId).toBe("main");
+    expect(result.frameDocuments).toHaveLength(2);
+    expect(result.frameDocuments.find((document) => document.frameId === "child")?.target).toEqual({
+      tabId: 4,
+      sessionId: "child-session",
+    });
+    expect(result.refs.find((ref) => ref.backendNodeId === 22)).toMatchObject({
+      frameId: "child",
+      name: "Frame action",
+    });
+  });
+
+  it("stores iframe refs with their owning CDP session", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const deps = makeFrameAwareDeps();
+
+    const result = await handleSnapshot(sm, { session_id: "aa11" }, deps);
+
+    if ("code" in result) throw new Error(`unexpected error: ${JSON.stringify(result)}`);
+    expect(result.text).toContain('@e1 button "Frame action"');
+    const frameRef = [...ctx.refStore.entries()].find(([, entry]) => entry.backendNodeId === 22);
+    expect(frameRef?.[1]).toMatchObject({
+      tabId: 4,
+      frameId: "child",
+      cdpSessionId: "child-session",
+    });
   });
 
   it("renders a blocking login overlay as the focused top layer", async () => {
