@@ -4,6 +4,7 @@
 // store's refcounted acquire/release across overlapping carriers.
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ObservationOverlay } from "../../src/client/ObservationOverlay";
 import {
@@ -129,7 +130,7 @@ describe("registerObservationSidebar", () => {
     const descriptor = sidebar.descriptor();
     expect(descriptor.id).toBe(OBSERVATION_TAB_TYPE);
     expect(descriptor.single).toBe(true);
-    expect(descriptor.title).toBe("Browser");
+    expect(descriptor.title).toBe("Browser Skill");
     dispose();
     expect(getSidebarMode()).toBe(false);
     expect(sidebar.disposeTab).toHaveBeenCalledTimes(1);
@@ -190,6 +191,17 @@ describe("registerObservationSidebar", () => {
     h.push([BUSY]);
     expect(badge?.()).toBe(1);
     h.store.release();
+  });
+
+  it("uses the BrowserSkill product mark as the tab icon", () => {
+    const h = makeHarness([]);
+    const sidebar = makeSidebar();
+    registerObservationSidebar(sidebar.service, h.store);
+    const icon = sidebar.descriptor().icon as (size: number) => ReactNode;
+    const { container } = render(<>{icon(16)}</>);
+    const img = container.querySelector("img");
+    expect(img?.getAttribute("src")).toContain("data:image/png;base64,");
+    expect(img?.getAttribute("width")).toBe("16");
   });
 });
 

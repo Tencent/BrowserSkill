@@ -7,21 +7,31 @@
 // without the sidebar plugin never start this fiber and keep the floating
 // overlay.
 
-import { RiGlobalLine } from "@remixicon/react";
 import { createElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { BSK_LOGO_URL } from "./brand-icon";
 import { OverlayBody } from "./ObservationOverlay";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
 import { useObservationView, usePip } from "./observation-view";
 import { setSidebarMode } from "./sidebar-mode";
 
-// remixicon's component types target @types/react 19 while the dsh shell
-// runs react 18 — the same compile-time-only recast as the overlay.
-const IconGlobe = RiGlobalLine as unknown as (props: {
-  size?: number | string;
-  className?: string;
-}) => ReactNode;
+/** The tab title — "Browser Skill", distinct from the sidebar's built-in "browser" tab. */
+const TAB_TITLE = "Browser Skill";
+
+/** Tab strip icon: the BrowserSkill product mark at the requested size. */
+function TabIcon({ size }: { size: number }) {
+  return (
+    <img
+      src={BSK_LOGO_URL}
+      width={size}
+      height={size}
+      alt=""
+      aria-hidden
+      className={css["brand-icon"]}
+    />
+  );
+}
 
 /**
  * Structural mirrors of dsh-better-sidebar's client service surface (only
@@ -148,8 +158,8 @@ export function registerObservationSidebar(
   store.acquire();
   const disposeTab = service.registerTab({
     id: OBSERVATION_TAB_TYPE,
-    title: "Browser",
-    icon: (size: number) => createElement(IconGlobe, { size }),
+    title: TAB_TITLE,
+    icon: (size: number) => createElement(TabIcon, { size }),
     single: true,
     badge: () => {
       const count = store.getSnapshot().sessions.length;
