@@ -12,6 +12,7 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
+import { armArchiveCleanup } from "./archive-cleanup";
 import { armLazyTools } from "./lazy-tools";
 import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
@@ -107,6 +108,10 @@ export function apply(
     removeRoutes = registerObservationRoutes(injected, observation);
     return () => removeRoutes();
   });
+  // Reap a conversation's browsers when the conversation itself is archived:
+  // archived sessions are hidden from every surface, so their Agent Windows
+  // would otherwise linger unreachable until idle timeout or unload.
+  const disarmArchiveCleanup = armArchiveCleanup(ctx, registry, observation);
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error. Uses --version on
@@ -132,6 +137,7 @@ export function apply(
       removeSuite();
       unregisterSkill();
       removeRoutes();
+      disarmArchiveCleanup();
       observation.dispose();
       runner.killAll();
       const stops = registry
@@ -144,6 +150,7 @@ export function apply(
   });
 }
 
+export { armArchiveCleanup, ownerSessionIds } from "./archive-cleanup";
 export type { ObservationEvent, ObservationOptions, SessionObservation } from "./observation";
 export { ObservationService } from "./observation";
 export { registerObservationRoutes } from "./observation-http";

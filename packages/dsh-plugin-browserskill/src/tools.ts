@@ -17,6 +17,7 @@ import {
   type ToolResult,
   type ToolRunContext,
 } from "@deepseek-ai/dsh-tools";
+import { ownerSessionIds } from "./archive-cleanup";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
 import type { KeyedExecutor } from "./queue";
@@ -245,6 +246,9 @@ export function registerTools(deps: ToolDeps): () => void {
           browserInstanceId: reply.browser_instance_id,
           startedAtMs: Date.now(),
         });
+        // Ownership for archive cleanup: the calling conversation and its
+        // ancestors reap this session when any of them is archived.
+        registry.trackOwner(reply.session_id, ownerSessionIds(deps.ctx, exec.agent?.id));
         deps.observation.addSession(reply.session_id, args.url);
         try {
           if (args.device !== undefined) {
