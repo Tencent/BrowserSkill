@@ -350,11 +350,13 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
                     if !ipc_is_idle {
                         continue;
                     }
-                    // Bridge from M2/M3 (which only knew about connection
-                    // counts) to M4/M5 (browser + session registries):
-                    // hold the daemon alive while any IPC client is
-                    // connected, any browser is paired, or any session
-                    // is live (design §3.2).
+                    // IPC liveness (open-connection count + idle window) is already
+                    // enforced above by `should_exit_for_idle`, which reads
+                    // `IpcActivityState` under one lock and returns true only when
+                    // there are zero connections AND the idle interval has elapsed.
+                    // Here we additionally hold the daemon alive while any browser
+                    // is paired or any session is live (design §3.2, M4/M5
+                    // registries).
                     if !state.browsers.is_empty() || !state.sessions.is_empty() {
                         continue;
                     }
