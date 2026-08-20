@@ -62,6 +62,10 @@ pub type RpcHandler = Arc<
 >;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+// The upload transaction owns its operation deadline and may need a bounded
+// cleanup before it can return a useful structured error. Keep only that
+// transport alive slightly longer so it does not replace the result.
+const EXTENSION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound on `wait_for_browser_ms` accepted over IPC.
 const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
 // `session.stop` fast-fails while another tool is active; this budget
@@ -332,7 +336,7 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
-    let timeout = match tool_dispatch_timeout(&params) {
+    let timeout = match tool_dispatch_transport_timeout(&method, &params) {
         Ok(timeout) => timeout,
         Err(err) => return ResponseBody::Err(err),
     };
@@ -694,6 +698,16 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
         data: None,
     })?;
     Ok(Duration::from_millis(u64::from(ms)))
+}
+
+fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
+    tool_dispatch_timeout(params).map(|timeout| {
+        if method == &Method::ToolUpload {
+            timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
+        } else {
+            timeout
+        }
+    })
 }
 
 // Local CLI-facing shapes. Intentionally distinct from
@@ -1492,6 +1506,30 @@ mod tests {
         });
         let got = tool_dispatch_timeout(&params).expect("timeout parses");
         assert_eq!(got, std::time::Duration::from_millis(300_000));
+    }
+
+    #[test]
+    fn extension_transport_outlives_the_operation_deadline() {
+        let params = serde_json::json!({
+            "session_id": "abcd",
+            "timeout_ms": 60_000,
+        });
+        let dispatch_timeout =
+            tool_dispatch_transport_timeout(&Method::ToolUpload, &params).unwrap();
+
+        assert_eq!(dispatch_timeout, Duration::from_secs(62));
+    }
+
+    #[test]
+    fn extension_response_grace_does_not_change_other_tools() {
+        let params = serde_json::json!({
+            "session_id": "abcd",
+            "timeout_ms": 60_000,
+        });
+        let dispatch_timeout =
+            tool_dispatch_transport_timeout(&Method::ToolClick, &params).unwrap();
+
+        assert_eq!(dispatch_timeout, Duration::from_secs(60));
     }
 
     #[test]

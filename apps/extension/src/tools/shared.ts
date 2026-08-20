@@ -53,6 +53,7 @@ export type { DialogCursor };
 export interface CdpRunner {
   send<T = unknown>(tabId: number, method: string, params?: object): Promise<T>;
   sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;
+  detach?(tabId: number): Promise<void>;
   getFrameGraph?(tabId: number): Promise<CdpFrameGraph>;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
