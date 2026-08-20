@@ -500,6 +500,49 @@ export interface SelectResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface UploadFile {
+  transfer_id: string;
+  name: string;
+  staged_path?: string;
+}
+
+export interface UploadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  files: UploadFile[];
+  timeout_ms?: number;
+}
+
+export interface UploadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  file_names: string[];
+}
+
+export interface DownloadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+  staging_path?: string;
+}
+
+export interface DownloadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  suggested_filename: string;
+  byte_size: number;
+  mime?: string;
+  danger?: string;
+  staged_path?: string;
+  transfer_id?: string;
+}
+
 // --------------------------------------------------------------------------
 // M9 tool payloads — evaluate / wait_for_navigation / wait_ms
 // --------------------------------------------------------------------------

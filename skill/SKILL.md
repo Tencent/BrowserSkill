@@ -206,6 +206,19 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
 
+### File transfer (require `--session`)
+
+| Command | Summary |
+|---------|---------|
+| `bsk upload <ref-or-selector> --file <path>` | Click one file chooser and attach an agent-readable local file (`--file` is repeatable) |
+| `bsk download <ref-or-selector> --out <path>` | Click one download trigger and copy the single completed file to an exact local path (`--overwrite` is opt-in) |
+
+The agent/harness decides whether a file transfer is appropriate and which local path belongs to the task. Treat upload as disclosure of that file to the current website, and download as accepting website-controlled bytes onto the local filesystem. Use only paths that are necessary for the user's bounded goal.
+
+BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted paths reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Download staging is removed after the CLI copies it; upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
+
+Do not use `request-help` merely because a native file chooser or browser download is involved; use these commands. Ask for help only when the intended upload file is unavailable/unreadable to the agent, the page requires genuinely human-only input, or the browser reports the transfer mechanism as unsupported.
+
 ### Scripting & timing
 
 | Command | Summary |
