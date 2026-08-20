@@ -13,6 +13,8 @@
 import { cn } from "@browser-skill/ui";
 import {
   RiArrowDownSLine,
+  RiCheckLine,
+  RiCloseCircleLine,
   RiErrorWarningLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
@@ -28,6 +30,8 @@ const IconPip = asIcon(RiPictureInPicture2Line);
 const IconDown = asIcon(RiArrowDownSLine);
 const IconWarn = asIcon(RiErrorWarningLine);
 const IconPin = asIcon(RiPushpinFill);
+const IconCloseSession = asIcon(RiCloseCircleLine);
+const IconCheck = asIcon(RiCheckLine);
 
 import {
   type ReactNode,
@@ -142,6 +146,83 @@ function IconAction(props: {
       {open ? (
         <span className={css.hint} data-align={props.align} role="tooltip">
           {props.hint}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** How long the stop button stays armed before the confirm click expires. */
+const STOP_ARM_MS = 3000;
+
+/**
+ * Stop-session button with a lightweight two-click confirm: the first click
+ * arms the button (solid red, check icon, short expiry), the second executes
+ * the stop. No dialog, no layout shift — and a stray single click can never
+ * close an Agent Window.
+ */
+function StopSessionAction(props: {
+  sessionId: string | undefined;
+  onStop: (sessionId: string) => Promise<boolean>;
+}) {
+  const { sessionId, onStop } = props;
+  const [hover, setHover] = useState(false);
+  const [armed, setArmed] = useState(false);
+  const [stopping, setStopping] = useState(false);
+
+  useEffect(() => {
+    if (!armed) return;
+    const timer = setTimeout(() => setArmed(false), STOP_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [armed]);
+
+  // The focused session can vanish mid-arm (stopped elsewhere): disarm.
+  useEffect(() => {
+    if (sessionId === undefined) setArmed(false);
+  }, [sessionId]);
+
+  const disabled = sessionId === undefined || stopping;
+  const label = stopping
+    ? "Stopping session…"
+    : armed
+      ? `Confirm stop session ${sessionId ?? ""}`
+      : `Stop session ${sessionId ?? ""}`;
+  const hint = stopping
+    ? "Closing the Agent Window…"
+    : armed
+      ? `Click again to stop session ${sessionId ?? ""} and close its Agent Window.`
+      : `Stop session ${sessionId ?? ""} and close its Agent Window.`;
+
+  return (
+    <span
+      className={css["tool-wrap"]}
+      onPointerEnter={() => setHover(true)}
+      onPointerLeave={() => setHover(false)}
+    >
+      <button
+        type="button"
+        className={cn(css["tool-button"], css["tool-stop"], armed && css["tool-stop-armed"])}
+        disabled={disabled}
+        aria-label={label}
+        aria-pressed={armed}
+        data-armed={armed || undefined}
+        onClick={() => {
+          if (sessionId === undefined || stopping) return;
+          if (!armed) {
+            setArmed(true);
+            return;
+          }
+          setArmed(false);
+          setStopping(true);
+          const target = sessionId;
+          void onStop(target).finally(() => setStopping(false));
+        }}
+      >
+        {armed ? <IconCheck size={16} /> : <IconCloseSession size={16} />}
+      </button>
+      {hover ? (
+        <span className={css.hint} role="tooltip">
+          {hint}
         </span>
       ) : null}
     </span>
@@ -346,15 +427,21 @@ export function OverlayBody(props: {
         </div>
       ) : null}
       <div className={css.actions}>
-        <IconAction
-          label={interrupting ? "Interrupting…" : "Interrupt the current browser action"}
-          hint="Stop the current browser action."
-          disabled={!canInterrupt}
-          danger
-          onClick={onInterrupt}
-        >
-          <IconStop size={16} />
-        </IconAction>
+        <div className={css["actions-group"]}>
+          <IconAction
+            label={interrupting ? "Interrupting…" : "Interrupt the current browser action"}
+            hint="Stop the current browser action."
+            disabled={!canInterrupt}
+            danger
+            onClick={onInterrupt}
+          >
+            <IconStop size={16} />
+          </IconAction>
+          <StopSessionAction
+            sessionId={focus?.sessionId}
+            onStop={(sessionId) => store.stopSession(sessionId)}
+          />
+        </div>
         {onPopOut !== undefined ? (
           <IconAction
             label="Pop out into a mini window"

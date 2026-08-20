@@ -61,6 +61,8 @@ function fakeRunner(
   opts: {
     screenshotFails?: boolean;
     screenshotNotFound?: boolean;
+    stopNotFound?: boolean;
+    stopFails?: boolean;
     killCount?: number;
     screenshotBytes?: () => Uint8Array;
   } = {},
@@ -72,6 +74,21 @@ function fakeRunner(
     killed,
     async run(args: string[], options: BskRunOptions = {}): Promise<BskRunResult> {
       calls.push({ args, options });
+      if (args[0] === "session" && args[1] === "stop") {
+        if (opts.stopNotFound) {
+          return {
+            code: 4,
+            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
+        if (opts.stopFails) {
+          return { code: 1, stdout: "", stderr: "boom", timedOut: false, aborted: false };
+        }
+        return { code: 0, stdout: "{}", stderr: "", timedOut: false, aborted: false };
+      }
       if (args[0] === "screenshot") {
         if (opts.screenshotNotFound) {
           return {
@@ -307,6 +324,57 @@ describe("interrupt routing", () => {
   });
 });
 
+describe("stopSession", () => {
+  it("stops an owned session: kills in-flight tools, runs session stop, removes the entry", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const runner = fakeRunner();
+    const { service, events } = setup({ registry, runner });
+    service.addSession("s1");
+    expect(registry.isOwned("s1")).toBe(true);
+
+    await expect(service.stopSession("s1")).resolves.toBe(true);
+    expect(runner.killed).toEqual(["s1"]);
+    const stop = runner.calls.find((c) => c.args[0] === "session" && c.args[1] === "stop");
+    expect(stop?.args).toEqual(["session", "stop", "s1"]);
+    expect(registry.isOwned("s1")).toBe(false);
+    expect(service.getState()).toEqual([]);
+    expect(events[events.length - 1]).toMatchObject({ type: "remove" });
+  });
+
+  it("refuses foreign sessions without touching the runner", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const runner = fakeRunner();
+    const { service } = setup({ registry, runner });
+    await expect(service.stopSession("foreign")).resolves.toBe(false);
+    expect(runner.killed).toEqual([]);
+    expect(runner.calls).toEqual([]);
+  });
+
+  it("stops idempotently when the daemon already forgot the session (dead entries)", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const runner = fakeRunner({ stopNotFound: true });
+    const { service, events } = setup({ registry, runner });
+    service.addSession("s1");
+    await expect(service.stopSession("s1")).resolves.toBe(true);
+    expect(registry.isOwned("s1")).toBe(false);
+    expect(events[events.length - 1]).toMatchObject({ type: "remove" });
+  });
+
+  it("returns false and keeps the entry when the stop itself fails", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const runner = fakeRunner({ stopFails: true });
+    const { service } = setup({ registry, runner });
+    service.addSession("s1");
+    await expect(service.stopSession("s1")).resolves.toBe(false);
+    expect(registry.isOwned("s1")).toBe(true);
+    expect(service.getState().map((s) => s.sessionId)).toEqual(["s1"]);
+  });
+});
+
 describe("HTTP/SSE interface", () => {
   interface RecordedRoute {
     path: string;
@@ -405,8 +473,42 @@ describe("HTTP/SSE interface", () => {
     await interruptRoute?.handler(postReq, interruptRes.res as never);
     expect(JSON.parse(interruptRes.res.body())).toEqual({ interrupted: true });
 
+    // stop (POST {sessionId}): owned session stops and leaves the state
+    const stopRoute = routes.get("/bsk-observation/stop");
+    const stopRes = fakeRes();
+    await stopRoute?.handler(postReq, stopRes.res as never);
+    // The stop is async behind the response-less handler — poll the state.
+    await waitFor(() => service.getState().length === 0);
+    expect(JSON.parse(stopRes.res.body())).toEqual({ stopped: true });
+
     dispose();
     expect(routes.size).toBe(0);
+    service.dispose();
+  });
+
+  it("refuses a stop without a sessionId", async () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const { service } = setup({ registry });
+    const { routes, webServer } = routeHarness();
+    const ctx = { get: (key: string) => (key === "webServer" ? webServer : undefined) } as never;
+    const dispose = registerObservationRoutes(ctx, service);
+
+    const stopRoute = routes.get("/bsk-observation/stop");
+    const res = fakeRes();
+    const emptyReq = fakeReq({
+      method: "POST",
+      headers: { host: "127.0.0.1:3999", "content-type": "application/json" },
+      on: (event: string, fn: (chunk?: string) => void) => {
+        if (event === "data") fn("{}");
+        if (event === "end") fn();
+      },
+    });
+    await stopRoute?.handler(emptyReq, res.res as never);
+    expect(res.res.status).toBe(400);
+    expect(registry.isOwned("s1")).toBe(true);
+
+    dispose();
     service.dispose();
   });
 

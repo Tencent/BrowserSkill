@@ -228,6 +228,36 @@ export class ObservationService {
   }
 
   /**
+   * Stop one owned session and close its Agent Window (the overlay's stop
+   * button — same end state as `browser_session_stop`). Never waits behind a
+   * hung in-flight command: tool children are killed first so the session's
+   * keyed queue drains immediately, and no further captures queue up. A
+   * session the daemon already forgot (dead strip entries) stops
+   * idempotently — the goal state (entry gone) is identical.
+   * @returns whether the session ended up stopped/removed.
+   */
+  async stopSession(sessionId: string): Promise<boolean> {
+    if (!this.deps.registry.isOwned(sessionId)) return false;
+    this.cancelCapture(sessionId);
+    this.deps.runner.killFor(sessionId);
+    const result = await this.deps.queue.run(sessionId, () =>
+      this.deps.runner.run(["session", "stop", sessionId], { timeoutMs: 30_000 }),
+    );
+    if (result.code !== 0) {
+      let code: string | undefined;
+      try {
+        code = (JSON.parse(result.stdout) as { code?: string }).code;
+      } catch {
+        code = undefined;
+      }
+      if (code !== "session_not_found") return false;
+    }
+    this.deps.registry.remove(sessionId);
+    this.removeSession(sessionId);
+    return true;
+  }
+
+  /**
    * Read one captured thumbnail from the in-process ring. Powers the plugin's
    * own HTTP thumbnail route — frames are plugin-owned runtime data, never
    * referenced by any session log, so the session-authorized client RPC

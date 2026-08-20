@@ -4,7 +4,7 @@
 // upgrade/fallback (mocked documentPictureInPicture). NOTE: use RTL's waitFor
 // (act-flushing), not vi.waitFor, when asserting store-driven UI updates.
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyResize, ObservationOverlay } from "../../src/client/ObservationOverlay";
 import { type EventSourceLike, ObservationClientStore } from "../../src/client/observation-store";
@@ -155,6 +155,45 @@ describe("ObservationOverlay", () => {
     expect(capsule.textContent).toContain("clicking");
     fireEvent.click(capsule);
     await screen.findByText(/s1 · clicking/);
+  });
+
+  it("stop session: the first click only arms the confirm, the second posts", async () => {
+    const h = makeHarness([{ sessionId: "s1", action: "idle", since: Date.now() }]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s1 · idle/);
+    const stop = screen.getByRole("button", { name: "Stop session s1" });
+    fireEvent.click(stop);
+    // Armed: a plain click must never close an Agent Window by itself.
+    expect(h.fetches.some((f) => f.url === "/bsk-observation/stop")).toBe(false);
+    const confirm = await screen.findByRole("button", { name: "Confirm stop session s1" });
+    expect(confirm.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(
+        h.fetches.some(
+          (f) => f.url === "/bsk-observation/stop" && f.init?.body === '{"sessionId":"s1"}',
+        ),
+      ).toBe(true),
+    );
+  });
+
+  it("disarms the stop confirm after the expiry window", async () => {
+    const h = makeHarness([{ sessionId: "s1", action: "idle", since: Date.now() }]);
+    render(<ObservationOverlay store={h.store} />);
+    const stop = await screen.findByRole("button", { name: "Stop session s1" });
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(stop);
+      // Synchronous queries only: waitFor-style finds hang under fake timers.
+      expect(screen.getByRole("button", { name: "Confirm stop session s1" })).toBeTruthy();
+      act(() => {
+        vi.advanceTimersByTime(3100);
+      });
+      expect(screen.getByRole("button", { name: "Stop session s1" })).toBeTruthy();
+      expect(h.fetches.some((f) => f.url === "/bsk-observation/stop")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resizes within min/max clamps", async () => {

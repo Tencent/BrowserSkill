@@ -165,6 +165,12 @@
   border-top: 1px solid var(--border);
 }
 
+.actions-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .tool-wrap {
   position: relative;
   display: inline-flex;
@@ -199,6 +205,11 @@
   color: var(--destructive);
 }
 
+/* Stop session: danger-tinted like interrupt. */
+.tool-stop {
+  color: var(--destructive);
+}
+
 /* Hover the wrap (not just :hover on the button) so the tooltip target
    lights the icon up too. The corner resize handles sit above this bar, so
    the outer sliver of the corner-most buttons starts a resize instead. */
@@ -214,6 +225,15 @@
 
 .tool-wrap:hover .tool-button:disabled {
   background: var(--accent);
+}
+
+/* The armed (confirm) state of the stop button: solid destructive fill so
+   the second click reads as final. Written at the wrap-hover specificity so
+   the hover rules above never wash it out. */
+.tool-button.tool-stop-armed,
+.tool-wrap:hover .tool-button.tool-stop-armed {
+  color: var(--destructive-foreground);
+  background: var(--destructive);
 }
 
 .hint {

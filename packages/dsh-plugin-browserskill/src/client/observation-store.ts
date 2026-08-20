@@ -53,6 +53,7 @@ export interface OverlaySnapshot {
 const STATE_URL = "/bsk-observation/state";
 const EVENTS_URL = "/bsk-observation/events";
 const INTERRUPT_URL = "/bsk-observation/interrupt";
+const STOP_URL = "/bsk-observation/stop";
 
 function revoke(url: string | undefined): void {
   if (url !== undefined && typeof URL.revokeObjectURL === "function") {
@@ -307,6 +308,25 @@ export class ObservationClientStore {
       if (!res.ok) return false;
       const body = (await res.json()) as { interrupted?: boolean };
       return body.interrupted === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Stop one session and close its Agent Window. The session's removal
+   * arrives through the SSE remove event — no local state is touched here.
+   */
+  async stopSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await this.deps.fetchFn(STOP_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!res.ok) return false;
+      const body = (await res.json()) as { stopped?: boolean };
+      return body.stopped === true;
     } catch {
       return false;
     }

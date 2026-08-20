@@ -257,6 +257,8 @@ describe("ObservationSidebarTab", () => {
     expect(screen.getByTestId("obs-header").dataset.draggable).toBeUndefined();
     // No resize handles — the sidebar owns the geometry.
     expect(screen.queryByTestId("obs-resize-se")).toBeNull();
+    // Session controls ride along: interrupt + stop-with-confirm.
+    expect(screen.getByRole("button", { name: "Stop session s1" })).toBeTruthy();
   });
 
   it("still pops out into a PiP window and returns on pagehide", async () => {
