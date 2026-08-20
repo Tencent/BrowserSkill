@@ -71,7 +71,7 @@ pub(crate) fn parse_modifiers(input: &str) -> Result<Vec<KeyModifier>, String> {
     Ok(out)
 }
 
-fn split_target(
+pub(crate) fn split_target(
     positional: Option<String>,
     explicit_ref: Option<String>,
     explicit_selector: Option<String>,

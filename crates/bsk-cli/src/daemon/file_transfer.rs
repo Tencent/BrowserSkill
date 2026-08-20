@@ -1,0 +1,493 @@
+//! Session-scoped, content-transparent staging for upload/download tools.
+//!
+//! The registry deliberately exposes no arbitrary-path operations. Upload
+//! bytes arrive from the invoking CLI in bounded chunks; browser downloads
+//! land in a daemon-minted directory and are read back by the invoking CLI.
+
+use std::collections::HashMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use base64::Engine;
+use bsk_protocol::tools::{
+    TransferBeginParams, TransferBeginResult, TransferChunkParams, TransferChunkResult,
+    TransferIdParams, TransferReadyResult, TransferReleaseResult,
+};
+use bsk_protocol::{ErrorCode, RpcError};
+use uuid::Uuid;
+
+use super::paths;
+
+pub const TRANSFER_CHUNK_SIZE: u32 = 512 * 1024;
+pub const MAX_TRANSFER_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_UPLOAD_FILES: usize = 20;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Upload,
+    Download,
+}
+
+#[derive(Debug)]
+struct Entry {
+    session_id: String,
+    direction: Direction,
+    path: PathBuf,
+    expected_size: Option<u64>,
+    written: u64,
+    ready: bool,
+}
+
+#[derive(Debug)]
+pub struct DownloadStaging {
+    pub transfer_id: String,
+    pub directory: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct TransferRegistry {
+    root: PathBuf,
+    initialized: Mutex<bool>,
+    entries: Mutex<HashMap<String, Entry>>,
+}
+
+impl TransferRegistry {
+    pub fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            root: paths::bsk_home()?.join("run").join("transfers"),
+            initialized: Mutex::new(false),
+            entries: Mutex::new(HashMap::new()),
+        })
+    }
+
+    #[cfg(test)]
+    fn at_root(root: PathBuf) -> anyhow::Result<Self> {
+        let registry = Self {
+            root,
+            initialized: Mutex::new(false),
+            entries: Mutex::new(HashMap::new()),
+        };
+        registry.ensure_root()?;
+        Ok(registry)
+    }
+
+    pub fn initialize(&self) -> anyhow::Result<()> {
+        self.ensure_root()
+    }
+
+    fn ensure_root(&self) -> anyhow::Result<()> {
+        let mut initialized = self.initialized.lock().unwrap();
+        if *initialized {
+            return Ok(());
+        }
+        if self.root.exists() {
+            // Transfers never survive a daemon; removing stale directories on
+            // startup gives crash cleanup without a second persistence model.
+            let _ = fs::remove_dir_all(&self.root);
+        }
+        fs::create_dir_all(&self.root)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.root, fs::Permissions::from_mode(0o700))?;
+        }
+        *initialized = true;
+        Ok(())
+    }
+
+    pub fn begin_upload(&self, p: TransferBeginParams) -> Result<TransferBeginResult, RpcError> {
+        self.ensure_root()
+            .map_err(|err| protocol_error(err.to_string()))?;
+        if p.byte_size > MAX_TRANSFER_BYTES {
+            return Err(invalid(format!(
+                "file size {} exceeds transfer limit {}",
+                p.byte_size, MAX_TRANSFER_BYTES
+            )));
+        }
+        let mut entries = self.entries.lock().unwrap();
+        let session_bytes: u64 = entries
+            .values()
+            .filter(|entry| entry.session_id == p.session_id)
+            .map(|entry| entry.expected_size.unwrap_or(entry.written))
+            .sum();
+        if session_bytes.saturating_add(p.byte_size) > MAX_TRANSFER_BYTES {
+            return Err(invalid(format!(
+                "session transfer staging exceeds limit {}",
+                MAX_TRANSFER_BYTES
+            )));
+        }
+        let id = new_id();
+        let dir = self.root.join(&id);
+        fs::create_dir(&dir).map_err(io_error)?;
+        set_private_dir(&dir).map_err(io_error)?;
+        let path = dir.join("payload");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(io_error)?;
+        entries.insert(
+            id.clone(),
+            Entry {
+                session_id: p.session_id,
+                direction: Direction::Upload,
+                path,
+                expected_size: Some(p.byte_size),
+                written: 0,
+                ready: false,
+            },
+        );
+        Ok(TransferBeginResult {
+            transfer_id: id,
+            chunk_size: TRANSFER_CHUNK_SIZE,
+        })
+    }
+
+    pub fn write_chunk(&self, p: TransferChunkParams) -> Result<TransferChunkResult, RpcError> {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(p.data_base64)
+            .map_err(|e| invalid(format!("invalid transfer chunk: {e}")))?;
+        if bytes.len() > TRANSFER_CHUNK_SIZE as usize {
+            return Err(invalid("transfer chunk exceeds negotiated size"));
+        }
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get_mut(&p.transfer_id)
+            .ok_or_else(|| not_found("transfer not found"))?;
+        if entry.direction != Direction::Upload || entry.ready {
+            return Err(invalid("transfer is not writable"));
+        }
+        if p.offset != entry.written {
+            return Err(invalid(format!(
+                "non-sequential transfer offset: expected {}, got {}",
+                entry.written, p.offset
+            )));
+        }
+        let next = entry.written.saturating_add(bytes.len() as u64);
+        if next > entry.expected_size.unwrap_or(MAX_TRANSFER_BYTES) {
+            return Err(invalid("transfer exceeds declared byte size"));
+        }
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&entry.path)
+            .map_err(io_error)?;
+        file.write_all(&bytes).map_err(io_error)?;
+        entry.written = next;
+        Ok(TransferChunkResult {
+            next_offset: next,
+            eof: false,
+            data_base64: None,
+        })
+    }
+
+    pub fn finish_upload(&self, p: TransferIdParams) -> Result<TransferReadyResult, RpcError> {
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get_mut(&p.transfer_id)
+            .ok_or_else(|| not_found("transfer not found"))?;
+        if entry.direction != Direction::Upload {
+            return Err(invalid("transfer is not an upload"));
+        }
+        if entry.written != entry.expected_size.unwrap_or(entry.written) {
+            return Err(invalid(format!(
+                "incomplete transfer: expected {} bytes, received {}",
+                entry.expected_size.unwrap_or(0),
+                entry.written
+            )));
+        }
+        entry.ready = true;
+        Ok(TransferReadyResult {
+            transfer_id: p.transfer_id,
+            byte_size: entry.written,
+        })
+    }
+
+    pub fn resolve_uploads(
+        &self,
+        session_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<PathBuf>, RpcError> {
+        let entries = self.entries.lock().unwrap();
+        ids.iter()
+            .map(|id| {
+                let entry = entries
+                    .get(id)
+                    .ok_or_else(|| not_found("upload transfer not found"))?;
+                if entry.session_id != session_id
+                    || entry.direction != Direction::Upload
+                    || !entry.ready
+                {
+                    return Err(permission(
+                        "upload transfer is outside this session or not ready",
+                    ));
+                }
+                Ok(entry.path.clone())
+            })
+            .collect()
+    }
+
+    pub fn begin_download(&self, session_id: &str) -> Result<DownloadStaging, RpcError> {
+        self.ensure_root()
+            .map_err(|err| protocol_error(err.to_string()))?;
+        let id = new_id();
+        let dir = self.root.join(&id);
+        fs::create_dir(&dir).map_err(io_error)?;
+        set_private_dir(&dir).map_err(io_error)?;
+        self.entries.lock().unwrap().insert(
+            id.clone(),
+            Entry {
+                session_id: session_id.to_string(),
+                direction: Direction::Download,
+                path: dir.clone(),
+                expected_size: None,
+                written: 0,
+                ready: false,
+            },
+        );
+        Ok(DownloadStaging {
+            transfer_id: id,
+            directory: dir,
+        })
+    }
+
+    pub fn finish_download(&self, id: &str, reported_path: &Path) -> Result<u64, RpcError> {
+        let canonical = reported_path.canonicalize().map_err(io_error)?;
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| not_found("download transfer not found"))?;
+        let dir = entry.path.canonicalize().map_err(io_error)?;
+        if entry.direction != Direction::Download || !canonical.starts_with(&dir) {
+            return Err(permission("download escaped its staging directory"));
+        }
+        let meta = fs::metadata(&canonical).map_err(io_error)?;
+        if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
+            return Err(invalid(
+                "download is not a regular file or exceeds the transfer limit",
+            ));
+        }
+        entry.path = canonical;
+        entry.written = meta.len();
+        entry.expected_size = Some(meta.len());
+        entry.ready = true;
+        Ok(meta.len())
+    }
+
+    pub fn read_chunk(&self, p: TransferChunkParams) -> Result<TransferChunkResult, RpcError> {
+        let entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get(&p.transfer_id)
+            .ok_or_else(|| not_found("transfer not found"))?;
+        if entry.direction != Direction::Download || !entry.ready {
+            return Err(invalid("transfer is not readable"));
+        }
+        if p.offset > entry.written {
+            return Err(invalid("read offset is beyond transfer length"));
+        }
+        let mut file = File::open(&entry.path).map_err(io_error)?;
+        file.seek(SeekFrom::Start(p.offset)).map_err(io_error)?;
+        let mut buf = vec![0u8; TRANSFER_CHUNK_SIZE as usize];
+        let count = file.read(&mut buf).map_err(io_error)?;
+        buf.truncate(count);
+        let next = p.offset + count as u64;
+        Ok(TransferChunkResult {
+            next_offset: next,
+            eof: next >= entry.written,
+            data_base64: Some(base64::engine::general_purpose::STANDARD.encode(buf)),
+        })
+    }
+
+    pub fn release(&self, p: TransferIdParams) -> TransferReleaseResult {
+        let entry = self.entries.lock().unwrap().remove(&p.transfer_id);
+        if let Some(entry) = entry {
+            let dir = if entry.path.is_dir() {
+                entry.path
+            } else {
+                entry.path.parent().unwrap_or(&self.root).to_path_buf()
+            };
+            let _ = fs::remove_dir_all(dir);
+            TransferReleaseResult { released: true }
+        } else {
+            TransferReleaseResult { released: false }
+        }
+    }
+
+    pub fn release_session(&self, session_id: &str) {
+        let ids: Vec<String> = self
+            .entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, entry)| entry.session_id == session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.release(TransferIdParams { transfer_id: id });
+        }
+    }
+}
+
+fn new_id() -> String {
+    format!("tr_{}", Uuid::new_v4().simple())
+}
+
+fn set_private_dir(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn invalid(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: ErrorCode::InvalidParams,
+        message: message.into(),
+        data: None,
+    }
+}
+fn not_found(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: ErrorCode::NotFound,
+        message: message.into(),
+        data: None,
+    }
+}
+fn permission(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: ErrorCode::PermissionDenied,
+        message: message.into(),
+        data: None,
+    }
+}
+fn io_error(err: std::io::Error) -> RpcError {
+    RpcError {
+        code: ErrorCode::ProtocolError,
+        message: err.to_string(),
+        data: None,
+    }
+}
+
+fn protocol_error(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: ErrorCode::ProtocolError,
+        message: message.into(),
+        data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> (tempfile::TempDir, TransferRegistry) {
+        let temp = tempfile::tempdir().unwrap();
+        let registry = TransferRegistry::at_root(temp.path().join("transfers")).unwrap();
+        (temp, registry)
+    }
+
+    #[test]
+    fn upload_is_not_resolvable_until_complete_or_from_another_session() {
+        let (_temp, registry) = registry();
+        let begin = registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "image.png".into(),
+                byte_size: 3,
+            })
+            .unwrap();
+        assert!(
+            registry
+                .resolve_uploads("s1", &[begin.transfer_id.clone()])
+                .is_err()
+        );
+        registry
+            .write_chunk(TransferChunkParams {
+                transfer_id: begin.transfer_id.clone(),
+                offset: 0,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(b"abc"),
+            })
+            .unwrap();
+        registry
+            .finish_upload(TransferIdParams {
+                transfer_id: begin.transfer_id.clone(),
+            })
+            .unwrap();
+        assert!(
+            registry
+                .resolve_uploads("s2", &[begin.transfer_id.clone()])
+                .is_err()
+        );
+        let [path] = registry
+            .resolve_uploads("s1", &[begin.transfer_id])
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn download_must_finish_inside_its_minted_directory() {
+        let (temp, registry) = registry();
+        let staging = registry.begin_download("s1").unwrap();
+        let outside = temp.path().join("outside.bin");
+        fs::write(&outside, b"secret").unwrap();
+        assert!(
+            registry
+                .finish_download(&staging.transfer_id, &outside)
+                .is_err()
+        );
+
+        let inside = staging.directory.join("result.bin");
+        fs::write(&inside, b"result").unwrap();
+        assert_eq!(
+            registry
+                .finish_download(&staging.transfer_id, &inside)
+                .unwrap(),
+            6
+        );
+    }
+
+    #[test]
+    fn releasing_a_session_removes_all_staging() {
+        let (_temp, registry) = registry();
+        let first = registry.begin_download("s1").unwrap();
+        let second = registry.begin_download("s2").unwrap();
+        registry.release_session("s1");
+        assert!(!first.directory.exists());
+        assert!(second.directory.exists());
+    }
+
+    #[test]
+    fn upload_staging_is_bounded_across_a_session() {
+        let (_temp, registry) = registry();
+        registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "large.bin".into(),
+                byte_size: MAX_TRANSFER_BYTES,
+            })
+            .unwrap();
+        assert!(
+            registry
+                .begin_upload(TransferBeginParams {
+                    session_id: "s1".into(),
+                    name: "one-more-byte.bin".into(),
+                    byte_size: 1,
+                })
+                .is_err()
+        );
+        assert!(
+            registry
+                .begin_upload(TransferBeginParams {
+                    session_id: "s2".into(),
+                    name: "other-session.bin".into(),
+                    byte_size: 1,
+                })
+                .is_ok()
+        );
+    }
+}

@@ -137,6 +137,7 @@ name = "bsk"
 version = "0.1.10"
 dependencies = [
  "anyhow",
+ "base64",
  "bsk-protocol",
  "clap",
  "console",

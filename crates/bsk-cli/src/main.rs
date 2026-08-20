@@ -97,6 +97,8 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Fill(args) => cli::interaction::dispatch_fill(args, format),
         Command::Press(args) => cli::interaction::dispatch_press(args, format),
         Command::Select(args) => cli::interaction::dispatch_select(args, format),
+        Command::Upload(args) => cli::upload::dispatch(args, format),
+        Command::Download(args) => cli::download::dispatch(args, format),
         Command::Evaluate(args) => cli::evaluate::dispatch(args, format),
         Command::WaitForNavigation(args) => cli::waits::dispatch_wait_for_navigation(args, format),
         Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, format),
