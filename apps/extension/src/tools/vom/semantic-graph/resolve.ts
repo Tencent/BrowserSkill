@@ -1,4 +1,5 @@
 import type { VomNode } from "@browser-skill/vom";
+import { stableIdentifierName } from "./name-evidence";
 import type {
   ResolvedSemanticGraph,
   ResolvedSemanticNode,
@@ -7,6 +8,7 @@ import type {
   SemanticGraphNode,
   SemanticNodeId,
 } from "./types";
+import { frameBackendKey } from "./types";
 
 const FORM_TAGS = new Set(["input", "textarea", "select"]);
 const NATIVE_CONTROL_TAGS = new Set(["button", "input", "select", "textarea"]);
@@ -57,8 +59,6 @@ function normalizeRole(value: string | undefined): string | undefined {
 }
 
 function nativeRole(tag: string, attrs: Record<string, string>): string | undefined {
-  const explicit = normalizeRole(attrs.role);
-  if (explicit) return explicit;
   if (tag === "button") return "button";
   if (tag === "textarea") return "textbox";
   if (tag === "select") return attrs.multiple === undefined ? "combobox" : "listbox";
@@ -90,14 +90,29 @@ function nativeRole(tag: string, attrs: Record<string, string>): string | undefi
   return undefined;
 }
 
-function resolvedRole(node: SemanticGraphNode): string | undefined {
+function domRole(tag: string, attrs: Record<string, string>): string | undefined {
+  return normalizeRole(attrs.role) ?? nativeRole(tag, attrs);
+}
+
+function resolvedRole(node: SemanticGraphNode): {
+  value?: string;
+  source: ResolvedSemanticNode["roleSource"];
+} {
   const rawAxRole = clean(axValue(node.ax?.role));
   const axRole = normalizeRole(rawAxRole);
-  const domRole = nativeRole(node.dom?.tag.toLowerCase() ?? "", node.dom?.attrs ?? {});
-  if (!axRole || ["generic", "none", "presentation"].includes(axRole)) {
-    return domRole ?? rawAxRole;
+  const attrs = node.dom?.attrs ?? {};
+  const explicitDomRole = normalizeRole(attrs.role);
+  const nativeDomRole = nativeRole(node.dom?.tag.toLowerCase() ?? "", attrs);
+  const usableAxRole = node.ax?.ignored !== true;
+  if (usableAxRole && axRole && !["generic", "none", "presentation"].includes(axRole)) {
+    return { value: rawAxRole, source: "ax" };
   }
-  return rawAxRole;
+  if (explicitDomRole) return { value: explicitDomRole, source: "dom-explicit" };
+  if (nativeDomRole) return { value: nativeDomRole, source: "dom-native" };
+  if (rawAxRole) {
+    return { value: rawAxRole, source: usableAxRole ? "ax" : "ax-ignored" };
+  }
+  return { source: "none" };
 }
 
 function sensitive(node: SemanticGraphNode): boolean {
@@ -141,14 +156,6 @@ function externalHrefHost(
   } catch {
     return undefined;
   }
-}
-
-function iconKeyword(value: string | undefined): string | undefined {
-  const token = clean(value)
-    ?.split(/[#/.\s:_-]+/)
-    .filter(Boolean)
-    .pop();
-  return token && /^[a-z][a-z0-9_-]{1,32}$/i.test(token) ? token.toLowerCase() : undefined;
 }
 
 interface ResolveIndexes {
@@ -214,7 +221,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     for (const childId of domChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
       const childRole = child
-        ? nativeRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {})
+        ? domRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {})
         : undefined;
       if (childRole && INTERACTIVE_ROLES.has(childRole.toLowerCase())) continue;
       const childText = domText(childId);
@@ -262,10 +269,8 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     for (const childId of domChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
       const childRole =
-        normalizeRole(axValue(child?.ax?.role)) ??
-        (child
-          ? nativeRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {})
-          : undefined);
+        (child?.ax?.ignored === true ? undefined : normalizeRole(axValue(child?.ax?.role))) ??
+        (child ? domRole(child.dom?.tag.toLowerCase() ?? "", child.dom?.attrs ?? {}) : undefined);
       if (
         (child?.dom && NATIVE_CONTROL_TAGS.has(child.dom.tag.toLowerCase())) ||
         INTERACTIVE_ROLES.has(childRole ?? "") ||
@@ -359,36 +364,11 @@ function precedingDomText(
   for (let offset = 1; offset <= 4 && index - offset >= 0; offset += 1) {
     const sibling = graph.nodes.get(siblings[index - offset]);
     const siblingRole = sibling
-      ? nativeRole(sibling.dom?.tag.toLowerCase() ?? "", sibling.dom?.attrs ?? {})
+      ? domRole(sibling.dom?.tag.toLowerCase() ?? "", sibling.dom?.attrs ?? {})
       : undefined;
     if (siblingRole && INTERACTIVE_ROLES.has(siblingRole.toLowerCase())) break;
     const text = indexes.domText(siblings[index - offset])?.replace(/[：:]\s*$/, "");
     if (text && text.length <= 80) return text;
-  }
-  return undefined;
-}
-
-function iconHint(
-  nodeId: SemanticNodeId,
-  graph: SemanticGraph,
-  indexes: ResolveIndexes,
-  depth = 0,
-): string | undefined {
-  if (depth > 3) return undefined;
-  for (const childId of indexes.domChildren.get(nodeId) ?? []) {
-    const child = graph.nodes.get(childId);
-    const attrs = child?.dom?.attrs ?? {};
-    const hint =
-      iconKeyword(attrs["aria-label"]) ??
-      iconKeyword(attrs.title) ??
-      iconKeyword(attrs.href) ??
-      iconKeyword(attrs["xlink:href"]) ??
-      iconKeyword(axValue(child?.ax?.name)) ??
-      iconKeyword(attrs.class) ??
-      iconKeyword(child?.dom?.textContent);
-    if (hint) return hint;
-    const nested = iconHint(childId, graph, indexes, depth + 1);
-    if (nested) return nested;
   }
   return undefined;
 }
@@ -398,19 +378,18 @@ function resolvedName(
   role: string | undefined,
   graph: SemanticGraph,
   indexes: ResolveIndexes,
+  supplementalNames: ReadonlyMap<string, string>,
+  identifierFallback: boolean,
 ): string | undefined {
   const attrs = node.dom?.attrs ?? {};
   const formControl = FORM_TAGS.has(node.dom?.tag.toLowerCase() ?? "");
   const descendantText = indexes.domText(node.id);
-  const canUseIconHint =
-    !indexes.hasNativeDescendant(node.id) &&
-    (INTERACTIVE_ROLES.has(role?.toLowerCase() ?? "") ||
-      node.dom?.cursor === "pointer" ||
-      attrs.onclick !== undefined ||
-      attrs.tabindex !== undefined);
+  const interactive =
+    INTERACTIVE_ROLES.has(role?.toLowerCase() ?? "") ||
+    NATIVE_CONTROL_TAGS.has(node.dom?.tag.toLowerCase() ?? "");
   const candidates = [
-    axValue(node.ax?.name),
-    indexes.axText(node.id),
+    node.ax?.ignored === true ? undefined : axValue(node.ax?.name),
+    node.ax?.ignored === true ? undefined : indexes.axText(node.id),
     ariaLabelledText(node, indexes),
     clean(attrs["aria-label"]),
     nativeLabelText(node, graph, indexes),
@@ -420,7 +399,10 @@ function resolvedName(
     formControl ? precedingAxText(node, graph, indexes) : undefined,
     formControl ? precedingDomText(node, graph, indexes) : undefined,
     formControl ? clean(node.dom?.formPlaceholder ?? attrs.placeholder) : undefined,
-    canUseIconHint ? iconHint(node.id, graph, indexes) : undefined,
+    !interactive || node.backendNodeId === undefined
+      ? undefined
+      : clean(supplementalNames.get(frameBackendKey(node.frameId, node.backendNodeId))),
+    identifierFallback && interactive ? stableIdentifierName(attrs) : undefined,
   ];
   let name = candidates.find((candidate) => candidate !== undefined);
   const hasPopup = axProperty(node.ax, "hasPopup");
@@ -462,12 +444,21 @@ function nearbyText(
   return clean(texts.join(" "));
 }
 
-export function resolveSemanticGraph(graph: SemanticGraph): ResolvedSemanticGraph {
+export function resolveSemanticGraph(
+  graph: SemanticGraph,
+  options: {
+    supplementalNames?: ReadonlyMap<string, string>;
+    identifierFallback?: boolean;
+  } = {},
+): ResolvedSemanticGraph {
   const indexes = buildIndexes(graph);
+  const supplementalNames = options.supplementalNames ?? new Map<string, string>();
+  const identifierFallback = options.identifierFallback ?? true;
   const nodes = new Map<SemanticNodeId, ResolvedSemanticNode>();
   for (const node of graph.nodes.values()) {
-    const role = resolvedRole(node);
-    const name = resolvedName(node, role, graph, indexes);
+    const roleResolution = resolvedRole(node);
+    const role = roleResolution.value;
+    const name = resolvedName(node, role, graph, indexes, supplementalNames, identifierFallback);
     const isSensitive = sensitive(node);
     const sourceValue = node.dom?.formValue ?? axValue(node.ax?.value);
     const value = isSensitive ? undefined : sourceValue;
@@ -505,9 +496,9 @@ export function resolveSemanticGraph(graph: SemanticGraph): ResolvedSemanticGrap
       insideNative: insideNative(node, graph),
       ...(role?.toLowerCase() === "link" ? { href: externalHrefHost(attrs.href, frame?.url) } : {}),
     };
-    const selected = axProperty(node.ax, "selected");
-    const expanded = axProperty(node.ax, "expanded");
-    const controls = axProperty(node.ax, "controls");
+    const selected = node.ax?.ignored === true ? undefined : axProperty(node.ax, "selected");
+    const expanded = node.ax?.ignored === true ? undefined : axProperty(node.ax, "expanded");
+    const controls = node.ax?.ignored === true ? undefined : axProperty(node.ax, "controls");
     if (selected === "true" && !vom.attrs?.["aria-selected"]) {
       vom.attrs = { ...(vom.attrs ?? {}), "aria-selected": "true" };
     }
@@ -521,6 +512,7 @@ export function resolveSemanticGraph(graph: SemanticGraph): ResolvedSemanticGrap
       ...node,
       vom,
       referenceable: node.backendNodeId !== undefined,
+      roleSource: roleResolution.source,
     });
   }
   return { ...graph, nodes };

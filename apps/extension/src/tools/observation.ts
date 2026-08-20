@@ -59,7 +59,15 @@ import {
   projectRecordSafeObservation,
 } from "./vom/record-safe-observation";
 import type { FrameDocument } from "./vom/frame-document";
-import { buildSemanticVomScene, type SemanticAxNode } from "./vom/semantic-graph";
+import { probeTooltipNames } from "./vom/name-enrichment";
+import {
+  buildSemanticGraph,
+  buildSemanticVomScene,
+  normalizeSemanticStructure,
+  projectSemanticGraph,
+  resolveSemanticGraph,
+  type SemanticAxNode,
+} from "./vom/semantic-graph";
 
 // ---------------------------------------------------------------------------
 // Shared helpers (legacy aliases — observation.ts kept exporting these
@@ -641,6 +649,7 @@ function findSurfaceNodeByPoint(
 
 export interface BuildVomSceneOptions {
   pageUrl?: string;
+  supplementalNames?: ReadonlyMap<string, string>;
 }
 
 export type VomFrameDocument = CapturedFrameDocument<CdpAxNode>;
@@ -800,13 +809,14 @@ export function buildVomScene(
 export function buildFrameVomScene(
   documents: VomFrameDocument[],
   captured: CapturedViewModel,
-  _options: BuildVomSceneOptions = {},
+  options: BuildVomSceneOptions = {},
 ): VomScene {
   const scene = buildSemanticVomScene({
     documents: documents as FrameDocument<SemanticAxNode>[],
     viewport: captured.viewport,
     rootFrameId: captured.rootFrameId,
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
+    supplementalNames: options.supplementalNames,
   });
   const rootDocument = documents.find((document) => document.frameId === scene.rootFrameId);
   const signals = capturedOnlySignals(rootDocument?.domNodes ?? captured.nodes);
@@ -1027,7 +1037,25 @@ export async function captureVomObservation(
     documents.length === 1 && captured.iframeNodes.size > 0
       ? legacyFrameDocuments(documents[0].axNodes, captured, url, documents[0].target)
       : documents;
-  const scene = buildFrameVomScene(normalizedDocuments, captured, { pageUrl: url });
+  const semanticGraph = buildSemanticGraph({
+    documents: normalizedDocuments as FrameDocument<SemanticAxNode>[],
+    viewport: captured.viewport,
+    rootFrameId: captured.rootFrameId,
+    excludedBackendNodeIds: captured.excludedBackendNodeIds,
+  });
+  const staticSemantics = resolveSemanticGraph(semanticGraph, { identifierFallback: false });
+  const tooltipNames = options.conditionalSurfaceProbe
+    ? await probeTooltipNames(cdp, tabId, normalizedDocuments, staticSemantics, {
+        signal: options.signal,
+        hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
+      })
+    : new Map<string, string>();
+  throwIfAborted(options.signal, "observation");
+  const scene = projectSemanticGraph(
+    normalizeSemanticStructure(
+      resolveSemanticGraph(semanticGraph, { supplementalNames: tooltipNames }),
+    ),
+  );
   const rendered = renderVom(scene, {
     maxDepth: options.maxDepth,
     maxTokens: options.maxTokens,

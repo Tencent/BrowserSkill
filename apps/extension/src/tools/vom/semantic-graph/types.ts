@@ -54,10 +54,26 @@ export interface SemanticGraph {
 export interface ResolvedSemanticNode extends SemanticGraphNode {
   vom: Omit<VomNode, "id" | "parentId" | "backendNodeId" | "frameId" | "contextScopeId">;
   referenceable: boolean;
+  roleSource: "ax" | "ax-ignored" | "dom-explicit" | "dom-native" | "none";
 }
 
 export interface ResolvedSemanticGraph extends Omit<SemanticGraph, "nodes"> {
   nodes: Map<SemanticNodeId, ResolvedSemanticNode>;
+}
+
+export type StructureDecision =
+  | { kind: "keep"; reason: "semantic" | "frame-owner" }
+  | { kind: "inferred-group"; reason: "independent-interaction-branches" }
+  | { kind: "transparent"; reason: "wrapper" | "child-document-root" | "ax-ignored" }
+  | { kind: "excluded"; reason: "excluded" | "redundant-source" };
+
+export interface StructuredSemanticNode extends ResolvedSemanticNode {
+  structure: StructureDecision;
+  semanticParentId?: SemanticNodeId;
+}
+
+export interface StructuredSemanticGraph extends Omit<ResolvedSemanticGraph, "nodes"> {
+  nodes: Map<SemanticNodeId, StructuredSemanticNode>;
 }
 
 export function frameBackendKey(frameId: string, backendNodeId: number): string {
