@@ -66,6 +66,16 @@
   cursor: move;
 }
 
+/* Sidebar first-row metrics, mirroring the builtin tabs (explorerHeader et
+   al. are 36px): tab strip (34px) + a 36px status row lands the header's
+   bottom border exactly on the shell header's, keeping the window-wide
+   hairline continuous. The floating card keeps its compact header. */
+.sidebar-tab .header {
+  box-sizing: border-box;
+  height: 36px;
+  padding: 0 8px 0 12px;
+}
+
 .status-text {
   flex: 1;
   min-width: 0;

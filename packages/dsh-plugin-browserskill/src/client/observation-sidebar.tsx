@@ -87,13 +87,25 @@ export interface TabDescriptorLike {
 
 export interface BetterSidebarLike {
   registerTab(descriptor: TabDescriptorLike): () => void;
-  openTab(seed: { type: string; title?: string }): void;
+  openTab(seed: {
+    type: string;
+    title?: string;
+    /** Content seed (lands on tab.path); content opens expand the panel. */
+    path?: string;
+  }): void;
   getSnapshot(): SidebarSnapshotLike;
   isTabEnabled(id: string): boolean;
 }
 
 /** The registered tab type id (also the SidebarTab.type value). */
 export const OBSERVATION_TAB_TYPE = "browserskill:observation";
+
+/**
+ * Inert content seed carried on auto-opened tabs: its mere presence makes
+ * the sidebar treat the open as a content open (expanding the hosting panel
+ * so the tracking view lands in sight). Never read by our component.
+ */
+export const OBSERVATION_TAB_PATH = "browser-skill:observation";
 
 /**
  * The observation tab body: the same OverlayBody the floating card renders,
@@ -170,15 +182,17 @@ export function registerObservationSidebar(
 
   // Open the tab when the first browser session appears (and right away
   // when one is already live at activation). An already-open tab is never
-  // re-focused — the user may be reading another page on purpose. Type-only
-  // opens never force the panel open, so this stays as unobtrusive as the
-  // floating card's collapsed capsule was.
+  // re-focused — the user may be reading another page on purpose. The open
+  // carries a content seed (`path`): only content opens land in sight — the
+  // sidebar expands the hosting panel for them, while type-only opens
+  // silently no-op behind a collapsed panel. The pseudo-path is inert (our
+  // component never reads tab.path).
   let previousCount = store.getSnapshot().sessions.length;
   const maybeOpen = (): void => {
     if (service.getSnapshot().state === undefined) return;
     if (!service.isTabEnabled(OBSERVATION_TAB_TYPE)) return;
     if (observationTabOpen(service.getSnapshot().state)) return;
-    service.openTab({ type: OBSERVATION_TAB_TYPE });
+    service.openTab({ type: OBSERVATION_TAB_TYPE, path: OBSERVATION_TAB_PATH });
   };
   if (previousCount > 0) maybeOpen();
   const unsubscribe = store.subscribe(() => {

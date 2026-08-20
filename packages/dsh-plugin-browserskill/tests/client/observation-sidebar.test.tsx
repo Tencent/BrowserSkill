@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ObservationOverlay } from "../../src/client/ObservationOverlay";
 import {
   type BetterSidebarLike,
+  OBSERVATION_TAB_PATH,
   OBSERVATION_TAB_TYPE,
   ObservationSidebarTab,
   observationTabOpen,
@@ -151,7 +152,10 @@ describe("registerObservationSidebar", () => {
     registerObservationSidebar(sidebar.service, h.store);
     // The initial state fetch lands asynchronously; the 0→N watcher then fires.
     await waitFor(() =>
-      expect(sidebar.openTab).toHaveBeenCalledWith({ type: OBSERVATION_TAB_TYPE }),
+      expect(sidebar.openTab).toHaveBeenCalledWith({
+        type: OBSERVATION_TAB_TYPE,
+        path: OBSERVATION_TAB_PATH,
+      }),
     );
   });
 
