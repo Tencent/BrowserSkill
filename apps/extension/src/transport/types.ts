@@ -33,6 +33,9 @@ export type RpcErrorReason =
   | "restricted_tab_url"
   | "borrow_conflict"
   | "screenshot_capture_failed"
+  | "file_chooser_control_failed"
+  | "file_chooser_not_opened"
+  | "unsupported_file_chooser"
   | "cleanup_failed";
 
 export interface RpcErrorData {

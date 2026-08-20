@@ -148,7 +148,7 @@ flowchart LR
 - The invoking agent/harness decides whether a transfer is authorized and supplies the task-local source or destination path.
 - The CLI is the only component that reads an upload source or writes the final download destination. The extension never receives either agent-facing path.
 - The daemon issues opaque, session-scoped transfer IDs and stages bounded chunks in a private runtime directory. It injects only its own staging paths into extension RPCs and validates that a completed download remains inside its minted directory.
-- The extension only performs the browser-side mechanism: intercept one chooser or capture one download, scoped to the requested session and Agent Window tab. It does not classify content or make policy decisions.
+- The extension only performs the browser-side mechanism: handle one file-chooser transaction or capture one download, scoped to the requested session and exact Agent Window target. Automatic upload is limited to choosers backed by `<input type="file">`; non-input pickers such as `window.showOpenFilePicker()` return a structured unsupported result for the agent to handle. The extension does not classify content or make policy decisions.
 - Download staging is released after the CLI commits the file. Upload staging remains until session teardown because the page may read an attached file only on a later form submission. All staging is released on session stop/browser disconnect and on daemon startup after a crash. Existing download destinations are not overwritten unless the CLI caller explicitly opts in.
 
 ## Repository layout

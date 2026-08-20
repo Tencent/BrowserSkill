@@ -49,6 +49,9 @@ pub mod reason {
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
+    pub const FILE_CHOOSER_CONTROL_FAILED: &str = "file_chooser_control_failed";
+    pub const FILE_CHOOSER_NOT_OPENED: &str = "file_chooser_not_opened";
+    pub const UNSUPPORTED_FILE_CHOOSER: &str = "unsupported_file_chooser";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
 }
 
@@ -269,6 +272,29 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::Unsupported, reason::UNSUPPORTED_FILE_CHOOSER) => RenderInfo {
+            summary: "the page opened a non-input file picker",
+            hint: Some(
+                "do not retry upload; use `bsk request-help` and tell the user the exact original local path to select, or stop if human help is disabled",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_CHOOSER_CONTROL_FAILED) => {
+            RenderInfo {
+                summary: "the browser file-chooser transaction could not complete",
+                hint: Some(
+                    "do not retry the same upload blindly; use `bsk request-help` when human help is available",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
+        (ErrorCode::Timeout, reason::FILE_CHOOSER_NOT_OPENED) => RenderInfo {
+            summary: "the upload action did not open a file chooser",
+            hint: Some(
+                "observe once after expanding any upload menu, then retry with the actual upload action or use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
         _ => base,
     }
 }
@@ -390,6 +416,27 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn file_chooser_reasons_render_actionable_fallbacks() {
+        let unsupported = serde_json::json!({ "reason": reason::UNSUPPORTED_FILE_CHOOSER });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported));
+        assert_eq!(info.summary, "the page opened a non-input file picker");
+        assert!(info.hint.unwrap().contains("exact original local path"));
+
+        let control = serde_json::json!({ "reason": reason::FILE_CHOOSER_CONTROL_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&control));
+        assert!(info.summary.contains("transaction could not complete"));
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let not_opened = serde_json::json!({ "reason": reason::FILE_CHOOSER_NOT_OPENED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&not_opened));
+        assert_eq!(
+            info.summary,
+            "the upload action did not open a file chooser"
+        );
+        assert!(info.hint.unwrap().contains("expanding any upload menu"));
     }
 
     #[test]
