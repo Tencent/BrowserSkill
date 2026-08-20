@@ -217,7 +217,13 @@ The agent/harness decides whether a file transfer is appropriate and which local
 
 BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted paths reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Download staging is removed after the CLI copies it; upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
 
-Do not use `request-help` merely because a native file chooser or browser download is involved; use these commands. Ask for help only when the intended upload file is unavailable/unreadable to the agent, the page requires genuinely human-only input, or the browser reports the transfer mechanism as unsupported.
+Do not use `request-help` merely because a native file chooser or browser download is involved; try these commands first. For upload failures, use the structured error instead of retrying blindly:
+
+- `reason=unsupported_file_chooser` means the page opened a non-input picker such as `window.showOpenFilePicker()`. Do not retry `upload`; if human help is available, call `request-help` and tell the user the exact original file path to choose. The staged daemon path is an internal implementation detail and must not be shown to the user.
+- `reason=file_chooser_control_failed` means BrowserSkill could not establish or complete the browser-side transaction. Do not retry the same action blindly; use `request-help` when available.
+- `reason=file_chooser_not_opened` means the click completed without opening a chooser. Observe once to verify that the target is the actual upload action (for example, after expanding a menu), then retry with the corrected target or ask for help.
+
+If `request-help` returns `outcome="disabled"`, do not retry it. Stop gracefully and report that the workflow requires a non-input file picker or unavailable local file.
 
 ### Scripting & timing
 
