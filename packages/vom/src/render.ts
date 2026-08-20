@@ -199,7 +199,10 @@ function shouldRender(node: VomNode): boolean {
 }
 
 export function isVomReferenceNode(node: VomNode): boolean {
-  return INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node);
+  return (
+    node.referenceable !== false &&
+    (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
+  );
 }
 
 function hasRecoveryHandler(node: VomNode): boolean {

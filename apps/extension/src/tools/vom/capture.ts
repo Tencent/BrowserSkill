@@ -1020,7 +1020,13 @@ export async function captureViewModel(
   options: CaptureViewModelOptions = {},
 ): Promise<CapturedViewModel> {
   throwIfAborted(options.signal);
-  const metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  let metrics: LayoutMetricsReply = {};
+  try {
+    metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    console.debug("[bsk capture] layout metrics unavailable", error);
+  }
   throwIfAborted(options.signal);
   const dpr = devicePixelRatio(metrics);
   const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
