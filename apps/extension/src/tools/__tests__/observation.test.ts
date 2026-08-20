@@ -2909,6 +2909,87 @@ describe("handleSnapshot", () => {
       ],
     };
   }
+
+  function secretsSnapshotReply(secrets: {
+    email: string;
+    password: string;
+    otp: string;
+    card: string;
+  }) {
+    const S = [
+      "html",
+      "body",
+      "input",
+      "position",
+      "static",
+      "pointer-events",
+      "auto",
+      "type",
+      "text",
+      "password",
+      "autocomplete",
+      "one-time-code",
+      "cc-number",
+      "value",
+      secrets.email,
+      secrets.password,
+      secrets.otp,
+      secrets.card,
+    ];
+    const i = (s: string) => S.indexOf(s);
+    const style = [i("static"), i("auto"), i("auto")];
+    return {
+      strings: S,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1, 1, 1, 1],
+            nodeName: [i("html"), i("body"), i("input"), i("input"), i("input"), i("input")],
+            backendNodeId: [10, 11, 12, 13, 14, 15],
+            attributes: [
+              [],
+              [],
+              [i("type"), i("text"), i("value"), i(secrets.email)],
+              [i("type"), i("password"), i("value"), i(secrets.password)],
+              [
+                i("type"),
+                i("text"),
+                i("autocomplete"),
+                i("one-time-code"),
+                i("value"),
+                i(secrets.otp),
+              ],
+              [
+                i("type"),
+                i("text"),
+                i("autocomplete"),
+                i("cc-number"),
+                i("value"),
+                i(secrets.card),
+              ],
+            ],
+            inputValue: {
+              index: [2, 3, 4, 5],
+              value: [i(secrets.email), i(secrets.password), i(secrets.otp), i(secrets.card)],
+            },
+          },
+          layout: {
+            nodeIndex: [1, 2, 3, 4, 5],
+            styles: [style, style, style, style, style],
+            bounds: [
+              [0, 0, 1000, 800],
+              [10, 10, 200, 32],
+              [10, 50, 200, 32],
+              [10, 90, 200, 32],
+              [10, 130, 200, 32],
+            ],
+            paintOrders: [0, 1, 2, 3, 4],
+          },
+        },
+      ],
+    };
+  }
+
   const VP_METRICS = {
     cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
   };
@@ -3063,20 +3144,96 @@ describe("handleSnapshot", () => {
       line: expect.any(Number),
     });
     expect(result.rootFrameId).toBe("root");
-    expect(result.frameDocuments).toHaveLength(1);
-    expect(result.frameDocuments[0]?.domNodes.some((node) => node.backendNodeId === 13)).toBe(true);
+    expect(result).not.toHaveProperty("frameDocuments");
+    expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
+    expect(result.nodes.find((node) => node.backendNodeId === 13)).toMatchObject({
+      frameId: "root",
+      backendNodeId: 13,
+      tag: "input",
+      rect: { x: 400, y: 300, w: 200, h: 40 },
+    });
   });
 
-  it("keeps frame documents and rendered refs on the same frame identity", async () => {
+  it("does not leak form secrets through the record-safe observation payload", async () => {
+    const secrets = {
+      email: "user@example.com",
+      password: "hunter2",
+      otp: "847291",
+      card: "4111111111111111",
+    };
+    const ax: CdpAxNode[] = [
+      {
+        nodeId: "root",
+        role: { type: "role", value: "RootWebArea" },
+        backendDOMNodeId: 11,
+        childIds: ["email", "password", "otp", "card"],
+      },
+      {
+        nodeId: "email",
+        parentId: "root",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Email" },
+        value: { value: secrets.email },
+        backendDOMNodeId: 12,
+      },
+      {
+        nodeId: "password",
+        parentId: "root",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Password" },
+        value: { value: secrets.password },
+        backendDOMNodeId: 13,
+      },
+      {
+        nodeId: "otp",
+        parentId: "root",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Code" },
+        value: { value: secrets.otp },
+        backendDOMNodeId: 14,
+      },
+      {
+        nodeId: "card",
+        parentId: "root",
+        role: { type: "role", value: "textbox" },
+        name: { type: "computedString", value: "Card" },
+        value: { value: secrets.card },
+        backendDOMNodeId: 15,
+      },
+    ];
+    const deps = makeOverlayDeps(ax, secretsSnapshotReply(secrets), VP_METRICS);
+
+    const result = await captureVomObservation(deps.cdp, 4, "https://example.com", {
+      redactValues: true,
+    });
+    const dumped = JSON.stringify(result);
+
+    expect(result).not.toHaveProperty("frameDocuments");
+    expect(dumped).not.toContain(secrets.email);
+    expect(dumped).not.toContain(secrets.password);
+    expect(dumped).not.toContain(secrets.otp);
+    expect(dumped).not.toContain(secrets.card);
+    expect(dumped).not.toContain("formValue");
+    expect(dumped).not.toContain("axNodes");
+    expect(result.text).toContain("•••");
+  });
+
+  it("keeps frames and rendered refs on the same frame identity", async () => {
     const deps = makeFrameAwareDeps();
 
     const result = await captureVomObservation(deps.cdp, 4, "https://example.com");
 
     expect(result.rootFrameId).toBe("main");
-    expect(result.frameDocuments).toHaveLength(2);
-    expect(result.frameDocuments.find((document) => document.frameId === "child")?.target).toEqual({
-      tabId: 4,
-      sessionId: "child-session",
+    expect(result.frames).toHaveLength(2);
+    expect(result.frames.find((frame) => frame.frameId === "child")).toEqual({
+      frameId: "child",
+      parentFrameId: "main",
+      ownerBackendNodeId: 12,
+      target: { tabId: 4, sessionId: "child-session" },
+    });
+    expect(result.nodes.find((node) => node.backendNodeId === 22)).toMatchObject({
+      frameId: "child",
+      tag: "button",
     });
     expect(result.refs.find((ref) => ref.backendNodeId === 22)).toMatchObject({
       frameId: "child",

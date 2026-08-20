@@ -8,6 +8,7 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
+  type Rect,
   type RenderedRef,
   renderVom,
   type VomNode,
@@ -1590,13 +1591,56 @@ export interface CaptureVomObservationOptions extends VomOptions {
   signal?: AbortSignal;
 }
 
+/** Frame identity needed to click an `@eN` that lives in an iframe. */
+export interface CaptureVomFrame {
+  frameId: string;
+  target: CdpTarget;
+  parentFrameId?: string;
+  ownerBackendNodeId?: number;
+}
+
+/** Geometry index for matching a recorded click to a captured node. */
+export interface CaptureVomNode {
+  frameId: string;
+  backendNodeId: number;
+  tag: string;
+  rect: Rect | null;
+}
+
+/**
+ * Record-safe observation: rendered VOM text plus the matching index.
+ * Raw AX/DOM trees are not returned — they carry form values.
+ */
 export interface CaptureVomObservationResult {
   text: string;
   refs: RenderedRef[];
   truncated: boolean;
   rootFrameId: string;
-  frameDocuments: CapturedFrameDocument<CdpAxNode>[];
+  frames: CaptureVomFrame[];
+  nodes: CaptureVomNode[];
   surfaceProbes?: CapturedSurfaceProbe[];
+}
+
+function recordSafeFrames(documents: CapturedFrameDocument<CdpAxNode>[]): CaptureVomFrame[] {
+  return documents.map((document) => ({
+    frameId: document.frameId,
+    target: document.target,
+    ...(document.parentFrameId ? { parentFrameId: document.parentFrameId } : {}),
+    ...(document.ownerBackendNodeId !== undefined
+      ? { ownerBackendNodeId: document.ownerBackendNodeId }
+      : {}),
+  }));
+}
+
+function recordSafeNodes(documents: CapturedFrameDocument<CdpAxNode>[]): CaptureVomNode[] {
+  return documents.flatMap((document) =>
+    document.domNodes.map((node) => ({
+      frameId: document.frameId,
+      backendNodeId: node.backendNodeId,
+      tag: node.tag,
+      rect: node.rect,
+    })),
+  );
 }
 
 export async function captureVomObservation(
@@ -1628,7 +1672,8 @@ export async function captureVomObservation(
     refs: rendered.refs,
     truncated: rendered.truncated,
     rootFrameId: captured.rootFrameId ?? documents[0]?.frameId ?? "root",
-    frameDocuments: documents,
+    frames: recordSafeFrames(documents),
+    nodes: recordSafeNodes(documents),
     surfaceProbes: captured.surfaceProbes,
   };
 }
@@ -1674,7 +1719,7 @@ async function handleVomObservation(
     });
     throwIfAborted(signal, toolName);
     const targetByFrameId = new Map(
-      observation.frameDocuments.map((document) => [document.frameId, document.target]),
+      observation.frames.map((frame) => [frame.frameId, frame.target]),
     );
     ctx.refStore.replace(
       observation.refs.map((ref) => {
