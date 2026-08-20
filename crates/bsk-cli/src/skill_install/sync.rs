@@ -7,6 +7,41 @@ use super::{
     DEFAULT_SKILL_MD, SOURCE_CUSTOM, SOURCE_MARKER_FILE, bundled_source_marker, harness::HarnessId,
 };
 
+/// SHA-256 hex digests of `SKILL.md` content that `bsk` shipped in
+/// earlier releases, before `.bsk-source` markers existed. When a
+/// marker-less installed `SKILL.md` matches one of these
+/// fingerprints (or the current bundle), the daemon recognises it
+/// as a managed bundled install and rewrites it to the current
+/// bundle in the same sync pass. Without this list, anyone who
+/// installed before markers landed would be silently preserved as
+/// "unknown" forever, frozen on the version they first installed.
+const HISTORICAL_BUNDLED_FINGERPRINTS: &[&str] = &[
+    // Initial public release
+    "28d39215d1a6f658d55a41b8ecc2c6692bed628093824442927581f4a3e1bc5a",
+    // feat(record): add popup quick-actions launcher and make record --url optional
+    "875affb61f68c62712e038bb2a3a54efeaa20974aeab516aaaacd9605e25aa5a",
+    // fix(record): use example.com as the default record start URL
+    "c3d933f6390199b9a250e6fc66e441c0817fbceb16403d760606ff9bcd3c25ba",
+    // fix(runtime): fix early control return and update lifecycle
+    "735bd85400e725c33ebb1146bf55d1f997fd4e7f6b785da52fe600a5cd81d4ca",
+    // fix(vom): bug fix
+    "352d51bb05f38f71a88b2bfe87fb39295e2a3165bb7e56ff505e68b25336b581",
+    // feat(request-help): add BSK_REQUEST_HELP=off to disable blocking help requests
+    "f93715bfa657922e0753793552f69aa7077dc06109466a9770f1016881e7d962",
+    // feat: support Agent Window sizing
+    "df897c39d725123e3fd8884b3ab911fa2c21694844c16cde56899d4e3b55033b",
+    // feat(emulate): add mobile device emulation via CDP Emulation domain
+    "7556a415ec6144b5aa45afa4218687bb3fbda48936748c63e093504f6be13ab0",
+    // feat(extension): add bsk hover and adjust vom to support
+    "d5eb9c2e826828ee380c76c24afffb593ef13b8fb7d6a596df71a719e7b1d83a",
+    // feat(update): auto-upgrade bsk when daemon finds a newer version (#77)
+    "4d357816676a989cc28f930951f4d1259d1655c00af85d4c0c429eca398d243d",
+    // docs(skill): list bsk console and bsk network in SKILL.md (#84)
+    "cfb4934ff5647b3d9220c287bfde4f813948dc562dc5915e1ce3362a9e631b5c",
+    // feat(session): support unfocused agent windows (--no-focus) (#87)
+    "a4c6a616f2b52a23f66de700fe7c41f11e854cd51997c85f03f3f3a22a1b7279",
+];
+
 /// Per-harness outcome of a sync pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
@@ -15,8 +50,11 @@ pub struct SyncReport {
     /// Harnesses whose on-disk `SKILL.md` already matched the bundled
     /// content; no write happened, mtime preserved.
     pub up_to_date: Vec<HarnessId>,
-    /// Harnesses whose skill is custom, manually edited, or from a
-    /// marker-less historical install. Automatic sync preserves it.
+    /// Harnesses whose skill is custom, manually edited, or otherwise
+    /// marker-less installations we don't recognise. Automatic sync
+    /// preserves them; legacy bundled installs whose content matches a
+    /// known historical fingerprint are upgraded instead (see
+    /// `HISTORICAL_BUNDLED_FINGERPRINTS`).
     pub preserved: Vec<HarnessId>,
     /// Harnesses that have an installed `SKILL.md` but the sync attempt
     /// failed with an I/O error. The string is a human-readable detail.
@@ -65,19 +103,53 @@ fn sync_one(dest: &Path, source: &str) -> SyncOne {
         .parent()
         .expect("SKILL.md destination must have a parent")
         .join(SOURCE_MARKER_FILE);
+
+    // Atomic replace + marker refresh. Used for both stale-managed
+    // upgrades and legacy bundled adoptions. Returns Err with a
+    // human-readable detail on any I/O failure.
+    let atomic_replace = |dest: &Path, source: &str, marker: &Path| -> Result<(), String> {
+        let tmp = dest.with_extension(format!("md.tmp.{}", std::process::id()));
+        std::fs::write(&tmp, source).map_err(|err| format!("write {}: {err}", tmp.display()))?;
+        // Best-effort cleanup if the rename below fails.
+        let rename_result = std::fs::rename(&tmp, dest)
+            .map_err(|err| format!("rename {} -> {}: {err}", tmp.display(), dest.display()));
+        if let Err(err) = rename_result {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(err);
+        }
+        std::fs::write(marker, bundled_source_marker(source))
+            .map_err(|err| format!("write {}: {err}", marker.display()))
+    };
+
     let managed_marker = match std::fs::read_to_string(&marker) {
         Ok(value) if value == SOURCE_CUSTOM => return SyncOne::Preserved,
         Ok(value) if value.starts_with("bundled:") => value,
         Ok(_) => return SyncOne::Preserved,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            if on_disk != source {
+            // Marker-less file: adopt as managed when the content
+            // matches the current bundle or any historical bundled
+            // fingerprint. Without this list, anyone who installed
+            // before `.bsk-source` markers existed would never be
+            // auto-upgraded again.
+            let on_disk_marker = bundled_source_marker(&on_disk);
+            let is_known_bundle = on_disk == source
+                || HISTORICAL_BUNDLED_FINGERPRINTS
+                    .iter()
+                    .any(|fp| on_disk_marker == format!("bundled:{fp}\n"));
+            if !is_known_bundle {
                 return SyncOne::Preserved;
             }
-            let marker_value = bundled_source_marker(source);
-            if let Err(err) = std::fs::write(&marker, &marker_value) {
-                return SyncOne::Error(format!("write {}: {err}", marker.display()));
+            if on_disk == source {
+                if let Err(err) = std::fs::write(&marker, bundled_source_marker(source)) {
+                    return SyncOne::Error(format!("write {}: {err}", marker.display()));
+                }
+                return SyncOne::UpToDate;
             }
-            return SyncOne::UpToDate;
+            // Legacy bundled install: rewrite to current bundle.
+            return match atomic_replace(dest, source, &marker) {
+                Ok(()) => SyncOne::Updated,
+                Err(msg) => SyncOne::Error(msg),
+            };
         }
         Err(err) => return SyncOne::Error(format!("read {}: {err}", marker.display())),
     };
@@ -89,25 +161,10 @@ fn sync_one(dest: &Path, source: &str) -> SyncOne {
     }
     // Atomic replace: write tmp, rename over. Including pid in the
     // tmp suffix avoids concurrent processes racing on the same path.
-    let tmp = dest.with_extension(format!("md.tmp.{}", std::process::id()));
-    if let Err(err) = std::fs::write(&tmp, source) {
-        // Best-effort cleanup of any partial tmp left by a half-written attempt.
-        let _ = std::fs::remove_file(&tmp);
-        return SyncOne::Error(format!("write {}: {err}", tmp.display()));
+    match atomic_replace(dest, source, &marker) {
+        Ok(()) => SyncOne::Updated,
+        Err(msg) => SyncOne::Error(msg),
     }
-    if let Err(err) = std::fs::rename(&tmp, dest) {
-        // Best-effort cleanup of the orphan tmp file.
-        let _ = std::fs::remove_file(&tmp);
-        return SyncOne::Error(format!(
-            "rename {} -> {}: {err}",
-            tmp.display(),
-            dest.display()
-        ));
-    }
-    if let Err(err) = std::fs::write(&marker, bundled_source_marker(source)) {
-        return SyncOne::Error(format!("write {}: {err}", marker.display()));
-    }
-    SyncOne::Updated
 }
 
 #[cfg(test)]
@@ -293,5 +350,46 @@ mod tests {
         let second = sync_with_source(home, "next bundle");
         assert_eq!(second.updated, vec![HarnessId::Cursor]);
         assert_eq!(std::fs::read_to_string(dest).unwrap(), "next bundle");
+    }
+
+    #[test]
+    fn sync_adopts_markerless_legacy_bundle_and_upgrades_it() {
+        // Historical bundled SKILL.md content from the initial public
+        // release (sha256 28d39215...d4a3e1bc5a, listed in
+        // HISTORICAL_BUNDLED_FINGERPRINTS). A user with this exact
+        // on-disk content and no marker would, before this fix, be
+        // silently preserved as "unknown" forever once the bundled
+        // SKILL.md changed.
+        const LEGACY_SKILL_MD: &str = "---\nname: browser-skill\ndescription: |\n  Use when the user asks to perform browser automation tasks against their\n  logged-in browser: visit and read pages, fill forms, scrape data, click\n  through a flow, regression-test a PR's UI, validate a deployed page.\n  Requires the bsk CLI installed and the browser-skill extension loaded.\n---\n\n# browser-skill\n\nDrive the user's **real Chromium browser** (with their logins and cookies) through the `bsk` CLI. The extension opens an isolated **Agent Window** for automation; the user's normal windows stay protected unless you explicitly borrow a tab.\n\n## When to use\n\n- Open pages, read titles/text, scrape structured data from sites the user can already access\n- Fill forms, click through multi-step flows, smoke-test a UI change\n- Understand pages with `bsk snapshot` first; use `bsk get-html` or `bsk screenshot` only when the snapshot is insufficient\n- Operate on a specific user tab they point you at (after `bsk tab borrow`)\n\n## When NOT to use\n\n- Tasks with **no browser** involved (files, APIs, databases only)\n- Installing or configuring the extension (point the user to setup docs instead)\n- **Credential harvesting** — never run `bsk evaluate` on banking, SSO, or password-manager pages to extract tokens, cookies, or secrets\n- Long-lived control of a user's personal login window — borrow only for the immediate step, then `bsk tab return` or end the session\n- Replacing the user's manual browsing when they only wanted an explanation\n\n## Prerequisites\n\n1. `bsk` on `PATH` (Rust CLI from browser-skill)\n2. browser-skill **extension** loaded in Chromium and connected (popup shows green)\n3. Any `bsk` command auto-starts background services as needed; use `bsk doctor` if anything fails\n\n## Mandatory workflow\n\nEvery automation task **must** follow this lifecycle. Do **not** rely on idle timeouts (default session idle is 5 minutes).\n\n```\n1. bsk session start              → capture the 4-letter session id printed on stdout\n2. … every tool command …        → always pass --session <id>\n3. bsk session stop <id>          → REQUIRED when done (even on error paths)\n```\n\nOptional: `bsk session start --browser <instance-id-or-label>` when multiple browsers are connected (`bsk browsers` / error output lists them).\n\nEmergency cleanup: `bsk session stop --all` or the Agent Window overlay **Stop all**.\n\n## Core interaction loop\n\nWrite operations only affect tabs in the **Agent Window** (or tabs you **borrowed** into it).\n\n```\nbsk navigate <url> --session <id>\nbsk snapshot --session <id>          → aria tree with @e1, @e2, … refs\nbsk click @e3 --session <id>          → or bsk fill, bsk select, bsk press\nbsk snapshot --session <id>            → again after navigation / DOM change\n```\n\n**Refs invalidate after navigation** — always re-snapshot before clicking, filling, or selecting on a new page.\n\nPrefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` / `--selector` when ambiguous (`bsk click --help`).\n\n## Observation priority\n\nStart with `bsk snapshot` to understand page structure, text, controls, and element refs. Only escalate when the latest snapshot cannot answer the question:\n\n1. `bsk snapshot` — default for page understanding and interaction planning\n2. `bsk get-html` — when hidden DOM, metadata, or markup details are required\n3. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the snapshot. Use `--ref @eN` (from the latest snapshot) to crop to one element; omit `--ref` for the full visible tab.\n\nDo **not** call `bsk get-html` or `bsk screenshot` first just to inspect a page.\n\n## Sandbox rules\n\n| Rule | Detail |\n|------|--------|\n| Agent Window | `bsk tab create`, `bsk navigate`, `bsk click`, etc. work on agent tabs by default |\n| User tabs | Read-only until borrowed: `bsk tab list --session <id> --scope user` then `bsk tab borrow <tab-id> --session <id>` |\n| Return borrowed tabs | Call `bsk tab return <tab-id> --session <id>` when finished; unreturned tabs are **auto-returned** on `bsk session stop` |\n| Writes off-agent | Commands that mutate the page fail if the tab is not in the Agent Window — borrow or create a tab first |\n\n## Global flags\n\n| Flag | Purpose |\n|------|---------|\n| `--json` | Machine-readable JSON on stdout (errors too) |\n| `--quiet` | Suppress informational stderr |\n| `-v` / `-vv` | More verbose logging |\n\nCommand-specific flags (timeouts, `--tab-id`, `--wait-until`, …): **`bsk <cmd> --help`**\n\n## CLI command reference (one line each)\n\nDetails and flags: **`bsk <cmd> --help`**\n\n### Diagnostics\n\n| Command | Summary |\n|---------|---------|\n| `bsk status` | Connection health, connected browsers, active sessions |\n| `bsk doctor` | Deep diagnostics and repair hints |\n| `bsk browsers` | List connected browser instances (ids, labels, versions) |\n\n### Session\n\n| Command | Summary |\n|---------|---------|\n| `bsk session start` | Open Agent Window; prints **4-letter session id** |\n| `bsk session stop <id>` | End session, close Agent Window, auto-return borrowed tabs |\n| `bsk session stop --all` | Stop every active session |\n| `bsk session list` | List active sessions |\n\n### Tabs (require `--session <id>`)\n\n| Command | Summary |\n|---------|---------|\n| `bsk tab list` | List tabs (`--scope user\\|agent\\|all`, default `all`) |\n| `bsk tab create` | New tab in Agent Window (`--url`, `--no-active`, `--index`) |\n| `bsk tab close <tab-id>` | Close an agent tab |\n| `bsk tab select <tab-id>` | Focus an agent tab |\n| `bsk tab borrow <tab-id>` | Move a user tab into the Agent Window |\n| `bsk tab return <tab-id>` | Return a borrowed tab to its original window |\n\n### Observation (require `--session` unless noted)\n\n| Command | Summary |\n|---------|---------|\n| `bsk snapshot` | First-choice page understanding: accessibility tree with `@eN` element refs |\n| `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |\n| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |\n\n### Navigation\n\n| Command | Summary |\n|---------|---------|\n| `bsk navigate <url>` | Go to URL in agent tab (`--wait-until`, `--timeout`) |\n| `bsk navigate-back` | History back one step |\n| `bsk navigate-forward` | History forward one step |\n| `bsk reload` | Reload current tab (`--hard` bypass cache) |\n\n(`bsk navigate back` / `bsk navigate forward` are equivalent subcommands.)\n\n### Interaction\n\n| Command | Summary |\n|---------|---------|\n| `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |\n| `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |\n| `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |\n| `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |\n\n### Scripting & timing\n\n| Command | Summary |\n|---------|---------|\n| `bsk evaluate <expression>` | Run JS in agent tab (see red lines); JS throw → stderr, **exit 0** |\n| `bsk wait-for-navigation` | Block until load/DOM idle/etc. (`--wait-until`, `--timeout`) |\n| `bsk wait-ms <duration>` | Sleep (`500ms`, `2s`, `1m`; **no** `--session`) |\n\n### Ask the human for help — `bsk request-help`\n\nWhen a step needs a human (captcha, login, OTP) or you want the user to\nconfirm an important action, pause and ask:\n\n    bsk request-help --session <id> --prompt \"Solve the captcha, then click Continue\" \\\n      --title \"Captcha required\" --target @e7 --target \"#submit\" --timeout 5m\n\n- `--prompt` (required): what the user should do.\n- `--title` (optional): custom title for the overlay panel. When omitted,\n  the extension shows its default localized title.\n- `--target` (repeatable): a snapshot ref (`@e7`) or CSS selector\n  (`#submit`) to scroll to and flash-highlight. **Strongly recommended** —\n  whenever the prompt refers to a concrete element (a button to click, a\n  field to fill, a checkbox to toggle), pass its `@eN` ref / selector so the\n  user is guided straight to the right spot instead of hunting for it. For\n  interaction scenarios, always include the relevant target(s); reserve a\n  prompt with no `--target` for cases where there is genuinely no specific\n  element to point at (e.g. \"wait for the page to finish loading\").\n- `--timeout` (default `5m`): how long to wait.\n\nThe target tab is brought to the foreground; the page stays interactive\nwhile the agent control mask is hidden. The call blocks until the user\nacts. The result `outcome` is one of:\n\n- `continued` — the user finished and clicked Continue (treat as confirm).\n- `cancelled` — the user clicked Cancel (treat as reject/abort).\n- `timed_out` — nobody acted within the timeout.\n- `navigated` — the page navigated while waiting (full reload or SPA URL change). Snapshot refs are stale; run `bsk snapshot` on the new page, then decide whether to call `bsk request-help` again.\n\n`note` carries any text the user typed back. `resolved_targets` reports\nwhich refs/selectors matched a live element.\n\n## Error handling\n\n### Exit codes (`echo $?` after `bsk …`)\n\n| Code | Meaning | What to do |\n|------|---------|------------|\n| `0` | Success (including `evaluate` where JS threw but RPC succeeded) | Continue |\n| `1` | User error — bad args, unknown session, tab not in Agent Window, stale ref | Fix args; `bsk session list`; re-snapshot |\n| `2` | Protocol / transport — service unreachable, IPC failure | `bsk doctor`; check extension connected; retry the command |\n| `3` | Browser / CDP execution failed | Retry; simplify selector; check tab still open |\n| `4` | Timeout | Increase `--timeout`; try `--wait-until domcontentloaded` |\n| `5` | Version skew (CLI vs extension) | Upgrade/reinstall matching versions |\n\nHuman errors print `error:` + `hint:` on stderr; `--json` includes `code`, `message`, `hint`, `exit_code`.\n\n### When to run diagnostics\n\n| Situation | Command |\n|-----------|---------|\n| Before first task in a session | `bsk status` — extension connected? |\n| Any failure you cannot fix in one retry | `bsk doctor` |\n| Multiple browsers / wrong target | `bsk browsers` then `bsk session start --browser <id>` |\n\nAlways **`bsk session stop <id>`** in a `finally`-style path so the Agent Window closes and borrowed tabs return.\n\n## Red lines\n\n1. **No token theft** — do not `bsk evaluate` on sensitive sites to read `localStorage`, cookies, or auth headers for exfiltration.\n2. **No long borrow** — do not leave a user's personal tab in the Agent Window across unrelated tasks.\n3. **No skip stop** — always `bsk session stop <id>`; never assume idle timeout will clean up.\n4. **No observe escalation before snapshot** — use `bsk snapshot` first; only use `bsk get-html` or `bsk screenshot` when the snapshot is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot ref — never skip snapshot just to grab a visual.\n5. **`evaluate` is powerful and risky** — use only when snapshot + click/fill/select cannot suffice; never on credential surfaces.\n\n---\n\n**More detail for any command:** `bsk <cmd> --help`\n";
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path();
+        let dest_dir = HarnessId::Cursor.skill_dest_dir_for_home(home);
+        std::fs::create_dir_all(&dest_dir).unwrap();
+        std::fs::write(dest_dir.join("SKILL.md"), LEGACY_SKILL_MD).unwrap();
+        // Sanity: the legacy content must really hash to the fingerprint
+        // we expect, otherwise the test only proves its own artefact.
+        assert_eq!(
+            bundled_source_marker(LEGACY_SKILL_MD),
+            format!(
+                "bundled:{}\n",
+                "28d39215d1a6f658d55a41b8ecc2c6692bed628093824442927581f4a3e1bc5a",
+            ),
+            "legacy fixture must hash to its claimed fingerprint",
+        );
+
+        let report = sync_with_source(home, "current bundle");
+
+        assert_eq!(report.updated, vec![HarnessId::Cursor]);
+        assert_eq!(report.preserved, Vec::new());
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("SKILL.md")).unwrap(),
+            "current bundle",
+            "legacy install should be rewritten to the current bundle",
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join(SOURCE_MARKER_FILE)).unwrap(),
+            bundled_source_marker("current bundle"),
+            "fresh bundled marker must be stamped after the upgrade",
+        );
     }
 }
