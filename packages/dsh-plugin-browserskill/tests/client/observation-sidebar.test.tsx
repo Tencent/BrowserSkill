@@ -58,8 +58,9 @@ function makeHarness(initial: SessionObservation[]): Harness {
   };
 }
 
-function leafWith(type: string): SidebarStateLike {
+function leafWith(type: string, panelOpen = true): SidebarStateLike {
   return {
+    panelOpen,
     splits: {
       kind: "split",
       id: "root",
@@ -183,6 +184,22 @@ describe("registerObservationSidebar", () => {
     const sidebar = makeSidebar(undefined);
     registerObservationSidebar(sidebar.service, h.store);
     expect(sidebar.openTab).not.toHaveBeenCalled();
+  });
+
+  it("nudges an existing tab back into sight when the panel is collapsed", async () => {
+    const h = makeHarness([]);
+    // Tab already open (persisted), but the panel is collapsed: a new
+    // session should surface the tracking view again (focus + expand via a
+    // content open), like the floating card reappearing.
+    const sidebar = makeSidebar(leafWith(OBSERVATION_TAB_TYPE, false));
+    registerObservationSidebar(sidebar.service, h.store);
+    h.push([BUSY]);
+    await waitFor(() =>
+      expect(sidebar.openTab).toHaveBeenCalledWith({
+        type: OBSERVATION_TAB_TYPE,
+        path: OBSERVATION_TAB_PATH,
+      }),
+    );
   });
 
   it("shows the live session count as the tab badge", () => {

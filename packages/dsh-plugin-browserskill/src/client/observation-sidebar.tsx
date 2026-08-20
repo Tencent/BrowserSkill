@@ -66,6 +66,8 @@ export type SidebarNodeLike = SidebarLeafLike | SidebarSplitLike;
 export interface SidebarStateLike {
   splits: SidebarNodeLike;
   bottomSplits: SidebarNodeLike;
+  /** Whether the right panel is expanded (the merged drawer on narrow screens). */
+  panelOpen?: boolean;
 }
 
 export interface SidebarSnapshotLike {
@@ -181,17 +183,21 @@ export function registerObservationSidebar(
   });
 
   // Open the tab when the first browser session appears (and right away
-  // when one is already live at activation). An already-open tab is never
-  // re-focused — the user may be reading another page on purpose. The open
-  // carries a content seed (`path`): only content opens land in sight — the
-  // sidebar expands the hosting panel for them, while type-only opens
-  // silently no-op behind a collapsed panel. The pseudo-path is inert (our
-  // component never reads tab.path).
+  // when one is already live at activation). The open carries a content
+  // seed (`path`): only content opens land in sight — the sidebar expands
+  // the hosting panel for them, while type-only opens silently no-op
+  // behind a collapsed panel. The pseudo-path is inert (our component
+  // never reads tab.path). While the panel is OPEN an existing tab is
+  // never re-focused — the user may be reading another page on purpose;
+  // while it is collapsed a new session nudges the existing tab back into
+  // sight (a content open focuses + expands), mirroring how the floating
+  // card used to reappear.
   let previousCount = store.getSnapshot().sessions.length;
   const maybeOpen = (): void => {
-    if (service.getSnapshot().state === undefined) return;
+    const state = service.getSnapshot().state;
+    if (state === undefined) return;
     if (!service.isTabEnabled(OBSERVATION_TAB_TYPE)) return;
-    if (observationTabOpen(service.getSnapshot().state)) return;
+    if (observationTabOpen(state) && state.panelOpen !== false) return;
     service.openTab({ type: OBSERVATION_TAB_TYPE, path: OBSERVATION_TAB_PATH });
   };
   if (previousCount > 0) maybeOpen();
