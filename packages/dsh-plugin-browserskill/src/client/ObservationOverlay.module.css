@@ -30,15 +30,33 @@
   color: var(--card-foreground);
 }
 
+/* Sidebar carrier: fill the better-sidebar tab area and let the body flex
+   (the tab content container owns the outer sizing). */
+.sidebar-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.sidebar-tab > * {
+  flex: 1;
+  min-height: 0;
+}
+
 .header {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  cursor: move;
   user-select: none;
   touch-action: none;
   border-bottom: 1px solid var(--border);
+}
+
+/* Only the floating card drags by its header — the sidebar tab does not. */
+.header[data-draggable] {
+  cursor: move;
 }
 
 .status-text {

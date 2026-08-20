@@ -3,9 +3,12 @@
 // composer's way); collapsed = a status capsule; "pop out" upgrades the same
 // content to a native Document PiP window (user gesture required by the
 // browser). Multi-session renders a meeting-style strip under the focus view.
-// Visuals follow the BrowserSkill product family: @browser-skill/ui components
-// and oklch tokens on a .bsk-obs scope root, so the card reads as BSK's own
-// surface without leaking styles into (or inheriting themes from) the shell.
+// When the dsh-better-sidebar plugin is installed the tracking view moves
+// into a sidebar tab instead (see observation-sidebar.tsx) and this floating
+// card hides itself via the sidebar-mode flag. Visuals follow the
+// BrowserSkill product family: @browser-skill/ui components and oklch tokens
+// on a .bsk-obs scope root, so the card reads as BSK's own surface without
+// leaking styles into (or inheriting themes from) the shell.
 
 import { cn } from "@browser-skill/ui";
 import {
@@ -39,11 +42,12 @@ import { createPortal } from "react-dom";
 import type { SessionObservation } from "../observation";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
+import { focusOf, statusOf, useObservationView, usePip } from "./observation-view";
+import { getSidebarMode, subscribeSidebarMode } from "./sidebar-mode";
 
-/** Minimal Document PiP surface (TS lib.dom lacks it). */
-interface DocumentPip {
-  requestWindow(options?: { width?: number; height?: number }): Promise<Window>;
-}
+// The pure view helpers live in observation-view (shared with the sidebar
+// tab); re-export so existing imports of this module keep working.
+export { focusOf, statusOf };
 
 interface Point {
   x: number;
@@ -60,11 +64,6 @@ const MIN_SIZE: Size = { w: 240, h: 180 };
 const EDGE_MARGIN = 16;
 /** Default dock: top-right, just under the shell's top bar (no spacing tokens exist in dsh 0.1). */
 const TOP_OFFSET = 64;
-
-function pipApi(): DocumentPip | undefined {
-  if (typeof window === "undefined") return undefined;
-  return (window as unknown as { documentPictureInPicture?: DocumentPip }).documentPictureInPicture;
-}
 
 function clampSize(size: Size, viewport: Size): Size {
   const maxW = viewport.w * 0.8;
@@ -112,23 +111,6 @@ function formatElapsed(sinceMs: number, nowMs: number): string {
   const mm = String(Math.floor(total / 60)).padStart(2, "0");
   const ss = String(total % 60).padStart(2, "0");
   return `${mm}:${ss}`;
-}
-
-/**
- * Auto-follow focus: the most recently touched session, but never yank focus
- * to a session whose latest action failed (errors flag the strip item, they
- * do not steal the stage) or one already reported dead.
- */
-export function focusOf(sessions: readonly SessionObservation[]): SessionObservation | undefined {
-  if (sessions.length === 0) return undefined;
-  const byRecency = [...sessions].sort((a, b) => b.since - a.since);
-  const healthy = byRecency.find((s) => s.lastError === undefined && s.dead !== true);
-  return healthy ?? byRecency[0];
-}
-
-export function statusOf(obs: SessionObservation): "active" | "idle" | "error" {
-  if (obs.lastError !== undefined && obs.action === "idle") return "error";
-  return obs.action === "idle" ? "idle" : "active";
 }
 
 /** Compact toolbar icon: no label, hover bubble for the name / semantics. */
@@ -246,8 +228,8 @@ function StripItem(props: {
   );
 }
 
-/** The floating card / PiP shared content. */
-function OverlayBody(props: {
+/** The floating card / PiP / sidebar-tab shared content. */
+export function OverlayBody(props: {
   store: ObservationClientStore;
   focus: SessionObservation | undefined;
   sessions: readonly SessionObservation[];
@@ -310,6 +292,7 @@ function OverlayBody(props: {
       <div
         className={css.header}
         data-testid="obs-header"
+        data-draggable={onHeaderPointerDown !== undefined || undefined}
         onPointerDown={onHeaderPointerDown}
         role="presentation"
       >
@@ -387,25 +370,17 @@ function OverlayBody(props: {
   );
 }
 
-/** Clone the host document's style/link nodes into a PiP window. */
-function cloneStylesInto(pipWindow: Window): void {
-  for (const node of document.querySelectorAll('link[rel="stylesheet"], style')) {
-    pipWindow.document.head.appendChild(node.cloneNode(true));
-  }
-}
-
 export function ObservationOverlay({ store }: { store: ObservationClientStore }) {
-  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
-  useEffect(() => {
-    store.start();
-    return () => store.stop();
-  }, [store]);
+  const { snapshot, focus, pinnedId, onTogglePin, now } = useObservationView(store);
+  // While the better-sidebar plugin carries the tracking view, this floating
+  // card (and its capsule) stays out of the way; an already-open PiP window
+  // keeps its portal until the user closes it.
+  const sidebarMode = useSyncExternalStore(subscribeSidebarMode, getSidebarMode);
 
   const [collapsed, setCollapsed] = useState(false);
   const [pos, setPos] = useState<Point | null>(null);
   const [size, setSize] = useState<Size>(DEFAULT_SIZE);
-  const [pipWindow, setPipWindow] = useState<Window | null>(null);
-  const [pinnedId, setPinnedId] = useState<string | null>(null);
+  const { pipWindow, pipSupported, popOut } = usePip();
   const dragRef = useRef<{
     kind: "move" | "resize";
     corner?: ResizeCorner;
@@ -413,23 +388,6 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     startY: number;
     base: Point & Size;
   } | null>(null);
-
-  // Elapsed-time ticker: 1s while anything is active.
-  const anyActive = snapshot.sessions.some((s) => s.action !== "idle");
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!anyActive) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [anyActive]);
-
-  // Focus: the pinned session wins while it still exists; otherwise auto-follow.
-  const pinned =
-    pinnedId !== null ? snapshot.sessions.find((s) => s.sessionId === pinnedId) : undefined;
-  const focus = pinned ?? focusOf(snapshot.sessions);
-  const onTogglePin = useCallback((sessionId: string) => {
-    setPinnedId((current) => (current === sessionId ? null : sessionId));
-  }, []);
 
   const viewport = (): Size => ({ w: window.innerWidth, h: window.innerHeight });
 
@@ -511,34 +469,21 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
     document.addEventListener("pointerup", onPointerUp);
   };
 
-  const popOut = async (): Promise<void> => {
-    const pip = pipApi();
-    if (pip === undefined) return;
-    try {
-      const win = await pip.requestWindow({ width: size.w, height: size.h });
-      cloneStylesInto(win);
-      win.addEventListener("pagehide", () => setPipWindow(null));
-      setPipWindow(win);
-    } catch {
-      // requestWindow rejects without a user gesture (or when the window was
-      // closed mid-request): stay on the in-page card, no state change.
-    }
-  };
-
-  // Hidden while no owned session exists (and no PiP is up).
-  if (snapshot.sessions.length === 0 && pipWindow === null) return null;
-
   const body = (
     <OverlayBody
       store={store}
       focus={focus}
       sessions={snapshot.sessions}
       available={snapshot.available}
-      pinnedId={pinned !== undefined ? pinnedId : null}
+      pinnedId={pinnedId}
       onTogglePin={onTogglePin}
       now={now}
       inPip={pipWindow !== null}
-      onPopOut={pipWindow === null && pipApi() !== undefined ? () => void popOut() : undefined}
+      onPopOut={
+        pipWindow === null && pipSupported
+          ? () => popOut({ width: size.w, height: size.h })
+          : undefined
+      }
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
       onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
@@ -547,6 +492,12 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   if (pipWindow !== null) {
     return createPortal(body, pipWindow.document.body);
   }
+
+  // The sidebar tab is the carrier now — no floating card, no capsule.
+  if (sidebarMode) return null;
+
+  // Hidden while no owned session exists (and no PiP is up).
+  if (snapshot.sessions.length === 0) return null;
 
   if (collapsed) {
     const state = focus !== undefined ? statusOf(focus) : "idle";

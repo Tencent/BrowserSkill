@@ -78,6 +78,8 @@ export class ObservationClientStore {
   };
   private available = true;
   private started = false;
+  /** Refcount of mounted consumers (overlay card, sidebar tab, sidebar fiber). */
+  private consumers = 0;
 
   constructor(private readonly deps: ObservationClientDeps) {}
 
@@ -187,6 +189,23 @@ export class ObservationClientStore {
     this.lastReady.clear();
     this.sessions.clear();
     this.publish();
+  }
+
+  /**
+   * Hold the feed for one consumer's lifetime: the stream starts with the
+   * first holder and stops with the last release. Several carriers can share
+   * the store (the floating card, the better-sidebar tab, and the sidebar
+   * integration fiber) without one unmount killing the others' updates.
+   */
+  acquire(): void {
+    this.consumers += 1;
+    if (this.consumers === 1) this.start();
+  }
+
+  release(): void {
+    if (this.consumers === 0) return;
+    this.consumers -= 1;
+    if (this.consumers === 0) this.stop();
   }
 
   /** Forget one session's tracked + held frames, revoking their blob URLs. */
