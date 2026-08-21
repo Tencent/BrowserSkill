@@ -40,7 +40,8 @@ export class RecordingTabCoordinator {
     );
   }
 
-  commit(tabId: number): void {
+  commit(tabId: number, currentUrl?: string): void {
+    if (currentUrl !== undefined) this.navigation(tabId).currentUrl = currentUrl;
     this.#currentTabId = tabId;
   }
 
