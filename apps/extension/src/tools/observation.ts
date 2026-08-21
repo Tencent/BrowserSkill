@@ -16,7 +16,7 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
-  withOverlaysHiddenForCapture,
+  withExtensionOverlayHidden,
 } from "@/lib/capture-suppress-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
@@ -307,7 +307,7 @@ export async function handleScreenshot(
       tabId: target.tabId,
       ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
     };
-    const captured = await withOverlaysHiddenForCapture(
+    const captured = await withExtensionOverlayHidden(
       target.tabId,
       () =>
         captureElementScreenshot(
@@ -339,7 +339,7 @@ export async function handleScreenshot(
     );
   }
 
-  const captured = await withOverlaysHiddenForCapture(
+  const captured = await withExtensionOverlayHidden(
     target.tabId,
     () => captureFullTabPng(deps, ctx, target, signal),
     deps.sendToTab,

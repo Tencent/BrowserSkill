@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { type DownloadsApi, handleDownload } from "../download";
 import { captureBrowserDownload } from "../download-capture";
+import { uploadThroughFileDrop } from "../file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "../file-input-transaction";
 import type { ResolvedActionTarget } from "../interaction";
 import type { CdpRunner } from "../shared";
@@ -37,14 +38,18 @@ function fakeEvent<T extends (...args: never[]) => unknown>() {
   };
 }
 
-function actionTarget(frameId?: string): ResolvedActionTarget {
+function actionTarget(frameId?: string, sessionId?: string): ResolvedActionTarget {
   return {
     tab: { tabId: 4, windowId: 100, active: true },
     backendNodeId: 123,
-    cdpTarget: { tabId: 4 },
+    cdpTarget: { tabId: 4, ...(sessionId ? { sessionId } : {}) },
     ...(frameId ? { frameId } : {}),
     usedRef: "e3",
   };
+}
+
+function withoutOverlay<T>(operation: () => Promise<T>): Promise<T> {
+  return operation();
 }
 
 function uploadCdp(
@@ -59,6 +64,7 @@ function uploadCdp(
   let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
     calls.push({ method, params });
+    if (method === "DOM.scrollIntoViewIfNeeded") return {};
     if (method === "Page.setInterceptFileChooserDialog") return {};
     if (method === "Page.getLayoutMetrics")
       return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
@@ -108,6 +114,50 @@ function uploadCdp(
       cdpEvent?.({ tabId: 4 }, "Page.fileChooserOpened", event),
     cdp,
   };
+}
+
+function dropCdp(
+  options: {
+    targetContainsPoint?: boolean;
+    dispatchError?: (type: string) => Error | Promise<never> | undefined;
+    onCall?: (method: string) => void;
+  } = {},
+) {
+  const calls: Array<{ method: string; params?: object }> = [];
+  const detach = vi.fn(async () => {});
+  const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+    calls.push({ method, params });
+    options.onCall?.(method);
+    if (method === "DOM.scrollIntoViewIfNeeded") return {};
+    if (method === "Page.getLayoutMetrics") {
+      return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+    }
+    if (method === "DOM.getContentQuads") {
+      return { quads: [[10, 20, 210, 20, 210, 120, 10, 120]] };
+    }
+    if (method === "DOM.getNodeForLocation") return { backendNodeId: 124 };
+    if (method === "DOM.resolveNode") {
+      const id = (params as { backendNodeId?: number }).backendNodeId;
+      return { object: { objectId: id === 123 ? "drop-target" : "hit-target" } };
+    }
+    if (method === "Runtime.callFunctionOn") {
+      return { result: { value: options.targetContainsPoint ?? true } };
+    }
+    if (method === "Input.dispatchDragEvent") {
+      const type = (params as { type?: string }).type ?? "";
+      const error = options.dispatchError?.(type);
+      if (error instanceof Promise) return error;
+      if (error) throw error;
+      return {};
+    }
+    if (method === "Runtime.releaseObjectGroup") return {};
+    throw new Error(`unexpected drop CDP command ${method}`);
+  });
+  const cdp: CdpRunner = {
+    send: send as unknown as CdpRunner["send"],
+    detach,
+  };
+  return { calls, cdp, detach };
 }
 
 describe("file transfer tools", () => {
@@ -267,6 +317,236 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({
       code: "timeout",
       data: { effect_state: "unknown", phase: "set_files" },
+    });
+    expect(detach).toHaveBeenCalledWith(4);
+  });
+
+  it("delivers staged files through one explicit native drop without clicking", async () => {
+    const manager = sessions();
+    const ctx = await manager.start("s1");
+    ctx.refStore.set("e3", 123, { tabId: 4 });
+    const lifecycle: string[] = [];
+    const { cdp, calls } = dropCdp({ onCall: (method) => lifecycle.push(method) });
+    const overlayPhases: string[] = [];
+
+    const result = await handleUpload(
+      manager,
+      {
+        session_id: "s1",
+        ref: "@e3",
+        mode: "drop",
+        files: [{ transfer_id: "tr_1", name: "one.png", staged_path: "/stage/one.png" }],
+      },
+      {
+        cdp,
+        tabsApi: tabsApi(),
+        sendToTab: vi.fn(async (_tabId, message) => {
+          overlayPhases.push(message.phase);
+          lifecycle.push(`overlay:${message.phase}`);
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({ tab_id: 4, used_ref: "e3", file_names: ["one.png"] });
+    expect(calls.filter((call) => call.method === "Input.dispatchDragEvent")).toEqual([
+      {
+        method: "Input.dispatchDragEvent",
+        params: {
+          type: "dragEnter",
+          x: 110,
+          y: 70,
+          data: { items: [], files: ["/stage/one.png"], dragOperationsMask: 1 },
+        },
+      },
+      {
+        method: "Input.dispatchDragEvent",
+        params: {
+          type: "dragOver",
+          x: 110,
+          y: 70,
+          data: { items: [], files: ["/stage/one.png"], dragOperationsMask: 1 },
+        },
+      },
+      {
+        method: "Input.dispatchDragEvent",
+        params: {
+          type: "drop",
+          x: 110,
+          y: 70,
+          data: { items: [], files: ["/stage/one.png"], dragOperationsMask: 1 },
+        },
+      },
+    ]);
+    expect(calls.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
+    expect(overlayPhases).toEqual(["begin", "end"]);
+    expect(lifecycle.indexOf("DOM.getContentQuads")).toBeLessThan(
+      lifecycle.indexOf("overlay:begin"),
+    );
+    expect(lifecycle.indexOf("overlay:begin")).toBeLessThan(
+      lifecycle.indexOf("DOM.getNodeForLocation"),
+    );
+    expect(lifecycle.lastIndexOf("Input.dispatchDragEvent")).toBeLessThan(
+      lifecycle.indexOf("overlay:end"),
+    );
+    expect(lifecycle.indexOf("overlay:end")).toBeLessThan(
+      lifecycle.indexOf("Runtime.releaseObjectGroup"),
+    );
+  });
+
+  it("fails closed before dragging when another element owns the action point", async () => {
+    const { cdp, calls } = dropCdp({ targetContainsPoint: false });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 100,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: {
+        reason: "file_drop_target_unavailable",
+        mechanism: "drop",
+        effect_state: "none",
+        phase: "resolve_target",
+      },
+    });
+    expect(calls.some((call) => call.method === "Input.dispatchDragEvent")).toBe(false);
+  });
+
+  it("dispatches an OOPIF file drop in the child target's local coordinates", async () => {
+    const rootCalls: Array<{ method: string; params?: object }> = [];
+    const childCalls: Array<{ method: string; params?: object }> = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method, params) => {
+        rootCalls.push({ method, params });
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "DOM.getBoxModel") {
+          return { model: { content: [100, 100, 300, 100, 300, 200, 100, 200] } };
+        }
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+        }
+        throw new Error(`unexpected root command ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (_target, method, params) => {
+        childCalls.push({ method, params });
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "DOM.getContentQuads") {
+          return { quads: [[10, 20, 210, 20, 210, 120, 10, 120]] };
+        }
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 400, clientHeight: 300 } };
+        }
+        if (method === "DOM.getNodeForLocation") {
+          return { backendNodeId: 124, frameId: "child" };
+        }
+        if (method === "DOM.resolveNode") {
+          const id = (params as { backendNodeId?: number }).backendNodeId;
+          return { object: { objectId: id === 123 ? "drop-target" : "hit-target" } };
+        }
+        if (method === "Runtime.callFunctionOn") return { result: { value: true } };
+        if (method === "Input.dispatchDragEvent" || method === "Runtime.releaseObjectGroup") {
+          return {};
+        }
+        throw new Error(`unexpected child command ${method}`);
+      }) as CdpRunner["sendToTarget"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          {
+            frameId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 10,
+            target: { tabId: 4, sessionId: "child-session" },
+          },
+        ],
+      })),
+    };
+
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget("child", "child-session"),
+      files: ["/stage/one.png"],
+      timeoutMs: 100,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({ x: 110, y: 70 });
+    expect(
+      childCalls
+        .filter((call) => call.method === "Input.dispatchDragEvent")
+        .map((call) => call.params),
+    ).toEqual([
+      expect.objectContaining({ type: "dragEnter", x: 110, y: 70 }),
+      expect.objectContaining({ type: "dragOver", x: 110, y: 70 }),
+      expect.objectContaining({ type: "drop", x: 110, y: 70 }),
+    ]);
+    expect(rootCalls.some((call) => call.method === "Input.dispatchDragEvent")).toBe(false);
+  });
+
+  it("reports a missing native drag command as unsupported before commit", async () => {
+    const { cdp } = dropCdp({
+      dispatchError: (type) =>
+        type === "dragEnter" ? new Error("'Input.dispatchDragEvent' wasn't found") : undefined,
+    });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 100,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "unsupported",
+      data: {
+        reason: "upload_mechanism_unsupported",
+        effect_state: "none",
+        phase: "drag_enter",
+      },
+    });
+  });
+
+  it("cancels an unresolved drag before returning a pre-commit timeout", async () => {
+    const { cdp, calls } = dropCdp({
+      dispatchError: (type) => (type === "dragEnter" ? new Promise<never>(() => {}) : undefined),
+    });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 10,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "timeout",
+      data: { reason: "file_drop_failed", effect_state: "none", phase: "drag_enter" },
+    });
+    expect(calls).toContainEqual({
+      method: "Input.dispatchDragEvent",
+      params: expect.objectContaining({ type: "dragCancel" }),
+    });
+  });
+
+  it("marks an unresolved drop unknown and detaches browser state", async () => {
+    const { cdp, detach } = dropCdp({
+      dispatchError: (type) => (type === "drop" ? new Promise<never>(() => {}) : undefined),
+    });
+    const result = await uploadThroughFileDrop({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/stage/one.png"],
+      timeoutMs: 10,
+      withOverlayHidden: withoutOverlay,
+    });
+
+    expect(result).toMatchObject({
+      code: "timeout",
+      data: { reason: "file_drop_failed", effect_state: "unknown", phase: "drop" },
     });
     expect(detach).toHaveBeenCalledWith(4);
   });
