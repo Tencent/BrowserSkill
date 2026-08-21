@@ -834,7 +834,7 @@
       }
     },
     "TraceV2": {
-      "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.",
+      "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\nUnknown extension fields are ignored so older traces remain readable. Mixed v2/v3 envelopes are rejected by `RecordedTrace` classification.",
       "type": "object",
       "required": [
         "entry",
@@ -874,8 +874,7 @@
             "$ref": "#/definitions/StepV2"
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "TraceV3": {
       "description": "Wire trace returned by `tool.record_stop` / `await`.",

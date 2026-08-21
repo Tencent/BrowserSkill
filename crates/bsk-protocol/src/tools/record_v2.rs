@@ -105,8 +105,10 @@ pub enum StepV2 {
 }
 
 /// Persisted user-action trace exported by legacy `tool.record_stop` / `await`.
+///
+/// Unknown extension fields are ignored so older traces remain readable.
+/// Mixed v2/v3 envelopes are rejected by `RecordedTrace` classification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct TraceV2 {
     /// RFC 3339 timestamp when recording stopped.
     pub recorded_at: String,
@@ -220,6 +222,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&trace).unwrap()["steps"][0]["op"],
             "hover"
+        );
+    }
+
+    #[test]
+    fn trace_v2_ignores_unknown_extension_fields() {
+        let value = json!({
+            "recorded_at": "2026-07-21T08:00:00Z",
+            "entry": { "start_url": "https://example.com/" },
+            "pages": [{ "id": "p1", "url": "https://example.com/" }],
+            "steps": [],
+            "meta": { "tool": "legacy-exporter" }
+        });
+        let trace: TraceV2 = serde_json::from_value(value).unwrap();
+        assert_eq!(trace.pages.len(), 1);
+        assert!(trace.steps.is_empty());
+    }
+
+    #[test]
+    fn trace_v2_schema_allows_additional_properties() {
+        let schema = serde_json::to_value(schemars::schema_for!(TraceV2)).unwrap();
+        assert_ne!(
+            schema.get("additionalProperties"),
+            Some(&serde_json::Value::Bool(false)),
+            "Trace v2 must keep accepting traces with unknown extension fields"
         );
     }
 }

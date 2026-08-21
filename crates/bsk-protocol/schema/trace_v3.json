@@ -1,23 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TraceV2",
-  "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\nUnknown extension fields are ignored so older traces remain readable. Mixed v2/v3 envelopes are rejected by `RecordedTrace` classification.",
+  "title": "TraceV3",
+  "description": "Wire trace returned by `tool.record_stop` / `await`.",
   "type": "object",
   "required": [
     "entry",
-    "pages",
     "recorded_at",
-    "steps"
+    "recorder",
+    "states",
+    "steps",
+    "stopped_by",
+    "version"
   ],
   "properties": {
     "entry": {
       "$ref": "#/definitions/TraceEntry"
-    },
-    "pages": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/PageRefV2"
-      }
     },
     "purpose": {
       "type": [
@@ -26,8 +23,10 @@
       ]
     },
     "recorded_at": {
-      "description": "RFC 3339 timestamp when recording stopped.",
       "type": "string"
+    },
+    "recorder": {
+      "$ref": "#/definitions/RecorderInfo"
     },
     "started_at": {
       "type": [
@@ -35,14 +34,36 @@
         "null"
       ]
     },
+    "states": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TraceStateV3"
+      }
+    },
     "steps": {
       "type": "array",
       "items": {
-        "$ref": "#/definitions/StepV2"
+        "$ref": "#/definitions/StepV3"
       }
+    },
+    "stopped_by": {
+      "$ref": "#/definitions/StopReason"
+    },
+    "version": {
+      "type": "integer",
+      "const": 3
     }
   },
+  "additionalProperties": false,
   "definitions": {
+    "FillCommit": {
+      "type": "string",
+      "enum": [
+        "enter",
+        "suggestion",
+        "blur"
+      ]
+    },
     "KeyModifier": {
       "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
       "type": "string",
@@ -53,29 +74,36 @@
         "shift"
       ]
     },
-    "PageRefV2": {
-      "description": "Page context dictionary entry — referenced by steps via `page` id.",
+    "NavigationCause": {
+      "type": "string",
+      "enum": [
+        "user_typed",
+        "link",
+        "form_submit",
+        "reload",
+        "history",
+        "script",
+        "browser"
+      ]
+    },
+    "RecorderInfo": {
       "type": "object",
       "required": [
-        "id",
-        "url"
+        "bsk",
+        "vom"
       ],
       "properties": {
-        "id": {
+        "bsk": {
           "type": "string"
         },
-        "title": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "url": {
-          "type": "string"
+        "vom": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
-    "SelectedOptionV2": {
+    "SelectedOptionV3": {
       "description": "One selected option (`select` op).",
       "type": "object",
       "required": [
@@ -93,41 +121,34 @@
         }
       }
     },
-    "StepEffectV2": {
-      "description": "Observed navigation after a step (objective fact only).",
+    "StepResultV3": {
       "type": "object",
       "required": [
-        "navigated_to"
+        "state"
       ],
       "properties": {
-        "navigated_to": {
-          "description": "Reference into `pages[]` for the destination page.",
+        "state": {
           "type": "string"
         }
       }
     },
-    "StepV2": {
-      "description": "One recorded user action — discriminated union by `op` (v2).",
+    "StepV3": {
+      "description": "One recorded user action — discriminated union by `op`.",
       "oneOf": [
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
+            "cause",
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "to"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "cause": {
+              "$ref": "#/definitions/NavigationCause"
             },
             "id": {
               "type": "integer",
@@ -140,8 +161,11 @@
                 "navigate"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "to": {
@@ -150,25 +174,16 @@
           }
         },
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -180,35 +195,29 @@
                 "click"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -220,35 +229,33 @@
                 "hover"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
+            "commit",
             "id",
             "op",
-            "page",
+            "result",
+            "state",
             "target",
             "value"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+            "commit": {
+              "$ref": "#/definitions/FillCommit"
             },
             "id": {
               "type": "integer",
@@ -261,18 +268,18 @@
                 "fill"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "redacted": {
+              "type": "boolean"
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
-            "redacted": {
-              "type": [
-                "boolean",
-                "null"
-              ]
-            },
             "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
+              "$ref": "#/definitions/TargetDescriptorV3"
             },
             "value": {
               "type": "string"
@@ -280,26 +287,16 @@
           }
         },
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
             "id",
             "op",
-            "page",
-            "selection",
+            "result",
+            "state",
             "target"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -311,41 +308,35 @@
                 "select"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
-              "type": "string"
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
             },
             "selection": {
               "type": "array",
               "items": {
-                "$ref": "#/definitions/SelectedOptionV2"
+                "$ref": "#/definitions/SelectedOptionV3"
               }
             },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
             "target": {
-              "$ref": "#/definitions/TargetDescriptorV2"
+              "$ref": "#/definitions/TargetDescriptorV3"
             }
           }
         },
         {
-          "description": "Fields shared by every v2 step variant (flattened in JSON).",
+          "description": "Fields shared by every step variant (flattened in JSON).",
           "type": "object",
           "required": [
             "id",
             "key",
             "op",
-            "page"
+            "result",
+            "state"
           ],
           "properties": {
-            "effect": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/StepEffectV2"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
             "id": {
               "type": "integer",
               "format": "uint32",
@@ -369,14 +360,17 @@
                 "press"
               ]
             },
-            "page": {
-              "description": "Reference into `pages[]`.",
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
               "type": "string"
             },
             "target": {
               "anyOf": [
                 {
-                  "$ref": "#/definitions/TargetDescriptorV2"
+                  "$ref": "#/definitions/TargetDescriptorV3"
                 },
                 {
                   "type": "null"
@@ -384,35 +378,63 @@
               ]
             }
           }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "scroll"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            }
+          }
         }
       ]
     },
-    "TargetDescriptorV2": {
-      "description": "Stable semantic handle for an interacted element (v2).\n\n`name` and `nearby_label` are **untrusted page text**.",
+    "StopReason": {
+      "type": "string",
+      "enum": [
+        "user_finish",
+        "cli_stop"
+      ]
+    },
+    "TargetDescriptorV3": {
+      "description": "Stable semantic handle for an interacted element within a page observation.",
       "type": "object",
-      "required": [
-        "tag"
-      ],
       "properties": {
+        "ctx": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": [
             "string",
             "null"
           ]
         },
-        "name_attr": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "nearby_label": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "placeholder": {
+        "ref": {
           "type": [
             "string",
             "null"
@@ -424,8 +446,8 @@
             "null"
           ]
         },
-        "tag": {
-          "type": "string"
+        "unmatched": {
+          "type": "boolean"
         }
       }
     },
@@ -436,6 +458,36 @@
       ],
       "properties": {
         "start_url": {
+          "type": "string"
+        }
+      }
+    },
+    "TraceStateV3": {
+      "description": "Page observation dictionary entry — referenced by steps via `state` / `result.state`.",
+      "type": "object",
+      "required": [
+        "body",
+        "id",
+        "url"
+      ],
+      "properties": {
+        "body": {
+          "description": "Full page observation (front matter + VOM body + annotations).",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "url": {
           "type": "string"
         }
       }
