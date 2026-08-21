@@ -14,7 +14,7 @@ import { RecordingObservationRuntime } from "../recording/recording-runtime";
 function observation() {
   return {
     rootFrameId: "root",
-    index: new ObservationNodeIndex({ rootFrameId: "root", frameDocuments: [], refs: [] }),
+    index: new ObservationNodeIndex({ rootFrameId: "root", matchNodes: [], refs: [] }),
     url: "https://example.com/",
     title: "Example",
     vomText: '@vom 1\nRootWebArea "Example"',
@@ -94,5 +94,40 @@ describe("RecordingObservationRuntime", () => {
 
     expect(captureRecordingObservation).toHaveBeenCalledTimes(2);
     expect(trace.states).toHaveLength(1);
+  });
+
+  it("keeps runtime matching data out of the serialized trace", async () => {
+    const captured = observation();
+    captured.index = new ObservationNodeIndex({
+      rootFrameId: "root",
+      matchNodes: [
+        {
+          frameId: "root",
+          backendNodeId: 42,
+          tag: "button",
+          rect: { x: 10, y: 20, w: 100, h: 30 },
+          localRect: { x: 10, y: 20, w: 100, h: 30 },
+        },
+      ],
+      refs: [{ ref: "e1", backendNodeId: 42, role: "button", name: "Submit", line: 1 }],
+    });
+    captureRecordingObservation.mockResolvedValueOnce(captured);
+    const recording = runtime();
+
+    await recording.captureInitial(7);
+    const dumped = JSON.stringify(
+      recording.buildTrace({
+        drafts: [],
+        startedAt: "2026-08-19T00:00:00.000Z",
+        stoppedBy: "user_finish",
+        bskVersion: "0.1.6",
+      }),
+    );
+
+    expect(dumped).toContain("RootWebArea");
+    expect(dumped).not.toContain("matchNodes");
+    expect(dumped).not.toContain("localRect");
+    expect(dumped).not.toContain("backendNodeId");
+    expect(dumped).not.toContain("ObservationNodeIndex");
   });
 });

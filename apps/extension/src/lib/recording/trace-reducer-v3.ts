@@ -58,7 +58,7 @@ function selection(values: string[], labels?: string[]): Array<{ value: string; 
   }));
 }
 
-function reduceDraft(draft: RecordingDraftStep, id: number): StepV3 | null {
+function reduceDraft(draft: RecordingDraftStep, id: number, redactValues: boolean): StepV3 | null {
   if (!shouldIncludeDraft(draft)) return null;
   const state = draft.preStateId ?? draft.postStateId;
   const resultState = draft.postStateId ?? draft.preStateId;
@@ -81,13 +81,14 @@ function reduceDraft(draft: RecordingDraftStep, id: number): StepV3 | null {
         target: draft.matchedTarget ?? unmatchedTarget(draft.captureTarget),
       };
     case "fill":
+      const fillIsRedacted = redactValues || draft.redacted === true;
       return {
         op: "fill",
         ...common,
         target: draft.matchedTarget ?? unmatchedTarget(draft.captureTarget),
-        value: draft.value,
+        value: fillIsRedacted ? "***" : draft.value,
         commit: draft.commit ?? "blur",
-        ...(draft.redacted ? { redacted: true } : {}),
+        ...(fillIsRedacted ? { redacted: true } : {}),
       };
     case "press":
       return {
@@ -104,7 +105,7 @@ function reduceDraft(draft: RecordingDraftStep, id: number): StepV3 | null {
         op: "select",
         ...common,
         target: draft.matchedTarget ?? unmatchedTarget(draft.captureTarget),
-        selection: selection(draft.values, draft.labels),
+        ...(!redactValues ? { selection: selection(draft.values, draft.labels) } : {}),
       };
     case "scroll":
       return { op: "scroll", ...common };
@@ -116,11 +117,14 @@ export interface ReducedTraceV3 {
   stepIdByDraftId: Map<number, number>;
 }
 
-export function reduceTraceStepsV3(steps: RecordingDraftStep[]): ReducedTraceV3 {
+export function reduceTraceStepsV3(
+  steps: RecordingDraftStep[],
+  options: { redactValues?: boolean } = {},
+): ReducedTraceV3 {
   const output: StepV3[] = [];
   const stepIdByDraftId = new Map<number, number>();
   for (const { draft, draftIds } of collapseRedirects(steps)) {
-    const step = reduceDraft(draft, output.length + 1);
+    const step = reduceDraft(draft, output.length + 1, options.redactValues ?? false);
     if (!step) continue;
     output.push(step);
     for (const draftId of draftIds) stepIdByDraftId.set(draftId, step.id);
