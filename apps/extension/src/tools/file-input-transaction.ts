@@ -46,7 +46,10 @@ export interface FileInputTransactionResult {
 }
 
 class BoundedWaitError extends Error {
-  constructor(readonly kind: "timeout" | "aborted", message: string) {
+  constructor(
+    readonly kind: "timeout" | "aborted",
+    message: string,
+  ) {
     super(message);
   }
 }
@@ -99,7 +102,11 @@ function transferFailure(
   return transferError(code, reason, message, { effectState, phase });
 }
 
-function enrichFailure(error: RpcError, effectState: TransferEffectState, phase: UploadPhase): RpcError {
+function enrichFailure(
+  error: RpcError,
+  effectState: TransferEffectState,
+  phase: UploadPhase,
+): RpcError {
   return {
     ...error,
     data: { ...error.data, effect_state: effectState, phase },
@@ -187,10 +194,15 @@ export async function uploadThroughActivatedFileInput(
 
     try {
       const resolved = await waitBounded(
-        sendToCdpTarget<{ object?: { objectId?: string } }>(options.cdp, target, "DOM.resolveNode", {
-          backendNodeId: options.actionTarget.backendNodeId,
-          objectGroup,
-        }),
+        sendToCdpTarget<{ object?: { objectId?: string } }>(
+          options.cdp,
+          target,
+          "DOM.resolveNode",
+          {
+            backendNodeId: options.actionTarget.backendNodeId,
+            objectGroup,
+          },
+        ),
         deadline,
         options.signal,
         "resolving upload trigger timed out",
@@ -309,10 +321,7 @@ export async function uploadThroughActivatedFileInput(
       let backendNodeId: number | undefined;
       let multiple = summary.multiple;
       if (chooser) {
-        if (
-          options.actionTarget.frameId &&
-          chooser.frameId !== options.actionTarget.frameId
-        ) {
+        if (options.actionTarget.frameId && chooser.frameId !== options.actionTarget.frameId) {
           outcome = transferFailure(
             "unsupported",
             "file_input_not_activated",
