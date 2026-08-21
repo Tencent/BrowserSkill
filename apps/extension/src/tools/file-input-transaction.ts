@@ -7,6 +7,7 @@ import type { ClickResult, RpcError, TransferEffectState } from "@/transport/typ
 import { transferError } from "./errors";
 import type { ResolvedActionTarget } from "./interaction";
 import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
+import { BoundedWaitError, remainingMs, waitBounded } from "./transfer-transaction";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
 const ACTIVATION_GRACE_MS = 1_000;
@@ -43,46 +44,6 @@ export interface FileInputTransactionOptions {
 export interface FileInputTransactionResult {
   click: ClickResult;
   multiple: boolean;
-}
-
-class BoundedWaitError extends Error {
-  constructor(
-    readonly kind: "timeout" | "aborted",
-    message: string,
-  ) {
-    super(message);
-  }
-}
-
-function remainingMs(deadline: number): number {
-  return Math.max(0, deadline - Date.now());
-}
-
-async function waitBounded<T>(
-  promise: Promise<T>,
-  deadline: number,
-  signal: AbortSignal | undefined,
-  timeoutMessage: string,
-): Promise<T> {
-  const remaining = remainingMs(deadline);
-  if (signal?.aborted) throw new BoundedWaitError("aborted", "upload transaction aborted");
-  if (remaining === 0) throw new BoundedWaitError("timeout", timeoutMessage);
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-  const boundary = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new BoundedWaitError("timeout", timeoutMessage)), remaining);
-    if (signal) {
-      onAbort = () => reject(new BoundedWaitError("aborted", "upload transaction aborted"));
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
-  try {
-    return await Promise.race([promise, boundary]);
-  } finally {
-    if (timer) clearTimeout(timer);
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-  }
 }
 
 function runtimeError(reply: RuntimeReply, fallback: string): Error | null {

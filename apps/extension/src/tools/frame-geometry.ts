@@ -29,7 +29,10 @@ export interface NodeAddress {
 export interface ResolvedNodeGeometry {
   topVisibleRegions: Region;
   topBounds: ViewportRect;
+  /** Point in the top-level tab viewport, used by root-target input events. */
   actionPoint: Point;
+  /** Point in the addressed CDP target's viewport, used by OOPIF-local input events. */
+  targetActionPoint: Point;
 }
 
 function geometryError(message: string): RpcError {
@@ -262,11 +265,30 @@ export async function resolveNodeGeometry(
     if (isRpcError(localRegion)) return localRegion;
 
     let topVisibleRegions: Region;
+    let targetActionPoint: Point | null = null;
     if (address.frameId && graph) {
       const projection = await resolveFrameProjection(cdp, graph, address.frameId);
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
+      if (address.target.sessionId) {
+        const localViewport = projection.edges[0]?.sourceViewport ?? projection.topViewport;
+        const localVisibleRegions = localRegion
+          .map((polygon) =>
+            clipPolygon(
+              polygon,
+              rectPolygon({
+                x: 0,
+                y: 0,
+                w: localViewport.width,
+                h: localViewport.height,
+              }),
+            ),
+          )
+          .filter((polygon) => polygon.length >= 3);
+        const localActionRegion = largestRegion(localVisibleRegions);
+        targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
+      }
     } else {
       const viewport = await targetViewport(cdp, address.target);
       if (!viewport) return geometryError("could not resolve top viewport geometry");
@@ -283,7 +305,11 @@ export async function resolveNodeGeometry(
     if (!topBounds || !actionPoint) {
       return { code: "permission_denied", message: "element not visible" };
     }
-    return { topVisibleRegions, topBounds, actionPoint };
+    if (address.target.sessionId && !targetActionPoint) {
+      return { code: "permission_denied", message: "element not visible in its target" };
+    }
+    targetActionPoint ??= actionPoint;
+    return { topVisibleRegions, topBounds, actionPoint, targetActionPoint };
   } catch (error) {
     return geometryError(error instanceof Error ? error.message : String(error));
   }

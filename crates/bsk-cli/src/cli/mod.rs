@@ -181,7 +181,7 @@ pub enum Command {
     /// Set `<select>` option values by `value` attribute.
     Select(SelectArgs),
 
-    /// Upload one or more local files through a page file chooser.
+    /// Upload files through a page file input or explicit drop target.
     Upload(UploadArgs),
 
     /// Capture one browser download and write it to a local path.
