@@ -2,10 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 
 const captureRecordingObservation = vi.hoisted(() => vi.fn());
+const waitForDocumentSettled = vi.hoisted(() => vi.fn(async () => "quiet" as const));
 
 vi.mock("../recording/observation-capture", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../recording/observation-capture")>();
   return { ...actual, captureRecordingObservation };
+});
+
+vi.mock("../recording/document-settle", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../recording/document-settle")>();
+  return { ...actual, waitForDocumentSettled };
 });
 
 import { ObservationNodeIndex } from "../recording/observation-capture";
@@ -31,7 +37,10 @@ function runtime(): RecordingObservationRuntime {
 }
 
 describe("RecordingObservationRuntime", () => {
-  afterEach(() => captureRecordingObservation.mockReset());
+  afterEach(() => {
+    captureRecordingObservation.mockReset();
+    waitForDocumentSettled.mockClear();
+  });
 
   it("shares one initial capture and includes it in flush", async () => {
     let release!: (value: ReturnType<typeof observation>) => void;
@@ -198,5 +207,83 @@ describe("RecordingObservationRuntime", () => {
       geometrySpace: "local",
     });
     expect(draft.matchedTarget?.ref).toBe("e1");
+  });
+
+  it("refreshes a late iframe before matching its first action", async () => {
+    const iframeObservation = {
+      ...observation(),
+      index: new ObservationNodeIndex({
+        rootFrameId: "root",
+        frames: [
+          {
+            frameId: "child",
+            target: { tabId: 7, sessionId: "oopif-session" },
+            recordingDocumentId: "producer-1",
+          },
+        ],
+        matchNodes: [
+          {
+            backendNodeId: 42,
+            frameId: "child",
+            tag: "button",
+            rect: { x: 410, y: 20, w: 100, h: 30 },
+            localRect: { x: 10, y: 20, w: 100, h: 30 },
+          },
+        ],
+        refs: [
+          {
+            ref: "e1",
+            backendNodeId: 42,
+            frameId: "child",
+            role: "button",
+            name: "表格视图",
+            line: 1,
+          },
+        ],
+      }),
+    };
+    captureRecordingObservation
+      .mockResolvedValueOnce(observation())
+      .mockResolvedValueOnce(iframeObservation)
+      .mockResolvedValueOnce(iframeObservation);
+    const recording = runtime();
+
+    await recording.captureInitial(7);
+    await recording.refreshDocument(7, "producer-1");
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "click",
+        captureTarget: { tag: "button", role: "button", name: "表格视图" },
+        targetHint: {
+          geometry: { rect: { x: 10, y: 20, w: 100, h: 30 }, tag: "button" },
+        },
+      },
+    ];
+    await recording.processDraft(7, drafts, 0, "producer-1");
+    recording.cancel();
+
+    expect(captureRecordingObservation).toHaveBeenCalledTimes(3);
+    expect(waitForDocumentSettled).toHaveBeenCalledWith(
+      expect.anything(),
+      { frameId: "child", target: { tabId: 7, sessionId: "oopif-session" } },
+      { signal: expect.any(AbortSignal) },
+    );
+    const draft = drafts[0];
+    expect(draft?.op).toBe("click");
+    if (!draft || draft.op !== "click") throw new Error("expected click draft");
+    expect(draft.matchedTarget).toMatchObject({ ref: "e1", name: "表格视图" });
+  });
+
+  it("does not poison final flush when a frame readiness refresh fails", async () => {
+    captureRecordingObservation
+      .mockResolvedValueOnce(observation())
+      .mockRejectedValueOnce(new Error("child Document replaced"));
+    const recording = runtime();
+
+    await recording.captureInitial(7);
+    await expect(recording.refreshDocument(7, "producer-1")).rejects.toThrow(
+      "child Document replaced",
+    );
+    await expect(recording.flush()).resolves.toBeUndefined();
   });
 });
