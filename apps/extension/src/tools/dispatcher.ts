@@ -26,6 +26,7 @@ import type {
   ResponseFrame,
   RpcError,
   ScreenshotParams,
+  ScrollToParams,
   SelectParams,
   SnapshotParams,
   WaitForNavigationParams,
@@ -52,6 +53,7 @@ import {
   handleSnapshot,
 } from "./observation";
 import { handleRecordAwait, handleRecordStart, handleRecordStop } from "./record";
+import { handleScrollTo } from "./scroll";
 import {
   handleSessionStart,
   handleSessionStop,
@@ -471,6 +473,17 @@ export class ToolDispatcher {
         );
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
+      case "tool.scroll_to":
+        return this.withHoverReleaseForRequest(
+          req.params as ScrollToParams,
+          () =>
+            handleScrollTo(
+              this.sessions,
+              req.params as ScrollToParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
       case "tool.fill":
         return this.withHoverReleaseForRequest(
           req.params as FillParams,
@@ -718,6 +731,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.reload":
     case "tool.click":
     case "tool.hover":
+    case "tool.scroll_to":
     case "tool.fill":
     case "tool.press":
     case "tool.select":

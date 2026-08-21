@@ -128,7 +128,7 @@ async function wait(ms: number, signal?: AbortSignal): Promise<void> {
  * `RpcError` if the caller supplied neither (or both), or if neither
  * lookup matched.
  */
-async function resolveBackendNode(
+export async function resolveBackendNode(
   cdp: CdpRunner,
   ctx: SessionContext,
   target: { tabId: number },
