@@ -139,8 +139,10 @@ describe("RecordingObservationRuntime", () => {
 
     await recording.captureInitial(4);
     const transition = await recording.captureTabTransition(4, 5);
+    await recording.captureInitial(4);
+    await recording.captureInitial(5);
 
-    expect(transition).toMatchObject({
+    expect(transition).toEqual({
       preStateId: "s1",
       postStateId: "s2",
       targetUrl: "https://example.com/second",

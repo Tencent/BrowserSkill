@@ -255,8 +255,7 @@ async function activateRecordingTab(
   };
   recording.steps.push(draft);
   recording.observation?.bindTabTransition(draft, recording.steps.length);
-  recording.tabs.navigation(targetTabId, targetUrl);
-  recording.tabs.commit(targetTabId);
+  recording.tabs.commit(targetTabId, targetUrl);
 }
 
 async function processRecordedStep(
