@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import {
+  handleBlur,
   handleClick,
   handleFill,
+  handleFocus,
   handleHover,
   handlePress,
   handleSelect,
@@ -537,6 +539,156 @@ describe("handleHover", () => {
     expect(res).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
     expect(bypassOverlay).toHaveBeenCalledTimes(1);
     expect(bypassOverlay).toHaveBeenCalledWith(4, true);
+  });
+});
+
+describe("handleFocus and handleBlur", () => {
+  it("focuses a ref and verifies the deep active element", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.focus": () => ({}),
+      "DOM.resolveNode": () => ({ object: { objectId: "focus-target" } }),
+      "Runtime.callFunctionOn": () => ({ result: { value: { focused: true } } }),
+    });
+
+    const res = await handleFocus(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({ tab_id: 4, used_ref: "e3", focused: true });
+    expect(fake.sent.map((call) => call.method)).toEqual([
+      "DOM.scrollIntoViewIfNeeded",
+      "DOM.focus",
+      "DOM.resolveNode",
+      "Runtime.callFunctionOn",
+    ]);
+  });
+
+  it("focuses an OOPIF ref in its CDP session", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 99,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
+    fake.cdp.sendToTarget = vi.fn(async (target, method) => {
+      targetCalls.push({ sessionId: target.sessionId, method });
+      if (method === "DOM.scrollIntoViewIfNeeded") return {};
+      if (method === "DOM.focus") return {};
+      if (method === "DOM.resolveNode") return { object: { objectId: "focus-target" } };
+      if (method === "Runtime.callFunctionOn") return { result: { value: { focused: true } } };
+      throw new Error(`unexpected child CDP call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handleFocus(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.focused).toBe(true);
+    expect(targetCalls).toEqual([
+      { sessionId: "child-session", method: "DOM.scrollIntoViewIfNeeded" },
+      { sessionId: "child-session", method: "DOM.focus" },
+      { sessionId: "child-session", method: "DOM.resolveNode" },
+      { sessionId: "child-session", method: "Runtime.callFunctionOn" },
+    ]);
+  });
+
+  it("does not focus after cancellation during scrolling", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const abort = new AbortController();
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => {
+        abort.abort();
+        return {};
+      },
+    });
+
+    const res = await handleFocus(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, signal: abort.signal },
+    );
+
+    expect(res).toMatchObject({ code: "cancelled" });
+    expect(fake.sent.some((call) => call.method === "DOM.focus")).toBe(false);
+  });
+
+  it("blurs a ref and returns its previous focus state", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.resolveNode": () => ({ object: { objectId: "focus-target" } }),
+      "Runtime.callFunctionOn": () => ({
+        result: { value: { ok: true, was_focused: true, focused: false } },
+      }),
+    });
+
+    const res = await handleBlur(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({
+      tab_id: 4,
+      used_ref: "e3",
+      was_focused: true,
+      focused: false,
+    });
+    expect(fake.sent.map((call) => call.method)).toEqual([
+      "DOM.resolveNode",
+      "Runtime.callFunctionOn",
+    ]);
+  });
+
+  it("rejects a target that does not implement blur", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.resolveNode": () => ({ object: { objectId: "focus-target" } }),
+      "Runtime.callFunctionOn": () => ({
+        result: { value: { ok: false, was_focused: false, focused: false } },
+      }),
+    });
+
+    const res = await handleBlur(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({ code: "invalid_params", message: /does not support blur/ });
   });
 });
 

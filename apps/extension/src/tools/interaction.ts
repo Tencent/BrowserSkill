@@ -1,5 +1,4 @@
-// DOM interaction tools — `tool.click`, `tool.fill`, `tool.press`, and
-// `tool.select`.
+// DOM interaction tools — click, hover, focus/blur, fill, press, and select.
 //
 // All interaction tools:
 // 1. Resolve target tab (sandbox: must be inside Agent Window).
@@ -14,10 +13,14 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
+  BlurParams,
+  BlurResult,
   ClickParams,
   ClickResult,
   FillParams,
   FillResult,
+  FocusParams,
+  FocusResult,
   HoverParams,
   HoverResult,
   KeyModifier,
@@ -212,6 +215,157 @@ async function resolveBackendNode(
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
     };
+  }
+}
+
+type FocusCheck = { focused: boolean };
+type BlurMutation =
+  | { ok: true; was_focused: boolean; focused: boolean }
+  | { ok: false; was_focused: boolean; focused: boolean };
+
+const DEEP_FOCUS_CHECK = `function() {
+  const deepActiveElement = (root) => {
+    let active = root && root.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+      active = active.shadowRoot.activeElement;
+    }
+    return active;
+  };
+  return { focused: deepActiveElement(this.ownerDocument) === this };
+}`;
+
+const BLUR_TARGET = `function() {
+  const deepActiveElement = (root) => {
+    let active = root && root.activeElement;
+    while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+      active = active.shadowRoot.activeElement;
+    }
+    return active;
+  };
+  const wasFocused = deepActiveElement(this.ownerDocument) === this;
+  if (typeof this.blur !== 'function') {
+    return { ok: false, was_focused: wasFocused, focused: wasFocused };
+  }
+  this.blur();
+  return {
+    ok: true,
+    was_focused: wasFocused,
+    focused: deepActiveElement(this.ownerDocument) === this,
+  };
+}`;
+
+// ---------------------------------------------------------------------------
+// tool.focus / tool.blur
+// ---------------------------------------------------------------------------
+
+export async function handleFocus(
+  manager: SessionManager,
+  params: FocusParams,
+  deps: InteractionDeps = getDefaultDeps(),
+): Promise<FocusResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "focus");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const aborted = throwIfAborted(deps.signal);
+  if (aborted) return aborted;
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "focus");
+  if (denied) return denied;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+  const node = await resolveBackendNode(deps.cdp, ctx, target, params, "focus");
+  if (isRpcError(node)) return node;
+  const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+
+  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  const scrollErr = await scrollElementAndFramesIntoView(
+    deps.cdp,
+    target.tabId,
+    node.cdpTarget,
+    node.backendNodeId,
+    node.frameId,
+  );
+  if (scrollErr) return scrollErr;
+  const abortedBeforeFocus = throwIfAborted(deps.signal);
+  if (abortedBeforeFocus) return abortedBeforeFocus;
+
+  try {
+    await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+    const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+    if (isRpcError(objectIdOrErr)) return objectIdOrErr;
+    const evaluated = await nodeCdp.send<{ result?: { value?: FocusCheck } }>(
+      target.tabId,
+      "Runtime.callFunctionOn",
+      {
+        objectId: objectIdOrErr,
+        functionDeclaration: DEEP_FOCUS_CHECK,
+        returnByValue: true,
+      },
+    );
+    if (evaluated.result?.value?.focused !== true) {
+      return { code: "invalid_params", message: "target element did not become focused" };
+    }
+    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      tab_id: target.tabId,
+      used_ref: node.usedRef,
+      used_selector: node.usedSelector,
+      focused: true,
+    });
+  } catch (err) {
+    return { code: "cdp_failed", message: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export async function handleBlur(
+  manager: SessionManager,
+  params: BlurParams,
+  deps: InteractionDeps = getDefaultDeps(),
+): Promise<BlurResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "blur");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const aborted = throwIfAborted(deps.signal);
+  if (aborted) return aborted;
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "blur");
+  if (denied) return denied;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+  const node = await resolveBackendNode(deps.cdp, ctx, target, params, "blur");
+  if (isRpcError(node)) return node;
+  const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  const abortedBeforeBlur = throwIfAborted(deps.signal);
+  if (abortedBeforeBlur) return abortedBeforeBlur;
+
+  try {
+    const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+    if (isRpcError(objectIdOrErr)) return objectIdOrErr;
+    const evaluated = await nodeCdp.send<{ result?: { value?: BlurMutation } }>(
+      target.tabId,
+      "Runtime.callFunctionOn",
+      {
+        objectId: objectIdOrErr,
+        functionDeclaration: BLUR_TARGET,
+        returnByValue: true,
+      },
+    );
+    const mutation = evaluated.result?.value;
+    if (!mutation?.ok) {
+      return { code: "invalid_params", message: "target element does not support blur()" };
+    }
+    if (mutation.focused) {
+      return { code: "cdp_failed", message: "target element remained focused after blur()" };
+    }
+    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      tab_id: target.tabId,
+      used_ref: node.usedRef,
+      used_selector: node.usedSelector,
+      was_focused: mutation.was_focused,
+      focused: false,
+    });
+  } catch (err) {
+    return { code: "cdp_failed", message: err instanceof Error ? err.message : String(err) };
   }
 }
 

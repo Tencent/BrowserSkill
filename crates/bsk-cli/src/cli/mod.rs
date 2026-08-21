@@ -42,7 +42,9 @@ use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
-use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs};
+use crate::cli::interaction::{
+    BlurArgs, ClickArgs, FillArgs, FocusArgs, HoverArgs, PressArgs, SelectArgs,
+};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
@@ -166,6 +168,12 @@ pub enum Command {
 
     /// Hover a snapshot ref or CSS selector.
     Hover(HoverArgs),
+
+    /// Focus a snapshot ref or CSS selector.
+    Focus(FocusArgs),
+
+    /// Remove focus from a snapshot ref or CSS selector.
+    Blur(BlurArgs),
 
     /// Fill an input / textarea / contenteditable.
     Fill(FillArgs),
