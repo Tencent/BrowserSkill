@@ -11,6 +11,7 @@ pub mod observation;
 pub mod record;
 mod record_common;
 mod record_v2;
+mod record_v3;
 pub mod script;
 pub mod session;
 pub mod tabs;
