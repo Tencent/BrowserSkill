@@ -8,7 +8,7 @@ import type { RecordingDraftStep } from "../recording/types";
 const OBSERVATION: RegisteredObservation = {
   stateId: "s-next",
   rootFrameId: "root",
-  index: new ObservationNodeIndex({ rootFrameId: "root", frameDocuments: [], refs: [] }),
+  index: new ObservationNodeIndex({ rootFrameId: "root", matchNodes: [], refs: [] }),
   url: "https://example.com/next",
 };
 
