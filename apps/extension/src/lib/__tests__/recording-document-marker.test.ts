@@ -1,14 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
+import {
+  RECORD_DOCUMENT_ATTRIBUTE,
+  recordingDocumentMarkerValue,
+} from "@/shared/recording-document-identity";
 import { markRecordingDocument } from "../recording/document-marker";
 import { ObservationNodeIndex } from "../recording/observation-capture";
 
 describe("recording document marker", () => {
+  it("rejects a non-random Document identity", () => {
+    expect(() => markRecordingDocument("user@example.com")).toThrow(
+      "recording Document identity must be a random UUID",
+    );
+  });
+
   it("restores the Document attribute exactly", () => {
     document.documentElement.setAttribute(RECORD_DOCUMENT_ATTRIBUTE, "page-value");
-    const marker = markRecordingDocument("producer-1");
+    const producerId = "123e4567-e89b-42d3-a456-426614174000";
+    const marker = markRecordingDocument(producerId);
 
-    expect(document.documentElement.getAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe("producer-1");
+    expect(document.documentElement.getAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(
+      recordingDocumentMarkerValue(producerId),
+    );
     marker.restore();
     expect(document.documentElement.getAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe("page-value");
     document.documentElement.removeAttribute(RECORD_DOCUMENT_ATTRIBUTE);
