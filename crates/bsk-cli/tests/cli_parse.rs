@@ -207,6 +207,24 @@ fn parses_hover_with_settle() {
 }
 
 #[test]
+fn parses_focus_target() {
+    let cli = parse(&["bsk", "focus", "@e2", "--session", "s1"]);
+    let Command::Focus(args) = cli.command else {
+        panic!("expected focus command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e2"));
+}
+
+#[test]
+fn parses_blur_selector() {
+    let cli = parse(&["bsk", "blur", "--selector", "#search", "--session", "s1"]);
+    let Command::Blur(args) = cli.command else {
+        panic!("expected blur command");
+    };
+    assert_eq!(args.selector.as_deref(), Some("#search"));
+}
+
+#[test]
 fn rejects_zero_click_count() {
     assert!(
         Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s1", "--count", "0"]).is_err()

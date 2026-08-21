@@ -70,6 +70,8 @@ bsk navigate <url> --session <id>
 bsk observe --session <id>           → primary semantic VOM view; reveals hover/focus surfaces
 bsk snapshot --session <id>          → static aria tree fallback when VOM is insufficient
 bsk hover @e3 --session <id>          → reveal hover-triggered menus before re-observing/clicking
+bsk focus @e4 --session <id>          → explicitly enter focus-driven UI states
+bsk blur @e4 --session <id>           → explicitly leave focus-driven UI states
 bsk click @e4 --session <id>          → or bsk fill, bsk select, bsk press
 bsk observe --session <id>             → again after navigation / DOM change
 ```
@@ -202,6 +204,8 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 |---------|---------|
 | `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |
 | `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
+| `bsk focus <ref-or-selector>` | Focus an element and verify it became the deep active element |
+| `bsk blur <ref-or-selector>` | Remove focus from an element and report whether it was focused |
 | `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
