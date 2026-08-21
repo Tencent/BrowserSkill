@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 use base64::Engine;
@@ -100,6 +100,7 @@ impl TransferRegistry {
     pub fn begin_upload(&self, p: TransferBeginParams) -> Result<TransferBeginResult, RpcError> {
         self.ensure_root()
             .map_err(|err| protocol_error(err.to_string()))?;
+        let basename = safe_upload_basename(&p.name)?;
         if p.byte_size > MAX_TRANSFER_BYTES {
             return Err(invalid(format!(
                 "file size {} exceeds transfer limit {}",
@@ -122,12 +123,13 @@ impl TransferRegistry {
         let dir = self.root.join(&id);
         fs::create_dir(&dir).map_err(io_error)?;
         set_private_dir(&dir).map_err(io_error)?;
-        let path = dir.join("payload");
-        OpenOptions::new()
+        let path = dir.join(basename);
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .map_err(io_error)?;
+        set_private_file(&file).map_err(io_error)?;
         entries.insert(
             id.clone(),
             Entry {
@@ -380,6 +382,26 @@ fn set_private_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn set_private_file(file: &File) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+fn safe_upload_basename(name: &str) -> Result<&str, RpcError> {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) {
+        return Err(invalid("upload name must be a safe basename"));
+    }
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => Ok(name),
+        _ => Err(invalid("upload name must be a safe basename")),
+    }
+}
+
 fn invalid(message: impl Into<String>) -> RpcError {
     RpcError {
         code: ErrorCode::InvalidParams,
@@ -464,7 +486,77 @@ mod tests {
             .unwrap()
             .try_into()
             .unwrap();
+        assert_eq!(path.file_name().unwrap(), "image.png");
         assert_eq!(fs::read(path).unwrap(), b"abc");
+    }
+
+    #[test]
+    fn upload_name_must_be_one_safe_path_component() {
+        let (_temp, registry) = registry();
+        for name in ["", ".", "..", "../secret", "folder/file", "folder\\file"] {
+            let result = registry.begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: name.into(),
+                byte_size: 0,
+            });
+            assert!(result.is_err(), "accepted unsafe upload name");
+        }
+        assert!(registry.entries.lock().unwrap().is_empty());
+        assert!(fs::read_dir(&registry.root).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn same_upload_names_are_isolated_by_transfer_directory() {
+        let (_temp, registry) = registry();
+        let first = registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "image.png".into(),
+                byte_size: 0,
+            })
+            .unwrap();
+        let second = registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "image.png".into(),
+                byte_size: 0,
+            })
+            .unwrap();
+        let entries = registry.entries.lock().unwrap();
+        let first_path = &entries[&first.transfer_id].path;
+        let second_path = &entries[&second.transfer_id].path;
+        assert_ne!(first_path.parent(), second_path.parent());
+        assert_eq!(first_path.file_name().unwrap(), "image.png");
+        assert_eq!(second_path.file_name().unwrap(), "image.png");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upload_staging_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, registry) = registry();
+        let begin = registry
+            .begin_upload(TransferBeginParams {
+                session_id: "s1".into(),
+                name: "private.png".into(),
+                byte_size: 0,
+            })
+            .unwrap();
+        let entries = registry.entries.lock().unwrap();
+        let path = &entries[&begin.transfer_id].path;
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
