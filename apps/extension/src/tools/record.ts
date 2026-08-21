@@ -888,7 +888,16 @@ export async function handleRecordStart(
     actionQueue: Promise.resolve(),
     lastStepSequenceByProducer: new Map(),
   });
-  deps.frameCoordinator?.begin(requestId, startedAtMs);
+  deps.frameCoordinator?.begin(requestId, startedAtMs, target.tabId, async (scope) => {
+    const recording = recordings.get(params.session_id);
+    if (!recording || recording.requestId !== requestId || recording.settled) return;
+    try {
+      await recording.observation?.refreshDocument(scope.tabId, scope.producerId);
+    } catch {
+      // The normal action-time capture remains available if a child Document
+      // is replaced while its readiness refresh is in flight.
+    }
+  });
   // Observe navigations for the whole recording lifetime; attach before
   // optional navigate so the destination load can rearm capture.
   ensureBrowserObservationListeners(deps);
