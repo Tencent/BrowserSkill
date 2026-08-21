@@ -15,7 +15,7 @@ function rectMatches(a: TargetGeometry["rect"], b: TargetGeometry["rect"]): bool
 }
 
 function candidateMatches(candidate: IndexedObservationNode, geometry: TargetGeometry): boolean {
-  return candidate.node.rect !== null && rectMatches(geometry.rect, candidate.node.rect);
+  return candidate.geometry.rect !== null && rectMatches(geometry.rect, candidate.geometry.rect);
 }
 
 export function unmatchedTarget(fallback?: CaptureTargetDescriptor): TargetDescriptorV3 {
