@@ -3146,11 +3146,12 @@ describe("handleSnapshot", () => {
     expect(result.rootFrameId).toBe("root");
     expect(result).not.toHaveProperty("frameDocuments");
     expect(result.frames).toEqual([{ frameId: "root", target: { tabId: 4 } }]);
-    expect(result.nodes.find((node) => node.backendNodeId === 13)).toMatchObject({
+    expect(result.matchNodes.find((node) => node.backendNodeId === 13)).toMatchObject({
       frameId: "root",
       backendNodeId: 13,
       tag: "input",
       rect: { x: 400, y: 300, w: 200, h: 40 },
+      localRect: { x: 400, y: 300, w: 200, h: 40 },
     });
   });
 
@@ -3214,7 +3215,10 @@ describe("handleSnapshot", () => {
     expect(dumped).not.toContain(secrets.otp);
     expect(dumped).not.toContain(secrets.card);
     expect(dumped).not.toContain("formValue");
+    expect(dumped).not.toContain("formDefaultValue");
     expect(dumped).not.toContain("axNodes");
+    expect(dumped).not.toContain("domNodes");
+    expect(dumped).not.toContain("attrs");
     expect(result.text).toContain("•••");
   });
 
@@ -3231,9 +3235,10 @@ describe("handleSnapshot", () => {
       ownerBackendNodeId: 12,
       target: { tabId: 4, sessionId: "child-session" },
     });
-    expect(result.nodes.find((node) => node.backendNodeId === 22)).toMatchObject({
+    expect(result.matchNodes.find((node) => node.backendNodeId === 22)).toMatchObject({
       frameId: "child",
       tag: "button",
+      localRect: { x: 20, y: 30, w: 120, h: 40 },
     });
     expect(result.refs.find((ref) => ref.backendNodeId === 22)).toMatchObject({
       frameId: "child",

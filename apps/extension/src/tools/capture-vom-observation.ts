@@ -1,7 +1,9 @@
 export {
-  type CaptureVomFrame,
-  type CaptureVomNode,
   type CaptureVomObservationOptions,
-  type CaptureVomObservationResult,
   captureVomObservation,
 } from "./observation";
+export {
+  type CaptureVomFrame,
+  type CaptureVomMatchNode,
+  type CaptureVomObservationResult,
+} from "./vom/record-safe-observation";
