@@ -7,6 +7,7 @@ use tokio::task::JoinHandle;
 
 use super::abort::AbortRegistry;
 use super::browsers::BrowserRegistry;
+use super::file_transfer::TransferRegistry;
 use super::inflight::ToolInflightRegistry;
 use super::ipc::IpcHandle;
 use super::queue::ToolQueueRegistry;
@@ -51,6 +52,9 @@ pub struct DaemonState {
     /// `SessionRegistry` because the signal is a transient runtime
     /// control state.
     pub session_interrupts: Arc<SessionInterruptRegistry>,
+    /// Operation-scoped local file staging. The extension only sees paths
+    /// minted here; agent-facing RPCs use opaque transfer ids.
+    pub transfers: Arc<TransferRegistry>,
 }
 
 impl DaemonState {
@@ -64,6 +68,7 @@ impl DaemonState {
         ));
         let abort_registry = Arc::new(AbortRegistry::new());
         let session_interrupts = Arc::new(SessionInterruptRegistry::new());
+        let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             config,
             browsers,
@@ -72,6 +77,7 @@ impl DaemonState {
             abort_registry,
             tool_inflight,
             session_interrupts,
+            transfers,
         }
     }
 }

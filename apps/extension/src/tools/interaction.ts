@@ -40,6 +40,7 @@ import {
   enforceAgentWindow,
   isRpcError,
   lookupSession,
+  type ResolvedTargetTab,
   resolveTargetTab,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
@@ -54,6 +55,15 @@ export interface InteractionDeps {
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   /** Keep hover hit-testing active for the caller's next observation/action. */
   keepOverlayBypassAfterHover?: boolean;
+}
+
+export interface ResolvedActionTarget {
+  tab: ResolvedTargetTab;
+  backendNodeId: number;
+  cdpTarget: CdpTarget;
+  frameId?: string;
+  usedRef?: string;
+  usedSelector?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -128,7 +138,7 @@ async function wait(ms: number, signal?: AbortSignal): Promise<void> {
  * `RpcError` if the caller supplied neither (or both), or if neither
  * lookup matched.
  */
-async function resolveBackendNode(
+export async function resolveBackendNode(
   cdp: CdpRunner,
   ctx: SessionContext,
   target: { tabId: number },
@@ -215,6 +225,17 @@ async function resolveBackendNode(
   }
 }
 
+export async function resolveActionTarget(
+  cdp: CdpRunner,
+  ctx: SessionContext,
+  target: ResolvedTargetTab,
+  params: { ref?: string; selector?: string },
+  toolName: string,
+): Promise<ResolvedActionTarget | RpcError> {
+  const node = await resolveBackendNode(cdp, ctx, target, params, toolName);
+  return isRpcError(node) ? node : { tab: target, ...node };
+}
+
 // ---------------------------------------------------------------------------
 // tool.click
 // ---------------------------------------------------------------------------
@@ -233,10 +254,19 @@ export async function handleClick(
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "click");
   if (denied) return denied;
-  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+  const resolved = await resolveActionTarget(deps.cdp, ctx, target, params, "click");
+  if (isRpcError(resolved)) return resolved;
+  return clickResolvedTarget(ctx, resolved, params, deps);
+}
 
-  const node = await resolveBackendNode(deps.cdp, ctx, target, params, "click");
-  if (isRpcError(node)) return node;
+export async function clickResolvedTarget(
+  ctx: SessionContext,
+  resolved: ResolvedActionTarget,
+  params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
+  deps: InteractionDeps,
+): Promise<ClickResult | RpcError> {
+  const { tab: target } = resolved;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   if (throwIfAborted(deps.signal)) {
     return { code: "cancelled", message: "click aborted" };
@@ -247,9 +277,9 @@ export async function handleClick(
     deps.cdp,
     target.tabId,
     {
-      target: node.cdpTarget,
-      backendNodeId: node.backendNodeId,
-      ...(node.frameId ? { frameId: node.frameId } : {}),
+      target: resolved.cdpTarget,
+      backendNodeId: resolved.backendNodeId,
+      ...(resolved.frameId ? { frameId: resolved.frameId } : {}),
     },
     { scrollIntoView: true },
   );
@@ -337,8 +367,8 @@ export async function handleClick(
 
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
-    used_ref: node.usedRef,
-    used_selector: node.usedSelector,
+    used_ref: resolved.usedRef,
+    used_selector: resolved.usedSelector,
     x: centre.x,
     y: centre.y,
   });

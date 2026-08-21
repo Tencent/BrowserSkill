@@ -206,6 +206,29 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
 
+### File transfer (require `--session`)
+
+| Command | Summary |
+|---------|---------|
+| `bsk upload <ref-or-selector> --file <path>` | Click one upload trigger and attach an agent-readable local file (`--file` is repeatable) |
+| `bsk download <ref-or-selector> --out <path>` | Click one download trigger and copy the single completed file to an exact local path (`--overwrite` is opt-in) |
+
+The agent/harness decides whether a file transfer is appropriate and which local path belongs to the task. Treat upload as disclosure of that file to the current website, and download as accepting website-controlled bytes onto the local filesystem. Use only paths that are necessary for the user's bounded goal.
+
+BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted capabilities reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Upload intercepts the native chooser for one transaction, locates the input activated in the resolved target's document, and assigns only the staged file paths. Download uniquely correlates one exact-target browser intent with one Chrome download in either event order, routes it through a daemon-minted relative directory, and lets the daemon validate and import it. Upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
+
+Do not use `request-help` merely because a native file chooser or browser download is involved; try these commands first. For transfer failures, use the structured error instead of retrying blindly:
+
+- `reason=file_input_not_activated` means the requested click did not activate exactly one `<input type="file">`; the page may use a non-input picker such as `window.showOpenFilePicker()`. Do not retry blindly. If human help is available, call `request-help` and tell the user the exact original local path to choose. The staged daemon path is internal and must not be shown to the user.
+- `reason=file_input_probe_failed` means BrowserSkill could not safely establish the browser-side upload transaction. Do not repeat the same action; use `request-help` when available.
+- `reason=set_file_input_failed` means BrowserSkill found the activated file input but Chrome rejected the staged path or assignment. Check the extension's file-URL access permission; otherwise use `request-help`.
+- `reason=download_capture_failed` means BrowserSkill could not attribute exactly one completed download to the requested target. Do not retry blindly or accept an unrelated browser download; use `request-help` when available.
+- `effect_state=none` means BrowserSkill confirmed that no file-transfer effect was committed. Follow the accompanying reason; a corrected target or explicit human fallback may be attempted.
+- `effect_state=unknown` means the browser may already have attached or created the file. Do not repeat the transfer. Observe the page if that can establish the result; otherwise stop and report the uncertainty.
+- `effect_state=committed` means the browser-side effect occurred even if later completion or cleanup failed. Do not repeat it; continue only after verifying the resulting page/download state.
+
+If `request-help` returns `outcome="disabled"`, do not retry it. Stop gracefully and report the transfer mechanism that requires human intervention.
+
 ### Scripting & timing
 
 | Command | Summary |

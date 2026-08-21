@@ -49,6 +49,12 @@ pub mod reason {
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
+    pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
+    pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
+    pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
+    pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
+    pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
+    pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
 }
 
@@ -196,6 +202,20 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
+            summary: "the file transfer outcome could not be confirmed",
+            hint: Some(
+                "do not retry the transfer: the browser may already have applied it; inspect the page or stop safely",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout, reason::TRANSFER_TIMEOUT) => RenderInfo {
+            summary: "the file transfer timed out after browser dispatch",
+            hint: Some(
+                "do not retry when effect_state is unknown or committed; inspect the page before taking another action",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::PermissionDenied, reason::ELEMENT_NOT_VISIBLE) => RenderInfo {
             summary: "target element has no visible geometry",
             hint: Some(
@@ -266,6 +286,36 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the browser could not capture the tab image",
             hint: Some(
                 "both the visible-tab capture and the CDP compositor fallback failed inside the browser; this points at a browser-side rendering/readback issue — try reloading the tab, restarting the browser, or upgrading/downgrading Chrome",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::FILE_INPUT_NOT_ACTIVATED) => RenderInfo {
+            summary: "the upload trigger did not activate a file input",
+            hint: Some(
+                "the page may use a non-input picker such as showOpenFilePicker(); do not retry blindly — use `bsk request-help` with the exact original local path, or stop if human help is disabled",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_INPUT_PROBE_FAILED) => {
+            RenderInfo {
+                summary: "the browser upload transaction could not be established",
+                hint: Some(
+                    "do not retry the same upload blindly; use `bsk request-help` when human help is available",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::SET_FILE_INPUT_FAILED) => RenderInfo {
+            summary: "the browser could not attach the staged file to the input",
+            hint: Some(
+                "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::DOWNLOAD_CAPTURE_FAILED) => RenderInfo {
+            summary: "the browser download could not be attributed or completed",
+            hint: Some(
+                "do not retry blindly; the target browser may not expose a reliable download intent signal",
             ),
             exit_code: base.exit_code,
         },
@@ -390,6 +440,38 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn file_transfer_reasons_render_actionable_fallbacks() {
+        let unsupported = serde_json::json!({ "reason": reason::FILE_INPUT_NOT_ACTIVATED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported));
+        assert_eq!(
+            info.summary,
+            "the upload trigger did not activate a file input"
+        );
+        assert!(info.hint.unwrap().contains("exact original local path"));
+
+        let control = serde_json::json!({ "reason": reason::FILE_INPUT_PROBE_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&control));
+        assert!(
+            info.summary
+                .contains("transaction could not be established")
+        );
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
+        assert!(info.summary.contains("download could not be attributed"));
+
+        let unknown = serde_json::json!({ "reason": reason::TRANSFER_OUTCOME_UNKNOWN });
+        let info = info_for_error(ErrorCode::ProtocolError, Some(&unknown));
+        assert!(info.summary.contains("outcome could not be confirmed"));
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let timeout = serde_json::json!({ "reason": reason::TRANSFER_TIMEOUT });
+        let info = info_for_error(ErrorCode::Timeout, Some(&timeout));
+        assert!(info.summary.contains("timed out after browser dispatch"));
     }
 
     #[test]

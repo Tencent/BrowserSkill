@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DownloadParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "browser_relative_dir": {
+      "description": "Daemon-injected relative directory beneath Chrome's Downloads root.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_byte_size": {
+      "description": "Daemon-injected authoritative transfer size limit. The extension uses it only for early cancellation; daemon import remains the final check.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}
