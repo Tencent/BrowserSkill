@@ -306,7 +306,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::Unsupported, reason::FILE_INPUT_NOT_ACTIVATED) => RenderInfo {
             summary: "the upload trigger did not activate a file input",
             hint: Some(
-                "the page may use a non-input picker such as showOpenFilePicker(); do not retry blindly — use `bsk request-help` with the exact original local path, or stop if human help is disabled",
+                "the page may use a non-input picker such as showOpenFilePicker(); when effect_state is none, re-observe and use `--mode drop` once only for a reliably identified attachment-receiving area — otherwise use `bsk request-help` with the exact original local path",
             ),
             exit_code: base.exit_code,
         },
@@ -339,7 +339,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         ) => RenderInfo {
             summary: "the file-drop target could not be safely resolved",
             hint: Some(
-                "rerun observe and select the visible drop zone itself; no file was delivered when effect_state is none",
+                "rerun observe and select the attachment-receiving editor or drop zone itself; do not guess another target — no file was delivered when effect_state is none",
             ),
             exit_code: base.exit_code,
         },
@@ -504,7 +504,10 @@ mod tests {
             info.summary,
             "the upload trigger did not activate a file input"
         );
-        assert!(info.hint.unwrap().contains("exact original local path"));
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("--mode drop"));
+        assert!(hint.contains("reliably identified attachment-receiving area"));
+        assert!(hint.contains("exact original local path"));
 
         let control = serde_json::json!({ "reason": reason::FILE_INPUT_PROBE_FAILED });
         let info = info_for_error(ErrorCode::Timeout, Some(&control));
