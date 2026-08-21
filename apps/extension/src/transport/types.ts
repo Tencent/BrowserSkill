@@ -444,6 +444,25 @@ export interface HoverResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface ScrollToParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface ScrollToResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 export interface FillParams {
   session_id: string;
   value: string;
