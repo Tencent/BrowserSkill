@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RECORD_DOCUMENT_ATTRIBUTE } from "@/lib/recording/document-marker";
 import type { RecordFramePortMessage } from "@/lib/recording/frame-bridge";
 import { RECORD_FRAME_START } from "@/lib/recording/frame-bridge";
+import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
 import { RecordFrameAgent } from "../recording/frame-agent";
 
 class PortListeners<T extends (...args: never[]) => unknown> {

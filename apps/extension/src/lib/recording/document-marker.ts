@@ -1,6 +1,7 @@
-import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
-
-export { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
+import {
+  RECORD_DOCUMENT_ATTRIBUTE,
+  recordingDocumentMarkerValue,
+} from "@/shared/recording-document-identity";
 
 export interface RecordingDocumentMarker {
   restore(): void;
@@ -24,12 +25,13 @@ export function markRecordingDocument(
   root: HTMLElement = document.documentElement,
 ): RecordingDocumentMarker {
   const previous = root.getAttribute(RECORD_DOCUMENT_ATTRIBUTE);
-  const ensure = () => root.setAttribute(RECORD_DOCUMENT_ATTRIBUTE, producerId);
+  const markerValue = recordingDocumentMarkerValue(producerId);
+  const ensure = () => root.setAttribute(RECORD_DOCUMENT_ATTRIBUTE, markerValue);
   ensure();
   return {
     ensure,
     restore() {
-      if (root.getAttribute(RECORD_DOCUMENT_ATTRIBUTE) !== producerId) return;
+      if (root.getAttribute(RECORD_DOCUMENT_ATTRIBUTE) !== markerValue) return;
       if (previous === null) root.removeAttribute(RECORD_DOCUMENT_ATTRIBUTE);
       else root.setAttribute(RECORD_DOCUMENT_ATTRIBUTE, previous);
     },
