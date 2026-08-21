@@ -5,11 +5,7 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
-import {
-  clickResolvedTarget,
-  type InteractionDeps,
-  resolveActionTarget,
-} from "./interaction";
+import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import {
   type CdpRunner,
   enforceAgentWindow,

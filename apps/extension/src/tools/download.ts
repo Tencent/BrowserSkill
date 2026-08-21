@@ -4,11 +4,7 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { DownloadParams, DownloadResult, RpcError } from "@/transport/types";
 import { captureBrowserDownload, chromeDownloadsApi, type DownloadsApi } from "./download-capture";
-import {
-  clickResolvedTarget,
-  type InteractionDeps,
-  resolveActionTarget,
-} from "./interaction";
+import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
 let downloadActive = false;

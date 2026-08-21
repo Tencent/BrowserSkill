@@ -298,7 +298,8 @@ export async function captureBrowserDownload(
     const triggered = await options.trigger();
     if (isRpcError(triggered)) {
       void completion.catch(() => undefined);
-      const effect: TransferEffectState = capturedId !== undefined ? "committed" : intent ? "unknown" : "none";
+      const effect: TransferEffectState =
+        capturedId !== undefined ? "committed" : intent ? "unknown" : "none";
       failureResult = {
         ...triggered,
         data: { ...triggered.data, effect_state: effect, phase: "trigger" },
@@ -310,7 +311,8 @@ export async function captureBrowserDownload(
     succeeded = true;
     return { click, item };
   } catch (err) {
-    const effect: TransferEffectState = capturedId !== undefined ? "committed" : click ? "unknown" : "none";
+    const effect: TransferEffectState =
+      capturedId !== undefined ? "committed" : click ? "unknown" : "none";
     failureResult = captureError(
       err instanceof Error ? err.message : String(err),
       effect,
