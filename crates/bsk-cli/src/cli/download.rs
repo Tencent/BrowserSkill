@@ -91,7 +91,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn write_transfer(sock: &PathBuf, id: &str, out: &Path, overwrite: bool) -> Result<(), CliError> {
+fn write_transfer(sock: &Path, id: &str, out: &Path, overwrite: bool) -> Result<(), CliError> {
     let parent = out
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -107,7 +107,7 @@ fn write_transfer(sock: &PathBuf, id: &str, out: &Path, overwrite: bool) -> Resu
         let mut offset = 0u64;
         loop {
             let chunk: TransferChunkResult = crate::cli::business_rpc::call(
-                sock.clone(),
+                sock.to_path_buf(),
                 "transfer-read",
                 Method::TransferRead,
                 Some(TransferChunkParams {

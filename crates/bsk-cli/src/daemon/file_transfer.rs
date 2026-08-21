@@ -461,7 +461,7 @@ mod tests {
             .unwrap();
         assert!(
             registry
-                .resolve_uploads("s1", &[begin.transfer_id.clone()])
+                .resolve_uploads("s1", std::slice::from_ref(&begin.transfer_id))
                 .is_err()
         );
         registry
@@ -478,7 +478,7 @@ mod tests {
             .unwrap();
         assert!(
             registry
-                .resolve_uploads("s2", &[begin.transfer_id.clone()])
+                .resolve_uploads("s2", std::slice::from_ref(&begin.transfer_id))
                 .is_err()
         );
         let [path] = registry
