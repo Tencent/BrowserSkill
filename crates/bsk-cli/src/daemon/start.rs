@@ -282,6 +282,12 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
                     if !report.up_to_date.is_empty() {
                         debug!(count = report.up_to_date.len(), "skill already up to date");
                     }
+                    if !report.preserved.is_empty() {
+                        debug!(
+                            count = report.preserved.len(),
+                            "custom or edited skill preserved"
+                        );
+                    }
                 }
                 Ok(None) => { /* home_dir() already warned inside the closure */ }
                 Err(join_err) => {

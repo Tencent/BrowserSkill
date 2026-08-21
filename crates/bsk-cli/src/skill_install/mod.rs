@@ -10,11 +10,30 @@ use anyhow::{Context, Result, bail};
 use console::{Style, style};
 use dialoguer::{MultiSelect, theme::ColorfulTheme};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub use harness::{HarnessId, HarnessReport, all_harness_reports, parse_harness_id};
 
 pub const SKILL_DIR_NAME: &str = "browser-skill";
 pub const DEFAULT_SKILL_MD: &str = include_str!("../../skill/SKILL.md");
+pub const SOURCE_MARKER_FILE: &str = ".bsk-source";
+pub const SOURCE_CUSTOM: &str = "custom\n";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallSourceKind {
+    Bundled,
+    Custom,
+}
+
+pub(crate) fn bundled_source_marker(source: &str) -> String {
+    let digest = Sha256::digest(source.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("bundled:{hex}\n")
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InstallResult {
@@ -74,6 +93,7 @@ pub struct InstallError {
 pub struct InstallOptions<'a> {
     pub harnesses: &'a [HarnessId],
     pub source: &'a str,
+    pub source_kind: InstallSourceKind,
     pub force: bool,
     /// When `Some`, installs under this home instead of the real `$HOME`.
     pub home: Option<&'a Path>,
@@ -103,7 +123,7 @@ pub fn install_to_harnesses_at_home(home: &Path, opts: &InstallOptions<'_>) -> I
     let mut errors = Vec::new();
 
     for harness in opts.harnesses {
-        match install_one_at_home(home, *harness, opts.source, opts.force) {
+        match install_one_at_home(home, *harness, opts.source, opts.source_kind, opts.force) {
             Ok((path, status)) => results.push(InstallResult {
                 harness: harness.cli_name().to_string(),
                 path,
@@ -123,6 +143,7 @@ fn install_one_at_home(
     home: &Path,
     harness: HarnessId,
     source: &str,
+    source_kind: InstallSourceKind,
     force: bool,
 ) -> Result<(PathBuf, InstallStatus)> {
     let dest_dir = harness.skill_dest_dir_for_home(home);
@@ -134,7 +155,18 @@ fn install_one_at_home(
 
     let existed = dest_file.exists();
     fs::create_dir_all(&dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
+    let marker = dest_dir.join(SOURCE_MARKER_FILE);
+    // Mark custom ownership before replacing the skill. If the process
+    // stops between these writes, automatic sync fails safe and preserves
+    // the previous file instead of treating custom content as managed.
+    if source_kind == InstallSourceKind::Custom {
+        fs::write(&marker, SOURCE_CUSTOM).with_context(|| format!("write {}", marker.display()))?;
+    }
     fs::write(&dest_file, source).with_context(|| format!("write {}", dest_file.display()))?;
+    if source_kind == InstallSourceKind::Bundled {
+        fs::write(&marker, bundled_source_marker(source))
+            .with_context(|| format!("write {}", marker.display()))?;
+    }
 
     let status = if existed {
         InstallStatus::Updated
@@ -310,6 +342,7 @@ mod tests {
             &InstallOptions {
                 harnesses: &[harness],
                 source: "# test skill\n",
+                source_kind: InstallSourceKind::Custom,
                 force: false,
                 home: Some(&home),
             },
@@ -317,6 +350,10 @@ mod tests {
         assert!(out.errors.is_empty());
         assert_eq!(out.results.len(), 1);
         assert!(skills.join(SKILL_DIR_NAME).join("SKILL.md").is_file());
+        assert_eq!(
+            fs::read_to_string(skills.join(SKILL_DIR_NAME).join(SOURCE_MARKER_FILE)).unwrap(),
+            SOURCE_CUSTOM
+        );
     }
 
     #[test]
@@ -336,6 +373,7 @@ mod tests {
             &InstallOptions {
                 harnesses: &[harness],
                 source: "new",
+                source_kind: InstallSourceKind::Custom,
                 force: false,
                 home: Some(&home),
             },
@@ -361,12 +399,69 @@ mod tests {
             &InstallOptions {
                 harnesses: &[harness],
                 source: "new",
+                source_kind: InstallSourceKind::Custom,
                 force: true,
                 home: Some(&home),
             },
         );
         assert_eq!(out.results[0].status, InstallStatus::Updated);
         assert_eq!(fs::read_to_string(&dest).unwrap(), "new");
+        assert_eq!(
+            fs::read_to_string(dest.parent().unwrap().join(SOURCE_MARKER_FILE)).unwrap(),
+            SOURCE_CUSTOM
+        );
+    }
+
+    #[test]
+    fn bundled_install_records_the_written_content_hash() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let harness = HarnessId::Cursor;
+
+        let out = install_to_harnesses_at_home(
+            &home,
+            &InstallOptions {
+                harnesses: &[harness],
+                source: DEFAULT_SKILL_MD,
+                source_kind: InstallSourceKind::Bundled,
+                force: false,
+                home: Some(&home),
+            },
+        );
+
+        assert!(out.errors.is_empty());
+        let marker = harness
+            .skill_dest_dir_for_home(&home)
+            .join(SOURCE_MARKER_FILE);
+        assert_eq!(
+            fs::read_to_string(marker).unwrap(),
+            bundled_source_marker(DEFAULT_SKILL_MD)
+        );
+    }
+
+    #[test]
+    fn custom_install_survives_automatic_bundled_sync() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().to_path_buf();
+        let harness = HarnessId::Cursor;
+        let dest = harness.skill_dest_dir_for_home(&home).join("SKILL.md");
+
+        let out = install_to_harnesses_at_home(
+            &home,
+            &InstallOptions {
+                harnesses: &[harness],
+                source: "custom instructions",
+                source_kind: InstallSourceKind::Custom,
+                force: false,
+                home: Some(&home),
+            },
+        );
+        assert!(out.errors.is_empty());
+
+        let report = sync::sync_with_source(&home, "new bundled instructions");
+
+        assert_eq!(report.preserved, vec![HarnessId::Cursor]);
+        assert_eq!(fs::read_to_string(dest).unwrap(), "custom instructions");
     }
 
     #[test]
