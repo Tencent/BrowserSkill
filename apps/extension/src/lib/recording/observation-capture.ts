@@ -1,11 +1,14 @@
 import type { RenderedRef } from "@browser-skill/vom";
-import { captureVomObservation } from "@/tools/capture-vom-observation";
+import {
+  type CaptureVomMatchNode,
+  type CaptureVomObservationResult,
+  captureVomObservation,
+} from "@/tools/capture-vom-observation";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
-import type { CapturedNode } from "@/tools/vom/capture";
 
 export interface IndexedObservationNode {
   frameId: string;
-  node: CapturedNode;
+  geometry: CaptureVomMatchNode;
   ref?: RenderedRef;
 }
 
@@ -38,11 +41,7 @@ export class ObservationNodeIndex {
   readonly #refById = new Map<string, RenderedRef>();
   readonly #refsByFrame = new Map<string, RenderedRef[]>();
 
-  constructor(input: {
-    rootFrameId: string;
-    frameDocuments: Array<{ frameId: string; domNodes: CapturedNode[] }>;
-    refs: RenderedRef[];
-  }) {
+  constructor(input: Pick<CaptureVomObservationResult, "rootFrameId" | "matchNodes" | "refs">) {
     const refByNode = new Map<string, RenderedRef>();
     for (const ref of input.refs) {
       const frameId = ref.frameId ?? input.rootFrameId;
@@ -52,15 +51,17 @@ export class ObservationNodeIndex {
       frameRefs.push(ref);
       this.#refsByFrame.set(frameId, frameRefs);
     }
-    for (const document of input.frameDocuments) {
-      for (const node of document.domNodes) {
-        const frameId = node.frameId ?? document.frameId;
-        const entry = { frameId, node, ref: refByNode.get(nodeKey(frameId, node.backendNodeId)) };
-        const key = frameTagKey(frameId, node.tag);
-        const bucket = this.#nodesByFrameTag.get(key) ?? [];
-        bucket.push(entry);
-        this.#nodesByFrameTag.set(key, bucket);
-      }
+    for (const geometry of input.matchNodes) {
+      const { frameId } = geometry;
+      const entry = {
+        frameId,
+        geometry,
+        ref: refByNode.get(nodeKey(frameId, geometry.backendNodeId)),
+      };
+      const key = frameTagKey(frameId, geometry.tag);
+      const bucket = this.#nodesByFrameTag.get(key) ?? [];
+      bucket.push(entry);
+      this.#nodesByFrameTag.set(key, bucket);
     }
   }
 
