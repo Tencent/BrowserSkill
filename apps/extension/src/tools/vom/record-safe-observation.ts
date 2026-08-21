@@ -41,9 +41,11 @@ export interface CaptureVomObservationResult {
 
 function projectFrames(documents: CapturedFrameDocument<FrameAxNode>[]): CaptureVomFrame[] {
   return documents.map((document) => {
-    const recordingDocumentId = document.domNodes
-      .map((node) => readRecordingDocumentIdentity(node.attrs))
-      .find((identity) => identity !== undefined);
+    let recordingDocumentId: string | undefined;
+    for (const node of document.domNodes) {
+      recordingDocumentId = readRecordingDocumentIdentity(node.attrs);
+      if (recordingDocumentId) break;
+    }
     return {
       frameId: document.frameId,
       target: document.target,
