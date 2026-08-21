@@ -26,4 +26,14 @@ describe("RecordingTabCoordinator", () => {
     tabs.commit(6);
     expect(tabs.currentTabId).toBe(6);
   });
+
+  it("commits the freshly observed URL when returning to an existing tab", () => {
+    const tabs = new RecordingTabCoordinator(4);
+    tabs.navigation(5, "https://example.com/old");
+
+    tabs.commit(5, "https://example.com/new");
+
+    expect(tabs.currentTabId).toBe(5);
+    expect(tabs.navigation(5).currentUrl).toBe("https://example.com/new");
+  });
 });
