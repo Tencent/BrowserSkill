@@ -24,6 +24,8 @@ export interface VomNode {
   backendNodeId?: number;
   frameId?: string;
   contextScopeId?: string;
+  /** False for semantic-only nodes that cannot be addressed through CDP. */
+  referenceable?: boolean;
 
   role?: string;
   name?: string;

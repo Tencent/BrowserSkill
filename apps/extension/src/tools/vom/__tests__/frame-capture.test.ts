@@ -132,4 +132,67 @@ describe("captureFrameData", () => {
       ]),
     );
   });
+
+  it("keeps OOPIF semantics when viewport projection is unavailable", async () => {
+    const owner = { ...ownerNode(10, 50), rect: null, localRect: null };
+    const captured: CapturedViewModel = {
+      nodes: [owner],
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      frameNodes: new Map([["main", [owner]]]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "Accessibility.enable") return {};
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        if (method === "DOM.getBoxModel") throw new Error("owner geometry unavailable");
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        }
+        throw new Error(`unexpected root ${method}`);
+      }) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (_target, method) => {
+        if (method === "Page.getLayoutMetrics") throw new Error("viewport unavailable");
+        if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
+        if (method === "DOMSnapshot.captureSnapshot") return childSnapshot("child", 101);
+        if (method === "Accessibility.getFullAXTree") {
+          return {
+            nodes: [
+              {
+                nodeId: "button",
+                backendDOMNodeId: 101,
+                role: { type: "role", value: "button" },
+                name: { type: "computedString", value: "Continue" },
+              },
+            ],
+          };
+        }
+        throw new Error(`unexpected ${method}`);
+      }) as unknown as NonNullable<CdpRunner["sendToTarget"]>,
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          {
+            frameId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 10,
+            target: { tabId: 4, sessionId: "child-session" },
+          },
+        ],
+      })),
+    };
+
+    const documents = await captureFrameData(cdp, 4, captured);
+    const childDocument = documents.find((document) => document.frameId === "child");
+
+    expect(childDocument?.axNodes).toEqual([
+      expect.objectContaining({ backendDOMNodeId: 101, frameId: "child" }),
+    ]);
+    expect(childDocument?.domNodes.find((node) => node.backendNodeId === 101)).toEqual(
+      expect.objectContaining({ rect: null, localRect: { x: 10, y: 20, w: 100, h: 40 } }),
+    );
+  });
 });

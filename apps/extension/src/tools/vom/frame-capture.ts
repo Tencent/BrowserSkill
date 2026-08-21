@@ -33,23 +33,17 @@ async function discoverFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFra
 
 function transformFrameNodes(
   nodes: CapturedNode[],
-  projection: GeometryProjection,
+  projection: GeometryProjection | null,
 ): CapturedNode[] {
   return nodes.map((node) => ({
     ...node,
-    rect: (() => {
-      const bounds = projectRectToViewport(node.rect, projection);
-      return bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null;
-    })(),
+    rect: projection
+      ? (() => {
+          const bounds = projectRectToViewport(node.rect, projection);
+          return bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null;
+        })()
+      : null,
   }));
-}
-
-function frameOwnerNode(captured: CapturedViewModel, frame: CdpFrame): CapturedNode | undefined {
-  if (frame.ownerBackendNodeId === undefined) return undefined;
-  const parentNodes = frame.parentFrameId
-    ? captured.frameNodes?.get(frame.parentFrameId)
-    : captured.nodes;
-  return parentNodes?.find((node) => node.backendNodeId === frame.ownerBackendNodeId);
 }
 
 async function captureMissingFrameDocuments(
@@ -65,14 +59,20 @@ async function captureMissingFrameDocuments(
 
   for (const frame of graph.frames) {
     if (!frame.target.sessionId || captured.frameNodes.has(frame.frameId)) continue;
-    const owner = frameOwnerNode(captured, frame);
-    if (!owner?.rect || frame.ownerBackendNodeId === undefined) continue;
     try {
       const child = await captureViewModel(cdpRunnerForTarget(cdp, frame.target), tabId, {
         signal,
       });
-      const projection = await resolveFrameProjection(cdp, graph, frame.frameId);
-      if (!projection) continue;
+      let projection: GeometryProjection | null = null;
+      try {
+        projection = await resolveFrameProjection(cdp, graph, frame.frameId);
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        console.debug("[bsk observation] child frame geometry projection failed", {
+          frameId: frame.frameId,
+          err,
+        });
+      }
       const rootFrameId = child.rootFrameId ?? frame.frameId;
       const childFrames = child.frameNodes ?? new Map<string, CapturedNode[]>();
       if (!childFrames.has(rootFrameId)) childFrames.set(rootFrameId, child.nodes);
@@ -85,11 +85,13 @@ async function captureMissingFrameDocuments(
       for (const [childFrameId, nodes] of childFrames) {
         captured.frameNodes.set(childFrameId, transformFrameNodes(nodes, projection));
       }
-      captured.iframeNodes.set(
-        frame.ownerBackendNodeId,
-        captured.frameNodes.get(frame.frameId) ?? [],
-      );
-      captured.frameOwnerBackendNodeIds.set(frame.frameId, frame.ownerBackendNodeId);
+      if (frame.ownerBackendNodeId !== undefined) {
+        captured.iframeNodes.set(
+          frame.ownerBackendNodeId,
+          captured.frameNodes.get(frame.frameId) ?? [],
+        );
+        captured.frameOwnerBackendNodeIds.set(frame.frameId, frame.ownerBackendNodeId);
+      }
       if (frame.parentFrameId) captured.frameParentIds.set(frame.frameId, frame.parentFrameId);
       for (const [childFrameId, ownerBackendNodeId] of child.frameOwnerBackendNodeIds ?? []) {
         captured.frameOwnerBackendNodeIds.set(childFrameId, ownerBackendNodeId);

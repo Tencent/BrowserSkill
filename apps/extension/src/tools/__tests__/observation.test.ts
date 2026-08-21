@@ -1656,7 +1656,7 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", cursor: "pointer" }),
+      expect.objectContaining({ id: 20, role: "button", name: "close", cursor: "pointer" }),
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
@@ -1732,7 +1732,7 @@ describe("buildVomScene", () => {
     };
 
     const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 20)).toBeUndefined();
     expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("link");
   });
 
@@ -1801,9 +1801,9 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", attrs: { "aria-label": "收藏" } }),
+      expect.objectContaining({ id: 20, role: "button", attrs: { "aria-label": "收藏" } }),
     );
-    expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 30)).toBeUndefined();
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
     expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
@@ -2131,7 +2131,7 @@ describe("buildVomScene", () => {
     });
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 21, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
+      { triggerId: 20, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
     ]);
     expect(renderVom(scene).text).toContain(
       '@e1 button "image" [hover first: My profile | Sign out]',

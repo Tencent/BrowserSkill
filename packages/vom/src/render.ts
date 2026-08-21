@@ -75,6 +75,10 @@ const STRUCTURAL_ROLES = new Set([
   "webarea",
 ]);
 
+export function isVomStructuralRole(role: string | undefined): boolean {
+  return STRUCTURAL_ROLES.has(role?.toLowerCase() ?? "");
+}
+
 const SENSITIVE_MASK = "•••";
 const DEFAULT_MAX_DEPTH = Number.POSITIVE_INFINITY;
 const DEFAULT_MAX_TOKENS = Number.POSITIVE_INFINITY;
@@ -193,13 +197,16 @@ function shouldRender(node: VomNode): boolean {
   const role = normalizedRole(node);
   if (SKIP_ROLES.has(role)) return false;
   if (INTERACTIVE_ROLES.has(role)) return true;
-  if (STRUCTURAL_ROLES.has(role)) return true;
+  if (isVomStructuralRole(role)) return true;
 
   return cleaned(node.name) !== undefined;
 }
 
 export function isVomReferenceNode(node: VomNode): boolean {
-  return INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node);
+  return (
+    node.referenceable !== false &&
+    (INTERACTIVE_ROLES.has(normalizedRole(node)) || isUrlBearingStructuralAction(node))
+  );
 }
 
 function hasRecoveryHandler(node: VomNode): boolean {
@@ -219,14 +226,30 @@ function isContentEditable(node: VomNode): boolean {
   return contentEditable === "true" || contentEditable === "plaintext-only";
 }
 
-function iconKeyword(value: string | undefined): string | undefined {
-  const cleanedValue = cleaned(value);
-  if (!cleanedValue) return undefined;
-  const last = cleanedValue
-    .split(/[#/.\s:_-]+/)
+const ICON_REFERENCE_MARKERS = new Set(["glyph", "icon", "icons", "symbol"]);
+const ICON_REFERENCE_DECORATORS = new Set(["fill", "filled", "line", "outline", "outlined"]);
+
+function iconReferenceName(value: string | undefined): string | undefined {
+  const reference = cleaned(value);
+  if (!reference) return undefined;
+  const fragment = reference.includes("#") ? reference.slice(reference.lastIndexOf("#") + 1) : "";
+  const tokens = (fragment || reference)
+    ?.split(/[#/.\s:_-]+/)
     .filter(Boolean)
-    .pop();
-  return last && /^[a-z][a-z0-9_-]{1,32}$/i.test(last) ? last.toLowerCase() : undefined;
+    .map((token) => token.toLowerCase());
+  if (tokens.length === 0) return undefined;
+  if (fragment) {
+    const semanticTokens = tokens.filter(
+      (token) => !ICON_REFERENCE_MARKERS.has(token) && !ICON_REFERENCE_DECORATORS.has(token),
+    );
+    return semanticTokens.length > 0 ? semanticTokens.join(" ") : undefined;
+  }
+  const marker = tokens.findLastIndex((token) => ICON_REFERENCE_MARKERS.has(token));
+  if (marker < 0) return undefined;
+  const semanticTokens = tokens
+    .slice(marker + 1)
+    .filter((token) => !ICON_REFERENCE_DECORATORS.has(token));
+  return semanticTokens.length > 0 ? semanticTokens.join(" ") : undefined;
 }
 
 function iconHintFromSubtree(
@@ -238,12 +261,12 @@ function iconHintFromSubtree(
   for (const child of children.get(node.id) ?? []) {
     const attrs = child.attrs ?? {};
     const hint =
-      iconKeyword(attrs["aria-label"]) ??
-      iconKeyword(attrs.title) ??
-      iconKeyword(attrs.href) ??
-      iconKeyword(attrs["xlink:href"]) ??
-      iconKeyword(attrs.class) ??
-      iconKeyword(child.text);
+      cleaned(attrs["aria-label"]) ??
+      cleaned(attrs.title) ??
+      (normalizedRole(child) === "img" ? cleaned(child.name) : undefined) ??
+      (["img", "svg", "use"].includes(normalizedTag(child))
+        ? (iconReferenceName(attrs.href) ?? iconReferenceName(attrs["xlink:href"]))
+        : undefined);
     if (hint) return hint;
     const nested = iconHintFromSubtree(child, children, depth + 1);
     if (nested) return nested;
@@ -269,6 +292,7 @@ function recoveredRole(
   node: VomNode,
   children?: Map<number | null, VomNode[]>,
 ): string | undefined {
+  const currentRole = normalizedRole(node);
   const explicitRole = node.attrs?.role?.toLowerCase() ?? "";
   const hasHandler = hasRecoveryHandler(node);
   const focusable = isFocusable(node);
@@ -290,7 +314,9 @@ function recoveredRole(
       : "button";
   }
   if (hasHandler && hasName) return "button";
-  if (node.cursor === "pointer" && hasName) return "button";
+  if ((!currentRole || SKIP_ROLES.has(currentRole)) && node.cursor === "pointer" && hasName) {
+    return "button";
+  }
   return undefined;
 }
 
