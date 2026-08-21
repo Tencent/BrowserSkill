@@ -2,7 +2,7 @@
 
 use std::fs::File;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -93,7 +93,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn stage_file(sock: &PathBuf, session: &str, path: &PathBuf) -> Result<(String, String), CliError> {
+fn stage_file(sock: &Path, session: &str, path: &PathBuf) -> Result<(String, String), CliError> {
     let mut file = File::open(path)
         .with_context(|| format!("open upload file {}", path.display()))
         .map_err(CliError::Local)?;
@@ -114,7 +114,7 @@ fn stage_file(sock: &PathBuf, session: &str, path: &PathBuf) -> Result<(String, 
         .ok_or_else(|| CliError::Local(anyhow::anyhow!("upload file has no valid basename")))?
         .to_string();
     let begin: TransferBeginResult = crate::cli::business_rpc::call(
-        sock.clone(),
+        sock.to_path_buf(),
         "transfer-begin",
         Method::TransferBegin,
         Some(TransferBeginParams {
@@ -133,7 +133,7 @@ fn stage_file(sock: &PathBuf, session: &str, path: &PathBuf) -> Result<(String, 
                 break;
             }
             let reply: TransferChunkResult = crate::cli::business_rpc::call(
-                sock.clone(),
+                sock.to_path_buf(),
                 "transfer-chunk",
                 Method::TransferChunk,
                 Some(TransferChunkParams {
@@ -146,7 +146,7 @@ fn stage_file(sock: &PathBuf, session: &str, path: &PathBuf) -> Result<(String, 
             offset = reply.next_offset;
         }
         let _: TransferReadyResult = crate::cli::business_rpc::call(
-            sock.clone(),
+            sock.to_path_buf(),
             "transfer-finish",
             Method::TransferFinish,
             Some(TransferIdParams {
@@ -163,9 +163,9 @@ fn stage_file(sock: &PathBuf, session: &str, path: &PathBuf) -> Result<(String, 
     Ok((begin.transfer_id, name))
 }
 
-fn release(sock: &PathBuf, id: &str) -> Result<TransferReleaseResult, CliError> {
+fn release(sock: &Path, id: &str) -> Result<TransferReleaseResult, CliError> {
     crate::cli::business_rpc::call(
-        sock.clone(),
+        sock.to_path_buf(),
         "transfer-release",
         Method::TransferRelease,
         Some(TransferIdParams {
