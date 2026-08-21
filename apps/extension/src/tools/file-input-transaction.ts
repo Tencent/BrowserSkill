@@ -1,35 +1,43 @@
-// One upload transaction, independent of Page.fileChooserOpened delivery.
-// A transaction-scoped DOM listener records the file input actually activated
-// by the requested click and cancels its native default action. File System
-// Access picker entry points are replaced only for the same transaction, so a
-// non-input picker fails promptly without opening an OS dialog.
+// One upload transaction with an explicit browser-side commit boundary.
+// Chrome interception prevents a native chooser from escaping automation;
+// chooser events and a frame-scoped DOM probe are independent input-location
+// signals, so event delivery is not required for standard file inputs.
 
-import type { CdpTarget } from "@/browser-driver/frame-graph";
-import type { ClickResult, RpcError } from "@/transport/types";
+import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
+import { transferError } from "./errors";
+import type { ResolvedActionTarget } from "./interaction";
 import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
+const ACTIVATION_GRACE_MS = 1_000;
+const PROBE_INTERVAL_MS = 20;
 
-type UploadPhase = "arm_input_probe" | "trigger" | "resolve_input" | "set_files";
+type UploadPhase =
+  | "arm_interception"
+  | "arm_input_probe"
+  | "trigger"
+  | "resolve_input"
+  | "set_files"
+  | "cleanup";
 
 interface RuntimeReply {
-  result?: {
-    value?: unknown;
-    objectId?: string;
-  };
-  exceptionDetails?: {
-    text?: string;
-    exception?: { description?: string };
-  };
+  result?: { value?: unknown; objectId?: string };
+  exceptionDetails?: { text?: string; exception?: { description?: string } };
+}
+
+interface ChooserEvent {
+  frameId?: string;
+  backendNodeId?: number;
+  mode?: "selectSingle" | "selectMultiple";
 }
 
 export interface FileInputTransactionOptions {
   cdp: CdpRunner;
-  target: CdpTarget;
+  actionTarget: ResolvedActionTarget;
   files: string[];
   timeoutMs: number;
   signal?: AbortSignal;
-  trigger(timeoutMs: number): Promise<ClickResult | RpcError>;
+  trigger(): Promise<ClickResult | RpcError>;
 }
 
 export interface FileInputTransactionResult {
@@ -38,10 +46,7 @@ export interface FileInputTransactionResult {
 }
 
 class BoundedWaitError extends Error {
-  constructor(
-    readonly kind: "timeout" | "aborted",
-    message: string,
-  ) {
+  constructor(readonly kind: "timeout" | "aborted", message: string) {
     super(message);
   }
 }
@@ -77,15 +82,6 @@ async function waitBounded<T>(
   }
 }
 
-function uploadError(
-  code: RpcError["code"],
-  message: string,
-  reason: "file_input_probe_failed" | "file_input_not_activated" | "set_file_input_failed",
-  phase: UploadPhase,
-): RpcError {
-  return { code, message, data: { reason, phase } };
-}
-
 function runtimeError(reply: RuntimeReply, fallback: string): Error | null {
   if (!reply.exceptionDetails) return null;
   return new Error(
@@ -93,25 +89,124 @@ function runtimeError(reply: RuntimeReply, fallback: string): Error | null {
   );
 }
 
+function transferFailure(
+  code: RpcError["code"],
+  reason: "file_input_probe_failed" | "file_input_not_activated" | "set_file_input_failed",
+  message: string,
+  effectState: TransferEffectState,
+  phase: UploadPhase,
+): RpcError {
+  return transferError(code, reason, message, { effectState, phase });
+}
+
+function enrichFailure(error: RpcError, effectState: TransferEffectState, phase: UploadPhase): RpcError {
+  return {
+    ...error,
+    data: { ...error.data, effect_state: effectState, phase },
+  };
+}
+
+function sameTarget(
+  source: { tabId?: number; sessionId?: string },
+  target: { tabId: number; sessionId?: string },
+): boolean {
+  return source.tabId === target.tabId && source.sessionId === target.sessionId;
+}
+
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  await waitBounded(
+    new Promise((resolve) => setTimeout(resolve, ms)),
+    Date.now() + ms + 1,
+    signal,
+    "upload activation probe timed out",
+  );
+}
+
+async function callOnTrigger<T = RuntimeReply>(
+  options: FileInputTransactionOptions,
+  objectId: string,
+  functionDeclaration: string,
+  args: unknown[],
+  returnByValue: boolean,
+): Promise<T> {
+  return sendToCdpTarget<T>(options.cdp, options.actionTarget.cdpTarget, "Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration,
+    arguments: args.map((value) => ({ value })),
+    returnByValue,
+    awaitPromise: false,
+  });
+}
+
 export async function uploadThroughActivatedFileInput(
   options: FileInputTransactionOptions,
 ): Promise<FileInputTransactionResult | RpcError> {
   const deadline = Date.now() + options.timeoutMs;
+  const target = options.actionTarget.cdpTarget;
   const objectGroup = `bsk-upload-${crypto.randomUUID()}`;
   const stateKey = `__bskUpload_${crypto.randomUUID().replaceAll("-", "")}`;
-  const stateKeyLiteral = JSON.stringify(stateKey);
-  let probeAttempted = false;
+  const chooserEvents: ChooserEvent[] = [];
+  let interceptionArmed = false;
+  let probeArmed = false;
+  let triggerObjectId: string | undefined;
+  let outcome: FileInputTransactionResult | RpcError = transferFailure(
+    "protocol_error",
+    "file_input_probe_failed",
+    "upload transaction ended without an outcome",
+    "none",
+    "cleanup",
+  );
+
+  const chooserSubscription = options.cdp.onEvent?.((source, method, raw) => {
+    if (method !== "Page.fileChooserOpened" || !sameTarget(source, target)) return;
+    const event = raw as ChooserEvent;
+    chooserEvents.push(event);
+  });
 
   try {
     try {
-      probeAttempted = true;
+      await waitBounded(
+        sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+          enabled: true,
+        }),
+        deadline,
+        options.signal,
+        "arming native file chooser interception timed out",
+      );
+      interceptionArmed = true;
+    } catch (err) {
+      outcome = transferFailure(
+        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+        "file_input_probe_failed",
+        err instanceof Error ? err.message : String(err),
+        "none",
+        "arm_interception",
+      );
+      return outcome;
+    }
+
+    try {
+      const resolved = await waitBounded(
+        sendToCdpTarget<{ object?: { objectId?: string } }>(options.cdp, target, "DOM.resolveNode", {
+          backendNodeId: options.actionTarget.backendNodeId,
+          objectGroup,
+        }),
+        deadline,
+        options.signal,
+        "resolving upload trigger timed out",
+      );
+      triggerObjectId = resolved.object?.objectId;
+      if (!triggerObjectId) throw new Error("DOM.resolveNode returned no trigger objectId");
+
       const armed = await waitBounded(
-        sendToCdpTarget<RuntimeReply>(options.cdp, options.target, "Runtime.evaluate", {
-          expression: `(() => {
-            const key = ${stateKeyLiteral};
-            const owner = globalThis;
-            const doc = document;
-            const state = { inputs: [], listener: null, pickerCalls: [], pickers: [] };
+        callOnTrigger<RuntimeReply>(
+          options,
+          triggerObjectId,
+          `function(key) {
+            const doc = this.ownerDocument;
+            const owner = doc.defaultView;
+            if (!owner) return false;
+            const state = { inputs: [], listener: null };
             Object.defineProperty(owner, key, { value: state, configurable: true });
             state.listener = event => {
               const path = typeof event.composedPath === "function" ? event.composedPath() : [];
@@ -123,143 +218,169 @@ export async function uploadThroughActivatedFileInput(
               }
             };
             doc.addEventListener("click", state.listener, true);
-            const win = doc.defaultView;
-            for (const name of ["showOpenFilePicker", "showSaveFilePicker", "showDirectoryPicker"]) {
-              if (!win || typeof win[name] !== "function") continue;
-              const hadOwn = Object.prototype.hasOwnProperty.call(win, name);
-              const descriptor = Object.getOwnPropertyDescriptor(win, name);
-              state.pickers.push({ name, hadOwn, descriptor });
-              Object.defineProperty(win, name, {
-                configurable: true,
-                enumerable: descriptor?.enumerable ?? true,
-                writable: true,
-                value: () => {
-                  state.pickerCalls.push(name);
-                  return Promise.reject(
-                    new DOMException("Picker intercepted by BrowserSkill", "AbortError")
-                  );
-                },
-              });
-            }
             return true;
-          })()`,
-          objectGroup,
-          returnByValue: true,
-        }),
+          }`,
+          [stateKey],
+          true,
+        ),
         deadline,
         options.signal,
-        "arming file input probe timed out",
+        "arming frame-scoped file input probe timed out",
       );
       const armError = runtimeError(armed, "failed to arm file input probe");
-      if (armError) throw armError;
+      if (armError || armed.result?.value !== true) {
+        throw armError ?? new Error("file input probe did not arm");
+      }
+      probeArmed = true;
     } catch (err) {
-      if (err instanceof BoundedWaitError && err.kind === "aborted") throw err;
-      return uploadError(
+      outcome = transferFailure(
         err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        err instanceof Error ? err.message : String(err),
         "file_input_probe_failed",
+        err instanceof Error ? err.message : String(err),
+        "none",
         "arm_input_probe",
       );
+      return outcome;
     }
 
     let click: ClickResult | RpcError;
     try {
       click = await waitBounded(
-        options.trigger(remainingMs(deadline)),
+        options.trigger(),
         deadline,
         options.signal,
         "upload trigger timed out",
       );
     } catch (err) {
-      if (err instanceof BoundedWaitError && err.kind === "aborted") throw err;
-      return uploadError(
+      outcome = transferFailure(
         err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        err instanceof Error ? err.message : String(err),
         "file_input_probe_failed",
+        err instanceof Error ? err.message : String(err),
+        "none",
         "trigger",
       );
+      return outcome;
     }
-    if (isRpcError(click)) return click;
+    if (isRpcError(click)) {
+      outcome = enrichFailure(click, "none", "trigger");
+      return outcome;
+    }
 
     try {
-      const summary = await waitBounded(
-        sendToCdpTarget<RuntimeReply>(options.cdp, options.target, "Runtime.evaluate", {
-          expression: `(() => {
-            const s = globalThis[${stateKeyLiteral}];
-            return s
-              ? { count: s.inputs.length, multiple: s.inputs[0]?.multiple === true,
-                  pickerCall: s.pickerCalls[0] }
+      const activationDeadline = Math.min(deadline, Date.now() + ACTIVATION_GRACE_MS);
+      let summary: { count: number; multiple: boolean } = { count: 0, multiple: false };
+      while (Date.now() < activationDeadline) {
+        if (chooserEvents.length > 0) break;
+        const reply = await callOnTrigger<RuntimeReply>(
+          options,
+          triggerObjectId,
+          `function(key) {
+            const state = this.ownerDocument.defaultView?.[key];
+            return state
+              ? { count: state.inputs.length, multiple: state.inputs[0]?.multiple === true }
               : { count: 0, multiple: false };
-          })()`,
-          returnByValue: true,
-        }),
-        deadline,
-        options.signal,
-        "resolving activated file input timed out",
-      );
-      const summaryError = runtimeError(summary, "failed to inspect activated file input");
-      if (summaryError) throw summaryError;
-      const value = summary.result?.value as
-        | { count?: unknown; multiple?: unknown; pickerCall?: unknown }
-        | undefined;
-      const count = typeof value?.count === "number" ? value.count : 0;
-      const multiple = value?.multiple === true;
-      if (typeof value?.pickerCall === "string") {
-        return uploadError(
-          "unsupported",
-          `upload trigger invoked ${value.pickerCall} instead of an input[type=file]`,
-          "file_input_not_activated",
-          "resolve_input",
+          }`,
+          [stateKey],
+          true,
         );
-      }
-      if (count !== 1) {
-        return uploadError(
-          "unsupported",
-          count === 0
-            ? "upload trigger did not activate an input[type=file]"
-            : "upload trigger activated more than one input[type=file]",
-          "file_input_not_activated",
-          "resolve_input",
-        );
-      }
-      if (!multiple && options.files.length !== 1) {
-        return { code: "invalid_params", message: "file input accepts exactly one file" };
+        const summaryError = runtimeError(reply, "failed to inspect activated file input");
+        if (summaryError) throw summaryError;
+        const value = reply.result?.value as { count?: unknown; multiple?: unknown } | undefined;
+        summary = {
+          count: typeof value?.count === "number" ? value.count : 0,
+          multiple: value?.multiple === true,
+        };
+        if (summary.count > 0) break;
+        await delay(Math.min(PROBE_INTERVAL_MS, remainingMs(activationDeadline)), options.signal);
       }
 
-      const input = await waitBounded(
-        sendToCdpTarget<RuntimeReply>(options.cdp, options.target, "Runtime.evaluate", {
-          expression: `globalThis[${stateKeyLiteral}]?.inputs[0]`,
-          objectGroup,
-          returnByValue: false,
-        }),
-        deadline,
-        options.signal,
-        "resolving activated file input object timed out",
-      );
-      const inputError = runtimeError(input, "failed to resolve activated file input object");
-      if (inputError) throw inputError;
-      const inputObjectId = input.result?.objectId;
-      if (!inputObjectId) throw new Error("activated file input returned no objectId");
+      if (chooserEvents.length > 1) {
+        outcome = transferFailure(
+          "unsupported",
+          "file_input_not_activated",
+          "upload trigger activated more than one file chooser",
+          "none",
+          "resolve_input",
+        );
+        return outcome;
+      }
 
-      const described = await waitBounded(
-        sendToCdpTarget<{ node?: { backendNodeId?: number } }>(
+      const chooser = chooserEvents[0];
+      let backendNodeId: number | undefined;
+      let multiple = summary.multiple;
+      if (chooser) {
+        if (
+          options.actionTarget.frameId &&
+          chooser.frameId !== options.actionTarget.frameId
+        ) {
+          outcome = transferFailure(
+            "unsupported",
+            "file_input_not_activated",
+            "upload trigger activated a file chooser in a different frame",
+            "none",
+            "resolve_input",
+          );
+          return outcome;
+        }
+        if (typeof chooser.backendNodeId !== "number") {
+          outcome = transferFailure(
+            "unsupported",
+            "file_input_not_activated",
+            "upload trigger invoked a non-input file picker",
+            "none",
+            "resolve_input",
+          );
+          return outcome;
+        }
+        backendNodeId = chooser.backendNodeId;
+        multiple = chooser.mode === "selectMultiple";
+      } else {
+        if (summary.count !== 1) {
+          outcome = transferFailure(
+            "unsupported",
+            "file_input_not_activated",
+            summary.count === 0
+              ? "upload trigger did not activate an input[type=file]"
+              : "upload trigger activated more than one input[type=file]",
+            "none",
+            "resolve_input",
+          );
+          return outcome;
+        }
+        const input = await callOnTrigger<RuntimeReply>(
+          options,
+          triggerObjectId,
+          `function(key) { return this.ownerDocument.defaultView?.[key]?.inputs[0]; }`,
+          [stateKey],
+          false,
+        );
+        const inputError = runtimeError(input, "failed to resolve activated file input object");
+        if (inputError) throw inputError;
+        if (!input.result?.objectId) throw new Error("activated file input returned no objectId");
+        const described = await sendToCdpTarget<{ node?: { backendNodeId?: number } }>(
           options.cdp,
-          options.target,
+          target,
           "DOM.describeNode",
-          { objectId: inputObjectId },
-        ),
-        deadline,
-        options.signal,
-        "describing activated file input timed out",
-      );
-      const backendNodeId = described.node?.backendNodeId;
-      if (typeof backendNodeId !== "number") {
-        throw new Error("DOM.describeNode returned no file input backendNodeId");
+          { objectId: input.result.objectId },
+        );
+        backendNodeId = described.node?.backendNodeId;
+        if (typeof backendNodeId !== "number") {
+          throw new Error("DOM.describeNode returned no file input backendNodeId");
+        }
+      }
+
+      if (!multiple && options.files.length !== 1) {
+        outcome = enrichFailure(
+          { code: "invalid_params", message: "file input accepts exactly one file" },
+          "none",
+          "resolve_input",
+        );
+        return outcome;
       }
 
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, options.target, "DOM.setFileInputFiles", {
+          sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
             files: options.files,
             backendNodeId,
           }),
@@ -268,72 +389,87 @@ export async function uploadThroughActivatedFileInput(
           "setting file input files timed out",
         );
       } catch (err) {
-        if (err instanceof BoundedWaitError && err.kind === "aborted") throw err;
-        return uploadError(
+        outcome = transferFailure(
           err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-          err instanceof Error ? err.message : String(err),
           "set_file_input_failed",
+          err instanceof Error ? err.message : String(err),
+          "unknown",
           "set_files",
         );
+        return outcome;
       }
-      return { click, multiple };
+      outcome = { click, multiple };
+      return outcome;
     } catch (err) {
-      if (err instanceof BoundedWaitError && err.kind === "aborted") throw err;
-      return uploadError(
+      outcome = transferFailure(
         err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
-        err instanceof Error ? err.message : String(err),
         "file_input_probe_failed",
+        err instanceof Error ? err.message : String(err),
+        "none",
         "resolve_input",
       );
+      return outcome;
     }
-  } catch (err) {
-    if (err instanceof BoundedWaitError && err.kind === "aborted") {
-      return { code: "cancelled", message: "upload transaction aborted" };
-    }
-    throw err;
   } finally {
-    if (probeAttempted) {
+    chooserSubscription?.dispose();
+    let cleanupFailed = false;
+    if (probeArmed && triggerObjectId) {
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, options.target, "Runtime.evaluate", {
-            expression: `(() => {
-              const key = ${stateKeyLiteral};
-              const state = globalThis[key];
-              if (state?.listener) {
-                document.removeEventListener("click", state.listener, true);
-              }
-              const win = document.defaultView;
-              if (win) {
-                for (const picker of state?.pickers || []) {
-                  try {
-                    if (picker.hadOwn && picker.descriptor) {
-                      Object.defineProperty(win, picker.name, picker.descriptor);
-                    } else {
-                      delete win[picker.name];
-                    }
-                  } catch {}
-                }
-              }
-              delete globalThis[key];
-            })()`,
-          }),
+          callOnTrigger(
+            options,
+            triggerObjectId,
+            `function(key) {
+              const owner = this.ownerDocument.defaultView;
+              const state = owner?.[key];
+              if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
+              if (owner) delete owner[key];
+            }`,
+            [stateKey],
+            true,
+          ),
           Date.now() + CLEANUP_TIMEOUT_MS,
           undefined,
           "cleaning file input probe timed out",
         );
       } catch {
-        // Navigation may have invalidated the object; its document is gone too.
+        cleanupFailed = true;
+      }
+    }
+    if (interceptionArmed) {
+      try {
+        await waitBounded(
+          sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+            enabled: false,
+            cancel: true,
+          }),
+          Date.now() + CLEANUP_TIMEOUT_MS,
+          undefined,
+          "disabling file chooser interception timed out",
+        );
+      } catch {
+        cleanupFailed = true;
       }
     }
     try {
       await waitBounded(
-        sendToCdpTarget(options.cdp, options.target, "Runtime.releaseObjectGroup", {
-          objectGroup,
-        }),
+        sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
         Date.now() + CLEANUP_TIMEOUT_MS,
         undefined,
         "releasing upload object group timed out",
       );
-    } catch {}
+    } catch {
+      cleanupFailed = true;
+    }
+
+    const effect = isRpcError(outcome)
+      ? (outcome.data?.effect_state as TransferEffectState | undefined)
+      : "committed";
+    if (effect === "unknown" || cleanupFailed) {
+      await options.cdp.detach?.(target.tabId);
+    }
+    if (cleanupFailed && isRpcError(outcome)) {
+      outcome.data = { ...outcome.data, cleanup_state: "failed" };
+    }
   }
 }

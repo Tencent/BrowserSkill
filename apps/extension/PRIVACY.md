@@ -51,7 +51,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`alarms`** — Periodically wake the service worker to keep the local WebSocket connection alive.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the local WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
-- **`downloads`** — Observe and, on cancellation, stop the one browser download initiated by an active `bsk download` command. It is not used to enumerate download history.
+- **`downloads`** — Correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unclaimed downloads.
 - **`storage`** — Persist a random instance ID and optional label in `chrome.storage.local`.
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. The Extension does **not** read or transmit page content from sites the agent is not actively driving.
 

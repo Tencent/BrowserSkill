@@ -258,7 +258,20 @@ describe("ToolDispatcher", () => {
       if (method === "DOM.getContentQuads") {
         return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] } as T;
       }
+      if (method === "DOM.resolveNode") {
+        return { object: { objectId: "trigger-object" } } as T;
+      }
       if (method === "DOM.describeNode") return { node: { backendNodeId: 456 } } as T;
+      if (method === "Runtime.callFunctionOn") {
+        const declaration = (params as { functionDeclaration?: string }).functionDeclaration ?? "";
+        if (declaration.includes("count: state.inputs.length")) {
+          return { result: { value: { count: 1, multiple: false } } } as T;
+        }
+        if (declaration.includes("inputs[0]")) {
+          return { result: { objectId: "input-object" } } as T;
+        }
+        return { result: { value: true } } as T;
+      }
       if (method === "Runtime.evaluate") {
         const expression = (params as { expression?: string }).expression ?? "";
         if (expression.includes("overlayDetails")) {
