@@ -110,6 +110,28 @@ describe("tooltip name enrichment", () => {
     expect(cdp.sendToTarget).not.toHaveBeenCalled();
   });
 
+  it("does not collect supplemental names from form controls", async () => {
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToTarget: vi.fn(async () => ({ executionContextId: 12 })) as CdpRunner["sendToTarget"],
+    };
+    const inputDocument = document({ tabId: 8 }, 602);
+    inputDocument.domNodes[0] = {
+      ...inputDocument.domNodes[0],
+      tag: "input",
+      attrs: { type: "email" },
+      formValue: "user@example.com",
+      formDefaultValue: "",
+      formState: "filled",
+    };
+
+    const names = await probeTooltipNames(cdp, 8, [inputDocument], semantics([inputDocument]));
+
+    expect(names.size).toBe(0);
+    expect(cdp.send).not.toHaveBeenCalled();
+    expect(cdp.sendToTarget).not.toHaveBeenCalled();
+  });
+
   it("keeps tooltip evidence isolated across sibling frame sessions", async () => {
     let hoveredX = -10;
     const cdp: CdpRunner = {

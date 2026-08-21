@@ -54,12 +54,11 @@ import {
   collectOverlayExcludedBackendIds,
 } from "./vom/capture";
 import { type CapturedFrameDocument, captureFrameData } from "./vom/frame-capture";
+import { probeTooltipNames } from "./vom/name-enrichment";
 import {
   type CaptureVomObservationResult,
   projectRecordSafeObservation,
 } from "./vom/record-safe-observation";
-import type { FrameDocument } from "./vom/frame-document";
-import { probeTooltipNames } from "./vom/name-enrichment";
 import {
   buildSemanticGraph,
   buildSemanticVomScene,
@@ -812,7 +811,7 @@ export function buildFrameVomScene(
   options: BuildVomSceneOptions = {},
 ): VomScene {
   const scene = buildSemanticVomScene({
-    documents: documents as FrameDocument<SemanticAxNode>[],
+    documents,
     viewport: captured.viewport,
     rootFrameId: captured.rootFrameId,
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
@@ -1038,7 +1037,7 @@ export async function captureVomObservation(
       ? legacyFrameDocuments(documents[0].axNodes, captured, url, documents[0].target)
       : documents;
   const semanticGraph = buildSemanticGraph({
-    documents: normalizedDocuments as FrameDocument<SemanticAxNode>[],
+    documents: normalizedDocuments,
     viewport: captured.viewport,
     rootFrameId: captured.rootFrameId,
     excludedBackendNodeIds: captured.excludedBackendNodeIds,

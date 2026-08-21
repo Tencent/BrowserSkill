@@ -381,6 +381,58 @@ describe("semantic VOM graph", () => {
     expect(group?.name).toBeUndefined();
     expect(group && isVomReferenceNode(group)).toBe(false);
     expect(buttons.map((node) => node.parentId)).toEqual([group?.id, group?.id]);
+
+    const rendered = renderVom(scene);
+    const lines = rendered.text.split("\n");
+    const groupLine = lines.findIndex((line) => line.trim() === "group");
+    expect(groupLine).toBeGreaterThanOrEqual(0);
+    for (const ref of rendered.refs) {
+      expect(ref.line).toBeGreaterThan(groupLine);
+      expect(lines[ref.line]).toMatch(/^\s+@e\d+ button/);
+    }
+  });
+
+  it("never promotes a form value into its semantic name through supplemental evidence", () => {
+    const secret = "user@example.com";
+    const input = {
+      ...dom(2, 1, "input", { type: "email" }),
+      formValue: secret,
+      formDefaultValue: "",
+      formState: "filled" as const,
+    };
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      supplementalNames: new Map([["main\u00002", secret]]),
+      identifierFallback: false,
+      documents: [
+        document(
+          "main",
+          [
+            {
+              nodeId: "root",
+              backendDOMNodeId: 1,
+              role: { type: "role", value: "RootWebArea" },
+              childIds: ["email"],
+            },
+            {
+              nodeId: "email",
+              parentId: "root",
+              backendDOMNodeId: 2,
+              role: { type: "role", value: "textbox" },
+              value: { value: secret },
+            },
+          ],
+          [dom(1, null, "body"), input],
+        ),
+      ],
+    });
+
+    const field = scene.nodes.find((node) => node.backendNodeId === 2);
+    expect(field?.name).toBeUndefined();
+    const rendered = renderVom(scene, { redactValues: true });
+    expect(rendered.text).toContain("•••");
+    expect(JSON.stringify(rendered)).not.toContain(secret);
   });
 
   it("keeps uncertain single-branch wrappers flat", () => {
