@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;

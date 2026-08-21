@@ -63,6 +63,10 @@ pub struct DownloadParams {
     /// Daemon-injected relative directory beneath Chrome's Downloads root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_relative_dir: Option<String>,
+    /// Daemon-injected authoritative transfer size limit. The extension uses
+    /// it only for early cancellation; daemon import remains the final check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_byte_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -163,8 +167,10 @@ mod tests {
             tab_id: None,
             timeout_ms: None,
             browser_relative_dir: None,
+            max_byte_size: None,
         })
         .unwrap();
         assert!(value.get("browser_relative_dir").is_none());
+        assert!(value.get("max_byte_size").is_none());
     }
 }

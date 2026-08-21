@@ -3,9 +3,13 @@
 // transaction module.
 
 import type { SessionManager } from "@/session-manager/manager";
-import type { ClickParams, RpcError, UploadParams, UploadResult } from "@/transport/types";
+import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
-import { handleClick, type InteractionDeps, resolveBackendNode } from "./interaction";
+import {
+  clickResolvedTarget,
+  type InteractionDeps,
+  resolveActionTarget,
+} from "./interaction";
 import {
   type CdpRunner,
   enforceAgentWindow,
@@ -38,25 +42,16 @@ export async function handleUpload(
   ) {
     return { code: "invalid_params", message: "upload requires daemon-staged files" };
   }
-  const address = await resolveBackendNode(deps.cdp, ctx, target, params, "upload");
+  const address = await resolveActionTarget(deps.cdp, ctx, target, params, "upload");
   if (isRpcError(address)) return address;
   const timeoutMs = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
   const transaction = await uploadThroughActivatedFileInput({
     cdp: deps.cdp,
-    target: address.cdpTarget,
+    actionTarget: address,
     files: params.files.map((file) => file.staged_path as string),
     timeoutMs,
     signal: deps.signal,
-    trigger: (remaining) => {
-      const clickParams: ClickParams = {
-        session_id: params.session_id,
-        ref: params.ref,
-        selector: params.selector,
-        tab_id: params.tab_id,
-        timeout_ms: Math.max(1, remaining),
-      };
-      return handleClick(manager, clickParams, deps);
-    },
+    trigger: () => clickResolvedTarget(ctx, address, {}, deps),
   });
   if (isRpcError(transaction)) return transaction;
   return {

@@ -37,10 +37,18 @@ export type RpcErrorReason =
   | "file_input_not_activated"
   | "set_file_input_failed"
   | "download_capture_failed"
+  | "transfer_outcome_unknown"
+  | "transfer_timeout"
   | "cleanup_failed";
+
+export type TransferEffectState = "none" | "committed" | "unknown";
+export type TransferCleanupState = "complete" | "failed";
 
 export interface RpcErrorData {
   reason?: RpcErrorReason;
+  effect_state?: TransferEffectState;
+  phase?: string;
+  cleanup_state?: TransferCleanupState;
   [key: string]: unknown;
 }
 
@@ -533,6 +541,7 @@ export interface DownloadParams {
   tab_id?: number;
   timeout_ms?: number;
   browser_relative_dir?: string;
+  max_byte_size?: number;
 }
 
 export interface DownloadResult {

@@ -49,38 +49,43 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let mut staged = Vec::new();
-    let result = (|| {
-        for path in &args.files {
-            staged.push(stage_file(&info.sock_path, &args.session, path)?);
-        }
-        let params = UploadParams {
-            session_id: args.session,
-            ref_,
-            selector,
-            tab_id: args.tab_id,
-            files: staged
-                .iter()
-                .map(|(id, name)| UploadFile {
-                    transfer_id: id.clone(),
-                    name: name.clone(),
-                    staged_path: None,
-                })
-                .collect(),
-            timeout_ms: Some(args.timeout),
-        };
-        crate::cli::business_rpc::call::<_, UploadResult>(
-            info.sock_path.clone(),
-            "upload",
-            Method::ToolUpload,
-            Some(params),
-            ipc_timeout(args.timeout),
-        )
-    })();
-    if result.is_err() {
-        for (id, _) in &staged {
-            let _ = release(&info.sock_path, id);
+    for path in &args.files {
+        match stage_file(&info.sock_path, &args.session, path) {
+            Ok(file) => staged.push(file),
+            Err(err) => {
+                for (id, _) in &staged {
+                    let _ = release(&info.sock_path, id);
+                }
+                return Err(err);
+            }
         }
     }
+    let params = UploadParams {
+        session_id: args.session,
+        ref_,
+        selector,
+        tab_id: args.tab_id,
+        files: staged
+            .iter()
+            .map(|(id, name)| UploadFile {
+                transfer_id: id.clone(),
+                name: name.clone(),
+                staged_path: None,
+            })
+            .collect(),
+        timeout_ms: Some(args.timeout),
+    };
+    let result = crate::cli::business_rpc::call::<_, UploadResult>(
+        info.sock_path.clone(),
+        "upload",
+        Method::ToolUpload,
+        Some(params),
+        ipc_timeout(args.timeout),
+    );
+    // Once tool.upload is dispatched, staging ownership belongs to the
+    // session. A transport timeout cannot prove that Chrome did not attach
+    // the file, so releasing here could invalidate a late successful attach.
+    // Session teardown remains the single cleanup boundary after dispatch.
     let reply = result?;
     match format {
         Format::Json => println!("{}", serde_json::to_string_pretty(&reply).unwrap()),

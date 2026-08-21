@@ -40,6 +40,67 @@ struct Entry {
     ready: bool,
 }
 
+/// Browser download path after the daemon has verified that it belongs to
+/// the capability minted for this transfer. From this point onward the daemon
+/// owns cleanup on every error path; unvalidated arbitrary paths are never
+/// removed.
+#[derive(Debug)]
+struct ValidatedBrowserFile {
+    path: PathBuf,
+    parent: PathBuf,
+    cleanup_armed: bool,
+}
+
+impl ValidatedBrowserFile {
+    fn validate(reported_path: &Path, transfer_id: &str) -> Result<Self, RpcError> {
+        if !reported_path.is_absolute() {
+            return Err(permission(
+                "download path is outside its browser capability",
+            ));
+        }
+        let expected_parent = Path::new("BrowserSkill").join(transfer_id);
+        let parent = reported_path
+            .parent()
+            .ok_or_else(|| permission("download path has no parent directory"))?;
+        if !parent.ends_with(&expected_parent) {
+            return Err(permission(
+                "download escaped its browser capability directory",
+            ));
+        }
+        for path in [reported_path, parent] {
+            if fs::symlink_metadata(path)
+                .map_err(io_error)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(permission("download capability path contains a symlink"));
+            }
+        }
+        Ok(Self {
+            path: reported_path.to_path_buf(),
+            parent: parent.to_path_buf(),
+            cleanup_armed: true,
+        })
+    }
+
+    fn remove_source(mut self) -> Result<(), RpcError> {
+        remove_if_present(&self.path).map_err(io_error)?;
+        remove_dir_if_present(&self.parent).map_err(io_error)?;
+        self.cleanup_armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ValidatedBrowserFile {
+    fn drop(&mut self) {
+        if !self.cleanup_armed {
+            return;
+        }
+        let _ = remove_if_present(&self.path);
+        let _ = remove_dir_if_present(&self.parent);
+    }
+}
+
 #[derive(Debug)]
 pub struct DownloadStaging {
     pub transfer_id: String,
@@ -259,30 +320,11 @@ impl TransferRegistry {
         let entry = entries
             .get_mut(id)
             .ok_or_else(|| not_found("download transfer not found"))?;
-        if entry.direction != Direction::Download || !reported_path.is_absolute() {
-            return Err(permission(
-                "download path is outside its browser capability",
-            ));
+        if entry.direction != Direction::Download {
+            return Err(permission("transfer is not a download capability"));
         }
-        let expected_parent = Path::new("BrowserSkill").join(id);
-        let reported_parent = reported_path
-            .parent()
-            .ok_or_else(|| permission("download path has no parent directory"))?;
-        if !reported_parent.ends_with(&expected_parent) {
-            return Err(permission(
-                "download escaped its browser capability directory",
-            ));
-        }
-        for path in [reported_path, reported_parent] {
-            if fs::symlink_metadata(path)
-                .map_err(io_error)?
-                .file_type()
-                .is_symlink()
-            {
-                return Err(permission("download capability path contains a symlink"));
-            }
-        }
-        let canonical = reported_path.canonicalize().map_err(io_error)?;
+        let browser_file = ValidatedBrowserFile::validate(reported_path, id)?;
+        let canonical = browser_file.path.canonicalize().map_err(io_error)?;
         let meta = fs::metadata(&canonical).map_err(io_error)?;
         if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
             return Err(invalid(
@@ -310,8 +352,7 @@ impl TransferRegistry {
         entry.written = copied;
         entry.expected_size = Some(copied);
         entry.ready = true;
-        let _ = fs::remove_file(&canonical);
-        let _ = fs::remove_dir(reported_parent);
+        browser_file.remove_source()?;
         Ok(copied)
     }
 
@@ -389,6 +430,22 @@ fn set_private_file(file: &File) -> std::io::Result<()> {
         file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+fn remove_dir_if_present(path: &Path) -> std::io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 fn safe_upload_basename(name: &str) -> Result<&str, RpcError> {
@@ -570,6 +627,7 @@ mod tests {
                 .import_download(&staging.transfer_id, &outside)
                 .is_err()
         );
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
 
         let browser_dir = temp
             .path()
@@ -599,6 +657,31 @@ mod tests {
                 .unwrap(),
             b"result"
         );
+    }
+
+    #[test]
+    fn validated_oversized_browser_download_is_removed_on_rejection() {
+        let (temp, registry) = registry();
+        let staging = registry.begin_download("s1").unwrap();
+        let browser_dir = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging.transfer_id);
+        fs::create_dir_all(&browser_dir).unwrap();
+        let inside = browser_dir.join("oversized.bin");
+        File::create(&inside)
+            .unwrap()
+            .set_len(MAX_TRANSFER_BYTES + 1)
+            .unwrap();
+
+        assert!(
+            registry
+                .import_download(&staging.transfer_id, &inside)
+                .is_err()
+        );
+        assert!(!inside.exists());
+        assert!(!browser_dir.exists());
     }
 
     #[test]
