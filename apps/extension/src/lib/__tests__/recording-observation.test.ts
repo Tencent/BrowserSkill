@@ -18,22 +18,13 @@ function sessionWithInput(redactValues = false): RecordingObservationSession {
     rootFrameId: "root",
     index: new ObservationNodeIndex({
       rootFrameId: "root",
-      frameDocuments: [
+      matchNodes: [
         {
           frameId: "root",
-          domNodes: [
-            {
-              backendNodeId: 42,
-              parentBackendNodeId: null,
-              frameId: "root",
-              tag: "input",
-              attrs: {},
-              rect: { x: 20, y: 40, w: 200, h: 30 },
-              paintOrder: 1,
-              position: "static",
-              pointerEvents: "auto",
-            },
-          ],
+          backendNodeId: 42,
+          tag: "input",
+          rect: { x: 20, y: 40, w: 200, h: 30 },
+          localRect: { x: 20, y: 40, w: 200, h: 30 },
         },
       ],
       refs: [{ ref: "e1", backendNodeId: 42, role: "textbox", name: "Password", line: 1 }],
