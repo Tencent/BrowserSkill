@@ -662,7 +662,6 @@ export interface EmulateResult {
 
 export const TRACE_VERSION_V3 = 3;
 export const TRACE_VERSION_V2 = 2;
-export const DEFAULT_TRACE_VERSION = 2;
 export const VOM_FORMAT_VERSION = 1;
 
 export interface TargetDescriptorV3 {
