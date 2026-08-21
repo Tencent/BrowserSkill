@@ -55,7 +55,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         selector,
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
-        staging_path: None,
+        browser_relative_dir: None,
     };
     let reply: DownloadResult = crate::cli::business_rpc::call(
         info.sock_path.clone(),
@@ -82,7 +82,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
             value["path"] = serde_json::json!(args.out.to_string_lossy());
             if let Some(obj) = value.as_object_mut() {
                 obj.remove("transfer_id");
-                obj.remove("staged_path");
+                obj.remove("browser_path");
             }
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         }

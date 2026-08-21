@@ -526,6 +526,7 @@ export class ToolDispatcher {
                   cdp: this.cdp,
                   tabsApi: chromeTabsApi,
                   signal,
+                  bypassOverlay,
                 })
               : Promise.resolve({
                   code: "unsupported",
@@ -542,6 +543,7 @@ export class ToolDispatcher {
                   cdp: this.cdp,
                   tabsApi: chromeTabsApi,
                   signal,
+                  bypassOverlay,
                 })
               : Promise.resolve({
                   code: "unsupported",

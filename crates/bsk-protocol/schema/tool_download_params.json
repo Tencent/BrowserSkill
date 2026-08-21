@@ -6,6 +6,13 @@
     "session_id"
   ],
   "properties": {
+    "browser_relative_dir": {
+      "description": "Daemon-injected relative directory beneath Chrome's Downloads root.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ref": {
       "type": [
         "string",
@@ -20,13 +27,6 @@
     },
     "session_id": {
       "type": "string"
-    },
-    "staging_path": {
-      "description": "Daemon-injected destination directory for the browser process.",
-      "type": [
-        "string",
-        "null"
-      ]
     },
     "tab_id": {
       "type": [
