@@ -19,6 +19,7 @@ interface ArmedRecording {
   startedAtMs: number;
   tabIds: Set<number>;
   agents: Map<string, FrameAgent>;
+  onDocumentReady?: (scope: RecordingCaptureScope) => void | Promise<void>;
   finishing: boolean;
 }
 
@@ -33,6 +34,11 @@ interface BrowserFrame {
   documentId?: string;
 }
 
+interface BrowserFrameNavigation extends BrowserFrame {
+  tabId: number;
+  lifecycle: "committed" | "completed";
+}
+
 const RECORD_FRAME_STOP_TIMEOUT_MS = 5_000;
 
 export interface RecordFrameCoordinatorDeps {
@@ -42,6 +48,7 @@ export interface RecordFrameCoordinatorDeps {
     message: RecordFrameStartMessage,
     target: { documentId?: string; frameId?: number },
   ): Promise<unknown>;
+  subscribeFrameNavigation?(listener: (frame: BrowserFrameNavigation) => void): () => void;
 }
 
 function documentKey(tabId: number, documentId: string): string {
@@ -72,6 +79,18 @@ function defaultDeps(): RecordFrameCoordinatorDeps {
     sendToDocument(tabId, message, target) {
       return chrome.tabs.sendMessage(tabId, message, target);
     },
+    subscribeFrameNavigation(listener) {
+      const onCommitted = (details: chrome.webNavigation.WebNavigationTransitionCallbackDetails) =>
+        listener({ ...details, lifecycle: "committed" });
+      const onCompleted = (details: chrome.webNavigation.WebNavigationFramedCallbackDetails) =>
+        listener({ ...details, lifecycle: "completed" });
+      chrome.webNavigation.onCommitted.addListener(onCommitted);
+      chrome.webNavigation.onCompleted.addListener(onCompleted);
+      return () => {
+        chrome.webNavigation.onCommitted.removeListener(onCommitted);
+        chrome.webNavigation.onCompleted.removeListener(onCompleted);
+      };
+    },
   };
 }
 
@@ -79,6 +98,7 @@ export class RecordFrameCoordinator {
   readonly #deps: RecordFrameCoordinatorDeps;
   readonly #recordings = new Map<string, ArmedRecording>();
   #attached = false;
+  #detachFrameNavigation: (() => void) | null = null;
 
   constructor(deps: RecordFrameCoordinatorDeps = defaultDeps()) {
     this.#deps = deps;
@@ -89,24 +109,37 @@ export class RecordFrameCoordinator {
     this.#attached = true;
     chrome.runtime.onConnect.addListener(this.#onConnect);
     chrome.runtime.onMessage.addListener(this.#onMessage);
+    this.#detachFrameNavigation =
+      this.#deps.subscribeFrameNavigation?.(this.#onFrameNavigation) ?? null;
     return () => {
       if (!this.#attached) return;
       this.#attached = false;
       chrome.runtime.onConnect.removeListener(this.#onConnect);
       chrome.runtime.onMessage.removeListener(this.#onMessage);
+      this.#detachFrameNavigation?.();
+      this.#detachFrameNavigation = null;
       for (const recording of this.#recordings.values()) this.#cancelAgents(recording);
       this.#recordings.clear();
     };
   }
 
-  begin(requestId: string, startedAtMs: number): void {
+  begin(
+    requestId: string,
+    startedAtMs: number,
+    initialTabId: number,
+    onDocumentReady?: (scope: RecordingCaptureScope) => void | Promise<void>,
+  ): void {
     const previous = this.#recordings.get(requestId);
     if (previous) this.#cancelAgents(previous);
     this.#recordings.set(requestId, {
       requestId,
       startedAtMs,
-      tabIds: new Set(),
+      // Register the initial tab before navigation begins. A newly-created
+      // child document can query at document_start before armTab's frame
+      // snapshot sees it, especially when Chromium promotes it to an OOPIF.
+      tabIds: new Set([initialTabId]),
       agents: new Map(),
+      ...(onDocumentReady ? { onDocumentReady } : {}),
       finishing: false,
     });
   }
@@ -124,21 +157,10 @@ export class RecordFrameCoordinator {
     }
     if (!frames.some((frame) => frame.frameId === 0)) frames.unshift({ frameId: 0 });
 
-    const message: RecordFrameStartMessage = {
-      type: RECORD_FRAME_START,
-      requestId,
-      startedAtMs: recording.startedAtMs,
-    };
     const results = await Promise.all(
       frames.map(async (frame) => {
-        try {
-          const response = await this.#deps.sendToDocument(tabId, message, {
-            ...(frame.documentId ? { documentId: frame.documentId } : { frameId: frame.frameId }),
-          });
-          return { frameId: frame.frameId, started: isStarted(response) };
-        } catch {
-          return { frameId: frame.frameId, started: false };
-        }
+        const started = await this.#startFrame(recording, tabId, frame);
+        return { frameId: frame.frameId, started };
       }),
     );
     return results.some((result) => result.frameId === 0 && result.started);
@@ -206,6 +228,33 @@ export class RecordFrameCoordinator {
         : { active: false },
     );
     return false;
+  };
+
+  readonly #onFrameNavigation = (frame: BrowserFrameNavigation): void => {
+    if (frame.frameId === 0) return;
+    for (const recording of this.#recordings.values()) {
+      if (recording.finishing || !recording.tabIds.has(frame.tabId)) continue;
+      // onCommitted can race document_start, while onCompleted runs after the
+      // content script is available. Starting twice is safe and closes both
+      // the early-query and late-SPA-frame gaps.
+      void (async () => {
+        const started = await this.#startFrame(recording, frame.tabId, frame);
+        if (!started || frame.lifecycle !== "completed" || recording.finishing) return;
+        const agent = frame.documentId
+          ? recording.agents.get(documentKey(frame.tabId, frame.documentId))
+          : [...recording.agents.values()].find(
+              (candidate) =>
+                candidate.tabId === frame.tabId && candidate.browserFrameId === frame.frameId,
+            );
+        if (!agent) return;
+        await recording.onDocumentReady?.({
+          tabId: agent.tabId,
+          documentId: agent.documentId,
+          browserFrameId: agent.browserFrameId,
+          producerId: agent.producerId,
+        });
+      })();
+    }
   };
 
   readonly #onConnect = (port: chrome.runtime.Port): void => {
@@ -307,6 +356,26 @@ export class RecordFrameCoordinator {
         resolve(true);
       }
     });
+  }
+
+  async #startFrame(
+    recording: ArmedRecording,
+    tabId: number,
+    frame: BrowserFrame,
+  ): Promise<boolean> {
+    const message: RecordFrameStartMessage = {
+      type: RECORD_FRAME_START,
+      requestId: recording.requestId,
+      startedAtMs: recording.startedAtMs,
+    };
+    try {
+      const response = await this.#deps.sendToDocument(tabId, message, {
+        ...(frame.documentId ? { documentId: frame.documentId } : { frameId: frame.frameId }),
+      });
+      return isStarted(response);
+    } catch {
+      return false;
+    }
   }
 
   #cancelAgents(recording: ArmedRecording): void {
