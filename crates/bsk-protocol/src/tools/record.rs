@@ -15,7 +15,6 @@ pub use super::record_v2::{
 
 pub const TRACE_VERSION_V3: u32 = 3;
 pub const TRACE_VERSION_V2: u32 = 2;
-pub const DEFAULT_TRACE_VERSION: u32 = 2;
 pub const VOM_FORMAT_VERSION: u32 = 1;
 
 fn deserialize_trace_v3_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
