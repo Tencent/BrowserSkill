@@ -6,6 +6,33 @@ import { reduceTraceStepsV3 } from "../recording/trace-reducer-v3";
 import type { RecordingDraftStep } from "../recording/types";
 
 describe("trace reducer v3", () => {
+  it("removes form literals when value redaction is requested", () => {
+    const reduced = reduceTraceStepsV3(
+      [
+        {
+          op: "fill",
+          value: "private@example.com",
+          preStateId: "s1",
+          postStateId: "s1",
+        },
+        {
+          op: "select",
+          values: ["private-account-id"],
+          labels: ["Private account"],
+          preStateId: "s1",
+          postStateId: "s1",
+        },
+      ],
+      { redactValues: true },
+    );
+
+    expect(reduced.steps[0]).toMatchObject({ op: "fill", value: "***", redacted: true });
+    expect(reduced.steps[1]).toMatchObject({ op: "select" });
+    expect(reduced.steps[1]).not.toHaveProperty("selection");
+    expect(JSON.stringify(reduced.steps)).not.toContain("private@example.com");
+    expect(JSON.stringify(reduced.steps)).not.toContain("private-account-id");
+  });
+
   it("collapses redirect hops while retaining draft-to-step identity", () => {
     const drafts: RecordingDraftStep[] = [
       { op: "navigate", url: "https://example.com/start", preStateId: "s1", postStateId: "s2" },
@@ -36,7 +63,7 @@ describe("trace reducer v3", () => {
 
   it("builds the wire model from protocol constants", () => {
     const registry = new RecordingStateRegistry();
-    const state = registry.register({ url: "https://example.com", rawVomText: "@vom 1" });
+    const state = registry.register({ url: "https://example.com", vomText: "@vom 1" });
     const trace = buildTraceV3({
       registry,
       drafts: [

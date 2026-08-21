@@ -11,7 +11,7 @@ function sessionWithInput(redactValues = false): RecordingObservationSession {
   const session = new RecordingObservationSession({ redactValues });
   const state = session.registry.register({
     url: URL,
-    rawVomText: '@vom 1\ntextbox "Password" value="••••••" [ref=e1]',
+    vomText: '@vom 1\ntextbox "Password" value="••••••" [ref=e1]',
   });
   session.cursor.lastSettled = {
     stateId: state.id,
@@ -34,7 +34,7 @@ function sessionWithInput(redactValues = false): RecordingObservationSession {
   return session;
 }
 
-function finalizedFillBody(value: string, redactValues: boolean): string {
+function finalizedFillTrace(value: string, redactValues: boolean) {
   const session = sessionWithInput(redactValues);
   const draft: RecordingDraftStep = {
     op: "fill",
@@ -53,15 +53,20 @@ function finalizedFillBody(value: string, redactValues: boolean): string {
     startedAt: "2026-08-12T00:00:00.000Z",
     stoppedBy: "user_finish",
     bskVersion: "test",
-  }).states[0]!.body;
+    redactValues,
+  });
+}
+
+function finalizedFillBody(value: string, redactValues: boolean): string {
+  return finalizedFillTrace(value, redactValues).states[0]!.body;
 }
 
 describe("record observation annotations", () => {
   it("omits a fill literal when values are redacted", () => {
     const secret = "hunter2-private";
-    const body = finalizedFillBody(secret, true);
-    expect(body).toContain("step 1: fill");
-    expect(body).not.toContain(secret);
+    const dumped = JSON.stringify(finalizedFillTrace(secret, true));
+    expect(dumped).toContain("step 1: fill");
+    expect(dumped).not.toContain(secret);
   });
 
   it("keeps ordinary fill details", () => {
@@ -73,7 +78,7 @@ describe("record observation annotations", () => {
     const state = registry.register({
       url: "https://example.com/a\nb",
       title: "hello\nworld",
-      rawVomText: "@vom 1",
+      vomText: "@vom 1",
     });
     const trace = buildTraceV3({
       registry,
@@ -91,18 +96,18 @@ describe("recording state ownership", () => {
   it("deduplicates within one recording and isolates ids between recordings", () => {
     const first = new RecordingStateRegistry();
     const second = new RecordingStateRegistry();
-    expect(first.register({ url: URL, rawVomText: "same" }).id).toBe("s1");
-    expect(first.register({ url: URL, rawVomText: "same" }).id).toBe("s1");
-    expect(second.register({ url: URL, rawVomText: "other" }).id).toBe("s1");
+    expect(first.register({ url: URL, vomText: "same" }).id).toBe("s1");
+    expect(first.register({ url: URL, vomText: "same" }).id).toBe("s1");
+    expect(second.register({ url: URL, vomText: "other" }).id).toBe("s1");
   });
 
   it("enriches metadata when a deduplicated observation becomes more complete", () => {
     const registry = new RecordingStateRegistry();
-    registry.register({ url: URL, rawVomText: "same" });
+    registry.register({ url: URL, vomText: "same" });
     const state = registry.register({
       url: URL,
       title: "Login",
-      rawVomText: "same",
+      vomText: "same",
       truncated: true,
     });
     expect(state).toMatchObject({ id: "s1", title: "Login", truncated: true });

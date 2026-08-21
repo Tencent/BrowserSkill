@@ -2,7 +2,8 @@ export interface RecordedStateEntry {
   id: string;
   url: string;
   title?: string;
-  rawVomText: string;
+  /** Rendered VOM text; capture indexes and source DOM/AX data never enter the registry. */
+  vomText: string;
   truncated: boolean;
   stepsHere: number[];
 }
@@ -19,10 +20,10 @@ export class RecordingStateRegistry {
   register(input: {
     url: string;
     title?: string;
-    rawVomText: string;
+    vomText: string;
     truncated?: boolean;
   }): RecordedStateEntry {
-    const identity = stateIdentity(input.url, input.rawVomText);
+    const identity = stateIdentity(input.url, input.vomText);
     const existingId = this.#idByIdentity.get(identity);
     if (existingId) {
       const existing = this.#entriesById.get(existingId)!;
@@ -35,7 +36,7 @@ export class RecordingStateRegistry {
       id: `s${this.#nextId}`,
       url: input.url,
       ...(input.title ? { title: input.title } : {}),
-      rawVomText: input.rawVomText,
+      vomText: input.vomText,
       truncated: input.truncated ?? false,
       stepsHere: [],
     };

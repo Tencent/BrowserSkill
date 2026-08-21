@@ -171,6 +171,7 @@ export class RecordingObservationRuntime {
       startUrl: input.startUrl,
       stoppedBy: input.stoppedBy,
       bskVersion: input.bskVersion,
+      redactValues: this.#redactValues,
     });
   }
 }
