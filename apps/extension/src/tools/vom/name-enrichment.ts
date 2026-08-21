@@ -10,6 +10,7 @@ const MAX_TOOLTIP_PROBE_MS = 2_400;
 const TOOLTIP_SETTLE_MS = 250;
 const CACHE_TTL_MS = 5 * 60_000;
 const MAX_CACHE_ENTRIES = 500;
+const FORM_CONTROL_TAGS = new Set(["input", "select", "textarea"]);
 
 interface TooltipCacheEntry {
   name: string;
@@ -108,6 +109,7 @@ function candidates<T extends FrameOwnedAxNode>(
   for (const node of graph.nodes.values()) {
     if (
       node.vom.name ||
+      FORM_CONTROL_TAGS.has(node.dom?.tag.toLowerCase() ?? "") ||
       !node.referenceable ||
       node.backendNodeId === undefined ||
       !isVomReferenceNode({

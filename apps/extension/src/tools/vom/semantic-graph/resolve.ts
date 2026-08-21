@@ -399,7 +399,7 @@ function resolvedName(
     formControl ? precedingAxText(node, graph, indexes) : undefined,
     formControl ? precedingDomText(node, graph, indexes) : undefined,
     formControl ? clean(node.dom?.formPlaceholder ?? attrs.placeholder) : undefined,
-    !interactive || node.backendNodeId === undefined
+    formControl || !interactive || node.backendNodeId === undefined
       ? undefined
       : clean(supplementalNames.get(frameBackendKey(node.frameId, node.backendNodeId))),
     identifierFallback && interactive ? stableIdentifierName(attrs) : undefined,
