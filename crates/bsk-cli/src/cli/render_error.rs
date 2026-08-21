@@ -52,6 +52,9 @@ pub mod reason {
     pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
     pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
     pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
+    pub const UPLOAD_MECHANISM_UNSUPPORTED: &str = "upload_mechanism_unsupported";
+    pub const FILE_DROP_TARGET_UNAVAILABLE: &str = "file_drop_target_unavailable";
+    pub const FILE_DROP_FAILED: &str = "file_drop_failed";
     pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
@@ -323,6 +326,30 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::Unsupported, reason::UPLOAD_MECHANISM_UNSUPPORTED) => RenderInfo {
+            summary: "the browser does not support native file-drop upload",
+            hint: Some(
+                "do not retry the same drop; use a standard file-input target or `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (
+            ErrorCode::PermissionDenied | ErrorCode::Timeout | ErrorCode::CdpFailed,
+            reason::FILE_DROP_TARGET_UNAVAILABLE,
+        ) => RenderInfo {
+            summary: "the file-drop target could not be safely resolved",
+            hint: Some(
+                "rerun observe and select the visible drop zone itself; no file was delivered when effect_state is none",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_DROP_FAILED) => RenderInfo {
+            summary: "the browser could not complete the native file drop",
+            hint: Some(
+                "do not retry when effect_state is unknown; observe the page first, otherwise use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::CdpFailed, reason::DOWNLOAD_CAPTURE_FAILED) => RenderInfo {
             summary: "the browser download could not be attributed or completed",
             hint: Some(
@@ -486,6 +513,29 @@ mod tests {
                 .contains("transaction could not be established")
         );
         assert!(info.hint.unwrap().contains("do not retry"));
+
+        let unsupported_drop =
+            serde_json::json!({ "reason": reason::UPLOAD_MECHANISM_UNSUPPORTED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported_drop));
+        assert_eq!(
+            info.summary,
+            "the browser does not support native file-drop upload"
+        );
+        assert!(info.hint.unwrap().contains("standard file-input"));
+
+        let unavailable_target =
+            serde_json::json!({ "reason": reason::FILE_DROP_TARGET_UNAVAILABLE });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&unavailable_target));
+        assert_eq!(
+            info.summary,
+            "the file-drop target could not be safely resolved"
+        );
+        assert!(info.hint.unwrap().contains("effect_state is none"));
+
+        let failed_drop = serde_json::json!({ "reason": reason::FILE_DROP_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&failed_drop));
+        assert!(info.summary.contains("native file drop"));
+        assert!(info.hint.unwrap().contains("effect_state is unknown"));
 
         let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
         let info = info_for_error(ErrorCode::CdpFailed, Some(&download));

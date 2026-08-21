@@ -6,11 +6,60 @@ use bsk::cli::daemon::{DaemonCmd, parse_duration};
 use bsk::cli::navigate::NavigateCmd;
 use bsk::cli::record::{RecordCmd, RecordSub};
 use bsk::cli::session::{SessionCmd, SessionSub};
+use bsk::cli::upload::UploadModeArg;
 use bsk::{Cli, Command};
 use clap::Parser;
 
 fn parse(args: &[&str]) -> Cli {
     Cli::try_parse_from(args).expect("clap parse should succeed")
+}
+
+#[test]
+fn parses_upload_modes() {
+    let cli = parse(&[
+        "bsk",
+        "upload",
+        "@e1",
+        "--file",
+        "image.png",
+        "--session",
+        "s1",
+    ]);
+    let Command::Upload(default_args) = cli.command else {
+        panic!("expected upload subcommand");
+    };
+    assert_eq!(default_args.mode, UploadModeArg::Input);
+
+    let cli = parse(&[
+        "bsk",
+        "upload",
+        "@e1",
+        "--file",
+        "image.png",
+        "--session",
+        "s1",
+        "--mode",
+        "drop",
+    ]);
+    let Command::Upload(drop_args) = cli.command else {
+        panic!("expected upload subcommand");
+    };
+    assert_eq!(drop_args.mode, UploadModeArg::Drop);
+
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "upload",
+            "@e1",
+            "--file",
+            "image.png",
+            "--session",
+            "s1",
+            "--mode",
+            "auto",
+        ])
+        .is_err()
+    );
 }
 
 #[test]
