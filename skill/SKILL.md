@@ -210,20 +210,21 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 
 | Command | Summary |
 |---------|---------|
-| `bsk upload <ref-or-selector> --file <path>` | Click one file chooser and attach an agent-readable local file (`--file` is repeatable) |
+| `bsk upload <ref-or-selector> --file <path>` | Click one upload trigger and attach an agent-readable local file (`--file` is repeatable) |
 | `bsk download <ref-or-selector> --out <path>` | Click one download trigger and copy the single completed file to an exact local path (`--overwrite` is opt-in) |
 
 The agent/harness decides whether a file transfer is appropriate and which local path belongs to the task. Treat upload as disclosure of that file to the current website, and download as accepting website-controlled bytes onto the local filesystem. Use only paths that are necessary for the user's bounded goal.
 
-BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted paths reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Download staging is removed after the CLI copies it; upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
+BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted capabilities reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Upload captures the file input actually activated by the requested click and assigns only the staged file paths. Download requires an exact-target browser intent before it claims one Chrome download, routes it through a daemon-minted relative directory, and lets the daemon validate and import it. Upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
 
-Do not use `request-help` merely because a native file chooser or browser download is involved; try these commands first. For upload failures, use the structured error instead of retrying blindly:
+Do not use `request-help` merely because a native file chooser or browser download is involved; try these commands first. For transfer failures, use the structured error instead of retrying blindly:
 
-- `reason=unsupported_file_chooser` means the page opened a non-input picker such as `window.showOpenFilePicker()`. Do not retry `upload`; if human help is available, call `request-help` and tell the user the exact original file path to choose. The staged daemon path is an internal implementation detail and must not be shown to the user.
-- `reason=file_chooser_control_failed` means BrowserSkill could not establish or complete the browser-side transaction. Do not retry the same action blindly; use `request-help` when available.
-- `reason=file_chooser_not_opened` means the click completed without opening a chooser. Observe once to verify that the target is the actual upload action (for example, after expanding a menu), then retry with the corrected target or ask for help.
+- `reason=file_input_not_activated` means the requested click did not activate exactly one `<input type="file">`; the page may use a non-input picker such as `window.showOpenFilePicker()`. Do not retry blindly. If human help is available, call `request-help` and tell the user the exact original local path to choose. The staged daemon path is internal and must not be shown to the user.
+- `reason=file_input_probe_failed` means BrowserSkill could not safely establish the browser-side upload transaction. Do not repeat the same action; use `request-help` when available.
+- `reason=set_file_input_failed` means BrowserSkill found the activated file input but Chrome rejected the staged path or assignment. Check the extension's file-URL access permission; otherwise use `request-help`.
+- `reason=download_capture_failed` means BrowserSkill could not attribute exactly one completed download to the requested target. Do not retry blindly or accept an unrelated browser download; use `request-help` when available.
 
-If `request-help` returns `outcome="disabled"`, do not retry it. Stop gracefully and report that the workflow requires a non-input file picker or unavailable local file.
+If `request-help` returns `outcome="disabled"`, do not retry it. Stop gracefully and report the transfer mechanism that requires human intervention.
 
 ### Scripting & timing
 

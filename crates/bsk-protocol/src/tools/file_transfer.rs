@@ -60,9 +60,9 @@ pub struct DownloadParams {
     pub tab_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
-    /// Daemon-injected destination directory for the browser process.
+    /// Daemon-injected relative directory beneath Chrome's Downloads root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staging_path: Option<String>,
+    pub browser_relative_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -78,9 +78,9 @@ pub struct DownloadResult {
     pub mime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub danger: Option<String>,
-    /// Extension-internal completed path, stripped by the daemon.
+    /// Extension-internal completed Chrome download path, stripped by the daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub staged_path: Option<String>,
+    pub browser_path: Option<String>,
     /// Opaque id returned by the daemon to the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_id: Option<String>,
@@ -162,9 +162,9 @@ mod tests {
             selector: Some("#export".into()),
             tab_id: None,
             timeout_ms: None,
-            staging_path: None,
+            browser_relative_dir: None,
         })
         .unwrap();
-        assert!(value.get("staging_path").is_none());
+        assert!(value.get("browser_relative_dir").is_none());
     }
 }

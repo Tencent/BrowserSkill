@@ -381,7 +381,7 @@ async fn handle_tool_dispatch(
             Ok(v) => v,
             Err(err) => return ResponseBody::Err(err),
         };
-        download.staging_path = Some(staging.directory.to_string_lossy().into_owned());
+        download.browser_relative_dir = Some(staging.browser_relative_dir);
         download_transfer_id = Some(staging.transfer_id);
         params = serde_json::to_value(download).unwrap_or(Value::Null);
     }
@@ -416,19 +416,19 @@ async fn handle_tool_dispatch(
                     });
                 }
             };
-            let Some(path) = result.staged_path.take() else {
+            let Some(path) = result.browser_path.take() else {
                 state
                     .transfers
                     .release(TransferIdParams { transfer_id: id });
                 return ResponseBody::Err(RpcError {
                     code: ErrorCode::ProtocolError,
-                    message: "tool.download returned no staged_path".into(),
+                    message: "tool.download returned no browser_path".into(),
                     data: None,
                 });
             };
             match state
                 .transfers
-                .finish_download(&id, std::path::Path::new(&path))
+                .import_download(&id, std::path::Path::new(&path))
             {
                 Ok(size) => {
                     result.byte_size = size;
