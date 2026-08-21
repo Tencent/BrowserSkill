@@ -440,7 +440,11 @@ describe("file transfer tools", () => {
       totalBytes: 4,
       bytesReceived: 0,
     } as chrome.downloads.DownloadItem;
-    const complete = { ...initial, state: "complete", fileSize: 4 } as chrome.downloads.DownloadItem;
+    const complete = {
+      ...initial,
+      state: "complete",
+      fileSize: 4,
+    } as chrome.downloads.DownloadItem;
     const downloads: DownloadsApi = {
       onCreated,
       onChanged,
