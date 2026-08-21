@@ -65,6 +65,10 @@ export interface VomOptions {
   maxDepth?: number;
   maxTokens?: number;
   /**
+   * When true, form values are rendered as masks instead of literal values.
+   */
+  redactValues?: boolean;
+  /**
    * Experimental: filter refs that are geometrically blocked by foreground
    * fixed/absolute/sticky regions. Disabled by default and does not alter the
    * public layer header format.
@@ -90,9 +94,17 @@ export interface VomRef {
   frameId?: string;
 }
 
+export interface RenderedRef extends VomRef {
+  role?: string;
+  name?: string;
+  ctx?: string;
+  /** Zero-based line index in `VomResult.text`. */
+  line: number;
+}
+
 export interface VomResult {
   text: string;
-  refs: VomRef[];
+  refs: RenderedRef[];
   truncated: boolean;
 }
 

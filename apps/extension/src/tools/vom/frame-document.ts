@@ -77,9 +77,12 @@ export function buildFrameDocuments<T extends FrameOwnedAxNode>(
 ): FrameDocument<T>[] {
   const frames = frameList(graph, batches, captured);
   const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));
+  const rootFrameId = graph?.rootFrameId ?? captured.rootFrameId ?? frames[0]?.frameId;
+  const domNodesForFrame = (frameId: string): CapturedNode[] =>
+    captured.frameNodes?.get(frameId) ?? (frameId === rootFrameId ? captured.nodes : []);
   const backendOwner = new Map<string, string>();
   for (const frame of frames) {
-    for (const node of captured.frameNodes?.get(frame.frameId) ?? []) {
+    for (const node of domNodesForFrame(frame.frameId)) {
       backendOwner.set(targetBackendKey(frame.target, node.backendNodeId), frame.frameId);
     }
   }
@@ -165,6 +168,6 @@ export function buildFrameDocuments<T extends FrameOwnedAxNode>(
     ...frame,
     contextScopeId: frame.frameId,
     axNodes: axNodesByFrame.get(frame.frameId) ?? [],
-    domNodes: captured.frameNodes?.get(frame.frameId) ?? [],
+    domNodes: domNodesForFrame(frame.frameId),
   }));
 }
