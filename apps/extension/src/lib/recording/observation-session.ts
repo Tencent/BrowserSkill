@@ -74,7 +74,7 @@ export class RecordingObservationSession {
     const state = this.registry.register({
       url: captured.url,
       title: captured.title,
-      rawVomText: captured.vomText,
+      vomText: captured.vomText,
       truncated: captured.truncated,
     });
     const observation: RegisteredObservation = {

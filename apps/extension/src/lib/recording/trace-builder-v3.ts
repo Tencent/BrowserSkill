@@ -39,8 +39,9 @@ export function buildTraceV3(input: {
   startUrl?: string;
   stoppedBy: StopReason;
   bskVersion: string;
+  redactValues?: boolean;
 }): TraceV3 {
-  const reduced = reduceTraceStepsV3(input.drafts);
+  const reduced = reduceTraceStepsV3(input.drafts, { redactValues: input.redactValues });
   const entries = publishedEntries(input.registry, reduced.steps);
   const publishedId = new Map(entries.map((entry, index) => [entry.id, `s${index + 1}`]));
   const annotationsByState = new Map<string, StepAnnotation[]>();
@@ -65,7 +66,7 @@ export function buildTraceV3(input: {
         url: entry.url,
         title: entry.title,
         stepIds: remapDraftIds(entry.stepsHere, reduced.stepIdByDraftId),
-        vomText: entry.rawVomText,
+        vomText: entry.vomText,
         annotations: annotationsByState.get(entry.id) ?? [],
         stepIdByDraftId: reduced.stepIdByDraftId,
       }),
