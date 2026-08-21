@@ -49,9 +49,10 @@ pub mod reason {
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
-    pub const FILE_CHOOSER_CONTROL_FAILED: &str = "file_chooser_control_failed";
-    pub const FILE_CHOOSER_NOT_OPENED: &str = "file_chooser_not_opened";
-    pub const UNSUPPORTED_FILE_CHOOSER: &str = "unsupported_file_chooser";
+    pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
+    pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
+    pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
+    pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
@@ -283,26 +284,33 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
-        (ErrorCode::Unsupported, reason::UNSUPPORTED_FILE_CHOOSER) => RenderInfo {
-            summary: "the page opened a non-input file picker",
+        (ErrorCode::Unsupported, reason::FILE_INPUT_NOT_ACTIVATED) => RenderInfo {
+            summary: "the upload trigger did not activate a file input",
             hint: Some(
-                "do not retry upload; use `bsk request-help` and tell the user the exact original local path to select, or stop if human help is disabled",
+                "the page may use a non-input picker such as showOpenFilePicker(); do not retry blindly — use `bsk request-help` with the exact original local path, or stop if human help is disabled",
             ),
             exit_code: base.exit_code,
         },
-        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_CHOOSER_CONTROL_FAILED) => {
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_INPUT_PROBE_FAILED) => {
             RenderInfo {
-                summary: "the browser file-chooser transaction could not complete",
+                summary: "the browser upload transaction could not be established",
                 hint: Some(
                     "do not retry the same upload blindly; use `bsk request-help` when human help is available",
                 ),
                 exit_code: base.exit_code,
             }
         }
-        (ErrorCode::Timeout, reason::FILE_CHOOSER_NOT_OPENED) => RenderInfo {
-            summary: "the upload action did not open a file chooser",
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::SET_FILE_INPUT_FAILED) => RenderInfo {
+            summary: "the browser could not attach the staged file to the input",
             hint: Some(
-                "observe once after expanding any upload menu, then retry with the actual upload action or use `bsk request-help`",
+                "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::DOWNLOAD_CAPTURE_FAILED) => RenderInfo {
+            summary: "the browser download could not be attributed or completed",
+            hint: Some(
+                "do not retry blindly; the target browser may not expose a reliable download intent signal",
             ),
             exit_code: base.exit_code,
         },
@@ -446,24 +454,26 @@ mod tests {
     }
 
     #[test]
-    fn file_chooser_reasons_render_actionable_fallbacks() {
-        let unsupported = serde_json::json!({ "reason": reason::UNSUPPORTED_FILE_CHOOSER });
+    fn file_transfer_reasons_render_actionable_fallbacks() {
+        let unsupported = serde_json::json!({ "reason": reason::FILE_INPUT_NOT_ACTIVATED });
         let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported));
-        assert_eq!(info.summary, "the page opened a non-input file picker");
-        assert!(info.hint.unwrap().contains("exact original local path"));
-
-        let control = serde_json::json!({ "reason": reason::FILE_CHOOSER_CONTROL_FAILED });
-        let info = info_for_error(ErrorCode::Timeout, Some(&control));
-        assert!(info.summary.contains("transaction could not complete"));
-        assert!(info.hint.unwrap().contains("do not retry"));
-
-        let not_opened = serde_json::json!({ "reason": reason::FILE_CHOOSER_NOT_OPENED });
-        let info = info_for_error(ErrorCode::Timeout, Some(&not_opened));
         assert_eq!(
             info.summary,
-            "the upload action did not open a file chooser"
+            "the upload trigger did not activate a file input"
         );
-        assert!(info.hint.unwrap().contains("expanding any upload menu"));
+        assert!(info.hint.unwrap().contains("exact original local path"));
+
+        let control = serde_json::json!({ "reason": reason::FILE_INPUT_PROBE_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&control));
+        assert!(
+            info.summary
+                .contains("transaction could not be established")
+        );
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
+        assert!(info.summary.contains("download could not be attributed"));
     }
 
     #[test]

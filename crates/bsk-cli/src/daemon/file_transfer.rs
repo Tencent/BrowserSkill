@@ -43,7 +43,7 @@ struct Entry {
 #[derive(Debug)]
 pub struct DownloadStaging {
     pub transfer_id: String,
-    pub directory: PathBuf,
+    pub browser_relative_dir: String,
 }
 
 #[derive(Debug)]
@@ -247,32 +247,70 @@ impl TransferRegistry {
             },
         );
         Ok(DownloadStaging {
+            browser_relative_dir: format!("BrowserSkill/{id}"),
             transfer_id: id,
-            directory: dir,
         })
     }
 
-    pub fn finish_download(&self, id: &str, reported_path: &Path) -> Result<u64, RpcError> {
-        let canonical = reported_path.canonicalize().map_err(io_error)?;
+    pub fn import_download(&self, id: &str, reported_path: &Path) -> Result<u64, RpcError> {
         let mut entries = self.entries.lock().unwrap();
         let entry = entries
             .get_mut(id)
             .ok_or_else(|| not_found("download transfer not found"))?;
-        let dir = entry.path.canonicalize().map_err(io_error)?;
-        if entry.direction != Direction::Download || !canonical.starts_with(&dir) {
-            return Err(permission("download escaped its staging directory"));
+        if entry.direction != Direction::Download || !reported_path.is_absolute() {
+            return Err(permission(
+                "download path is outside its browser capability",
+            ));
         }
+        let expected_parent = Path::new("BrowserSkill").join(id);
+        let reported_parent = reported_path
+            .parent()
+            .ok_or_else(|| permission("download path has no parent directory"))?;
+        if !reported_parent.ends_with(&expected_parent) {
+            return Err(permission(
+                "download escaped its browser capability directory",
+            ));
+        }
+        for path in [reported_path, reported_parent] {
+            if fs::symlink_metadata(path)
+                .map_err(io_error)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(permission("download capability path contains a symlink"));
+            }
+        }
+        let canonical = reported_path.canonicalize().map_err(io_error)?;
         let meta = fs::metadata(&canonical).map_err(io_error)?;
         if !meta.is_file() || meta.len() > MAX_TRANSFER_BYTES {
             return Err(invalid(
                 "download is not a regular file or exceeds the transfer limit",
             ));
         }
-        entry.path = canonical;
-        entry.written = meta.len();
-        entry.expected_size = Some(meta.len());
+
+        let destination = entry.path.join("payload");
+        let source = File::open(&canonical).map_err(io_error)?;
+        let mut destination_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(io_error)?;
+        let copied = std::io::copy(
+            &mut source.take(MAX_TRANSFER_BYTES.saturating_add(1)),
+            &mut destination_file,
+        )
+        .map_err(io_error)?;
+        if copied > MAX_TRANSFER_BYTES {
+            let _ = fs::remove_file(&destination);
+            return Err(invalid("download exceeds the transfer limit"));
+        }
+        entry.path = destination;
+        entry.written = copied;
+        entry.expected_size = Some(copied);
         entry.ready = true;
-        Ok(meta.len())
+        let _ = fs::remove_file(&canonical);
+        let _ = fs::remove_dir(reported_parent);
+        Ok(copied)
     }
 
     pub fn read_chunk(&self, p: TransferChunkParams) -> Result<TransferChunkResult, RpcError> {
@@ -430,24 +468,44 @@ mod tests {
     }
 
     #[test]
-    fn download_must_finish_inside_its_minted_directory() {
+    fn download_must_import_from_its_browser_capability_directory() {
         let (temp, registry) = registry();
         let staging = registry.begin_download("s1").unwrap();
         let outside = temp.path().join("outside.bin");
         fs::write(&outside, b"secret").unwrap();
         assert!(
             registry
-                .finish_download(&staging.transfer_id, &outside)
+                .import_download(&staging.transfer_id, &outside)
                 .is_err()
         );
 
-        let inside = staging.directory.join("result.bin");
+        let browser_dir = temp
+            .path()
+            .join("Downloads")
+            .join("BrowserSkill")
+            .join(&staging.transfer_id);
+        fs::create_dir_all(&browser_dir).unwrap();
+        let inside = browser_dir.join("result.bin");
         fs::write(&inside, b"result").unwrap();
         assert_eq!(
             registry
-                .finish_download(&staging.transfer_id, &inside)
+                .import_download(&staging.transfer_id, &inside)
                 .unwrap(),
             6
+        );
+        assert!(!inside.exists());
+        let chunk = registry
+            .read_chunk(TransferChunkParams {
+                transfer_id: staging.transfer_id,
+                offset: 0,
+                data_base64: String::new(),
+            })
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(chunk.data_base64.unwrap())
+                .unwrap(),
+            b"result"
         );
     }
 
@@ -456,9 +514,11 @@ mod tests {
         let (_temp, registry) = registry();
         let first = registry.begin_download("s1").unwrap();
         let second = registry.begin_download("s2").unwrap();
+        let first_directory = registry.root.join(&first.transfer_id);
+        let second_directory = registry.root.join(&second.transfer_id);
         registry.release_session("s1");
-        assert!(!first.directory.exists());
-        assert!(second.directory.exists());
+        assert!(!first_directory.exists());
+        assert!(second_directory.exists());
     }
 
     #[test]

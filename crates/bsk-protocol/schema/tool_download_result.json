@@ -8,6 +8,13 @@
     "tab_id"
   ],
   "properties": {
+    "browser_path": {
+      "description": "Extension-internal completed Chrome download path, stripped by the daemon.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "byte_size": {
       "type": "integer",
       "format": "uint64",
@@ -20,13 +27,6 @@
       ]
     },
     "mime": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "staged_path": {
-      "description": "Extension-internal completed path, stripped by the daemon.",
       "type": [
         "string",
         "null"

@@ -33,9 +33,10 @@ export type RpcErrorReason =
   | "restricted_tab_url"
   | "borrow_conflict"
   | "screenshot_capture_failed"
-  | "file_chooser_control_failed"
-  | "file_chooser_not_opened"
-  | "unsupported_file_chooser"
+  | "file_input_probe_failed"
+  | "file_input_not_activated"
+  | "set_file_input_failed"
+  | "download_capture_failed"
   | "cleanup_failed";
 
 export interface RpcErrorData {
@@ -531,7 +532,7 @@ export interface DownloadParams {
   selector?: string;
   tab_id?: number;
   timeout_ms?: number;
-  staging_path?: string;
+  browser_relative_dir?: string;
 }
 
 export interface DownloadResult {
@@ -542,7 +543,7 @@ export interface DownloadResult {
   byte_size: number;
   mime?: string;
   danger?: string;
-  staged_path?: string;
+  browser_path?: string;
   transfer_id?: string;
 }
 
