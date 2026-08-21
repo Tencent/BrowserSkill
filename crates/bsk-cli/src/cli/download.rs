@@ -15,6 +15,7 @@ use bsk_protocol::tools::{
 use clap::Args;
 use uuid::Uuid;
 
+use crate::cli::atomic_output;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
@@ -56,6 +57,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         tab_id: args.tab_id,
         timeout_ms: Some(args.timeout),
         browser_relative_dir: None,
+        max_byte_size: None,
     };
     let reply: DownloadResult = crate::cli::business_rpc::call(
         info.sock_path.clone(),
@@ -130,22 +132,8 @@ fn write_transfer(sock: &Path, id: &str, out: &Path, overwrite: bool) -> Result<
         }
         file.sync_all().map_err(|e| CliError::Local(e.into()))?;
         drop(file);
-        if !overwrite {
-            std::fs::hard_link(&temp, out)
-                .with_context(|| format!("commit download without overwriting {}", out.display()))
-                .map_err(CliError::Local)?;
-            std::fs::remove_file(&temp)
-                .with_context(|| format!("remove temporary download {}", temp.display()))
-                .map_err(CliError::Local)?;
-            return Ok(());
-        }
-        if out.exists() {
-            std::fs::remove_file(out)
-                .with_context(|| format!("replace existing output {}", out.display()))
-                .map_err(CliError::Local)?;
-        }
-        std::fs::rename(&temp, out)
-            .with_context(|| format!("commit download to {}", out.display()))
+        atomic_output::commit(&temp, out, overwrite)
+            .with_context(|| format!("atomically commit download to {}", out.display()))
             .map_err(CliError::Local)
     })();
     if result.is_err() {

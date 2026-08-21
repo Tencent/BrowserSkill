@@ -382,6 +382,7 @@ async fn handle_tool_dispatch(
             Err(err) => return ResponseBody::Err(err),
         };
         download.browser_relative_dir = Some(staging.browser_relative_dir);
+        download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
         download_transfer_id = Some(staging.transfer_id);
         params = serde_json::to_value(download).unwrap_or(Value::Null);
     }
@@ -702,7 +703,7 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
     tool_dispatch_timeout(params).map(|timeout| {
-        if method == &Method::ToolUpload {
+        if matches!(method, Method::ToolUpload | Method::ToolDownload) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout

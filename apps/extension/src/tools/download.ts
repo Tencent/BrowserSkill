@@ -2,9 +2,13 @@
 // browser-global chrome.downloads transaction to download-capture.ts.
 
 import type { SessionManager } from "@/session-manager/manager";
-import type { ClickParams, DownloadParams, DownloadResult, RpcError } from "@/transport/types";
+import type { DownloadParams, DownloadResult, RpcError } from "@/transport/types";
 import { captureBrowserDownload, chromeDownloadsApi, type DownloadsApi } from "./download-capture";
-import { handleClick, type InteractionDeps, resolveBackendNode } from "./interaction";
+import {
+  clickResolvedTarget,
+  type InteractionDeps,
+  resolveActionTarget,
+} from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
 let downloadActive = false;
@@ -32,7 +36,7 @@ export async function handleDownload(
     if (!params.browser_relative_dir) {
       return { code: "invalid_params", message: "download requires a daemon capability directory" };
     }
-    const address = await resolveBackendNode(deps.cdp, ctx, target, params, "download");
+    const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
     const capture = await captureBrowserDownload({
@@ -40,18 +44,11 @@ export async function handleDownload(
       target: address.cdpTarget,
       downloads: deps.downloads ?? chromeDownloadsApi,
       browserRelativeDir: params.browser_relative_dir,
+      maxByteSize: params.max_byte_size,
       timeoutMs: params.timeout_ms ?? 120_000,
       signal: deps.signal,
-      trigger: () => {
-        const clickParams: ClickParams = {
-          session_id: params.session_id,
-          ref: params.ref,
-          selector: params.selector,
-          tab_id: params.tab_id,
-          timeout_ms: params.timeout_ms,
-        };
-        return handleClick(manager, clickParams, deps);
-      },
+      expectedFrameId: address.frameId,
+      trigger: () => clickResolvedTarget(ctx, address, {}, deps),
     });
     if (isRpcError(capture)) return capture;
     const { click, item } = capture;

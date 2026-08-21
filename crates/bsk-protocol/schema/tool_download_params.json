@@ -13,6 +13,15 @@
         "null"
       ]
     },
+    "max_byte_size": {
+      "description": "Daemon-injected authoritative transfer size limit. The extension uses it only for early cancellation; daemon import remains the final check.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
     "ref": {
       "type": [
         "string",

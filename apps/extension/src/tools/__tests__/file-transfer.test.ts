@@ -3,6 +3,7 @@ import { SessionManager } from "@/session-manager/manager";
 import { type DownloadsApi, handleDownload } from "../download";
 import { captureBrowserDownload } from "../download-capture";
 import { uploadThroughActivatedFileInput } from "../file-input-transaction";
+import type { ResolvedActionTarget } from "../interaction";
 import type { CdpRunner } from "../shared";
 import { handleUpload } from "../upload";
 
@@ -36,37 +37,76 @@ function fakeEvent<T extends (...args: never[]) => unknown>() {
   };
 }
 
-function uploadCdp(options: { inputCount?: number; multiple?: boolean; pickerCall?: string } = {}) {
+function actionTarget(frameId?: string): ResolvedActionTarget {
+  return {
+    tab: { tabId: 4, windowId: 100, active: true },
+    backendNodeId: 123,
+    cdpTarget: { tabId: 4 },
+    ...(frameId ? { frameId } : {}),
+    usedRef: "e3",
+  };
+}
+
+function uploadCdp(
+  options: {
+    inputCount?: number;
+    multiple?: boolean;
+    chooser?: { frameId?: string; backendNodeId?: number; mode?: string };
+    pendingResolve?: boolean;
+  } = {},
+) {
   const calls: Array<{ method: string; params?: object }> = [];
+  let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
     calls.push({ method, params });
+    if (method === "Page.setInterceptFileChooserDialog") return {};
     if (method === "Page.getLayoutMetrics")
       return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
     if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
-    if (method === "Runtime.evaluate") {
-      const expression = (params as { expression?: string }).expression ?? "";
-      if (expression.includes("count:")) {
+    if (method === "DOM.resolveNode") {
+      if (options.pendingResolve) return new Promise<never>(() => {});
+      return { object: { objectId: "trigger-object" } };
+    }
+    if (method === "Runtime.callFunctionOn") {
+      const declaration = (params as { functionDeclaration?: string }).functionDeclaration ?? "";
+      if (declaration.includes("Object.defineProperty")) return { result: { value: true } };
+      if (declaration.includes("count: state.inputs.length")) {
         return {
           result: {
             value: {
               count: options.inputCount ?? 1,
               multiple: options.multiple ?? true,
-              pickerCall: options.pickerCall,
             },
           },
         };
       }
-      if (expression.includes("?.inputs[0]")) {
+      if (declaration.includes("inputs[0]")) {
         return { result: { objectId: "input-object" } };
       }
       return { result: { value: true } };
     }
     if (method === "DOM.describeNode") return { node: { backendNodeId: 456 } };
+    if (
+      method === "Input.dispatchMouseEvent" &&
+      (params as { type?: string }).type === "mousePressed" &&
+      options.chooser
+    ) {
+      cdpEvent?.({ tabId: 4 }, "Page.fileChooserOpened", options.chooser);
+    }
     return {};
   });
+  const cdp: CdpRunner = {
+    send: send as unknown as CdpRunner["send"],
+    onEvent: (handler) => {
+      cdpEvent = handler;
+      return { dispose: vi.fn() };
+    },
+  };
   return {
     calls,
-    cdp: { send: send as unknown as CdpRunner["send"] } satisfies CdpRunner,
+    emitChooser: (event: { frameId?: string; backendNodeId?: number; mode?: string }) =>
+      cdpEvent?.({ tabId: 4 }, "Page.fileChooserOpened", event),
+    cdp,
   };
 }
 
@@ -91,15 +131,14 @@ describe("file transfer tools", () => {
     );
 
     expect(result).toMatchObject({ tab_id: 4, file_names: ["one.png", "two.png"] });
-    const armCall = calls.find(
-      (call) =>
-        call.method === "Runtime.evaluate" &&
-        (call.params as { expression?: string }).expression?.includes("showOpenFilePicker"),
-    );
-    expect(armCall).toBeDefined();
-    expect((armCall?.params as { expression?: string }).expression).toContain(
-      "event.preventDefault()",
-    );
+    expect(calls[0]).toEqual({
+      method: "Page.setInterceptFileChooserDialog",
+      params: { enabled: true },
+    });
+    expect(calls).toContainEqual({
+      method: "Page.setInterceptFileChooserDialog",
+      params: { enabled: false, cancel: true },
+    });
     expect(calls).toContainEqual({
       method: "DOM.setFileInputFiles",
       params: { files: ["/private/stage/one", "/private/stage/two"], backendNodeId: 456 },
@@ -110,7 +149,7 @@ describe("file transfer tools", () => {
     const { cdp } = uploadCdp({ inputCount: 0 });
     const result = await uploadThroughActivatedFileInput({
       cdp,
-      target: { tabId: 4 },
+      actionTarget: actionTarget(),
       files: ["/private/stage/one"],
       timeoutMs: 100,
       trigger: async () => ({ tab_id: 4, x: 10, y: 10 }),
@@ -122,31 +161,80 @@ describe("file transfer tools", () => {
     });
   });
 
-  it("reports a File System Access picker without waiting for a timeout", async () => {
-    const { cdp } = uploadCdp({ inputCount: 0, pickerCall: "showOpenFilePicker" });
+  it("fails before clicking when chooser interception is unavailable", async () => {
+    const trigger = vi.fn(async () => ({ tab_id: 4, x: 10, y: 10 }));
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "Page.setInterceptFileChooserDialog") {
+          throw new Error("method unavailable");
+        }
+        return {};
+      }) as CdpRunner["send"],
+    };
+
     const result = await uploadThroughActivatedFileInput({
       cdp,
-      target: { tabId: 4 },
+      actionTarget: actionTarget(),
       files: ["/private/stage/one"],
       timeoutMs: 100,
-      trigger: async () => ({ tab_id: 4, x: 10, y: 10 }),
+      trigger,
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { effect_state: "none", phase: "arm_interception" },
+    });
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it("uses an exact chooser event as an independent input-location signal", async () => {
+    const { cdp, calls, emitChooser } = uploadCdp({ inputCount: 0 });
+    const result = await uploadThroughActivatedFileInput({
+      cdp,
+      actionTarget: actionTarget("f1"),
+      files: ["/private/stage/one"],
+      timeoutMs: 100,
+      trigger: async () => {
+        emitChooser({ frameId: "f1", backendNodeId: 789, mode: "selectSingle" });
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({ multiple: false });
+    expect(calls).toContainEqual({
+      method: "DOM.setFileInputFiles",
+      params: { files: ["/private/stage/one"], backendNodeId: 789 },
+    });
+  });
+
+  it("reports a File System Access picker without waiting for a timeout", async () => {
+    const { cdp, emitChooser } = uploadCdp({
+      inputCount: 0,
+    });
+    const result = await uploadThroughActivatedFileInput({
+      cdp,
+      actionTarget: actionTarget("f1"),
+      files: ["/private/stage/one"],
+      timeoutMs: 100,
+      trigger: async () => {
+        emitChooser({ frameId: "f1", mode: "selectSingle" });
+        return { tab_id: 4, x: 10, y: 10 };
+      },
     });
 
     expect(result).toMatchObject({
       code: "unsupported",
-      message: "upload trigger invoked showOpenFilePicker instead of an input[type=file]",
+      message: "upload trigger invoked a non-input file picker",
       data: { reason: "file_input_not_activated", phase: "resolve_input" },
     });
   });
 
   it("bounds a stuck file-input probe", async () => {
-    const cdp: CdpRunner = {
-      send: vi.fn(() => new Promise<never>(() => {})) as unknown as CdpRunner["send"],
-    };
+    const { cdp } = uploadCdp({ pendingResolve: true });
 
     const result = await uploadThroughActivatedFileInput({
       cdp,
-      target: { tabId: 4 },
+      actionTarget: actionTarget(),
       files: ["/private/stage/one"],
       timeoutMs: 5,
       trigger: vi.fn(),
@@ -156,6 +244,31 @@ describe("file transfer tools", () => {
       code: "timeout",
       data: { reason: "file_input_probe_failed", phase: "arm_input_probe" },
     });
+  });
+
+  it("marks a timed-out file assignment unknown and detaches browser state", async () => {
+    const fixture = uploadCdp();
+    const originalSend = fixture.cdp.send;
+    const detach = vi.fn(async () => {});
+    fixture.cdp.detach = detach;
+    fixture.cdp.send = vi.fn((tabId: number, method: string, params?: object) => {
+      if (method === "DOM.setFileInputFiles") return new Promise<never>(() => {});
+      return originalSend(tabId, method, params);
+    }) as CdpRunner["send"];
+
+    const result = await uploadThroughActivatedFileInput({
+      cdp: fixture.cdp,
+      actionTarget: actionTarget(),
+      files: ["/private/stage/one"],
+      timeoutMs: 10,
+      trigger: async () => ({ tab_id: 4, x: 10, y: 10 }),
+    });
+
+    expect(result).toMatchObject({
+      code: "timeout",
+      data: { effect_state: "unknown", phase: "set_files" },
+    });
+    expect(detach).toHaveBeenCalledWith(4);
   });
 
   it("routes one exact-target download through a browser-relative capability", async () => {
@@ -194,6 +307,7 @@ describe("file transfer tools", () => {
       onDeterminingFilename,
       search: vi.fn(async () => [completed]),
       cancel: vi.fn(async () => {}),
+      removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
     let suggested: chrome.downloads.DownloadFilenameSuggestion | undefined;
@@ -261,6 +375,7 @@ describe("file transfer tools", () => {
       onDeterminingFilename,
       search: vi.fn(async () => []),
       cancel: vi.fn(async () => {}),
+      removeFile: vi.fn(async () => {}),
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
     const cdp: CdpRunner = {
@@ -302,6 +417,139 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({
       code: "cdp_failed",
       data: { reason: "download_capture_failed" },
+    });
+  });
+
+  it("correlates a filename candidate that arrives before the CDP intent", async () => {
+    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
+    const onDeterminingFilename =
+      fakeEvent<
+        (
+          item: chrome.downloads.DownloadItem,
+          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+        ) => void | true
+      >();
+    const initial = {
+      id: 21,
+      url: "https://example.test/candidate-first.bin",
+      finalUrl: "https://example.test/candidate-first.bin",
+      filename: "candidate-first.bin",
+      state: "in_progress",
+      fileSize: -1,
+      totalBytes: 4,
+      bytesReceived: 0,
+    } as chrome.downloads.DownloadItem;
+    const complete = { ...initial, state: "complete", fileSize: 4 } as chrome.downloads.DownloadItem;
+    const downloads: DownloadsApi = {
+      onCreated,
+      onChanged,
+      onDeterminingFilename,
+      search: vi.fn(async () => [complete]),
+      cancel: vi.fn(async () => {}),
+      removeFile: vi.fn(async () => {}),
+    };
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      onEvent: (handler) => {
+        cdpEvent = handler;
+        return { dispose: vi.fn() };
+      },
+    };
+    let suggestion: chrome.downloads.DownloadFilenameSuggestion | undefined;
+
+    const result = await captureBrowserDownload({
+      cdp,
+      target: { tabId: 4 },
+      downloads,
+      browserRelativeDir: "BrowserSkill/tr_21",
+      timeoutMs: 1_000,
+      trigger: async () => {
+        const suggested = new Promise<void>((resolve) => {
+          onDeterminingFilename.emit(initial, (value) => {
+            suggestion = value;
+            resolve();
+          });
+        });
+        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+          url: initial.url,
+          suggestedFilename: initial.filename,
+        });
+        await suggested;
+        onCreated.emit(complete);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(suggestion).toEqual({
+      filename: "BrowserSkill/tr_21/candidate-first.bin",
+      conflictAction: "overwrite",
+    });
+    expect(result).toMatchObject({ item: { id: 21, state: "complete" } });
+  });
+
+  it("rejects ambiguous attribution without cancelling either unclaimed download", async () => {
+    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
+    const onDeterminingFilename =
+      fakeEvent<
+        (
+          item: chrome.downloads.DownloadItem,
+          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+        ) => void | true
+      >();
+    const downloads: DownloadsApi = {
+      onCreated,
+      onChanged,
+      onDeterminingFilename,
+      search: vi.fn(async () => []),
+      cancel: vi.fn(async () => {}),
+      removeFile: vi.fn(async () => {}),
+    };
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      onEvent: (handler) => {
+        cdpEvent = handler;
+        return { dispose: vi.fn() };
+      },
+    };
+    const defaults: number[] = [];
+    const candidate = (id: number) =>
+      ({
+        id,
+        url: "https://example.test/same.bin",
+        finalUrl: "https://example.test/same.bin",
+        filename: "same.bin",
+        state: "in_progress",
+      }) as chrome.downloads.DownloadItem;
+
+    const result = await captureBrowserDownload({
+      cdp,
+      target: { tabId: 4 },
+      downloads,
+      browserRelativeDir: "BrowserSkill/tr_ambiguous",
+      timeoutMs: 100,
+      trigger: async () => {
+        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+          url: "https://example.test/same.bin",
+          suggestedFilename: "same.bin",
+        });
+        for (const id of [31, 32]) {
+          onDeterminingFilename.emit(candidate(id), (value) => {
+            if (value === undefined) defaults.push(id);
+          });
+        }
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(defaults.sort()).toEqual([31, 32]);
+    expect(downloads.cancel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { effect_state: "unknown", phase: "attribution" },
     });
   });
 });

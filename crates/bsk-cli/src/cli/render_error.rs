@@ -53,6 +53,8 @@ pub mod reason {
     pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
     pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
     pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
+    pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
+    pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
@@ -201,6 +203,20 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
+            summary: "the file transfer outcome could not be confirmed",
+            hint: Some(
+                "do not retry the transfer: the browser may already have applied it; inspect the page or stop safely",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout, reason::TRANSFER_TIMEOUT) => RenderInfo {
+            summary: "the file transfer timed out after browser dispatch",
+            hint: Some(
+                "do not retry when effect_state is unknown or committed; inspect the page before taking another action",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::PermissionDenied, reason::ELEMENT_NOT_VISIBLE) => RenderInfo {
             summary: "target element has no visible geometry",
             hint: Some(
@@ -474,6 +490,15 @@ mod tests {
         let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
         let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
         assert!(info.summary.contains("download could not be attributed"));
+
+        let unknown = serde_json::json!({ "reason": reason::TRANSFER_OUTCOME_UNKNOWN });
+        let info = info_for_error(ErrorCode::ProtocolError, Some(&unknown));
+        assert!(info.summary.contains("outcome could not be confirmed"));
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let timeout = serde_json::json!({ "reason": reason::TRANSFER_TIMEOUT });
+        let info = info_for_error(ErrorCode::Timeout, Some(&timeout));
+        assert!(info.summary.contains("timed out after browser dispatch"));
     }
 
     #[test]
