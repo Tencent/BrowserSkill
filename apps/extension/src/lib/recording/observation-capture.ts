@@ -1,4 +1,5 @@
 import type { RenderedRef } from "@browser-skill/vom";
+import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureVomMatchNode,
   type CaptureVomObservationResult,
