@@ -69,6 +69,23 @@ describe("matchObservationTarget", () => {
     expect(target.ref).toBe("e2");
   });
 
+  it("matches iframe capture geometry in the child viewport coordinate space", () => {
+    const child = node(42, "child", 410);
+    child.localRect = { x: 10, y: 20, w: 100, h: 30 };
+    const target = matchObservationTarget({
+      observation: observation(
+        [child],
+        [{ ref: "e1", backendNodeId: 42, frameId: "child", line: 1 }],
+      ),
+      hint: {
+        frameId: "child",
+        geometrySpace: "local",
+        geometry: { rect: { x: 10, y: 20, w: 100, h: 30 }, tag: "button" },
+      },
+    });
+    expect(target.ref).toBe("e1");
+  });
+
   it("restricts a missing frame hint to the root frame", () => {
     const target = matchObservationTarget({
       observation: observation(
@@ -79,6 +96,21 @@ describe("matchObservationTarget", () => {
       fallback: { tag: "button", name: "发布" },
     });
     expect(target).toEqual({ name: "发布", unmatched: true });
+  });
+
+  it("fails closed when the source Document has no VOM frame mapping", () => {
+    const target = matchObservationTarget({
+      observation: observation(
+        [node(42, "root")],
+        [{ ref: "e1", backendNodeId: 42, role: "button", name: "发布", line: 1 }],
+      ),
+      hint: {
+        frameId: null,
+        geometry: { rect: { x: 10, y: 20, w: 100, h: 30 }, tag: "button" },
+      },
+      fallback: { tag: "button", role: "button", name: "发布" },
+    });
+    expect(target).toEqual({ role: "button", name: "发布", unmatched: true });
   });
 
   it("returns unmatched for ambiguous geometry", () => {

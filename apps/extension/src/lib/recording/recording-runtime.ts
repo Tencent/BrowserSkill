@@ -1,6 +1,6 @@
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { StopReason, TraceV3 } from "@/transport/types";
-import type { DocumentSettleScope } from "./document-settle";
+import { type DocumentSettleScope, waitForDocumentSettled } from "./document-settle";
 import type { RegisteredObservation } from "./observation-capture";
 import { RecordingObservationSession } from "./observation-session";
 import { inferMissingPostStates, SettleController } from "./settle-controller";
@@ -12,6 +12,8 @@ interface TabRecordingContext {
   session: RecordingObservationSession;
   settle: SettleController;
   pendingCapture: PendingCapture | null;
+  frameRefresh: Promise<void>;
+  frameRefreshAbort: AbortController | null;
 }
 
 interface PendingCapture {
@@ -58,6 +60,8 @@ export class RecordingObservationRuntime {
         tabId,
       }),
       pendingCapture: null,
+      frameRefresh: Promise.resolve(),
+      frameRefreshAbort: null,
     };
     this.#contexts.set(tabId, context);
     return context;
@@ -84,6 +88,41 @@ export class RecordingObservationRuntime {
     const context = this.#context(tabId);
     if (context.session.cursor.lastSettled) return;
     await this.#capture(tabId);
+  }
+
+  /** Refresh the safe observation after a late child Document becomes usable. */
+  async refreshDocument(tabId: number, producerId: string): Promise<void> {
+    const context = this.#context(tabId);
+    context.frameRefreshAbort?.abort();
+    const abort = new AbortController();
+    context.frameRefreshAbort = abort;
+    const previous = context.frameRefresh;
+    const refresh = (async () => {
+      await previous;
+      if (abort.signal.aborted) return;
+      if (context.pendingCapture) await Promise.allSettled([context.pendingCapture.promise]);
+      if (abort.signal.aborted) return;
+
+      // The first capture discovers the safe producer -> CDP Document scope.
+      await this.#capture(tabId);
+      if (abort.signal.aborted) return;
+      const scope = context.session.cursor.lastSettled?.index.documentScope(producerId);
+      if (scope) {
+        await waitForDocumentSettled(this.#cdp, scope, { signal: abort.signal });
+      }
+      if (abort.signal.aborted) return;
+
+      // Capture again after the child SPA is quiet so the next action can be
+      // matched against refs that actually exist in its pre-action state.
+      await this.#capture(tabId);
+    })();
+    const tracked = refresh.catch(() => {});
+    context.frameRefresh = tracked;
+    try {
+      await refresh;
+    } finally {
+      if (context.frameRefresh === tracked) context.frameRefreshAbort = null;
+    }
   }
 
   async captureTabTransition(
@@ -126,7 +165,7 @@ export class RecordingObservationRuntime {
     tabId: number,
     drafts: RecordingDraftStep[],
     draftIndex: number,
-    scope?: DocumentSettleScope,
+    producerId?: string,
   ): Promise<void> {
     const draft = drafts[draftIndex];
     if (!draft) return;
@@ -137,6 +176,23 @@ export class RecordingObservationRuntime {
       } catch {
         // Post-action settle can still provide a usable state.
       }
+    }
+    const scope = producerId
+      ? context.session.cursor.lastSettled?.index.documentScope(producerId)
+      : undefined;
+    if (
+      producerId &&
+      (draft.op === "click" ||
+        draft.op === "hover" ||
+        draft.op === "fill" ||
+        draft.op === "press" ||
+        draft.op === "select")
+    ) {
+      draft.targetHint = {
+        ...(draft.targetHint ?? {}),
+        frameId: scope?.frameId ?? null,
+        geometrySpace: "local",
+      };
     }
     context.session.bindDraft(draft, draftIndex + 1, context.settle.hasPending);
     context.settle.schedule(drafts, draftIndex, scope);
@@ -160,6 +216,7 @@ export class RecordingObservationRuntime {
   }
 
   async #flushContext(context: TabRecordingContext): Promise<void> {
+    await context.frameRefresh;
     if (context.pendingCapture) await Promise.allSettled([context.pendingCapture.promise]);
     await context.settle.flushRedirects();
     await context.settle.flush();
@@ -189,6 +246,7 @@ export class RecordingObservationRuntime {
 
   cancel(): void {
     for (const context of this.#contexts.values()) {
+      context.frameRefreshAbort?.abort();
       context.pendingCapture?.abort.abort();
       context.settle.cancel();
     }

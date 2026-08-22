@@ -15,8 +15,9 @@ export interface TargetGeometry {
 
 export interface TargetMatchHint {
   geometry?: TargetGeometry;
-  /** Missing means the current top frame, never an unrestricted frame search. */
-  frameId?: string;
+  /** Missing means top frame; null means the source Document could not be resolved. */
+  frameId?: string | null;
+  geometrySpace?: "top" | "local";
 }
 
 export interface StepAnnotation {

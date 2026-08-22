@@ -1,4 +1,5 @@
 import type { RenderedRef } from "@browser-skill/vom";
+import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureVomMatchNode,
   type CaptureVomObservationResult,
@@ -28,6 +29,11 @@ export interface RegisteredObservation {
   url: string;
 }
 
+export interface RecordingDocumentScope {
+  frameId: string;
+  target: CdpTarget;
+}
+
 function nodeKey(frameId: string, backendNodeId: number): string {
   return `${frameId}:${backendNodeId}`;
 }
@@ -40,8 +46,12 @@ export class ObservationNodeIndex {
   readonly #nodesByFrameTag = new Map<string, IndexedObservationNode[]>();
   readonly #refById = new Map<string, RenderedRef>();
   readonly #refsByFrame = new Map<string, RenderedRef[]>();
+  readonly #scopeByProducer = new Map<string, RecordingDocumentScope | null>();
 
-  constructor(input: Pick<CaptureVomObservationResult, "rootFrameId" | "matchNodes" | "refs">) {
+  constructor(
+    input: Pick<CaptureVomObservationResult, "rootFrameId" | "matchNodes" | "refs"> &
+      Partial<Pick<CaptureVomObservationResult, "frames">>,
+  ) {
     const refByNode = new Map<string, RenderedRef>();
     for (const ref of input.refs) {
       const frameId = ref.frameId ?? input.rootFrameId;
@@ -50,6 +60,16 @@ export class ObservationNodeIndex {
       const frameRefs = this.#refsByFrame.get(frameId) ?? [];
       frameRefs.push(ref);
       this.#refsByFrame.set(frameId, frameRefs);
+    }
+    for (const frame of input.frames ?? []) {
+      const documentId = frame.recordingDocumentId;
+      if (!documentId) continue;
+      this.#scopeByProducer.set(
+        documentId,
+        this.#scopeByProducer.has(documentId)
+          ? null
+          : { frameId: frame.frameId, target: frame.target },
+      );
     }
     for (const geometry of input.matchNodes) {
       const { frameId } = geometry;
@@ -75,6 +95,10 @@ export class ObservationNodeIndex {
 
   refs(frameId: string): readonly RenderedRef[] {
     return this.#refsByFrame.get(frameId) ?? [];
+  }
+
+  documentScope(producerId: string): RecordingDocumentScope | undefined {
+    return this.#scopeByProducer.get(producerId) ?? undefined;
   }
 }
 
