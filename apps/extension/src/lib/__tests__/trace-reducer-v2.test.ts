@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { DraftTraceStep } from "@/transport/types";
-import { reduceTraceSteps, resolveTraceStartUrl, shouldRecordPress } from "../trace-reducer";
+import type { RecordingDraftStep } from "@/lib/recording/types";
+import { shouldRecordPress } from "../recording/draft-policy";
+import { buildTraceV2 } from "../recording/trace-reducer-v2";
+
+function reduceTraceSteps(steps: RecordingDraftStep[], startUrl?: string) {
+  return buildTraceV2({
+    steps,
+    startedAt: "2026-01-01T00:00:00.000Z",
+    ...(startUrl ? { startUrl } : {}),
+  });
+}
 
 describe("shouldRecordPress", () => {
   it("keeps Enter and Escape", () => {
@@ -19,35 +28,35 @@ describe("shouldRecordPress", () => {
 
 describe("reduceTraceSteps", () => {
   it("builds steps with pages dictionary and page id references", () => {
-    const drafts: DraftTraceStep[] = [
+    const drafts: RecordingDraftStep[] = [
       {
         op: "navigate",
         url: "https://example.com/search?q=hello&utm_source=x",
-        page_url: "https://example.com/search?q=hello&utm_source=x",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
       },
       {
         op: "fill",
-        target: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
+        captureTarget: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
         value: "browser skill",
-        page_url: "https://example.com/search?q=hello&utm_source=x",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
       },
       {
         op: "press",
         key: "Enter",
-        target: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
-        navigated_to: "https://example.com/results/42",
-        page_url: "https://example.com/search?q=hello&utm_source=x",
+        captureTarget: { tag: "input", role: "textbox", name: "搜索", name_attr: "q" },
+        navigatedTo: "https://example.com/results/42",
+        pageUrl: "https://example.com/search?q=hello&utm_source=x",
       },
       {
         op: "click",
-        target: { tag: "button", role: "button", name: "发布" },
-        navigated_to: "https://example.com/p/99",
-        page_url: "https://example.com/results/42",
+        captureTarget: { tag: "button", role: "button", name: "发布" },
+        navigatedTo: "https://example.com/p/99",
+        pageUrl: "https://example.com/results/42",
       },
       {
         op: "press",
         key: "a",
-        page_url: "https://example.com/p/99",
+        pageUrl: "https://example.com/p/99",
       },
     ];
 
@@ -109,9 +118,9 @@ describe("reduceTraceSteps", () => {
       [
         {
           op: "fill",
-          target: { tag: "input", role: "textbox", name: "Search query" },
+          captureTarget: { tag: "input", role: "textbox", name: "Search query" },
           value: "",
-          page_url: "https://example.com/search",
+          pageUrl: "https://example.com/search",
         },
       ],
       "https://example.com/search",
@@ -125,16 +134,16 @@ describe("reduceTraceSteps", () => {
     ]);
   });
 
-  it("maps select navigated_to onto effect.navigated_to (page id)", () => {
+  it("maps select navigatedTo onto effect.navigatedTo (page id)", () => {
     const { pages, steps } = reduceTraceSteps(
       [
         {
           op: "select",
-          target: { tag: "select", role: "combobox", name: "分类" },
+          captureTarget: { tag: "select", role: "combobox", name: "分类" },
           values: ["tech"],
           labels: ["技术"],
-          navigated_to: "https://example.com/list?cat=tech",
-          page_url: "https://example.com/list",
+          navigatedTo: "https://example.com/list?cat=tech",
+          pageUrl: "https://example.com/list",
         },
       ],
       "https://example.com/list",
@@ -156,13 +165,13 @@ describe("reduceTraceSteps", () => {
       [
         {
           op: "hover",
-          target: { tag: "span", role: "button", name: "Account" },
-          page_url: "https://example.com/app",
+          captureTarget: { tag: "span", role: "button", name: "Account" },
+          pageUrl: "https://example.com/app",
         },
         {
           op: "click",
-          target: { tag: "a", role: "link", name: "Profile" },
-          page_url: "https://example.com/app",
+          captureTarget: { tag: "a", role: "link", name: "Profile" },
+          pageUrl: "https://example.com/app",
         },
       ],
       "https://example.com/app",
@@ -177,10 +186,11 @@ describe("reduceTraceSteps", () => {
 
   it("resolveTraceStartUrl prefers explicit start URL", () => {
     expect(
-      resolveTraceStartUrl(
-        [{ op: "navigate", url: "https://example.com/other" }],
-        "https://example.com/start",
-      ),
+      buildTraceV2({
+        steps: [{ op: "navigate", url: "https://example.com/other" }],
+        startedAt: "2026-01-01T00:00:00.000Z",
+        startUrl: "https://example.com/start",
+      }).entry.start_url,
     ).toBe("https://example.com/start");
   });
 });

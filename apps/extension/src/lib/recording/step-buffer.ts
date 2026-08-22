@@ -1,8 +1,8 @@
-import type { DraftTraceStep } from "@/transport/types";
-import type { RecordStepPayload } from "./record-bridge";
+import type { RecordStepPayload } from "../record-bridge";
+import type { RecordingDraftStep } from "./types";
 
 export interface RecordingStepBuffer {
-  steps: DraftTraceStep[];
+  steps: RecordingDraftStep[];
   currentUrl?: string;
   pendingNavigation: boolean;
   pendingNavigationDeadline?: number;
@@ -10,33 +10,33 @@ export interface RecordingStepBuffer {
 
 const NAVIGATION_TRIGGER_WINDOW_MS = 3_000;
 
-function toDraftStep(payload: RecordStepPayload): DraftTraceStep | null {
+function toDraftStep(payload: RecordStepPayload): RecordingDraftStep | null {
   const pageUrl = payload.page_url;
   switch (payload.op) {
     case "click":
       return payload.target
         ? {
             op: "click",
-            target: payload.target,
-            ...(pageUrl ? { page_url: pageUrl } : {}),
+            captureTarget: payload.target,
+            ...(pageUrl ? { pageUrl } : {}),
           }
         : null;
     case "hover":
       return payload.target
         ? {
             op: "hover",
-            target: payload.target,
-            ...(pageUrl ? { page_url: pageUrl } : {}),
+            captureTarget: payload.target,
+            ...(pageUrl ? { pageUrl } : {}),
           }
         : null;
     case "fill":
       return payload.target
         ? {
             op: "fill",
-            target: payload.target,
+            captureTarget: payload.target,
             value: payload.value ?? "",
             ...(payload.redacted ? { redacted: true } : {}),
-            ...(pageUrl ? { page_url: pageUrl } : {}),
+            ...(pageUrl ? { pageUrl } : {}),
           }
         : null;
     case "press":
@@ -44,19 +44,19 @@ function toDraftStep(payload: RecordStepPayload): DraftTraceStep | null {
         ? {
             op: "press",
             key: payload.key,
-            ...(payload.target ? { target: payload.target } : {}),
+            ...(payload.target ? { captureTarget: payload.target } : {}),
             ...(payload.modifiers?.length ? { modifiers: payload.modifiers } : {}),
-            ...(pageUrl ? { page_url: pageUrl } : {}),
+            ...(pageUrl ? { pageUrl } : {}),
           }
         : null;
     case "select":
       return payload.target && payload.values
         ? {
             op: "select",
-            target: payload.target,
+            captureTarget: payload.target,
             values: payload.values,
             ...(payload.labels?.length ? { labels: payload.labels } : {}),
-            ...(pageUrl ? { page_url: pageUrl } : {}),
+            ...(pageUrl ? { pageUrl } : {}),
           }
         : null;
     case "navigate":
@@ -69,7 +69,7 @@ function annotateLastStepNavigation(buffer: RecordingStepBuffer, url: string): b
     const step = buffer.steps[i];
     if (!step) continue;
     if (step.op === "click" || step.op === "press" || step.op === "select") {
-      buffer.steps[i] = { ...step, navigated_to: url };
+      buffer.steps[i] = { ...step, navigatedTo: url };
       return true;
     }
     break;
@@ -96,7 +96,7 @@ export function observeRecordedNavigation(
       buffer.steps.push({
         op: "navigate",
         url,
-        page_url: url,
+        pageUrl: url,
       });
     }
     return;
@@ -107,7 +107,7 @@ export function observeRecordedNavigation(
   buffer.steps.push({
     op: "navigate",
     url,
-    page_url: url,
+    pageUrl: url,
   });
 }
 

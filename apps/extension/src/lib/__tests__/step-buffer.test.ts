@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendRecordedPayload, observeRecordedNavigation } from "../recording-step-buffer";
+import { appendRecordedPayload, observeRecordedNavigation } from "../recording/step-buffer";
 
 describe("recording-step-buffer", () => {
   it("stores semantic click without summary", () => {
@@ -12,7 +12,7 @@ describe("recording-step-buffer", () => {
     expect(buffer.steps).toEqual([
       {
         op: "click",
-        target: { tag: "button", role: "button", name: "发布" },
+        captureTarget: { tag: "button", role: "button", name: "发布" },
       },
     ]);
     expect(buffer.pendingNavigation).toBe(true);
@@ -23,7 +23,7 @@ describe("recording-step-buffer", () => {
       steps: [
         {
           op: "click" as const,
-          target: { tag: "button", role: "button", name: "发布" },
+          captureTarget: { tag: "button", role: "button", name: "发布" },
         },
       ],
       currentUrl: "https://example.com/a",
@@ -34,8 +34,8 @@ describe("recording-step-buffer", () => {
     expect(buffer.steps).toEqual([
       {
         op: "click",
-        target: { tag: "button", role: "button", name: "发布" },
-        navigated_to: "https://example.com/b",
+        captureTarget: { tag: "button", role: "button", name: "发布" },
+        navigatedTo: "https://example.com/b",
       },
     ]);
     expect(JSON.stringify(buffer.steps)).not.toContain("wait_for_navigation");
@@ -46,7 +46,7 @@ describe("recording-step-buffer", () => {
       steps: [
         {
           op: "select" as const,
-          target: { tag: "select", role: "combobox", name: "分类" },
+          captureTarget: { tag: "select", role: "combobox", name: "分类" },
           values: ["tech"],
         },
       ],
@@ -58,9 +58,9 @@ describe("recording-step-buffer", () => {
     expect(buffer.steps).toEqual([
       {
         op: "select",
-        target: { tag: "select", role: "combobox", name: "分类" },
+        captureTarget: { tag: "select", role: "combobox", name: "分类" },
         values: ["tech"],
-        navigated_to: "https://example.com/list?cat=tech",
+        navigatedTo: "https://example.com/list?cat=tech",
       },
     ]);
   });

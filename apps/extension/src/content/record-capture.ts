@@ -1,9 +1,9 @@
 import {
+  type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
   resolveClickableElement,
   resolveHoverElement,
-  type TargetDescriptor,
 } from "@/lib/describe-target";
 import {
   evaluateHoverTrigger,
@@ -27,7 +27,7 @@ import {
   type RecordStopAck,
   type RecordStopMessage,
 } from "@/lib/record-bridge";
-import { shouldRecordPress } from "@/lib/trace-reducer";
+import { shouldRecordPress } from "@/lib/recording/draft-policy";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -65,14 +65,14 @@ export interface RecordCaptureController {
 
 interface FillSession {
   element: FillableElement;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   baselineValue: string;
   lastValue: string;
 }
 
 interface HoverCandidate {
   element: Element;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   recordedAt: number;
   score: number;
   eligible: boolean;
@@ -232,7 +232,10 @@ function collectHoverTriggerLabelText(root: Element): string {
   return normalizeLabelText(text);
 }
 
-function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDescriptor {
+function compactHoverTargetName(
+  el: Element,
+  desc: CaptureTargetDescriptor,
+): CaptureTargetDescriptor {
   if (!desc.name) return desc;
   const fullText = normalizeLabelText(el.textContent ?? "");
   const compactName = collectHoverTriggerLabelText(el);
@@ -250,7 +253,7 @@ function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDesc
   return desc;
 }
 
-function isWeakHoverTarget(target: TargetDescriptor): boolean {
+function isWeakHoverTarget(target: CaptureTargetDescriptor): boolean {
   return !target.role && !target.name && target.tag === "div";
 }
 
@@ -261,9 +264,9 @@ function looksLikeAvatarElement(el: Element): boolean {
 
 function normalizeHoverTarget(
   el: Element,
-  desc: TargetDescriptor,
+  desc: CaptureTargetDescriptor,
   decision: HoverTriggerDecision,
-): TargetDescriptor {
+): CaptureTargetDescriptor {
   if (desc.role === "img" && !desc.name && looksLikeAvatarElement(el)) {
     return { ...desc, name: "image" };
   }
@@ -277,7 +280,7 @@ function normalizeHoverTarget(
   return desc;
 }
 
-function hoverTriggerSignals(el: Element, desc: TargetDescriptor) {
+function hoverTriggerSignals(el: Element, desc: CaptureTargetDescriptor) {
   if (!(el instanceof HTMLElement)) return null;
   const style = hoverTriggerStyle(el);
   return {
