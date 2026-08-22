@@ -50,6 +50,7 @@ pub mod reason {
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
 
 /// Per-code rendering metadata. The `summary` is what the CLI prints
@@ -269,6 +270,16 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (
+            ErrorCode::CdpFailed | ErrorCode::Timeout | ErrorCode::InvalidParams,
+            reason::RECORD_START_PAGE_UNREACHABLE,
+        ) => RenderInfo {
+            summary: "default start page https://example.com/ could not be opened",
+            hint: Some(
+                "that site may be unreachable from your network. Pass --url with a page you can open, e.g. `bsk record start --url https://<site>/`",
+            ),
+            exit_code: base.exit_code,
+        },
         _ => base,
     }
 }
@@ -376,6 +387,22 @@ mod tests {
             "expected session-busy-specific hint"
         );
         assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn record_start_page_unreachable_overrides_cdp_failed_copy() {
+        let data = serde_json::json!({ "reason": reason::RECORD_START_PAGE_UNREACHABLE });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(
+            info.summary,
+            "default start page https://example.com/ could not be opened"
+        );
+        assert!(
+            info.hint.unwrap().contains("--url"),
+            "expected --url hint, got {:?}",
+            info.hint
+        );
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]

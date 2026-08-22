@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::cli::error::CliError;
 
+#[derive(Debug)]
 pub(super) struct ExportMeta {
     pub(super) states_dir: Option<PathBuf>,
     pub(super) trace_version: u32,
@@ -37,6 +38,89 @@ pub(super) fn export_recorded_trace(
                 v2_fallback: true,
             })
         }
+    }
+}
+
+/// Save the completed Trace first, then write the bundle. Recovery is
+/// removed only after the export commits so a bad `--output` cannot drop
+/// a recording the extension already returned.
+pub(super) fn export_with_recovery(
+    output_dir: &Path,
+    trace: &RecordedTrace,
+) -> Result<ExportMeta, CliError> {
+    let save_result = crate::cli::record_recovery::save(trace);
+    match export_recorded_trace(output_dir, trace) {
+        Ok(meta) => {
+            crate::cli::record_recovery::clear();
+            Ok(meta)
+        }
+        Err(export_err) => {
+            let export_err = annotate_recovery_hint(export_err, save_result.is_ok());
+            if let Err(save_err) = save_result {
+                return Err(match export_err {
+                    CliError::Local(inner) => CliError::Local(
+                        inner.context(format!("also failed to save recovery data: {save_err}")),
+                    ),
+                    other => other,
+                });
+            }
+            Err(export_err)
+        }
+    }
+}
+
+fn annotate_recovery_hint(err: CliError, recovery_saved: bool) -> CliError {
+    if !recovery_saved {
+        return err;
+    }
+    match err {
+        CliError::Local(inner) => CliError::Local(inner.context(
+            "export failed; the recorded trace was saved and can be recovered with `bsk record stop --output <dir>`",
+        )),
+        other => other,
+    }
+}
+
+fn looks_like_json_output(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+}
+
+fn legacy_json_output_error(path: &Path) -> CliError {
+    CliError::Local(anyhow::anyhow!(
+        "--output {} is a JSON file path; Trace v3 writes a bundle directory \
+         (`<dir>/trace.json` and `<dir>/states/`), not a single file. \
+         Use `--output trace` or another directory.",
+        path.display()
+    ))
+}
+
+/// Reject legacy `--output trace.json` (and any existing non-directory)
+/// before a recording starts, so the user is not blocked only after Finish.
+pub(super) fn validate_record_output(path: &Path) -> Result<(), CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CliError::Local(anyhow::anyhow!(
+            "--output {} must not be a symlink",
+            path.display()
+        ))),
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) if looks_like_json_output(path) => Err(legacy_json_output_error(path)),
+        Ok(_) => Err(CliError::Local(anyhow::anyhow!(
+            "--output {} is not a directory; Trace v3 writes a bundle directory \
+             (`<dir>/trace.json` and `<dir>/states/`). Use `--output trace`.",
+            path.display()
+        ))),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            if looks_like_json_output(path) {
+                Err(legacy_json_output_error(path))
+            } else {
+                Ok(())
+            }
+        }
+        Err(err) => Err(CliError::Local(
+            anyhow::Error::new(err).context(format!("inspect --output {}", path.display())),
+        )),
     }
 }
 
@@ -126,8 +210,9 @@ fn validate_bundle_directory(path: &Path, description: &str) -> Result<(), CliEr
             path.display()
         ))),
         Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) if looks_like_json_output(path) => Err(legacy_json_output_error(path)),
         Ok(_) => Err(CliError::Local(anyhow::anyhow!(
-            "{description} {} is not a directory",
+            "{description} {} is not a directory; Trace v3 writes `<dir>/trace.json` and `<dir>/states/`. Use `--output trace`.",
             path.display()
         ))),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -811,5 +896,81 @@ mod tests {
         assert_eq!(exported.trace_version, TRACE_VERSION_V2);
         assert!(exported.states_dir.is_none());
         assert!(output.join("trace.json").exists());
+    }
+
+    #[test]
+    fn existing_trace_json_file_is_rejected_with_bundle_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("trace.json");
+        fs::write(&output, "{}\n").unwrap();
+
+        let err = validate_record_output(&output).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("JSON file") || msg.contains("json file"),
+            "should name the legacy JSON file usage: {msg}"
+        );
+        assert!(
+            msg.contains("states/") || msg.contains("--output trace"),
+            "should hint at the new bundle directory usage: {msg}"
+        );
+        assert_eq!(fs::read_to_string(&output).unwrap(), "{}\n");
+    }
+
+    #[test]
+    fn missing_trace_json_path_is_rejected_as_legacy_output() {
+        let err = validate_record_output(Path::new("trace.json")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("JSON file") || msg.contains("json file"),
+            "{msg}"
+        );
+        assert!(
+            msg.contains("states/") || msg.contains("--output trace"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn export_failure_keeps_recovery_for_retry() {
+        let _lock = crate::cli::record_recovery::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var(crate::daemon::paths::BSK_HOME_ENV, tmp.path());
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let bad_output = dir.path().join("trace.json");
+        fs::write(&bad_output, "{}\n").unwrap();
+        let trace = RecordedTrace::V3(sample_trace("s1", "@vom 1\nL1 page"));
+
+        let err = export_with_recovery(&bad_output, &trace).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("recover") || msg.contains("record stop"),
+            "export failure should tell the user how to recover: {msg}"
+        );
+        assert!(
+            crate::cli::record_recovery::exists(),
+            "recovery data must survive a failed bundle export"
+        );
+        let recovered = crate::cli::record_recovery::load()
+            .unwrap()
+            .expect("recovery file");
+        assert_eq!(recovered, trace);
+        assert_eq!(fs::read_to_string(&bad_output).unwrap(), "{}\n");
+
+        let good_output = dir.path().join("bundle");
+        export_with_recovery(&good_output, &recovered).unwrap();
+        assert!(good_output.join("trace.json").exists());
+        assert!(good_output.join("states/s1.txt").exists());
+        assert!(
+            !crate::cli::record_recovery::exists(),
+            "successful export must delete recovery data"
+        );
+
+        unsafe {
+            std::env::remove_var(crate::daemon::paths::BSK_HOME_ENV);
+        }
     }
 }

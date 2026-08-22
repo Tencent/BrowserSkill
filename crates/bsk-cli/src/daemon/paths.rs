@@ -100,6 +100,14 @@ pub fn record_session_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("record-session.json"))
 }
 
+/// Path to a completed Trace saved before bundle export (`record-recovery.json`).
+///
+/// Kept until export succeeds so a failed `--output` write cannot drop the
+/// recording the extension already returned.
+pub fn record_recovery_path() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("record-recovery.json"))
+}
+
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
 /// token so test homes and custom installs do not share a predictable
 /// per-username pipe.
@@ -186,6 +194,10 @@ mod tests {
             assert_eq!(
                 record_session_path().unwrap(),
                 home.join("record-session.json")
+            );
+            assert_eq!(
+                record_recovery_path().unwrap(),
+                home.join("record-recovery.json")
             );
         });
     }
