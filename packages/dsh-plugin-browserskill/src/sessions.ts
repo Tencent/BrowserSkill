@@ -105,6 +105,11 @@ export class SessionRegistry {
     return owned;
   }
 
+  /** The DSH conversation ids owning one bsk session (empty when untracked). */
+  dshOwnersOf(sessionId: string): string[] {
+    return [...(this.dshOwners.get(sessionId) ?? [])];
+  }
+
   /** Mark an owned session as most recently used (recency order refresh). */
   private touch(sessionId: string): void {
     const existing = this.sessions.get(sessionId);

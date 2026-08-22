@@ -14,6 +14,7 @@ import {
   ObservationSidebarTab,
   observationTabOpen,
   registerObservationSidebar,
+  type SidebarNodeLike,
   type SidebarStateLike,
   type TabDescriptorLike,
 } from "../../src/client/observation-sidebar";
@@ -21,7 +22,20 @@ import { type EventSourceLike, ObservationClientStore } from "../../src/client/o
 import { getSidebarMode, setSidebarMode } from "../../src/client/sidebar-mode";
 import type { SessionObservation } from "../../src/observation";
 
-const BUSY: SessionObservation = { sessionId: "s1", action: "clicking", since: Date.now() - 7000 };
+// Owned by the sidebar mock's active conversation ("conv-1") so the scoped
+// visibility logic lets it through; FOREIGN belongs to another conversation.
+const BUSY: SessionObservation = {
+  sessionId: "s1",
+  action: "clicking",
+  since: Date.now() - 7000,
+  dshSessionIds: ["conv-1"],
+};
+const FOREIGN: SessionObservation = {
+  sessionId: "s9",
+  action: "clicking",
+  since: Date.now() - 5000,
+  dshSessionIds: ["other-conv"],
+};
 
 interface Harness {
   store: ObservationClientStore;
@@ -87,12 +101,32 @@ interface SidebarMock {
   setState: (state: SidebarStateLike | undefined) => void;
 }
 
+/** Insert a tab into the first leaf of the main tree (mirrors a real open). */
+function withTabOpened(state: SidebarStateLike, type: string): SidebarStateLike {
+  let done = false;
+  const walk = (node: SidebarNodeLike): SidebarNodeLike => {
+    if (done) return node;
+    if (node.kind === "leaf") {
+      done = true;
+      return { ...node, active: type, tabs: [...node.tabs, { id: type, type, title: type }] };
+    }
+    return { ...node, children: node.children.map(walk) };
+  };
+  return { ...state, splits: walk(state.splits) };
+}
+
 function makeSidebar(
   initialState: SidebarStateLike | undefined = leafWith("explorer"),
 ): SidebarMock {
   let descriptor: TabDescriptorLike | undefined;
   let state: SidebarStateLike | undefined = initialState;
-  const openTab = vi.fn();
+  const openTab = vi.fn((seed: { type: string }) => {
+    // Mirror the real feedback loop: a created tab lands in the state, so
+    // later evaluations see it open (single-instance dedupe re-focuses).
+    if (state !== undefined && !observationTabOpen(state)) {
+      state = withTabOpened(state, seed.type);
+    }
+  });
   const disposeTab = vi.fn();
   const service: BetterSidebarLike = {
     registerTab: (next) => {
@@ -202,16 +236,31 @@ describe("registerObservationSidebar", () => {
     );
   });
 
-  it("shows the live session count as the tab badge", () => {
+  it("shows the visible session count as the tab badge", () => {
     const h = makeHarness([]);
     const sidebar = makeSidebar();
     registerObservationSidebar(sidebar.service, h.store);
     const badge = sidebar.descriptor().badge;
-    expect(badge?.()).toBeNull();
+    const scope = { sessionId: "conv-1" };
+    expect(badge?.(undefined, scope, undefined)).toBeNull();
     h.store.acquire();
-    h.push([BUSY]);
-    expect(badge?.()).toBe(1);
+    h.push([BUSY, FOREIGN]);
+    expect(badge?.(undefined, scope, undefined)).toBe(1);
+    expect(badge?.(undefined, { sessionId: "other-conv" }, undefined)).toBe(1);
+    expect(badge?.(undefined, { sessionId: "nobody" }, undefined)).toBeNull();
     h.store.release();
+  });
+
+  it("does not auto-open for sessions owned by other conversations", async () => {
+    const h = makeHarness([]);
+    const sidebar = makeSidebar();
+    registerObservationSidebar(sidebar.service, h.store);
+    h.push([FOREIGN]);
+    await waitFor(() => expect(h.store.getSnapshot().sessions.length).toBe(1));
+    expect(sidebar.openTab).not.toHaveBeenCalled();
+    // A session visible to the active conversation does open the tab.
+    h.push([BUSY]);
+    await waitFor(() => expect(sidebar.openTab).toHaveBeenCalledTimes(1));
   });
 
   it("uses the BrowserSkill product mark as the tab icon", () => {
@@ -251,7 +300,7 @@ describe("ObservationSidebarTab", () => {
 
   it("renders the tracking view without card chrome (no collapse, no drag header)", async () => {
     const h = makeHarness([BUSY]);
-    render(<ObservationSidebarTab store={h.store} />);
+    render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
     await screen.findByText(/s1 · clicking/);
     expect(screen.queryByRole("button", { name: "Collapse" })).toBeNull();
     expect(screen.getByTestId("obs-header").dataset.draggable).toBeUndefined();
@@ -259,6 +308,19 @@ describe("ObservationSidebarTab", () => {
     expect(screen.queryByTestId("obs-resize-se")).toBeNull();
     // Session controls ride along: interrupt + stop-with-confirm.
     expect(screen.getByRole("button", { name: "Stop session s1" })).toBeTruthy();
+  });
+
+  it("scopes the view to the sidebar's conversation", async () => {
+    const h = makeHarness([BUSY, FOREIGN]);
+    render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
+    // Focus and content belong to the owned session; the foreign one never
+    // reaches the stage, the status line, or the strip (which needs 2+).
+    await screen.findByText(/s1 · clicking/);
+    expect(screen.queryByText(/s9/)).toBeNull();
+    expect(screen.queryByTestId("obs-strip")).toBeNull();
+    // Scoping to the other conversation swaps what's visible.
+    render(<ObservationSidebarTab store={h.store} scopeId="other-conv" />);
+    await screen.findByText(/s9 · clicking/);
   });
 
   it("still pops out into a PiP window and returns on pagehide", async () => {
@@ -275,7 +337,7 @@ describe("ObservationSidebarTab", () => {
         } as unknown as Window;
       }),
     };
-    render(<ObservationSidebarTab store={h.store} />);
+    render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
     const popout = await screen.findByRole("button", { name: /Pop out/ });
     fireEvent.click(popout);
     await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
@@ -302,7 +364,7 @@ describe("carrier switching", () => {
     await waitFor(() => expect(h.es()).toBeDefined());
     // A second carrier mounts (the sidebar tab), then the overlay unmounts:
     // the stream must survive for the remaining consumer.
-    const tab = render(<ObservationSidebarTab store={h.store} />);
+    const tab = render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
     overlay.unmount();
     h.push([BUSY]);
     await screen.findByText(/s1 · clicking/);

@@ -55,26 +55,51 @@ export interface ObservationView {
 }
 
 /**
+ * Whether one session is visible on a surface scoped to one DSH
+ * conversation: sessions started by that conversation or its descendants
+ * (the lineage ancestors ride along on the entry). Untracked sessions (no
+ * owner recorded) are hidden from scoped surfaces but stay in global views.
+ */
+export function visibleToScope(obs: SessionObservation, scopeId: string): boolean {
+  return obs.dshSessionIds?.includes(scopeId) === true;
+}
+
+/**
  * The store-backed observation view model. Holds the feed for the component
  * lifetime (refcounted — overlapping carriers never kill each other's
- * stream).
+ * stream). `scopeId` narrows the view to one DSH conversation's sessions
+ * (the better-sidebar tab); undefined keeps the global view (floating
+ * card, PiP).
  */
-export function useObservationView(store: ObservationClientStore): ObservationView {
+export function useObservationView(
+  store: ObservationClientStore,
+  scopeId?: string,
+): ObservationView {
   const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
   useEffect(() => {
     store.acquire();
     return () => store.release();
   }, [store]);
 
+  const scopedSnapshot: OverlaySnapshot =
+    scopeId === undefined
+      ? snapshot
+      : {
+          ...snapshot,
+          sessions: snapshot.sessions.filter((s) => visibleToScope(s, scopeId)),
+        };
+
   const [pinnedId, setPinnedId] = useState<string | null>(null);
   const pinned =
-    pinnedId !== null ? snapshot.sessions.find((s) => s.sessionId === pinnedId) : undefined;
-  const focus = pinned ?? focusOf(snapshot.sessions);
+    pinnedId !== null
+      ? scopedSnapshot.sessions.find((s) => s.sessionId === pinnedId)
+      : undefined;
+  const focus = pinned ?? focusOf(scopedSnapshot.sessions);
   const onTogglePin = useCallback((sessionId: string) => {
     setPinnedId((current) => (current === sessionId ? null : sessionId));
   }, []);
 
-  const anyActive = snapshot.sessions.some((s) => s.action !== "idle");
+  const anyActive = scopedSnapshot.sessions.some((s) => s.action !== "idle");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!anyActive) return;
@@ -82,7 +107,13 @@ export function useObservationView(store: ObservationClientStore): ObservationVi
     return () => clearInterval(timer);
   }, [anyActive]);
 
-  return { snapshot, focus, pinnedId: pinned !== undefined ? pinnedId : null, onTogglePin, now };
+  return {
+    snapshot: scopedSnapshot,
+    focus,
+    pinnedId: pinned !== undefined ? pinnedId : null,
+    onTogglePin,
+    now,
+  };
 }
 
 export interface PipHandle {

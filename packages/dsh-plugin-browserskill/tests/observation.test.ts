@@ -197,6 +197,23 @@ describe("state machine", () => {
     expect(events[events.length - 1].type).toBe("reset");
   });
 
+  it("stamps the registry-recorded DSH owners onto new entries", () => {
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    own(registry, "s2");
+    registry.trackOwner("s1", ["conv-a", "root"]);
+    const { service } = setup({ registry });
+    service.addSession("s1");
+    service.addSession("s2");
+    expect(service.getState()).toEqual([
+      { sessionId: "s1", action: "idle", since: 1_000_000, dshSessionIds: ["conv-a", "root"] },
+      { sessionId: "s2", action: "idle", since: 1_000_000 },
+    ]);
+    // The owner stamp survives later upserts (action/url/frame churn).
+    service.beginAction("s1", "clicking");
+    expect(service.getState()[0].dshSessionIds).toEqual(["conv-a", "root"]);
+  });
+
   it("ignores instrumentation for unknown sessions (owned-only by construction)", () => {
     const { service } = setup({});
     service.beginAction("foreign", "clicking");

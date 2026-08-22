@@ -39,6 +39,13 @@ export interface SessionObservation {
    * greys it out until it is stopped/removed. No more frames are requested.
    */
   dead?: boolean;
+  /**
+   * The DSH conversations this session belongs to (the starting agent's
+   * session plus its seed-lineage ancestors), recorded at start. Scoped
+   * surfaces (the better-sidebar tab) filter by it; absent means untracked
+   * ownership — visible only in the global (unscoped) view.
+   */
+  dshSessionIds?: string[];
 }
 
 /** Incremental event carried to subscribers (SSE on the wire). */
@@ -152,11 +159,13 @@ export class ObservationService {
   /** Register a fresh owned session (called from browser_session_start). */
   addSession(sessionId: string, url?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
+    const dshSessionIds = this.deps.registry.dshOwnersOf(sessionId);
     this.put({
       sessionId,
       ...(url !== undefined ? { url } : {}),
       action: "idle",
       since: this.scheduler.now(),
+      ...(dshSessionIds.length > 0 ? { dshSessionIds } : {}),
     });
     this.lastActivity.set(sessionId, this.scheduler.now());
     this.scheduleCapture(sessionId, 0);
