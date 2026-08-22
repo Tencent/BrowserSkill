@@ -1,14 +1,22 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "RecordedTrace",
-  "oneOf": [
-    {
-      "$ref": "#/definitions/TraceV2"
-    },
-    {
-      "$ref": "#/definitions/TraceV3"
+  "if": {
+    "required": [
+      "version"
+    ],
+    "properties": {
+      "version": {
+        "type": "integer"
+      }
     }
-  ],
+  },
+  "then": {
+    "$ref": "#/definitions/TraceV3"
+  },
+  "else": {
+    "$ref": "#/definitions/TraceV2"
+  },
   "definitions": {
     "FillCommit": {
       "type": "string",
@@ -823,7 +831,8 @@
       }
     },
     "TraceV2": {
-      "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\nUnknown extension fields are ignored so older traces remain readable. Mixed v2/v3 envelopes are rejected by `RecordedTrace` classification.",
+      "title": "TraceV2",
+      "description": "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\nUnknown extension fields are ignored so older traces remain readable. `states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace` classification.",
       "type": "object",
       "required": [
         "entry",
@@ -857,10 +866,17 @@
             "null"
           ]
         },
+        "states": false,
         "steps": {
           "type": "array",
           "items": {
             "$ref": "#/definitions/StepV2"
+          }
+        },
+        "version": {
+          "description": "Numeric version selects Trace v3. Legacy v2 envelopes omit this field.",
+          "not": {
+            "type": "integer"
           }
         }
       }
