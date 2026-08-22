@@ -530,6 +530,9 @@ describe("actionForLabel", () => {
     expect(actionForLabel("navigate")).toBe("navigating");
     expect(actionForLabel("screenshot")).toBe("capturing");
     expect(actionForLabel("session start")).toBe("starting");
+    expect(actionForLabel("tab borrow")).toBe("borrowing tab");
+    expect(actionForLabel("request-help")).toBe("waiting for user");
+    expect(actionForLabel("wait-for-navigation")).toBe("waiting for navigation");
   });
 });
 

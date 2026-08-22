@@ -19,9 +19,11 @@ import {
 } from "@deepseek-ai/dsh-tools";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
+import { registerPhaseOneTools } from "./phase-one-tools";
 import type { KeyedExecutor } from "./queue";
 import { type BskRunner, bskInstallMessage, isCommandNotFound, parseBskJson } from "./runner";
 import type { SessionRegistry } from "./sessions";
+import { SESSION_PARAM } from "./tool-params";
 
 /** Plugin configuration resolved from the Schemastery schema in index.ts. */
 export interface PluginConfig {
@@ -61,13 +63,6 @@ const DEVICE_PRESETS = [
   "galaxy-tab-s8",
 ] as const;
 
-const SESSION_PARAM = {
-  type: "string",
-  description:
-    "bsk session id to act on; must be one created by this plugin's browser_session_start. " +
-    "Omit to use the current session (the one most recently started or used).",
-} as const;
-
 /**
  * Run one bsk command and return its parsed JSON payload, or throw.
  * `observeSession` marks the run as model-facing work on that session: it is
@@ -81,6 +76,7 @@ async function runBsk(
   args: string[],
   label: string,
   observeSession?: string,
+  runnerTimeoutMs?: number,
 ): Promise<unknown> {
   // beginAction must fire only when the task actually starts inside the
   // per-session queue — marking it while still queued would overwrite the
@@ -97,7 +93,7 @@ async function runBsk(
         }
         return deps.runner.run(args, {
           signal: exec.signal,
-          timeoutMs: deps.config.defaultTimeoutMs,
+          timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
           ...(observeSession !== undefined ? { tag: observeSession } : {}),
         });
       };
@@ -955,6 +951,12 @@ export function registerTools(deps: ToolDeps): () => void {
       presentResult: presentTerminalResult,
     }),
   );
+  registerPhaseOneTools(deps, register, {
+    run: (exec, args, label, observeSession, runnerTimeoutMs) =>
+      runBsk(deps, exec, args, label, observeSession, runnerTimeoutMs),
+    commandLine: (args) => cmdline(deps, args),
+    presentTerminalResult,
+  });
   return () => {
     for (const dispose of disposers.splice(0)) dispose();
   };

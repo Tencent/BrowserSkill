@@ -20,22 +20,43 @@ extension keep owning the actual browser control — this package is a thin, wel
 | `browser_snapshot` | `bsk snapshot` | Indented aria-tree snapshot with `@eN` refs for interaction tools. |
 | `browser_observe` | `bsk observe` | Semantic VOM observation (read-only) with `@eN` refs. |
 | `browser_click` | `bsk click` | Click a snapshot ref or CSS selector (button / click-count options). |
+| `browser_hover` | `bsk hover` | Hover a ref or selector and allow hover-triggered UI to settle. |
 | `browser_fill` | `bsk fill` | Fill an input / textarea / contenteditable (clears first by default). |
+| `browser_select` | `bsk select` | Select one or more option values on a `<select>`. |
 | `browser_press` | `bsk press` | Dispatch a key or combo, optionally focusing a target first. |
 | `browser_screenshot` | `bsk screenshot` | PNG capture of the tab or a ref-cropped element; inlines the image when the deployment supports image input, otherwise returns a file path. |
 | `browser_emulate` | `bsk emulate` | Apply or clear mobile device emulation on the active tab. |
+| `browser_tab_list` | `bsk tab list` | List user and/or Agent Window tabs visible to an owned session. |
+| `browser_tab_create` | `bsk tab create` | Create a foreground or background tab in the Agent Window. |
+| `browser_tab_select` | `bsk tab select` | Focus an Agent Window tab. |
+| `browser_tab_close` | `bsk tab close` | Close an Agent Window tab. |
+| `browser_tab_borrow` | `bsk tab borrow` | Move a user tab into the Agent Window for controlled interaction. |
+| `browser_tab_return` | `bsk tab return` | Return a borrowed tab to its original user window. |
+| `browser_navigate_back` / `browser_navigate_forward` | `bsk navigate-back` / `bsk navigate-forward` | Traverse tab history and wait for a lifecycle phase. |
+| `browser_reload` | `bsk reload` | Reload the active tab, optionally bypassing cache. |
+| `browser_wait_for_navigation` | `bsk wait-for-navigation` | Wait explicitly for a page lifecycle event. |
+| `browser_request_help` | `bsk request-help` | Pause for login, captcha, OTP, confirmation, or another human browser step. |
+| `browser_get_html` | `bsk get-html` | Read raw document or ref-scoped HTML after semantic observation is insufficient. |
+| `browser_console` | `bsk console` | Read buffered console/log/exception entries without evaluating JavaScript. |
+| `browser_network` | `bsk network` | Read buffered network response/failure metadata. |
+| `browser_window_resize` | `bsk window resize` | Resize the owned session's Agent Window. |
+
+`bsk evaluate` and `bsk record` are intentionally not exposed by this plugin: arbitrary page
+evaluation is a higher-risk capability, while recording is long-running and needs a dedicated
+DeepSeek Harness lifecycle before it can be added safely.
 
 ## Agent skill (progressive disclosure)
 
 Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
 official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
 resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
-tool. The body is assembled at build time from two parts, so there is exactly one source of
-truth: a dsh-specific prelude (`skill/prelude.md` — tool↔CLI map, owned-session semantics,
-plugin-only overrides) followed verbatim by the canonical CLI skill (`skill/SKILL.md` at the
-repo root — the same file `crates/bsk-cli/build.rs` mirrors for the CLI package; workflows,
-stop-when-done rules, refs usage, sandbox rules). Registration and every pre-step catalog
-snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
+tool. Its single source is the DSH-specific `skill/SKILL.md`, which documents only structured
+`browser_*` calls and their plugin semantics. The repository-root CLI skill is intentionally not
+concatenated: its command examples belong to a different execution interface and would bypass
+the plugin's ownership, live observation UI, cancellation, and cleanup path if followed directly.
+The build rejects internal CLI-name leakage, command-line code blocks, unknown browser tools, and
+missing supported browser tools before embedding the Markdown. Registration and every pre-step
+catalog snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
 seam degrade silently.
 
 ## Multi-session model
@@ -88,7 +109,7 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
         # lazyTools: true              # reveal browser_* tools only after the skill is invoked
 ```
 
-- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the eleven
+- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the 28
   `browser_*` tool schemas stay OUT of the system prompt (zero schema tokens) until the
   `browser-skill` skill is actually invoked — the skill catalog entry is the only
   advertisement. One successful invocation (model tool call, or a `/browser-skill` user
@@ -152,7 +173,7 @@ shell's theme cannot bleed back in.
   card). Screenshots additionally attach the image itself when the host mounts an attachment store
   and the active model route declares image input; otherwise the PNG path is returned.
 - **Web UI toolview (browser half)**: the package is dual-face. `dsh.client` (platform `web`) ships
-  `lib/client.js`, which registers a keyed `tool.call.toolview` view for `browser_screenshot`. The
+  `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `browser_screenshot`. The
   custom view keeps the terminal block (command + output) and, when the settled result carries an
   image block, resolves the durable attachment through the client session's authorized
   `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
@@ -183,8 +204,8 @@ as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id stays
 Trigger it by pushing a tag that matches `package.json`'s `version`:
 
 ```sh
-git tag dsh-plugin-v0.1.0
-git push origin dsh-plugin-v0.1.0
+git tag dsh-plugin-v0.1.2
+git push origin dsh-plugin-v0.1.2
 ```
 
 Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads the
