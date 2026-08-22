@@ -8,7 +8,7 @@ use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     RecordAwaitParams, RecordAwaitResult, RecordStartParams, RecordStartResult, RecordStopParams,
-    RecordStopResult, Trace,
+    RecordStopResult, RecordedTrace,
 };
 use clap::{Args, Subcommand};
 
@@ -190,7 +190,7 @@ fn record_await_ipc_timeout(timeout_ms: u32) -> Duration {
         .unwrap_or(Duration::from_secs(u64::from(timeout_ms / 1_000) + 15))
 }
 
-fn write_trace_file(output: &PathBuf, trace: &Trace) -> Result<(), CliError> {
+fn write_trace_file(output: &PathBuf, trace: &RecordedTrace) -> Result<(), CliError> {
     let json = serde_json::to_string_pretty(trace)
         .context("serialize trace JSON")
         .map_err(CliError::Local)?;
@@ -207,7 +207,7 @@ fn write_trace_file(output: &PathBuf, trace: &Trace) -> Result<(), CliError> {
     Ok(())
 }
 
-fn render_finish(trace: &Trace, output: &PathBuf, format: Format) -> Result<(), CliError> {
+fn render_finish(trace: &RecordedTrace, output: &PathBuf, format: Format) -> Result<(), CliError> {
     match format {
         Format::Json => {
             println!(
@@ -221,7 +221,11 @@ fn render_finish(trace: &Trace, output: &PathBuf, format: Format) -> Result<(), 
             );
         }
         Format::Human => {
-            println!("saved {} steps to {}", trace.steps.len(), output.display());
+            let step_count = match trace {
+                RecordedTrace::V2(trace) => trace.steps.len(),
+                RecordedTrace::V3(trace) => trace.steps.len(),
+            };
+            println!("saved {step_count} steps to {}", output.display());
         }
     }
     Ok(())
