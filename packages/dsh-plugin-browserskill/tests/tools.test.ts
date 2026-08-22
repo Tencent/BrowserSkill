@@ -142,16 +142,33 @@ describe("tool registration", () => {
     const { tools } = setup({});
     expect([...tools.keys()].sort()).toEqual([
       "browser_click",
+      "browser_console",
       "browser_emulate",
       "browser_fill",
+      "browser_get_html",
+      "browser_hover",
       "browser_navigate",
+      "browser_navigate_back",
+      "browser_navigate_forward",
+      "browser_network",
       "browser_observe",
       "browser_press",
+      "browser_reload",
+      "browser_request_help",
       "browser_screenshot",
+      "browser_select",
       "browser_session_list",
       "browser_session_start",
       "browser_session_stop",
       "browser_snapshot",
+      "browser_tab_borrow",
+      "browser_tab_close",
+      "browser_tab_create",
+      "browser_tab_list",
+      "browser_tab_return",
+      "browser_tab_select",
+      "browser_wait_for_navigation",
+      "browser_window_resize",
     ]);
   });
 
@@ -434,6 +451,336 @@ describe("interaction tools", () => {
     const emulate = tools.get("browser_emulate");
     await expect(emulate?.execute({ off: true, device: "iphone-14" }, makeExec())).rejects.toThrow(
       /mutually exclusive/,
+    );
+  });
+
+  it("browser_hover and browser_select map their structured arguments", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      hover: { tab_id: 7, used_ref: "@e3", x: 12, y: 24 },
+      select: {
+        tab_id: 7,
+        used_ref: "@e4",
+        multiple: true,
+        selected_values: ["a", "b"],
+        selected_labels: ["Alpha", "Beta"],
+      },
+    });
+    await startSession(tools);
+    const hovered = (await tools
+      .get("browser_hover")
+      ?.execute(
+        { target: "@e3", modifiers: ["shift"], settleMs: 250, timeoutMs: 2000 },
+        makeExec(),
+      )) as { x: number; y: number };
+    expect(hovered).toMatchObject({ x: 12, y: 24 });
+    expect(calls[1].args).toEqual([
+      "hover",
+      "--session",
+      "s1",
+      "--modifiers",
+      "shift",
+      "--settle",
+      "250ms",
+      "--timeout",
+      "2000ms",
+      "@e3",
+    ]);
+
+    const selected = (await tools
+      .get("browser_select")
+      ?.execute({ target: "@e4", values: ["a", "b"], tabId: 7 }, makeExec())) as {
+      selectedValues: string[];
+      selectedLabels: string[];
+    };
+    expect(selected).toMatchObject({
+      selectedValues: ["a", "b"],
+      selectedLabels: ["Alpha", "Beta"],
+    });
+    expect(calls[2].args).toEqual([
+      "select",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--value",
+      "a",
+      "--value",
+      "b",
+      "@e4",
+    ]);
+  });
+});
+
+describe("phase-one tab tools", () => {
+  it("maps list/create/close/select/borrow/return through the owned session", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "tab list": {
+        tabs: [
+          {
+            tab_id: 7,
+            title: "Example",
+            url: "https://example.test",
+            window_id: 2,
+            active: true,
+            scope: "agent",
+          },
+        ],
+      },
+      "tab create": { tab_id: 8, window_id: 2, url: "https://new.test" },
+      "tab close": { tab_id: 8 },
+      "tab select": { tab_id: 7, window_id: 2 },
+      "tab borrow": {
+        tab_id: 20,
+        original_window_id: 9,
+        original_index: 1,
+        agent_window_id: 2,
+      },
+      "tab return": {
+        tab_id: 20,
+        returned_to_window_id: 9,
+        returned_to_index: 1,
+        fallback: false,
+      },
+    });
+    await startSession(tools);
+
+    const listed = (await tools
+      .get("browser_tab_list")
+      ?.execute({ scope: "agent" }, makeExec())) as { tabs: { tabId: number }[] };
+    expect(listed.tabs[0].tabId).toBe(7);
+    const created = (await tools
+      .get("browser_tab_create")
+      ?.execute({ url: "https://new.test", active: false, index: 1 }, makeExec())) as {
+      tabId: number;
+    };
+    expect(created.tabId).toBe(8);
+    await tools.get("browser_tab_close")?.execute({ tabId: 8 }, makeExec());
+    await tools.get("browser_tab_select")?.execute({ tabId: 7 }, makeExec());
+    const borrowed = (await tools
+      .get("browser_tab_borrow")
+      ?.execute({ tabId: 20 }, makeExec())) as { originalWindowId: number };
+    expect(borrowed.originalWindowId).toBe(9);
+    const returned = (await tools
+      .get("browser_tab_return")
+      ?.execute({ tabId: 20 }, makeExec())) as { fallback: boolean };
+    expect(returned.fallback).toBe(false);
+
+    expect(calls.slice(1).map((call) => call.args)).toEqual([
+      ["tab", "list", "--session", "s1", "--scope", "agent"],
+      [
+        "tab",
+        "create",
+        "--session",
+        "s1",
+        "--url",
+        "https://new.test",
+        "--no-active",
+        "--index",
+        "1",
+      ],
+      ["tab", "close", "8", "--session", "s1"],
+      ["tab", "select", "7", "--session", "s1"],
+      ["tab", "borrow", "20", "--session", "s1"],
+      ["tab", "return", "20", "--session", "s1"],
+    ]);
+  });
+});
+
+describe("phase-one navigation tools", () => {
+  it("maps back/forward/reload/wait and preserves timeout budgets", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "navigate-back": {
+        tab_id: 7,
+        previous_url: "https://b.test",
+        final_url: "https://a.test",
+        reached: "load",
+      },
+      "navigate-forward": {
+        tab_id: 7,
+        previous_url: "https://a.test",
+        final_url: "https://b.test",
+        reached: "load",
+      },
+      reload: {
+        tab_id: 7,
+        previous_url: "https://b.test",
+        final_url: "https://b.test",
+        reached: "networkidle",
+      },
+      "wait-for-navigation": { tab_id: 7, reached: "timeout", error_text: "no navigation" },
+    });
+    await startSession(tools);
+    await tools
+      .get("browser_navigate_back")
+      ?.execute({ tabId: 7, waitUntil: "commit", timeoutMs: 1000 }, makeExec());
+    await tools.get("browser_navigate_forward")?.execute({}, makeExec());
+    await tools
+      .get("browser_reload")
+      ?.execute({ hard: true, waitUntil: "networkidle" }, makeExec());
+    const waited = (await tools
+      .get("browser_wait_for_navigation")
+      ?.execute({ timeoutMs: 2500 }, makeExec())) as { reached: string; errorText: string };
+    expect(waited).toMatchObject({ reached: "timeout", errorText: "no navigation" });
+    expect(calls[1].args).toEqual([
+      "navigate-back",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--wait-until",
+      "commit",
+      "--timeout",
+      "1000ms",
+    ]);
+    expect(calls[2].args).toEqual(["navigate-forward", "--session", "s1"]);
+    expect(calls[3].args).toEqual([
+      "reload",
+      "--session",
+      "s1",
+      "--wait-until",
+      "networkidle",
+      "--hard",
+    ]);
+    expect(calls[4].args).toEqual([
+      "wait-for-navigation",
+      "--session",
+      "s1",
+      "--timeout",
+      "2500ms",
+    ]);
+    expect(calls[4].options.timeoutMs).toBe(120_000);
+  });
+});
+
+describe("phase-one support tools", () => {
+  it("maps request-help targets and structured completion criteria", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "request-help": {
+        outcome: "completed",
+        completed_by: "system",
+        note: "signed in",
+        tab_id: 7,
+        resolved_targets: [{ matched: true, ref: "@e3" }],
+      },
+    });
+    await startSession(tools);
+    const value = (await tools.get("browser_request_help")?.execute(
+      {
+        prompt: "Please sign in",
+        title: "Login required",
+        targets: ["@e3", "#submit"],
+        timeoutMs: 300_000,
+        completionCriteria: {
+          any: [{ urlContains: "/dashboard" }, { selectorExists: "[data-user]" }],
+          stableForMs: 1000,
+        },
+      },
+      makeExec(),
+    )) as { outcome: string; note: string };
+    expect(value).toMatchObject({ outcome: "completed", note: "signed in" });
+    expect(calls[1].options.timeoutMs).toBe(315_000);
+    expect(calls[1].args.slice(0, 8)).toEqual([
+      "request-help",
+      "--session",
+      "s1",
+      "--prompt",
+      "Please sign in",
+      "--timeout",
+      "300000ms",
+      "--title",
+    ]);
+    const criteriaIndex = calls[1].args.indexOf("--completion-criteria");
+    expect(JSON.parse(calls[1].args[criteriaIndex + 1])).toEqual({
+      any: [{ url_contains: "/dashboard" }, { selector_exists: "[data-user]" }],
+      stable_for_ms: 1000,
+    });
+  });
+
+  it("maps get-html, console, and network results without raw shell access", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "get-html": { tab_id: 7, html: "<main>Hi</main>", truncated: false, byte_size: 15 },
+      console: {
+        tab_id: 7,
+        entries: [
+          {
+            sequence: 3,
+            kind: "exception",
+            level: "error",
+            text: "boom",
+            stack_trace: [{ function_name: "run", url: "https://a.test/app.js", line: 4 }],
+          },
+        ],
+        next_since: 3,
+        truncated: false,
+      },
+      network: {
+        tab_id: 7,
+        entries: [
+          {
+            sequence: 5,
+            kind: "response",
+            method: "GET",
+            url: "https://a.test/api",
+            status: 200,
+            mime_type: "application/json",
+          },
+        ],
+        next_since: 5,
+        truncated: false,
+      },
+    });
+    await startSession(tools);
+    const html = (await tools
+      .get("browser_get_html")
+      ?.execute({ ref: "@e2", maxBytes: 2048 }, makeExec())) as { html: string };
+    expect(html.html).toBe("<main>Hi</main>");
+    const consoleValue = (await tools
+      .get("browser_console")
+      ?.execute({ since: 1, limit: 10, includeStack: true }, makeExec())) as {
+      entries: { stackTrace: { functionName: string }[] }[];
+    };
+    expect(consoleValue.entries[0].stackTrace[0].functionName).toBe("run");
+    const networkValue = (await tools
+      .get("browser_network")
+      ?.execute({ tabId: 7, maxTextChars: 512 }, makeExec())) as {
+      entries: { mimeType: string }[];
+    };
+    expect(networkValue.entries[0].mimeType).toBe("application/json");
+    expect(calls.slice(1).map((call) => call.args)).toEqual([
+      ["get-html", "--session", "s1", "--ref", "@e2", "--max-bytes", "2048"],
+      ["console", "--session", "s1", "--since", "1", "--limit", "10", "--include-stack"],
+      ["network", "--session", "s1", "--tab-id", "7", "--max-text-chars", "512"],
+    ]);
+  });
+
+  it("resizes only within the CLI-supported range", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "window resize": { window_id: 2, width: 1280, height: 800 },
+    });
+    await startSession(tools);
+    const resize = tools.get("browser_window_resize");
+    const value = (await resize?.execute({ width: 1280, height: 800 }, makeExec())) as {
+      windowId: number;
+    };
+    expect(value.windowId).toBe(2);
+    expect(calls[1].args).toEqual([
+      "window",
+      "resize",
+      "--session",
+      "s1",
+      "--width",
+      "1280",
+      "--height",
+      "800",
+    ]);
+    await expect(resize?.execute({ width: 99, height: 800 }, makeExec())).rejects.toThrow(
+      /100\.\.=7680/,
     );
   });
 });
