@@ -819,6 +819,10 @@ export interface RecordStartParams {
   tab_id?: number;
   url?: string;
   purpose?: string;
+  max_page_tokens?: number;
+  redact_values?: boolean;
+  /** Omitted means v2; `3` requests a state-linked v3 trace. */
+  trace_version?: number;
 }
 
 export interface RecordStartResult {
