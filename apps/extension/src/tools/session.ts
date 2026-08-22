@@ -76,6 +76,7 @@ export interface SessionStopResult {
 }
 
 export interface SessionStopDeps {
+  signal?: AbortSignal;
   cdp?: {
     detachSession(sessionId: string): Promise<void>;
   };
@@ -177,6 +178,9 @@ export async function handleSessionStop(
       message: `session ${params.session_id} unknown`,
     };
   }
+  if (deps.signal?.aborted) {
+    return { code: "cancelled", message: "session_stop aborted before teardown" };
+  }
 
   // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
   // ids so deletions during iteration do not break the Map iterator.
@@ -187,6 +191,7 @@ export async function handleSessionStop(
     try {
       const tabManagement = {
         ...(deps.tabManagement ?? {}),
+        signal: deps.signal,
         isAgentWindowId:
           deps.tabManagement?.isAgentWindowId ??
           ((windowId: number) => manager.findByWindowId(windowId) !== null),
@@ -214,6 +219,17 @@ export async function handleSessionStop(
     }
   }
 
+  if (deps.signal?.aborted) {
+    const nonCancelFailures = returnFailures?.filter((failure) => failure.code !== "cancelled");
+    if (nonCancelFailures && nonCancelFailures.length > 0) {
+      return {
+        ...(returnedTabIds.length > 0 ? { returned_tab_ids: returnedTabIds } : {}),
+        return_failures: nonCancelFailures,
+      };
+    }
+    return { code: "cancelled", message: "session_stop aborted during tab return" };
+  }
+
   const result: SessionStopResult = {};
   if (returnedTabIds.length > 0) result.returned_tab_ids = returnedTabIds;
   if (returnFailures && returnFailures.length > 0) {
@@ -232,6 +248,10 @@ export async function handleSessionStop(
 
   // Step 3: detach CDP sessions this session opened (no-op if none).
   await deps.cdp?.detachSession(params.session_id);
+
+  if (deps.signal?.aborted) {
+    return { code: "cancelled", message: "session_stop aborted before window close" };
+  }
 
   // Step 4: close the Agent Window and drop the context.
   await manager.stop(params.session_id);

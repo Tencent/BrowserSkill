@@ -203,6 +203,55 @@ describe("ToolDispatcher", () => {
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
   });
 
+  it("forwards daemon cancellation into an in-flight session stop", async () => {
+    const { transport, sent, deliver } = fakeTransport();
+    const remove = vi.fn(async () => {});
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove,
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    await sessions.start("aa11");
+    let finishDetach: () => void = () => {};
+    const detach = new Promise<void>((resolve) => {
+      finishDetach = resolve;
+    });
+    const cdp = {
+      send: vi.fn(),
+      detachSession: vi.fn(() => detach),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
+    await vi.waitFor(() => expect(cdp.detachSession).toHaveBeenCalledWith("aa11"));
+    deliver({ id: "cancel-stop", method: "cancel", params: { rpc_id: "r-1" } });
+    await flushMicrotasks();
+    finishDetach();
+    await flushMicrotasks();
+
+    expect(sent).toContainEqual({ id: "cancel-stop", result: { cancelled: true } });
+    expect(sent).toContainEqual({
+      id: "r-1",
+      error: expect.objectContaining({ code: "cancelled" }),
+    });
+    expect(sessions.has("aa11")).toBe(true);
+    expect(remove).not.toHaveBeenCalled();
+  });
+
   it("returns not_found when stopping an unknown session", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({

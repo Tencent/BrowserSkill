@@ -66,6 +66,52 @@ function makeApis(
 }
 
 describe("handleSessionStop with auto-return", () => {
+  it("leaves the session untouched when cancellation arrived before teardown", async () => {
+    const aw = fakeAgentWindow([100]);
+    const sm = new SessionManager({ agentWindow: aw });
+    await sm.start("aa11");
+    const cdp = { detachSession: vi.fn(async () => {}) };
+    const controller = new AbortController();
+    controller.abort();
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { cdp, signal: controller.signal },
+    );
+
+    expect(res).toMatchObject({ code: "cancelled" });
+    expect(sm.has("aa11")).toBe(true);
+    expect(cdp.detachSession).not.toHaveBeenCalled();
+    expect(aw.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not close the Agent Window when cancellation lands during CDP detach", async () => {
+    const aw = fakeAgentWindow([100]);
+    const sm = new SessionManager({ agentWindow: aw });
+    await sm.start("aa11");
+    const controller = new AbortController();
+    let finishDetach: () => void = () => {};
+    const detach = new Promise<void>((resolve) => {
+      finishDetach = resolve;
+    });
+    const cdp = { detachSession: vi.fn(() => detach) };
+
+    const stopping = handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { cdp, signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(cdp.detachSession).toHaveBeenCalledWith("aa11"));
+    controller.abort();
+    finishDetach();
+
+    const res = await stopping;
+    expect(res).toMatchObject({ code: "cancelled" });
+    expect(sm.has("aa11")).toBe(true);
+    expect(aw.remove).not.toHaveBeenCalled();
+  });
+
   it("returns every borrowed tab and closes the Agent Window in the right order", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });

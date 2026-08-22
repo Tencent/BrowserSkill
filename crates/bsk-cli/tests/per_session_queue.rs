@@ -325,6 +325,7 @@ async fn session_stop_fast_fails_while_tool_is_in_flight() {
         &state.session_interrupts,
         &sid,
         Duration::from_secs(5),
+        None,
     )
     .await;
     assert!(
@@ -366,6 +367,7 @@ async fn session_stop_fast_fails_while_tool_is_in_flight() {
         &state.session_interrupts,
         &sid,
         Duration::from_secs(5),
+        None,
     )
     .await
     .expect("session.stop ok after tool completes");

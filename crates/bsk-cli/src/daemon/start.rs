@@ -491,6 +491,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                     &state.session_interrupts,
                     &session_id,
                     Duration::from_secs(10),
+                    None,
                 )
                 .await
                 {
