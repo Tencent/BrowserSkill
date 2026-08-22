@@ -31,6 +31,7 @@ pub mod status;
 pub mod tab;
 pub mod update;
 pub mod waits;
+pub mod wheel;
 pub mod window;
 
 use clap::{Args, Parser, Subcommand};
@@ -53,6 +54,7 @@ use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
 use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
+use crate::cli::wheel::WheelArgs;
 use crate::cli::window::WindowCmd;
 
 /// Tool calls wait slightly longer than the daemon's 30s tool timeout so
@@ -166,6 +168,9 @@ pub enum Command {
 
     /// Hover a snapshot ref or CSS selector.
     Hover(HoverArgs),
+
+    /// Dispatch a native mouse-wheel event at the viewport centre or an element.
+    Wheel(WheelArgs),
 
     /// Fill an input / textarea / contenteditable.
     Fill(FillArgs),

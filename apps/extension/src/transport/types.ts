@@ -444,6 +444,28 @@ export interface HoverResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface WheelParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  delta_x?: number;
+  delta_y: number;
+  modifiers?: KeyModifier[];
+  timeout_ms?: number;
+}
+
+export interface WheelResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  x: number;
+  y: number;
+  delta_x: number;
+  delta_y: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 export interface FillParams {
   session_id: string;
   value: string;
