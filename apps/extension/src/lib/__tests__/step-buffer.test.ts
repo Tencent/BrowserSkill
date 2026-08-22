@@ -3,7 +3,7 @@ import { appendRecordedPayload, observeRecordedNavigation } from "../recording/s
 
 describe("recording-step-buffer", () => {
   it("stores semantic click without summary", () => {
-    const buffer = { steps: [], pendingNavigation: false };
+    const buffer = { steps: [], navigation: { pendingNavigation: false } };
     appendRecordedPayload(buffer, {
       op: "click",
       target: { tag: "button", role: "button", name: "发布" },
@@ -15,11 +15,11 @@ describe("recording-step-buffer", () => {
         captureTarget: { tag: "button", role: "button", name: "发布" },
       },
     ]);
-    expect(buffer.pendingNavigation).toBe(true);
+    expect(buffer.navigation.pendingNavigation).toBe(true);
   });
 
   it("keeps the hovered element description as a capture fallback", () => {
-    const buffer = { steps: [], pendingNavigation: false };
+    const buffer = { steps: [], navigation: { pendingNavigation: false } };
     appendRecordedPayload(
       buffer,
       {
@@ -59,9 +59,11 @@ describe("recording-step-buffer", () => {
           captureTarget: { tag: "button", role: "button", name: "发布" },
         },
       ],
-      currentUrl: "https://example.com/a",
-      pendingNavigation: true,
-      pendingNavigationDeadline: Date.now() + 5_000,
+      navigation: {
+        currentUrl: "https://example.com/a",
+        pendingNavigation: true,
+        pendingNavigationDeadline: Date.now() + 5_000,
+      },
     };
     observeRecordedNavigation(buffer, "https://example.com/b", true);
     expect(buffer.steps).toEqual([
@@ -83,9 +85,11 @@ describe("recording-step-buffer", () => {
           values: ["tech"],
         },
       ],
-      currentUrl: "https://example.com/list",
-      pendingNavigation: true,
-      pendingNavigationDeadline: Date.now() + 5_000,
+      navigation: {
+        currentUrl: "https://example.com/list",
+        pendingNavigation: true,
+        pendingNavigationDeadline: Date.now() + 5_000,
+      },
     };
     observeRecordedNavigation(buffer, "https://example.com/list?cat=tech", true);
     expect(buffer.steps).toEqual([
@@ -101,8 +105,7 @@ describe("recording-step-buffer", () => {
   it("emits navigate for uncaused URL changes", () => {
     const buffer = {
       steps: [],
-      currentUrl: "https://example.com/a",
-      pendingNavigation: false,
+      navigation: { currentUrl: "https://example.com/a", pendingNavigation: false },
     };
     const result = observeRecordedNavigation(buffer, "https://example.com/b", false);
     expect(result).toEqual({ kind: "appended", index: 0 });
@@ -115,8 +118,10 @@ describe("recording-step-buffer", () => {
   it("asks the recorder to coalesce redirect hops instead of emitting each one", () => {
     const buffer = {
       steps: [],
-      currentUrl: "https://passport.example/login",
-      pendingNavigation: false,
+      navigation: {
+        currentUrl: "https://passport.example/login",
+        pendingNavigation: false,
+      },
     };
     const hop1 = observeRecordedNavigation(
       buffer,
@@ -139,14 +144,16 @@ describe("recording-step-buffer", () => {
       url: "https://app.example/dashboard",
     });
     expect(buffer.steps).toEqual([]);
-    expect(buffer.currentUrl).toBe("https://app.example/dashboard");
+    expect(buffer.navigation.currentUrl).toBe("https://app.example/dashboard");
   });
 
   it("does not reuse redirect metadata for a later content-observed URL change", () => {
     const buffer = {
       steps: [],
-      currentUrl: "https://example.com/redirect",
-      pendingNavigation: false,
+      navigation: {
+        currentUrl: "https://example.com/redirect",
+        pendingNavigation: false,
+      },
     };
 
     const result = observeRecordedNavigation(buffer, "https://example.com/spa");

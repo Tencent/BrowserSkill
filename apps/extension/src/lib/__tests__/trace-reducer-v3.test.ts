@@ -33,6 +33,49 @@ describe("trace reducer v3", () => {
     expect(JSON.stringify(reduced.steps)).not.toContain("private-account-id");
   });
 
+  it("emits tab transitions only for callers that advertised support", () => {
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "switch_tab",
+        preStateId: "s1",
+        postStateId: "s2",
+      },
+    ];
+
+    expect(reduceTraceStepsV3(drafts).steps).toEqual([]);
+    expect(reduceTraceStepsV3(drafts, { includeTabSwitches: true }).steps).toEqual([
+      { op: "switch_tab", id: 1, state: "s1", result: { state: "s2" } },
+    ]);
+  });
+
+  it("keeps hover steps before menu clicks", () => {
+    const drafts: RecordingDraftStep[] = [
+      {
+        op: "hover",
+        captureTarget: { tag: "span", role: "button", name: "Account" },
+        preStateId: "s1",
+        postStateId: "s1",
+      },
+      {
+        op: "click",
+        captureTarget: { tag: "a", role: "link", name: "Profile" },
+        preStateId: "s1",
+        postStateId: "s1",
+      },
+    ];
+
+    expect(reduceTraceStepsV3(drafts).steps.map((s) => s.op)).toEqual(["hover", "click"]);
+  });
+
+  it("does not export a tab transition without both observation endpoints", () => {
+    const sourceOnly: RecordingDraftStep = { op: "switch_tab", preStateId: "s1" };
+    const targetOnly: RecordingDraftStep = { op: "switch_tab", postStateId: "s2" };
+
+    expect(
+      reduceTraceStepsV3([sourceOnly, targetOnly], { includeTabSwitches: true }).steps,
+    ).toEqual([]);
+  });
+
   it("collapses redirect hops while retaining draft-to-step identity", () => {
     const drafts: RecordingDraftStep[] = [
       { op: "navigate", url: "https://example.com/start", preStateId: "s1", postStateId: "s2" },

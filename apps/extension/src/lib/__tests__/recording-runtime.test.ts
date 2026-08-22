@@ -11,11 +11,11 @@ vi.mock("../recording/observation-capture", async (importOriginal) => {
 import { ObservationNodeIndex } from "../recording/observation-capture";
 import { RecordingObservationRuntime } from "../recording/recording-runtime";
 
-function observation() {
+function observation(url = "https://example.com/") {
   return {
     rootFrameId: "root",
     index: new ObservationNodeIndex({ rootFrameId: "root", matchNodes: [], refs: [] }),
-    url: "https://example.com/",
+    url,
     title: "Example",
     vomText: '@vom 1\nRootWebArea "Example"',
     truncated: false,
@@ -129,5 +129,24 @@ describe("RecordingObservationRuntime", () => {
     expect(dumped).not.toContain("localRect");
     expect(dumped).not.toContain("backendNodeId");
     expect(dumped).not.toContain("ObservationNodeIndex");
+  });
+
+  it("captures a tab transition without sharing observation cursors", async () => {
+    captureRecordingObservation
+      .mockResolvedValueOnce(observation("https://example.com/first"))
+      .mockResolvedValueOnce(observation("https://example.com/second"));
+    const recording = runtime();
+
+    await recording.captureInitial(4);
+    const transition = await recording.captureTabTransition(4, 5);
+    await recording.captureInitial(4);
+    await recording.captureInitial(5);
+
+    expect(transition).toEqual({
+      preStateId: "s1",
+      postStateId: "s2",
+      targetUrl: "https://example.com/second",
+    });
+    expect(captureRecordingObservation.mock.calls.map(([input]) => input.tabId)).toEqual([4, 5]);
   });
 });
