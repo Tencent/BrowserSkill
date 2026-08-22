@@ -661,6 +661,7 @@ export interface EmulateResult {
 // --------------------------------------------------------------------------
 
 export const TRACE_VERSION_V3 = 3;
+/** Logical v2 identifier. Not a wire field — v2 envelopes omit `version`. */
 export const TRACE_VERSION_V2 = 2;
 export const VOM_FORMAT_VERSION = 1;
 
@@ -853,6 +854,7 @@ export interface TraceV3 {
 }
 
 export type RecordedTrace = TraceV2 | TraceV3;
+export type RecordedStep = StepV2 | StepV3;
 
 export interface RecordStartParams {
   session_id: string;

@@ -116,7 +116,9 @@ fn main() {
     dump!(TraceV2, "trace_v2");
     dump!(TraceV3, "trace_v3");
     dump!(RecordedTrace, "trace");
-    dump!(StepV3, "trace_step");
+    dump!(StepV2, "trace_step_v2");
+    dump!(StepV3, "trace_step_v3");
+    dump!(RecordedStep, "trace_step");
     dump!(RecordStartParams, "tool_record_start_params");
     dump!(RecordStartResult, "tool_record_start_result");
     dump!(RecordStopParams, "tool_record_stop_params");

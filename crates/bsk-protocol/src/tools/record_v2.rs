@@ -107,8 +107,9 @@ pub enum StepV2 {
 /// Persisted user-action trace exported by legacy `tool.record_stop` / `await`.
 ///
 /// Unknown extension fields are ignored so older traces remain readable.
-/// Mixed v2/v3 envelopes are rejected by `RecordedTrace` classification.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// `states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace`
+/// classification — serde still ignores them, but the JSON Schema rejects them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceV2 {
     /// RFC 3339 timestamp when recording stopped.
     pub recorded_at: String,
@@ -119,6 +120,70 @@ pub struct TraceV2 {
     pub entry: TraceEntry,
     pub pages: Vec<PageRefV2>,
     pub steps: Vec<StepV2>,
+}
+
+fn constrain_trace_v2_schema(mut schema: schemars::schema::Schema) -> schemars::schema::Schema {
+    let schemars::schema::Schema::Object(obj) = &mut schema else {
+        return schema;
+    };
+    obj.metadata().title = Some("TraceV2".into());
+    obj.metadata().description = Some(
+        "Persisted user-action trace exported by legacy `tool.record_stop` / `await`.\n\n\
+         Unknown extension fields are ignored so older traces remain readable. \
+         `states[]` and a numeric `version` are reserved for Trace v3 / `RecordedTrace` classification."
+            .into(),
+    );
+
+    let object = obj.object.get_or_insert_with(Default::default);
+    object
+        .properties
+        .insert("states".into(), schemars::schema::Schema::Bool(false));
+    object.properties.insert(
+        "version".into(),
+        schemars::schema::SchemaObject {
+            metadata: Some(Box::new(schemars::schema::Metadata {
+                description: Some(
+                    "Numeric version selects Trace v3. Legacy v2 envelopes omit this field.".into(),
+                ),
+                ..Default::default()
+            })),
+            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
+                not: Some(Box::new(
+                    schemars::schema::SchemaObject {
+                        instance_type: Some(schemars::schema::InstanceType::Integer.into()),
+                        ..Default::default()
+                    }
+                    .into(),
+                )),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+        .into(),
+    );
+    schema
+}
+
+impl JsonSchema for TraceV2 {
+    fn schema_name() -> String {
+        "TraceV2".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        #[derive(JsonSchema)]
+        #[allow(dead_code)]
+        struct TraceV2Shape {
+            /// RFC 3339 timestamp when recording stopped.
+            recorded_at: String,
+            started_at: Option<String>,
+            purpose: Option<String>,
+            entry: TraceEntry,
+            pages: Vec<PageRefV2>,
+            steps: Vec<StepV2>,
+        }
+
+        constrain_trace_v2_schema(TraceV2Shape::json_schema(generator))
+    }
 }
 
 #[cfg(test)]
@@ -246,6 +311,20 @@ mod tests {
             schema.get("additionalProperties"),
             Some(&serde_json::Value::Bool(false)),
             "Trace v2 must keep accepting traces with unknown extension fields"
+        );
+    }
+
+    #[test]
+    fn trace_v2_schema_forbids_classification_keys() {
+        let schema = serde_json::to_value(schemars::schema_for!(TraceV2)).unwrap();
+        assert_eq!(
+            schema["properties"]["states"],
+            json!(false),
+            "Trace v2 schema must reject states[] (reserved for v3)"
+        );
+        assert_eq!(
+            schema["properties"]["version"]["not"]["type"], "integer",
+            "Trace v2 schema must reject a numeric version (that selects the v3 path)"
         );
     }
 }
