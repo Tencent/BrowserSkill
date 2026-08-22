@@ -199,9 +199,9 @@ export function registerObservationSidebar(
     // conversation (global sessions from other conversations stay hidden,
     // mirroring the tab body's scoped view).
     badge: (_ctx, scope) => {
-      const count = store.getSnapshot().sessions.filter((s) =>
-        visibleToScope(s, scope.sessionId),
-      ).length;
+      const count = store
+        .getSnapshot()
+        .sessions.filter((s) => visibleToScope(s, scope.sessionId)).length;
       return count > 0 ? count : null;
     },
     component: (props) =>
@@ -228,7 +228,11 @@ export function registerObservationSidebar(
   const evaluate = (): void => {
     const count = activeVisibleCount();
     const { state, sessionId } = service.getSnapshot();
-    if (state !== undefined && sessionId !== undefined && service.isTabEnabled(OBSERVATION_TAB_TYPE)) {
+    if (
+      state !== undefined &&
+      sessionId !== undefined &&
+      service.isTabEnabled(OBSERVATION_TAB_TYPE)
+    ) {
       const open = observationTabOpen(state);
       if (count > 0 && !open) {
         service.openTab({ type: OBSERVATION_TAB_TYPE, path: OBSERVATION_TAB_PATH });

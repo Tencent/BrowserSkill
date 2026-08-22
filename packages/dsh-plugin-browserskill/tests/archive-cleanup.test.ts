@@ -13,8 +13,7 @@ function ctxWithSessions(headers: Record<string, { parentSession?: string }>) {
     get: (key: string) =>
       key === "sessions"
         ? {
-            get: (id: string) =>
-              headers[id] === undefined ? undefined : { header: headers[id] },
+            get: (id: string) => (headers[id] === undefined ? undefined : { header: headers[id] }),
           }
         : undefined,
   } as never;
@@ -136,7 +135,11 @@ describe("armArchiveCleanup", () => {
     h.emit({ domain: "workspace", table: "", value: {} });
     expect(h.stopSession).not.toHaveBeenCalled();
     // A genuinely new archive still fires.
-    h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["old-conv", "conv-a"] } });
+    h.emit({
+      domain: "workspace",
+      table: "",
+      value: { archivedSessionIds: ["old-conv", "conv-a"] },
+    });
     expect(h.stopSession).toHaveBeenCalledWith("bsk2");
   });
 

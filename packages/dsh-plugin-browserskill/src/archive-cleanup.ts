@@ -70,8 +70,9 @@ export function armArchiveCleanup(
 ): () => void {
   // 'domain/changed' lives outside the vendored Events type map, so the
   // listener goes through a structural view of the events mixin.
-  const on = (ctx as { on?: (event: string, listener: (change: DomainChange) => void) => () => void })
-    .on;
+  const on = (
+    ctx as { on?: (event: string, listener: (change: DomainChange) => void) => () => void }
+  ).on;
   if (typeof on !== "function") return () => {};
 
   /** Archived ids already accounted for; lazily seeded from the registry. */
@@ -91,7 +92,9 @@ export function armArchiveCleanup(
     const archived = (change.value as WorkspaceGlobal | undefined)?.archivedSessionIds;
     if (!Array.isArray(archived)) return;
     const previous = initialize();
-    const fresh = archived.filter((id): id is string => typeof id === "string" && !previous.has(id));
+    const fresh = archived.filter(
+      (id): id is string => typeof id === "string" && !previous.has(id),
+    );
     seen = new Set(archived.filter((id): id is string => typeof id === "string"));
     for (const dshSessionId of fresh) {
       for (const sessionId of registry.ownedByDsh(dshSessionId)) {

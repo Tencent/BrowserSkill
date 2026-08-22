@@ -91,9 +91,7 @@ export function useObservationView(
 
   const [pinnedId, setPinnedId] = useState<string | null>(null);
   const pinned =
-    pinnedId !== null
-      ? scopedSnapshot.sessions.find((s) => s.sessionId === pinnedId)
-      : undefined;
+    pinnedId !== null ? scopedSnapshot.sessions.find((s) => s.sessionId === pinnedId) : undefined;
   const focus = pinned ?? focusOf(scopedSnapshot.sessions);
   const onTogglePin = useCallback((sessionId: string) => {
     setPinnedId((current) => (current === sessionId ? null : sessionId));
