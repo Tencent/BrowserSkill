@@ -8,6 +8,7 @@
  *   GET  /bsk-observation/state      → { sessions, available }
  *   GET  /bsk-observation/events     → SSE stream of ObservationEvent
  *   POST /bsk-observation/interrupt  → body {sessionId?} → {interrupted: boolean}
+ *   POST /bsk-observation/stop       → body {sessionId} → {stopped: boolean}
  *   GET  /bsk-observation/thumbnail/<attachmentId> → image bytes
  *
  * Routes exist only when a webServer service is mounted (web composition);
@@ -163,6 +164,42 @@ export function registerObservationRoutes(
             return;
           }
           sendJson(res, 200, { interrupted: observation.interrupt(sessionId) });
+        });
+      },
+    }),
+    webServer.register({
+      kind: "exact",
+      path: `${ROUTE_BASE}/stop`,
+      handler: (req, res) => {
+        if (req.method !== "POST") {
+          sendJson(res, 405, { error: "method not allowed" });
+          return;
+        }
+        if (fenceRejected(req, res)) return;
+        let body = "";
+        req.on("data", (chunk: Buffer | string) => {
+          body += chunk;
+        });
+        req.on("end", () => {
+          let sessionId: string | undefined;
+          try {
+            const parsed = JSON.parse(body || "{}") as { sessionId?: unknown };
+            if (typeof parsed.sessionId === "string" && parsed.sessionId !== "") {
+              sessionId = parsed.sessionId;
+            }
+          } catch {
+            sendJson(res, 400, { error: "invalid JSON body" });
+            return;
+          }
+          // A destructive call always names its target (never "current").
+          if (sessionId === undefined) {
+            sendJson(res, 400, { error: "sessionId required" });
+            return;
+          }
+          void observation.stopSession(sessionId).then(
+            (stopped) => sendJson(res, 200, { stopped }),
+            () => sendJson(res, 500, { error: "stop failed" }),
+          );
         });
       },
     }),

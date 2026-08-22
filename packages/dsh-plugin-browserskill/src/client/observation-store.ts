@@ -53,6 +53,7 @@ export interface OverlaySnapshot {
 const STATE_URL = "/bsk-observation/state";
 const EVENTS_URL = "/bsk-observation/events";
 const INTERRUPT_URL = "/bsk-observation/interrupt";
+const STOP_URL = "/bsk-observation/stop";
 
 function revoke(url: string | undefined): void {
   if (url !== undefined && typeof URL.revokeObjectURL === "function") {
@@ -78,6 +79,8 @@ export class ObservationClientStore {
   };
   private available = true;
   private started = false;
+  /** Refcount of mounted consumers (overlay card, sidebar tab, sidebar fiber). */
+  private consumers = 0;
 
   constructor(private readonly deps: ObservationClientDeps) {}
 
@@ -189,6 +192,23 @@ export class ObservationClientStore {
     this.publish();
   }
 
+  /**
+   * Hold the feed for one consumer's lifetime: the stream starts with the
+   * first holder and stops with the last release. Several carriers can share
+   * the store (the floating card, the better-sidebar tab, and the sidebar
+   * integration fiber) without one unmount killing the others' updates.
+   */
+  acquire(): void {
+    this.consumers += 1;
+    if (this.consumers === 1) this.start();
+  }
+
+  release(): void {
+    if (this.consumers === 0) return;
+    this.consumers -= 1;
+    if (this.consumers === 0) this.stop();
+  }
+
   /** Forget one session's tracked + held frames, revoking their blob URLs. */
   private dropThumb(sessionId: string): void {
     const attachmentId = this.thumbBySession.get(sessionId);
@@ -288,6 +308,25 @@ export class ObservationClientStore {
       if (!res.ok) return false;
       const body = (await res.json()) as { interrupted?: boolean };
       return body.interrupted === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Stop one session and close its Agent Window. The session's removal
+   * arrives through the SSE remove event — no local state is touched here.
+   */
+  async stopSession(sessionId: string): Promise<boolean> {
+    try {
+      const res = await this.deps.fetchFn(STOP_URL, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+      if (!res.ok) return false;
+      const body = (await res.json()) as { stopped?: boolean };
+      return body.stopped === true;
     } catch {
       return false;
     }
