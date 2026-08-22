@@ -21,11 +21,8 @@ function ctxWithSessions(headers: Record<string, { parentSession?: string }>) {
 }
 
 describe("ownerSessionIds", () => {
-  it("returns [] without an agent identity", () => {
+  it("walks the seed lineage to the root; empty without an agent identity", () => {
     expect(ownerSessionIds(ctxWithSessions({}), undefined)).toEqual([]);
-  });
-
-  it("walks the seed lineage to the root", () => {
     const ctx = ctxWithSessions({
       child: { parentSession: "parent" },
       parent: { parentSession: "root" },
@@ -54,7 +51,7 @@ describe("SessionRegistry owner tracking", () => {
     registry.completeStart({ sessionId, startedAtMs: 1 });
   }
 
-  it("indexes owners and forgets them on remove", () => {
+  it("indexes owners and forgets them on remove; ignores empty/unknown ownership", () => {
     const registry = new SessionRegistry(5);
     start(registry, "bsk1");
     start(registry, "bsk2");
@@ -66,14 +63,10 @@ describe("SessionRegistry owner tracking", () => {
     expect(registry.ownedByDsh("nobody")).toEqual([]);
     registry.remove("bsk1");
     expect(registry.ownedByDsh("root")).toEqual([]);
-  });
-
-  it("ignores empty ownership and unknown sessions", () => {
-    const registry = new SessionRegistry(5);
-    start(registry, "bsk1");
-    registry.trackOwner("bsk1", []);
-    registry.trackOwner("ghost", ["conv-a"]);
-    expect(registry.ownedByDsh("conv-a")).toEqual([]);
+    // Empty owner lists and unknown session ids record nothing.
+    registry.trackOwner("bsk2", []);
+    registry.trackOwner("ghost", ["conv-c"]);
+    expect(registry.ownedByDsh("conv-c")).toEqual([]);
   });
 });
 
@@ -109,7 +102,7 @@ describe("armArchiveCleanup", () => {
     registry.trackOwner(bskId, owners);
   }
 
-  it("stops every bsk session owned by a freshly archived conversation", () => {
+  it("stops every bsk session owned by a freshly archived conversation, until disarmed", () => {
     const h = harness();
     startOwned(h.registry, "bsk1", ["conv-a", "root"]);
     startOwned(h.registry, "bsk2", ["conv-b"]);
@@ -121,7 +114,14 @@ describe("armArchiveCleanup", () => {
     });
     expect(h.stopSession).toHaveBeenCalledTimes(1);
     expect(h.stopSession).toHaveBeenCalledWith("bsk1");
+    // After the disposer runs the watcher is silent again.
     disarm();
+    h.emit({
+      domain: "workspace",
+      table: "",
+      value: { archivedSessionIds: ["root", "conv-b"] },
+    });
+    expect(h.stopSession).toHaveBeenCalledTimes(1);
   });
 
   it("ignores pre-archived ids, foreign domains, and malformed frames", () => {
@@ -150,14 +150,5 @@ describe("armArchiveCleanup", () => {
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: [] } });
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
     expect(h.stopSession).toHaveBeenCalledTimes(2);
-  });
-
-  it("stops firing after the disposer runs", () => {
-    const h = harness();
-    startOwned(h.registry, "bsk1", ["conv-a"]);
-    const disarm = h.arm();
-    disarm();
-    h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
-    expect(h.stopSession).not.toHaveBeenCalled();
   });
 });

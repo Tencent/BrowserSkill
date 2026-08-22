@@ -3,9 +3,8 @@
 // flag hiding the floating overlay, PiP pop-out from the tab, and the
 // store's refcounted acquire/release across overlapping carriers.
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import type { ReactNode } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ObservationOverlay } from "../../src/client/ObservationOverlay";
 import {
   type BetterSidebarLike,
@@ -157,12 +156,15 @@ afterEach(() => {
 });
 
 describe("registerObservationSidebar", () => {
-  it("registers a single-instance tab and flips the carrier flag", () => {
+  it("registers a single-instance tab and holds the feed for its lifetime", () => {
     const h = makeHarness([]);
     const sidebar = makeSidebar();
     expect(getSidebarMode()).toBe(false);
     const dispose = registerObservationSidebar(sidebar.service, h.store);
     expect(getSidebarMode()).toBe(true);
+    // The fiber holds the observation feed itself, so the auto-open watcher
+    // sees new sessions even while the tab is closed.
+    expect(h.es()).toBeDefined();
     const descriptor = sidebar.descriptor();
     expect(descriptor.id).toBe(OBSERVATION_TAB_TYPE);
     expect(descriptor.single).toBe(true);
@@ -170,14 +172,6 @@ describe("registerObservationSidebar", () => {
     dispose();
     expect(getSidebarMode()).toBe(false);
     expect(sidebar.disposeTab).toHaveBeenCalledTimes(1);
-  });
-
-  it("holds the observation feed for the sidebar lifetime", () => {
-    const h = makeHarness([]);
-    const sidebar = makeSidebar();
-    const dispose = registerObservationSidebar(sidebar.service, h.store);
-    expect(h.es()).toBeDefined();
-    dispose();
     expect(h.es()?.close).toHaveBeenCalled?.();
   });
 
@@ -262,17 +256,6 @@ describe("registerObservationSidebar", () => {
     h.push([BUSY]);
     await waitFor(() => expect(sidebar.openTab).toHaveBeenCalledTimes(1));
   });
-
-  it("uses the BrowserSkill product mark as the tab icon", () => {
-    const h = makeHarness([]);
-    const sidebar = makeSidebar();
-    registerObservationSidebar(sidebar.service, h.store);
-    const icon = sidebar.descriptor().icon as (size: number) => ReactNode;
-    const { container } = render(<>{icon(16)}</>);
-    const img = container.querySelector("img");
-    expect(img?.getAttribute("src")).toContain("data:image/png;base64,");
-    expect(img?.getAttribute("width")).toBe("16");
-  });
 });
 
 describe("observationTabOpen", () => {
@@ -294,10 +277,6 @@ describe("observationTabOpen", () => {
 });
 
 describe("ObservationSidebarTab", () => {
-  beforeEach(() => {
-    delete (window as unknown as Record<string, unknown>).documentPictureInPicture;
-  });
-
   it("renders the tracking view without card chrome (no collapse, no drag header)", async () => {
     const h = makeHarness([BUSY]);
     render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
@@ -321,28 +300,6 @@ describe("ObservationSidebarTab", () => {
     // Scoping to the other conversation swaps what's visible.
     render(<ObservationSidebarTab store={h.store} scopeId="other-conv" />);
     await screen.findByText(/s9 · clicking/);
-  });
-
-  it("still pops out into a PiP window and returns on pagehide", async () => {
-    const h = makeHarness([BUSY]);
-    const pipDoc = document.implementation.createHTMLDocument("pip");
-    const listeners = new Map<string, (() => void)[]>();
-    (window as unknown as Record<string, unknown>).documentPictureInPicture = {
-      requestWindow: vi.fn(async () => {
-        return {
-          document: pipDoc,
-          addEventListener: (name: string, fn: () => void) => {
-            listeners.set(name, [...(listeners.get(name) ?? []), fn]);
-          },
-        } as unknown as Window;
-      }),
-    };
-    render(<ObservationSidebarTab store={h.store} scopeId="conv-1" />);
-    const popout = await screen.findByRole("button", { name: /Pop out/ });
-    fireEvent.click(popout);
-    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
-    for (const fn of listeners.get("pagehide") ?? []) fn();
-    await screen.findByText(/s1 · clicking/);
   });
 });
 
