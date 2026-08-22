@@ -22,6 +22,7 @@ pub mod navigate;
 pub mod network;
 pub mod observe;
 pub mod record;
+pub mod record_recovery;
 pub mod record_state;
 pub mod render_error;
 pub mod screenshot;

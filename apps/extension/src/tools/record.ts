@@ -894,7 +894,7 @@ export async function handleRecordStart(
       code: "invalid_params",
       message: params.url
         ? `cannot record on restricted URL (${startUrl}); use an http(s) page`
-        : `cannot record on restricted URL (${startUrl}); default start page must be injectable http(s)`,
+        : `cannot record on restricted URL (${startUrl}); default start page https://example.com/ did not load — pass --url with a page you can open`,
     };
   }
 
