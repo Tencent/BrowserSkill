@@ -15,7 +15,6 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -291,8 +290,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         });
 
         let started_at = Instant::now();
-        let activity: Arc<Mutex<Instant>> = Arc::new(Mutex::new(started_at));
-        let active_ipc_connections = Arc::new(AtomicUsize::new(0));
+        let activity = Arc::new(Mutex::new(IpcActivityState::new(started_at)));
         let (ipc_shutdown_tx, ipc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let status = ipc::DaemonStatus {
             started_at,
@@ -314,18 +312,14 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             let handler = handler.clone();
             let ipc_open = {
                 let activity = activity.clone();
-                let active = active_ipc_connections.clone();
                 move || {
-                    active.fetch_add(1, Ordering::SeqCst);
-                    record_activity(&activity);
+                    record_ipc_open(&activity);
                 }
             };
             let ipc_close = {
                 let activity = activity.clone();
-                let active = active_ipc_connections.clone();
                 move || {
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    record_activity(&activity);
+                    record_ipc_close(&activity);
                 }
             };
             tokio::spawn(ipc::serve(
@@ -344,7 +338,6 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let idle_task = {
             let activity = activity.clone();
             let state = Arc::clone(&state);
-            let active_ipc_connections = active_ipc_connections.clone();
             let daemon_idle = cfg.daemon_idle;
             tokio::spawn(async move {
                 let tick = (daemon_idle / 4).max(Duration::from_millis(250));
@@ -352,22 +345,19 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
                     ticker.tick().await;
-                    let last = match activity.lock() {
-                        Ok(a) => *a,
-                        Err(p) => *p.into_inner(),
-                    };
-                    if last.elapsed() < daemon_idle {
+                    let ipc_is_idle =
+                        lock_activity(&activity).should_exit_for_idle(Instant::now(), daemon_idle);
+                    if !ipc_is_idle {
                         continue;
                     }
-                    // Bridge from M2/M3 (which only knew about connection
-                    // counts) to M4/M5 (browser + session registries):
-                    // hold the daemon alive while any IPC client is
-                    // connected, any browser is paired, or any session
-                    // is live (design §3.2).
-                    if active_ipc_connections.load(Ordering::SeqCst) > 0
-                        || !state.browsers.is_empty()
-                        || !state.sessions.is_empty()
-                    {
+                    // IPC liveness (open-connection count + idle window) is already
+                    // enforced above by `should_exit_for_idle`, which reads
+                    // `IpcActivityState` under one lock and returns true only when
+                    // there are zero connections AND the idle interval has elapsed.
+                    // Here we additionally hold the daemon alive while any browser
+                    // is paired or any session is live (design §3.2, M4/M5
+                    // registries).
+                    if !state.browsers.is_empty() || !state.sessions.is_empty() {
                         continue;
                     }
                     info!(
@@ -682,10 +672,55 @@ fn restart_start_args(cfg: &DaemonConfig) -> StartArgs {
     }
 }
 
-fn record_activity(activity: &Arc<Mutex<Instant>>) {
-    if let Ok(mut a) = activity.lock() {
-        *a = Instant::now();
+#[derive(Debug)]
+struct IpcActivityState {
+    last_activity: Instant,
+    active_connections: usize,
+}
+
+impl IpcActivityState {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_activity: now,
+            active_connections: 0,
+        }
     }
+
+    fn touch(&mut self, now: Instant) {
+        self.last_activity = now;
+    }
+
+    fn opened(&mut self, now: Instant) {
+        self.active_connections = self.active_connections.saturating_add(1);
+        self.last_activity = now;
+    }
+
+    fn closed(&mut self, now: Instant) {
+        self.active_connections = self.active_connections.saturating_sub(1);
+        self.last_activity = now;
+    }
+
+    fn should_exit_for_idle(&self, now: Instant, idle: Duration) -> bool {
+        self.active_connections == 0 && now.saturating_duration_since(self.last_activity) >= idle
+    }
+}
+
+fn lock_activity(
+    activity: &Arc<Mutex<IpcActivityState>>,
+) -> std::sync::MutexGuard<'_, IpcActivityState> {
+    activity.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn record_activity(activity: &Arc<Mutex<IpcActivityState>>) {
+    lock_activity(activity).touch(Instant::now());
+}
+
+fn record_ipc_open(activity: &Arc<Mutex<IpcActivityState>>) {
+    lock_activity(activity).opened(Instant::now());
+}
+
+fn record_ipc_close(activity: &Arc<Mutex<IpcActivityState>>) {
+    lock_activity(activity).closed(Instant::now());
 }
 
 /// Initialise tracing for the daemon: write a daily-rotated file in
@@ -1067,5 +1102,38 @@ mod tests {
         assert!(!args.foreground);
         assert_eq!(args.session_idle, Some(Duration::from_secs(11)));
         assert_eq!(args.daemon_idle, Some(Duration::from_secs(22)));
+    }
+
+    #[test]
+    fn ipc_close_restarts_the_idle_window_atomically() {
+        let started = Instant::now();
+        let idle = Duration::from_secs(10);
+        let mut activity = IpcActivityState::new(started);
+
+        activity.opened(started);
+        let closed_at = started + Duration::from_secs(30);
+        assert!(
+            !activity.should_exit_for_idle(closed_at, idle),
+            "an open IPC connection must hold the daemon alive"
+        );
+
+        activity.closed(closed_at);
+        assert_eq!(activity.active_connections, 0);
+        assert_eq!(activity.last_activity, closed_at);
+        assert!(!activity.should_exit_for_idle(closed_at, idle));
+        assert!(!activity.should_exit_for_idle(closed_at + idle - Duration::from_millis(1), idle));
+        assert!(activity.should_exit_for_idle(closed_at + idle, idle));
+    }
+
+    #[test]
+    fn ipc_activity_keeps_the_daemon_alive_until_a_full_idle_interval_passes() {
+        let started = Instant::now();
+        let idle = Duration::from_secs(10);
+        let mut activity = IpcActivityState::new(started);
+        let request_at = started + Duration::from_secs(20);
+
+        activity.touch(request_at);
+        assert!(!activity.should_exit_for_idle(request_at + Duration::from_secs(9), idle));
+        assert!(activity.should_exit_for_idle(request_at + idle, idle));
     }
 }
