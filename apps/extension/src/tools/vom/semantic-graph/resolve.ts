@@ -240,13 +240,18 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
     if (axTextMemo.has(nodeId)) return axTextMemo.get(nodeId);
     if (resolvingAxText.has(nodeId)) return undefined;
     resolvingAxText.add(nodeId);
+    const complete = (value: string | undefined): string | undefined => {
+      resolvingAxText.delete(nodeId);
+      axTextMemo.set(nodeId, value);
+      return value;
+    };
     const node = graph.nodes.get(nodeId);
     const role = normalizeRole(axValue(node?.ax?.role)) ?? "";
-    const parts: string[] = [];
     if (TEXT_AX_ROLES.has(role)) {
       const own = clean(axValue(node?.ax?.name) ?? axValue(node?.ax?.value));
-      if (own) parts.push(own);
+      if (own) return complete(own);
     }
+    const parts: string[] = [];
     for (const childId of axChildren.get(nodeId) ?? []) {
       const child = graph.nodes.get(childId);
       const childRole = normalizeRole(axValue(child?.ax?.role)) ?? "";
@@ -255,10 +260,7 @@ function buildIndexes(graph: SemanticGraph): ResolveIndexes {
       if (childText) parts.push(childText);
       if (parts.join(" ").length >= 240) break;
     }
-    resolvingAxText.delete(nodeId);
-    const result = clean(parts.join(" ").slice(0, 240));
-    axTextMemo.set(nodeId, result);
-    return result;
+    return complete(clean(parts.join(" ").slice(0, 240)));
   };
 
   const nativeMemo = new Map<SemanticNodeId, boolean>();
@@ -389,12 +391,12 @@ function resolvedName(
     NATIVE_CONTROL_TAGS.has(node.dom?.tag.toLowerCase() ?? "");
   const candidates = [
     node.ax?.ignored === true ? undefined : axValue(node.ax?.name),
-    node.ax?.ignored === true ? undefined : indexes.axText(node.id),
     ariaLabelledText(node, indexes),
     clean(attrs["aria-label"]),
     nativeLabelText(node, graph, indexes),
     clean(attrs.title),
     clean(attrs.alt),
+    node.ax?.ignored === true ? undefined : indexes.axText(node.id),
     descendantText,
     formControl ? precedingAxText(node, graph, indexes) : undefined,
     formControl ? precedingDomText(node, graph, indexes) : undefined,

@@ -141,6 +141,104 @@ describe("semantic VOM graph", () => {
     ]);
   });
 
+  it("aggregates AX text at the semantic text frontier", () => {
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [
+            {
+              nodeId: "root",
+              backendDOMNodeId: 1,
+              role: { type: "role", value: "RootWebArea" },
+              childIds: ["covered", "inline-only", "repeated", "labelled"],
+            },
+            {
+              nodeId: "covered",
+              parentId: "root",
+              backendDOMNodeId: 2,
+              role: { type: "role", value: "paragraph" },
+              childIds: ["covered-static"],
+            },
+            {
+              nodeId: "covered-static",
+              parentId: "covered",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Covered text" },
+              childIds: ["covered-inline"],
+            },
+            {
+              nodeId: "covered-inline",
+              parentId: "covered-static",
+              role: { type: "role", value: "InlineTextBox" },
+              name: { type: "computedString", value: "Covered text" },
+            },
+            {
+              nodeId: "inline-only",
+              parentId: "root",
+              backendDOMNodeId: 3,
+              role: { type: "role", value: "paragraph" },
+              childIds: ["inline-leaf"],
+            },
+            {
+              nodeId: "inline-leaf",
+              parentId: "inline-only",
+              role: { type: "role", value: "InlineTextBox" },
+              name: { type: "computedString", value: "Inline fallback" },
+            },
+            {
+              nodeId: "repeated",
+              parentId: "root",
+              backendDOMNodeId: 4,
+              role: { type: "role", value: "paragraph" },
+              childIds: ["first-go", "second-go"],
+            },
+            {
+              nodeId: "first-go",
+              parentId: "repeated",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Go" },
+            },
+            {
+              nodeId: "second-go",
+              parentId: "repeated",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Go" },
+            },
+            {
+              nodeId: "labelled",
+              parentId: "root",
+              backendDOMNodeId: 5,
+              role: { type: "role", value: "button" },
+              childIds: ["visible-label"],
+            },
+            {
+              nodeId: "visible-label",
+              parentId: "labelled",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Visible text" },
+            },
+          ],
+          [
+            dom(1, null, "body"),
+            dom(2, 1, "p"),
+            dom(3, 1, "p"),
+            dom(4, 1, "p"),
+            dom(5, 1, "button", { "aria-label": "Explicit action" }),
+          ],
+        ),
+      ],
+    });
+
+    expect(scene.nodes.find((node) => node.backendNodeId === 2)?.name).toBe("Covered text");
+    expect(scene.nodes.find((node) => node.backendNodeId === 3)?.name).toBe("Inline fallback");
+    expect(scene.nodes.find((node) => node.backendNodeId === 4)?.name).toBe("Go Go");
+    expect(scene.nodes.find((node) => node.backendNodeId === 5)?.name).toBe("Explicit action");
+    expect(renderVom(scene).text).not.toContain("Covered text Covered text");
+  });
+
   it("uses stable identifiers only as a final name fallback", () => {
     const base = document(
       "main",
@@ -235,6 +333,19 @@ describe("semantic VOM graph", () => {
               nodeId: "button-a",
               backendDOMNodeId: 5,
               role: { type: "role", value: "button" },
+              childIds: ["text-a"],
+            },
+            {
+              nodeId: "text-a",
+              parentId: "button-a",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Accept" },
+              childIds: ["inline-a"],
+            },
+            {
+              nodeId: "inline-a",
+              parentId: "text-a",
+              role: { type: "role", value: "InlineTextBox" },
               name: { type: "computedString", value: "Accept" },
             },
           ],
@@ -248,6 +359,19 @@ describe("semantic VOM graph", () => {
               nodeId: "button-b",
               backendDOMNodeId: 5,
               role: { type: "role", value: "button" },
+              childIds: ["text-b"],
+            },
+            {
+              nodeId: "text-b",
+              parentId: "button-b",
+              role: { type: "role", value: "StaticText" },
+              name: { type: "computedString", value: "Decline" },
+              childIds: ["inline-b"],
+            },
+            {
+              nodeId: "inline-b",
+              parentId: "text-b",
+              role: { type: "role", value: "InlineTextBox" },
               name: { type: "computedString", value: "Decline" },
             },
           ],
@@ -264,6 +388,7 @@ describe("semantic VOM graph", () => {
         .map((node) => [node.backendNodeId, node.id]),
     );
     expect(frameButtons.map((node) => node.frameId)).toEqual(["frame-a", "frame-b"]);
+    expect(frameButtons.map((node) => node.name)).toEqual(["Accept", "Decline"]);
     expect(frameButtons.map((node) => node.parentId)).toEqual([owners.get(10), owners.get(20)]);
     expect(renderVom(scene).refs.map((ref) => [ref.frameId, ref.backendNodeId])).toEqual([
       ["frame-a", 5],
