@@ -817,6 +817,14 @@ export function buildFrameVomScene(
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
     supplementalNames: options.supplementalNames,
   });
+  return attachCapturedSceneAnnotations(scene, documents, captured);
+}
+
+function attachCapturedSceneAnnotations(
+  scene: VomScene,
+  documents: VomFrameDocument[],
+  captured: CapturedViewModel,
+): VomScene {
   const rootDocument = documents.find((document) => document.frameId === scene.rootFrameId);
   const signals = capturedOnlySignals(rootDocument?.domNodes ?? captured.nodes);
   const activeScopeBlocks = buildActiveScopeBlocks(scene.nodes, signals);
@@ -1055,7 +1063,8 @@ export async function captureVomObservation(
       resolveSemanticGraph(semanticGraph, { supplementalNames: tooltipNames }),
     ),
   );
-  const rendered = renderVom(scene, {
+  const decoratedScene = attachCapturedSceneAnnotations(scene, normalizedDocuments, captured);
+  const rendered = renderVom(decoratedScene, {
     maxDepth: options.maxDepth,
     maxTokens: options.maxTokens,
     redactValues: options.redactValues,

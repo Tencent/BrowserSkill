@@ -65,7 +65,10 @@ export type StructureDecision =
   | { kind: "keep"; reason: "semantic" | "frame-owner" }
   | { kind: "inferred-group"; reason: "independent-interaction-branches" }
   | { kind: "transparent"; reason: "wrapper" | "child-document-root" | "ax-ignored" }
-  | { kind: "excluded"; reason: "excluded" | "redundant-source" };
+  | {
+      kind: "excluded";
+      reason: "excluded" | "redundant-source" | "non-rendered-dom-fallback";
+    };
 
 export interface StructuredSemanticNode extends ResolvedSemanticNode {
   structure: StructureDecision;

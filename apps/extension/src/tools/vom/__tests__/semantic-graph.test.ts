@@ -271,6 +271,63 @@ describe("semantic VOM graph", () => {
     ]);
   });
 
+  it("requires render evidence before promoting DOM fallback semantics", () => {
+    const hiddenOwner = {
+      ...dom(10, 1, "iframe", { hidden: "" }),
+      rect: null,
+      localRect: null,
+      rendered: false,
+    };
+    const hiddenButton = {
+      ...dom(2, 1, "button", { "aria-label": "Hidden action" }),
+      rendered: false,
+    };
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [
+            {
+              nodeId: "root",
+              backendDOMNodeId: 1,
+              role: { type: "role", value: "RootWebArea" },
+            },
+          ],
+          [dom(1, null, "body"), hiddenButton, hiddenOwner],
+        ),
+        document("hidden-frame", [], [dom(20, null, "button", {}, "Frame action")], {
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+        }),
+      ],
+    });
+
+    expect(scene.nodes.some((node) => node.backendNodeId === 2)).toBe(false);
+    expect(scene.nodes.some((node) => node.backendNodeId === 10)).toBe(false);
+    expect(scene.nodes.some((node) => node.frameId === "hidden-frame")).toBe(false);
+    expect(renderVom(scene).refs).toEqual([]);
+  });
+
+  it("retains rendered DOM fallback controls when AX semantics are unavailable", () => {
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [],
+          [dom(1, null, "body"), { ...dom(2, 1, "button", {}, "Save"), rendered: true }],
+        ),
+      ],
+    });
+
+    expect(renderVom(scene).refs).toEqual([
+      expect.objectContaining({ backendNodeId: 2, role: "button", name: "Save" }),
+    ]);
+  });
+
   it("lets explicit DOM structure override ignored AX metadata", () => {
     const scene = buildSemanticVomScene({
       viewport: { width: 800, height: 600 },

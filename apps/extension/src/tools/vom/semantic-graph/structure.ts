@@ -49,6 +49,23 @@ function explicitStructural(node: ResolvedSemanticNode): boolean {
   );
 }
 
+function hasUsableAxSemantics(node: ResolvedSemanticNode): boolean {
+  return node.ax !== undefined && node.ax.ignored !== true;
+}
+
+function isRenderedDomFallback(node: ResolvedSemanticNode): boolean {
+  if (!node.dom) return false;
+  const attrs = node.dom.attrs;
+  if (
+    Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
+    Object.prototype.hasOwnProperty.call(attrs, "inert") ||
+    (attrs["aria-hidden"] ?? "").toLowerCase() === "true"
+  ) {
+    return false;
+  }
+  return node.dom.rendered ?? (node.dom.localRect != null || node.dom.rect != null);
+}
+
 function initialParentId(
   graph: ResolvedSemanticGraph,
   node: ResolvedSemanticNode,
@@ -142,6 +159,9 @@ function baseDecision(
 ): StructureDecision {
   if (node.excluded) return { kind: "excluded", reason: "excluded" };
   if (redundant.has(node.id)) return { kind: "excluded", reason: "redundant-source" };
+  if (!hasUsableAxSemantics(node) && !isRenderedDomFallback(node)) {
+    return { kind: "excluded", reason: "non-rendered-dom-fallback" };
+  }
   if (frameOwnerIds.has(node.id)) return { kind: "keep", reason: "frame-owner" };
   if (node.frameId !== graph.rootFrameId && ROOT_ROLES.has(output.role?.toLowerCase() ?? "")) {
     return { kind: "transparent", reason: "child-document-root" };
