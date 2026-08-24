@@ -1,0 +1,526 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TraceV3",
+  "description": "Wire trace returned by `tool.record_stop` / `await`.",
+  "type": "object",
+  "required": [
+    "entry",
+    "recorded_at",
+    "recorder",
+    "states",
+    "steps",
+    "stopped_by",
+    "version"
+  ],
+  "properties": {
+    "entry": {
+      "$ref": "#/definitions/TraceEntry"
+    },
+    "purpose": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "recorded_at": {
+      "type": "string"
+    },
+    "recorder": {
+      "$ref": "#/definitions/RecorderInfo"
+    },
+    "started_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "states": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TraceStateV3"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/StepV3"
+      }
+    },
+    "stopped_by": {
+      "$ref": "#/definitions/StopReason"
+    },
+    "version": {
+      "type": "integer",
+      "const": 3
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "FillCommit": {
+      "type": "string",
+      "enum": [
+        "enter",
+        "suggestion",
+        "blur"
+      ]
+    },
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "NavigationCause": {
+      "type": "string",
+      "enum": [
+        "user_typed",
+        "link",
+        "form_submit",
+        "reload",
+        "history",
+        "script",
+        "browser"
+      ]
+    },
+    "RecorderInfo": {
+      "type": "object",
+      "required": [
+        "bsk",
+        "vom"
+      ],
+      "properties": {
+        "bsk": {
+          "type": "string"
+        },
+        "vom": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "SelectedOptionV3": {
+      "description": "One selected option (`select` op).",
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
+        }
+      }
+    },
+    "StepResultV3": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "type": "string"
+        }
+      }
+    },
+    "StepV3": {
+      "description": "One recorded user action — discriminated union by `op`.",
+      "oneOf": [
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "cause",
+            "id",
+            "op",
+            "result",
+            "state",
+            "to"
+          ],
+          "properties": {
+            "cause": {
+              "$ref": "#/definitions/NavigationCause"
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "navigate"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "switch_tab"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state",
+            "target"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "click"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptorV3"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state",
+            "target"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "hover"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptorV3"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "commit",
+            "id",
+            "op",
+            "result",
+            "state",
+            "target",
+            "value"
+          ],
+          "properties": {
+            "commit": {
+              "$ref": "#/definitions/FillCommit"
+            },
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "fill"
+              ]
+            },
+            "redacted": {
+              "type": "boolean"
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptorV3"
+            },
+            "value": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state",
+            "target"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "select"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "selection": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/SelectedOptionV3"
+              }
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/definitions/TargetDescriptorV3"
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "key",
+            "op",
+            "result",
+            "state"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "key": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/KeyModifier"
+              }
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "press"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/TargetDescriptorV3"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "description": "Fields shared by every step variant (flattened in JSON).",
+          "type": "object",
+          "required": [
+            "id",
+            "op",
+            "result",
+            "state"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "op": {
+              "type": "string",
+              "enum": [
+                "scroll"
+              ]
+            },
+            "result": {
+              "$ref": "#/definitions/StepResultV3"
+            },
+            "state": {
+              "description": "Observation id immediately before this action.",
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "StopReason": {
+      "type": "string",
+      "enum": [
+        "user_finish",
+        "cli_stop"
+      ]
+    },
+    "TargetDescriptorV3": {
+      "description": "Stable semantic handle for an interacted element within a page observation.",
+      "type": "object",
+      "properties": {
+        "ctx": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unmatched": {
+          "type": "boolean"
+        }
+      }
+    },
+    "TraceEntry": {
+      "type": "object",
+      "required": [
+        "start_url"
+      ],
+      "properties": {
+        "start_url": {
+          "type": "string"
+        }
+      }
+    },
+    "TraceStateV3": {
+      "description": "Page observation dictionary entry — referenced by steps via `state` / `result.state`.",
+      "type": "object",
+      "required": [
+        "body",
+        "id",
+        "url"
+      ],
+      "properties": {
+        "body": {
+          "description": "Full page observation (front matter + VOM body + annotations).",
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

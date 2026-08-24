@@ -1,9 +1,9 @@
 import {
+  type CaptureTargetDescriptor,
   describeEventTarget,
   describeTarget,
   resolveClickableElement,
   resolveHoverElement,
-  type TargetDescriptor,
 } from "@/lib/describe-target";
 import {
   evaluateHoverTrigger,
@@ -12,22 +12,8 @@ import {
   hasDirectHoverInteractiveSignal,
   hasStrongHoverExpansionSignal,
 } from "@/lib/hover-trigger-policy";
-import {
-  isRecordCancelMessage,
-  isRecordStartMessage,
-  isRecordStopMessage,
-  RECORD_CANCEL,
-  RECORD_START,
-  RECORD_STEP,
-  RECORD_STOP,
-  type RecordCancelMessage,
-  type RecordStartAck,
-  type RecordStartMessage,
-  type RecordStepPayload,
-  type RecordStopAck,
-  type RecordStopMessage,
-} from "@/lib/record-bridge";
-import { shouldRecordPress } from "@/lib/trace-reducer";
+import type { RecordStepPayload } from "@/lib/record-bridge";
+import { shouldRecordPress } from "@/lib/recording/draft-policy";
 import {
   closestHoverSurfaceCandidate,
   collectHoverSurfaceStates,
@@ -37,42 +23,21 @@ import {
   isLikelyHoverSurfaceOwner,
 } from "./record-hover-surface";
 
-const pendingStepSends = new Map<string, Set<Promise<boolean>>>();
-const failedStepDeliveries = new Set<string>();
-const knownRecordRequests = new Set<string>();
-
-function sendRecordStep(requestId: string, step: RecordStepPayload): void {
-  const payload = { type: RECORD_STEP, requestId, step };
-  const pending = Promise.resolve(chrome.runtime.sendMessage(payload)).then(
-    () => true,
-    () => {
-      failedStepDeliveries.add(requestId);
-      return false;
-    },
-  );
-  const sends = pendingStepSends.get(requestId) ?? new Set<Promise<boolean>>();
-  sends.add(pending);
-  pendingStepSends.set(requestId, sends);
-  void pending.then(() => {
-    sends.delete(pending);
-    if (sends.size === 0) pendingStepSends.delete(requestId);
-  });
-}
-
 export interface RecordCaptureController {
   dispose(): void;
 }
 
 interface FillSession {
   element: FillableElement;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   baselineValue: string;
   lastValue: string;
+  pendingCommit?: "enter" | "suggestion" | "blur";
 }
 
 interface HoverCandidate {
   element: Element;
-  target: TargetDescriptor;
+  target: CaptureTargetDescriptor;
   recordedAt: number;
   score: number;
   eligible: boolean;
@@ -157,6 +122,24 @@ function nearbyFillableFromSearchChrome(target: Element): FillableElement | null
   return null;
 }
 
+function captureGeometry(el: Element): RecordStepPayload["geometry"] {
+  const rect = el.getBoundingClientRect();
+  return {
+    rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height },
+    tag: el.tagName.toLowerCase(),
+  };
+}
+
+function geometryForEventTarget(
+  target: EventTarget | null,
+): RecordStepPayload["geometry"] | undefined {
+  if (!(target instanceof Element)) return undefined;
+  const clickable = target.closest(
+    'a,button,input,select,textarea,[role="button"],[role="link"],[role="menuitem"],[contenteditable="true"]',
+  );
+  return captureGeometry(clickable ?? target);
+}
+
 function fillableValue(el: FillableElement): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
     return el.value;
@@ -232,7 +215,10 @@ function collectHoverTriggerLabelText(root: Element): string {
   return normalizeLabelText(text);
 }
 
-function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDescriptor {
+function compactHoverTargetName(
+  el: Element,
+  desc: CaptureTargetDescriptor,
+): CaptureTargetDescriptor {
   if (!desc.name) return desc;
   const fullText = normalizeLabelText(el.textContent ?? "");
   const compactName = collectHoverTriggerLabelText(el);
@@ -250,7 +236,7 @@ function compactHoverTargetName(el: Element, desc: TargetDescriptor): TargetDesc
   return desc;
 }
 
-function isWeakHoverTarget(target: TargetDescriptor): boolean {
+function isWeakHoverTarget(target: CaptureTargetDescriptor): boolean {
   return !target.role && !target.name && target.tag === "div";
 }
 
@@ -261,9 +247,9 @@ function looksLikeAvatarElement(el: Element): boolean {
 
 function normalizeHoverTarget(
   el: Element,
-  desc: TargetDescriptor,
+  desc: CaptureTargetDescriptor,
   decision: HoverTriggerDecision,
-): TargetDescriptor {
+): CaptureTargetDescriptor {
   if (desc.role === "img" && !desc.name && looksLikeAvatarElement(el)) {
     return { ...desc, name: "image" };
   }
@@ -277,7 +263,7 @@ function normalizeHoverTarget(
   return desc;
 }
 
-function hoverTriggerSignals(el: Element, desc: TargetDescriptor) {
+function hoverTriggerSignals(el: Element, desc: CaptureTargetDescriptor) {
   if (!(el instanceof HTMLElement)) return null;
   const style = hoverTriggerStyle(el);
   return {
@@ -373,6 +359,7 @@ function scheduleInputCompletionCommit(
 export function startRecordCapture(
   _requestId: string,
   sendStep: (step: RecordStepPayload) => void,
+  options: { captureNavigation?: boolean } = {},
 ): RecordCaptureController {
   const emitStep = (step: RecordStepPayload) => {
     sendStep({ page_url: location.href, ...step });
@@ -411,14 +398,17 @@ export function startRecordCapture(
     emitStep({
       op: "fill",
       target: session.target,
+      geometry: captureGeometry(session.element),
       value,
+      commit: session.pendingCommit ?? "blur",
       ...(isPassword ? { redacted: true } : {}),
     });
   };
 
-  const commitFillSession = () => {
+  const commitFillSession = (commit: "enter" | "suggestion" | "blur" = "blur") => {
     if (!fillSession || composing) return;
     const session = fillSession;
+    session.pendingCommit = commit;
     fillSession = null;
     emitFill(session);
     committedValues.set(session.element, session.lastValue);
@@ -624,6 +614,7 @@ export function startRecordCapture(
     emitStep({
       op: "hover",
       target: hover.target,
+      geometry: captureGeometry(hover.element),
     });
     emittedHoverElements.add(hover.element);
   };
@@ -678,6 +669,7 @@ export function startRecordCapture(
     emitStep({
       op: "click",
       target,
+      geometry: geometryForEventTarget(eventTarget(event)),
       expects_navigation: true,
     });
   };
@@ -779,7 +771,7 @@ export function startRecordCapture(
       scheduleInputCompletionCommit(
         sessionElement,
         syncFillSessionValue,
-        commitFillSession,
+        () => commitFillSession("suggestion"),
         (el) => fillSession?.element === el,
       );
       return;
@@ -839,6 +831,7 @@ export function startRecordCapture(
       emitStep({
         op: "select",
         target: desc,
+        geometry: captureGeometry(target),
         values,
         labels,
         expects_navigation: true,
@@ -879,7 +872,7 @@ export function startRecordCapture(
       };
     }
     if (fillable) {
-      commitFillSession();
+      commitFillSession(event.key === "Enter" ? "enter" : "blur");
     }
     const desc = describeEventTarget(target);
     if (!desc && !event.key) return;
@@ -887,7 +880,7 @@ export function startRecordCapture(
     emitStep({
       op: "press",
       key: event.key,
-      ...(desc ? { target: desc } : {}),
+      ...(desc ? { target: desc, geometry: geometryForEventTarget(target) } : {}),
       ...(modifiers.length ? { modifiers } : {}),
       expects_navigation: event.key === "Enter",
     });
@@ -903,23 +896,33 @@ export function startRecordCapture(
   document.addEventListener("change", onChange, true);
   document.addEventListener("keydown", onKeyDown, true);
 
-  const urlObserver = new MutationObserver(() => emitNavigateIfChanged());
-  urlObserver.observe(document, { subtree: true, childList: true });
+  const captureNavigation = options.captureNavigation ?? true;
+  const urlObserver = captureNavigation
+    ? new MutationObserver(() => emitNavigateIfChanged())
+    : null;
+  urlObserver?.observe(document, { subtree: true, childList: true });
   const onUrlEvent = () => emitNavigateIfChanged();
-  window.addEventListener("hashchange", onUrlEvent);
-  window.addEventListener("popstate", onUrlEvent);
-  window.addEventListener("pagehide", commitFillSession);
+  // Wrap: passing commitFillSession directly would forward the DOM event as
+  // the `commit` argument and stamp it onto the recorded fill step.
+  const onPageHide = () => commitFillSession();
+  if (captureNavigation) {
+    window.addEventListener("hashchange", onUrlEvent);
+    window.addEventListener("popstate", onUrlEvent);
+  }
+  window.addEventListener("pagehide", onPageHide);
 
   const originalPushState = history.pushState;
   const originalReplaceState = history.replaceState;
-  history.pushState = function (...args: Parameters<History["pushState"]>) {
-    originalPushState.apply(this, args);
-    emitNavigateIfChanged(navigationActionPending ? true : undefined);
-  };
-  history.replaceState = function (...args: Parameters<History["replaceState"]>) {
-    originalReplaceState.apply(this, args);
-    emitNavigateIfChanged(navigationActionPending ? true : undefined);
-  };
+  if (captureNavigation) {
+    history.pushState = function (...args: Parameters<History["pushState"]>) {
+      originalPushState.apply(this, args);
+      emitNavigateIfChanged(navigationActionPending ? true : undefined);
+    };
+    history.replaceState = function (...args: Parameters<History["replaceState"]>) {
+      originalReplaceState.apply(this, args);
+      emitNavigateIfChanged(navigationActionPending ? true : undefined);
+    };
+  }
 
   return {
     dispose() {
@@ -933,93 +936,16 @@ export function startRecordCapture(
       document.removeEventListener("compositionend", onCompositionEnd, true);
       document.removeEventListener("change", onChange, true);
       document.removeEventListener("keydown", onKeyDown, true);
-      urlObserver.disconnect();
-      window.removeEventListener("hashchange", onUrlEvent);
-      window.removeEventListener("popstate", onUrlEvent);
-      window.removeEventListener("pagehide", commitFillSession);
-      history.pushState = originalPushState;
-      history.replaceState = originalReplaceState;
+      urlObserver?.disconnect();
+      if (captureNavigation) {
+        window.removeEventListener("hashchange", onUrlEvent);
+        window.removeEventListener("popstate", onUrlEvent);
+      }
+      window.removeEventListener("pagehide", onPageHide);
+      if (captureNavigation) {
+        history.pushState = originalPushState;
+        history.replaceState = originalReplaceState;
+      }
     },
   };
 }
-
-export type RecordContentMessage = RecordStartMessage | RecordStopMessage | RecordCancelMessage;
-
-export function isRecordContentMessage(msg: unknown): msg is RecordContentMessage {
-  return isRecordStartMessage(msg) || isRecordStopMessage(msg) || isRecordCancelMessage(msg);
-}
-
-export function handleRecordContentMessage(
-  message: RecordContentMessage,
-  state: {
-    activeRequestId: string | null;
-    capture: RecordCaptureController | null;
-    setActiveRequestId(id: string | null): void;
-    setCapture(capture: RecordCaptureController | null): void;
-    onStart(requestId: string, startedAtMs?: number): void;
-    onStop(): void;
-  },
-  sendResponse?: (response: RecordStartAck | RecordStopAck) => void,
-): boolean {
-  if (isRecordStartMessage(message)) {
-    if (!knownRecordRequests.has(message.requestId)) {
-      knownRecordRequests.add(message.requestId);
-      failedStepDeliveries.delete(message.requestId);
-    }
-    state.capture?.dispose();
-    state.setCapture(
-      startRecordCapture(message.requestId, (step) => {
-        sendRecordStep(message.requestId, step);
-      }),
-    );
-    state.setActiveRequestId(message.requestId);
-    state.onStart(message.requestId, message.startedAtMs);
-    sendResponse?.({ ok: true });
-    return sendResponse !== undefined;
-  }
-
-  if (isRecordStopMessage(message) || isRecordCancelMessage(message)) {
-    // Require an active recording that matches this requestId — otherwise a
-    // stray STOP/CANCEL (e.g. after teardown) would still run finishStop and
-    // clear overlay state even though nothing was capturing.
-    if (!state.activeRequestId || state.activeRequestId !== message.requestId) {
-      return false;
-    }
-    state.capture?.dispose();
-    state.setCapture(null);
-    const finishStop = () => {
-      state.onStop();
-      state.setActiveRequestId(null);
-    };
-    if (isRecordStopMessage(message) && sendResponse) {
-      const pending = [...(pendingStepSends.get(message.requestId) ?? [])];
-      void Promise.all(pending).then((delivered) => {
-        finishStop();
-        const succeeded = delivered.every(Boolean) && !failedStepDeliveries.has(message.requestId);
-        if (succeeded) {
-          failedStepDeliveries.delete(message.requestId);
-          knownRecordRequests.delete(message.requestId);
-        }
-        sendResponse(
-          succeeded
-            ? { ok: true }
-            : {
-                ok: false,
-                error: "failed to deliver one or more recorded steps",
-              },
-        );
-      });
-      return true;
-    }
-    if (isRecordCancelMessage(message)) {
-      failedStepDeliveries.delete(message.requestId);
-      knownRecordRequests.delete(message.requestId);
-    }
-    finishStop();
-    return false;
-  }
-
-  return false;
-}
-
-export { RECORD_CANCEL, RECORD_START, RECORD_STEP, RECORD_STOP };

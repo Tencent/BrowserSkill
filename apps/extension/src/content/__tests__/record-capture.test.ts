@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { RECORD_STOP, type RecordStepPayload } from "@/lib/record-bridge";
-import { handleRecordContentMessage, startRecordCapture } from "../record-capture";
+import type { RecordStepPayload } from "@/lib/record-bridge";
+import { startRecordCapture } from "../record-capture";
 
 vi.stubGlobal("chrome", {
   runtime: {
-    sendMessage: vi.fn(() => Promise.resolve()),
+    sendMessage: vi.fn((message: { sequence?: number }) =>
+      Promise.resolve({ ok: true, sequence: message.sequence }),
+    ),
   },
 });
 
@@ -45,58 +47,6 @@ function mouseOver(el: Element): void {
 function click(el: Element): void {
   el.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1 }));
 }
-
-describe("handleRecordContentMessage stop/cancel", () => {
-  it("ignores STOP when no recording is active", () => {
-    const dispose = vi.fn();
-    const onStop = vi.fn();
-    const setActiveRequestId = vi.fn();
-    const setCapture = vi.fn();
-    const sendResponse = vi.fn();
-
-    const needsAsync = handleRecordContentMessage(
-      { type: RECORD_STOP, requestId: "rec-stale" },
-      {
-        activeRequestId: null,
-        capture: { dispose },
-        setActiveRequestId,
-        setCapture,
-        onStart: vi.fn(),
-        onStop,
-      },
-      sendResponse,
-    );
-
-    expect(needsAsync).toBe(false);
-    expect(dispose).not.toHaveBeenCalled();
-    expect(onStop).not.toHaveBeenCalled();
-    expect(setActiveRequestId).not.toHaveBeenCalled();
-    expect(setCapture).not.toHaveBeenCalled();
-    expect(sendResponse).not.toHaveBeenCalled();
-  });
-
-  it("ignores STOP for a mismatched requestId", () => {
-    const dispose = vi.fn();
-    const onStop = vi.fn();
-
-    const needsAsync = handleRecordContentMessage(
-      { type: RECORD_STOP, requestId: "rec-other" },
-      {
-        activeRequestId: "rec-1",
-        capture: { dispose },
-        setActiveRequestId: vi.fn(),
-        setCapture: vi.fn(),
-        onStart: vi.fn(),
-        onStop,
-      },
-      vi.fn(),
-    );
-
-    expect(needsAsync).toBe(false);
-    expect(dispose).not.toHaveBeenCalled();
-    expect(onStop).not.toHaveBeenCalled();
-  });
-});
 
 describe("record-capture semantic", () => {
   let steps: RecordStepPayload[];
@@ -174,6 +124,19 @@ describe("record-capture semantic", () => {
     ]);
   });
 
+  it("does not emit page navigation from a child Document capture", () => {
+    const originalUrl = location.href;
+    const capture = startRecordCapture("rec-child", (step) => steps.push(step), {
+      captureNavigation: false,
+    });
+
+    history.pushState({}, "", "#inside-frame");
+    expect(steps).toEqual([]);
+
+    capture.dispose();
+    history.replaceState({}, "", originalUrl);
+  });
+
   it("does not record clicks on anonymous layout divs", () => {
     document.body.innerHTML = `
       <div id="chrome">page chrome</div>
@@ -228,6 +191,7 @@ describe("record-capture semantic", () => {
     expect(steps[0]).toMatchObject({
       op: "hover",
       target: { role: "button", name: "Open user navigation menu" },
+      geometry: { tag: "button", rect: { x: 900, y: 8, w: 32, h: 32 } },
     });
     expect(steps[1]).toMatchObject({
       op: "click",

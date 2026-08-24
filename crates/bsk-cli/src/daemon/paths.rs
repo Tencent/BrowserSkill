@@ -100,6 +100,14 @@ pub fn record_session_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("record-session.json"))
 }
 
+/// Path to a completed Trace saved before bundle export (`record-recovery.json`).
+///
+/// Kept until export succeeds so a failed `--output` write cannot drop the
+/// recording the extension already returned.
+pub fn record_recovery_path() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("record-recovery.json"))
+}
+
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
 /// token so test homes and custom installs do not share a predictable
 /// per-username pipe.
@@ -119,6 +127,13 @@ pub fn pipe_name() -> String {
     render_pipe_name(&user, &home)
 }
 
+/// Process-wide lock for tests that mutate `BSK_HOME`.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    GUARD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Render the Windows named-pipe name for a user/home pair. Kept
 /// platform-agnostic so unit tests on any host can pin the output
 /// character set.
@@ -136,19 +151,12 @@ fn render_pipe_name(user: &str, home: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::TempDir;
 
-    /// Serialise tests that mutate the global `BSK_HOME` env var.
-    fn env_guard() -> &'static Mutex<()> {
-        static GUARD: Mutex<()> = Mutex::new(());
-        &GUARD
-    }
-
     fn with_temp_home<F: FnOnce(&Path)>(f: F) {
-        let _lock = env_guard().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_env_lock();
         let tmp = TempDir::new().unwrap();
-        // SAFETY: serialised by env_guard above.
+        // SAFETY: serialised by test_env_lock above.
         unsafe {
             std::env::set_var(BSK_HOME_ENV, tmp.path().join("bsk"));
         }
@@ -186,6 +194,10 @@ mod tests {
             assert_eq!(
                 record_session_path().unwrap(),
                 home.join("record-session.json")
+            );
+            assert_eq!(
+                record_recovery_path().unwrap(),
+                home.join("record-recovery.json")
             );
         });
     }

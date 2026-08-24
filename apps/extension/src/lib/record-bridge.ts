@@ -3,7 +3,7 @@
  * service worker and a tab's content script.
  */
 
-import type { TargetDescriptor } from "./describe-target";
+import type { CaptureTargetDescriptor } from "./describe-target";
 
 export const RECORD_START = "bsk-record-start";
 export const RECORD_STEP = "bsk-record-step";
@@ -15,6 +15,10 @@ export const RECORD_QUERY = "bsk-record-query";
 export interface RecordStartAck {
   ok: true;
 }
+
+export type RecordStepAck =
+  | { ok: true; sequence: number }
+  | { ok: false; expectedSequence: number; error: string };
 
 export type RecordStopAck = { ok: true } | { ok: false; error: string };
 
@@ -42,7 +46,7 @@ export interface RecordStartMessage {
 
 export interface RecordStepPayload {
   op: "click" | "hover" | "fill" | "press" | "select" | "navigate";
-  target?: TargetDescriptor;
+  target?: CaptureTargetDescriptor;
   value?: string;
   key?: string;
   modifiers?: Array<"alt" | "ctrl" | "meta" | "shift">;
@@ -50,17 +54,30 @@ export interface RecordStepPayload {
   labels?: string[];
   url?: string;
   redacted?: boolean;
+  commit?: "enter" | "suggestion" | "blur";
   /** Page URL when the step was captured. */
   page_url?: string;
+  /** Event-target bounds in the source frame's viewport coordinate space. */
+  geometry?: {
+    rect: { x: number; y: number; w: number; h: number };
+    tag: string;
+  };
   /** Capture-only hint; never persisted unless converted to navigated_to. */
   expects_navigation?: boolean;
   /** Whether an observed URL change was synchronously caused by the action. */
   navigation_caused_by_action?: boolean;
+  /** Raw webNavigation transition metadata for cause mapping. */
+  transitionType?: string;
+  transitionQualifiers?: string[];
 }
 
 export interface RecordStepMessage {
   type: typeof RECORD_STEP;
   requestId: string;
+  /** Stable for the lifetime of one content-script document. */
+  producerId: string;
+  /** Monotonic within one content-script producer and recording request. */
+  sequence: number;
   step: RecordStepPayload;
 }
 
@@ -112,8 +129,27 @@ export function isRecordQueryMessage(msg: unknown): msg is RecordQueryMessage {
 export function isRecordStepMessage(msg: unknown): msg is RecordStepMessage {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
-  if (m.type !== RECORD_STEP || typeof m.requestId !== "string") return false;
+  if (
+    m.type !== RECORD_STEP ||
+    typeof m.requestId !== "string" ||
+    typeof m.producerId !== "string" ||
+    m.producerId.length === 0 ||
+    typeof m.sequence !== "number" ||
+    !Number.isSafeInteger(m.sequence) ||
+    m.sequence < 1
+  ) {
+    return false;
+  }
   const step = m.step;
   if (typeof step !== "object" || step === null) return false;
   return typeof (step as RecordStepPayload).op === "string";
+}
+
+export function isAcceptedRecordStepAck(
+  value: unknown,
+  sequence: number,
+): value is Extract<RecordStepAck, { ok: true }> {
+  if (typeof value !== "object" || value === null) return false;
+  const ack = value as Partial<RecordStepAck>;
+  return ack.ok === true && ack.sequence === sequence;
 }

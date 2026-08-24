@@ -21,6 +21,7 @@ import {
   type OverlayMode,
 } from "@/lib/overlay-bridge";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
+import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
@@ -38,6 +39,7 @@ import {
   attachRecordFinishListener,
   attachRecordQueryListener,
   attachRecordStepListener,
+  type RecordRuntimeDeps,
 } from "@/tools/record";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { Transport } from "@/transport/transport";
@@ -145,10 +147,33 @@ export default defineBackground(() => {
       void sessionsLive.syncFromManager();
     },
   });
+  const recordDeps = {
+    tabsApi: chrome.tabs,
+    cdp,
+    frameCoordinator: recordFrameCoordinator,
+    sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
+      chrome.tabs.sendMessage(tabId, msg),
+    bypassOverlay: async (tabId: number, enabled: boolean) => {
+      try {
+        await chrome.tabs.sendMessage(tabId, {
+          type: OVERLAY_AUTOMATION_BYPASS,
+          enabled,
+        });
+      } catch {
+        // Content script may be unavailable on restricted pages.
+      }
+    },
+  } satisfies RecordRuntimeDeps;
+  recordFrameCoordinator.attach();
+  attachRecordStepListener(recordDeps);
+  attachRecordFinishListener(recordDeps);
+  attachRecordQueryListener(recordDeps);
+
   const dispatcher = new ToolDispatcher({
     transport,
     sessions,
     cdp,
+    recording: recordDeps,
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
     approveBorrow: (ctx) =>
@@ -170,27 +195,6 @@ export default defineBackground(() => {
     }),
   });
   dispatcher.start();
-  const recordDeps = {
-    tabsApi: chrome.tabs,
-    sendToTab: (tabId: number, msg: Parameters<typeof chrome.tabs.sendMessage>[1]) =>
-      chrome.tabs.sendMessage(tabId, msg),
-    bypassOverlay: async (tabId: number, enabled: boolean) => {
-      try {
-        await chrome.tabs.sendMessage(tabId, {
-          type: OVERLAY_AUTOMATION_BYPASS,
-          enabled,
-        });
-      } catch {
-        // Content script may be unavailable on restricted pages.
-      }
-    },
-  };
-  // Message listeners stay up (cheap; fire only for record message types).
-  // Tab / webNavigation observation attaches lazily while a recording is
-  // active — see ensureBrowserObservationListeners in tools/record.ts.
-  attachRecordStepListener();
-  attachRecordFinishListener(recordDeps);
-  attachRecordQueryListener(recordDeps);
   if (typeof chrome.notifications?.onClicked?.addListener === "function") {
     attachBorrowNotificationClickHandler({
       onClicked: chrome.notifications.onClicked,

@@ -1,30 +1,10 @@
-import type { DraftTraceStep, PageRef, SelectedOption, Step } from "@/transport/types";
-
-const CLIPBOARD_KEYS = new Set(["a", "c", "v", "x", "A", "C", "V", "X"]);
-const MODIFIER_ONLY_KEYS = new Set(["Meta", "Control", "Alt", "Shift", "OS", "Hyper", "Super"]);
-
-export function shouldRecordPress(
-  key: string,
-  modifiers?: Array<"alt" | "ctrl" | "meta" | "shift">,
-): boolean {
-  if (MODIFIER_ONLY_KEYS.has(key)) return false;
-  const mods = modifiers ?? [];
-  const hasCtrlOrMeta = mods.includes("ctrl") || mods.includes("meta");
-  if (hasCtrlOrMeta && CLIPBOARD_KEYS.has(key)) return false;
-  if (key === "Enter" || key === "Escape") return true;
-  // Drop bare character typing — FillSession already records the value.
-  if (key.length === 1 && !hasCtrlOrMeta && !mods.includes("alt")) return false;
-  return false;
-}
-
-function shouldIncludeDraft(step: DraftTraceStep): boolean {
-  if (step.op === "press" && !shouldRecordPress(step.key, step.modifiers)) return false;
-  return true;
-}
+import type { PageRefV2, SelectedOptionV2, StepV2, TraceV2 } from "@/transport/types";
+import { resolveDraftStartUrl, shouldIncludeDraft } from "./draft-policy";
+import type { RecordingDraftStep } from "./types";
 
 /** Collapse consecutive navigations to the last hop. */
-function collapseNavigations(steps: DraftTraceStep[]): DraftTraceStep[] {
-  const out: DraftTraceStep[] = [];
+function collapseNavigations(steps: RecordingDraftStep[]): RecordingDraftStep[] {
+  const out: RecordingDraftStep[] = [];
   for (const step of steps) {
     const prev = out[out.length - 1];
     if (step.op === "navigate" && prev?.op === "navigate") {
@@ -36,7 +16,7 @@ function collapseNavigations(steps: DraftTraceStep[]): DraftTraceStep[] {
   return out;
 }
 
-function collectUrls(steps: DraftTraceStep[], startUrl?: string): string[] {
+function collectUrls(steps: RecordingDraftStep[], startUrl?: string): string[] {
   const urls: string[] = [];
   if (startUrl) urls.push(startUrl);
   for (const step of steps) {
@@ -44,8 +24,8 @@ function collectUrls(steps: DraftTraceStep[], startUrl?: string): string[] {
       urls.push(step.url);
       continue;
     }
-    if ("page_url" in step && step.page_url) urls.push(step.page_url);
-    if ("navigated_to" in step && step.navigated_to) urls.push(step.navigated_to);
+    if (step.pageUrl) urls.push(step.pageUrl);
+    if ("navigatedTo" in step && step.navigatedTo) urls.push(step.navigatedTo);
   }
   const seen = new Set<string>();
   const unique: string[] = [];
@@ -58,9 +38,9 @@ function collectUrls(steps: DraftTraceStep[], startUrl?: string): string[] {
 }
 
 function buildPageRegistry(
-  steps: DraftTraceStep[],
+  steps: RecordingDraftStep[],
   startUrl?: string,
-): { pages: PageRef[]; urlToId: Map<string, string> } {
+): { pages: PageRefV2[]; urlToId: Map<string, string> } {
   const urls = collectUrls(steps, startUrl);
   const urlToId = new Map<string, string>();
   const pages = urls.map((url, index) => {
@@ -81,28 +61,28 @@ function pageIdFor(
   return urlToId.values().next().value ?? "p1";
 }
 
-function pageUrlForDraft(step: DraftTraceStep, fallbackUrl?: string): string | undefined {
-  if (step.op === "navigate") return step.page_url ?? step.url;
-  if ("page_url" in step && step.page_url) return step.page_url;
+function pageUrlForDraft(step: RecordingDraftStep, fallbackUrl?: string): string | undefined {
+  if (step.op === "navigate") return step.pageUrl ?? step.url;
+  if (step.pageUrl) return step.pageUrl;
   return fallbackUrl;
 }
 
 function effectForNavigation(
   navigatedTo: string | undefined,
   urlToId: Map<string, string>,
-): Step["effect"] {
+): StepV2["effect"] {
   if (!navigatedTo) return undefined;
   const pageId = urlToId.get(navigatedTo);
   if (!pageId) return undefined;
   return { navigated_to: pageId };
 }
 
-function withEffect(step: Step, effect: Step["effect"]): Step {
+function withEffect(step: StepV2, effect: StepV2["effect"]): StepV2 {
   if (!effect) return step;
   return { ...step, effect };
 }
 
-function toSelection(values: string[], labels?: string[]): SelectedOption[] {
+function toSelection(values: string[], labels?: string[]): SelectedOptionV2[] {
   return values.map((value, index) => ({
     value,
     ...(labels?.[index] ? { label: labels[index] } : {}),
@@ -110,11 +90,11 @@ function toSelection(values: string[], labels?: string[]): SelectedOption[] {
 }
 
 function toV2Step(
-  step: DraftTraceStep,
+  step: RecordingDraftStep,
   id: number,
   urlToId: Map<string, string>,
   fallbackUrl?: string,
-): Step | null {
+): StepV2 | null {
   if (!shouldIncludeDraft(step)) return null;
 
   const pageUrl = pageUrlForDraft(step, fallbackUrl);
@@ -129,28 +109,23 @@ function toV2Step(
         to: step.url,
       };
     case "click":
+      if (!step.captureTarget) return null;
       return withEffect(
         {
           op: "click",
           id,
           page,
-          target: step.target,
+          target: step.captureTarget,
         },
-        effectForNavigation(step.navigated_to, urlToId),
+        effectForNavigation(step.navigatedTo, urlToId),
       );
-    case "hover":
-      return {
-        op: "hover",
-        id,
-        page,
-        target: step.target,
-      };
     case "fill":
+      if (!step.captureTarget) return null;
       return {
         op: "fill",
         id,
         page,
-        target: step.target,
+        target: step.captureTarget,
         value: step.value,
         ...(step.redacted ? { redacted: true } : {}),
       };
@@ -161,44 +136,51 @@ function toV2Step(
           id,
           page,
           key: step.key,
-          ...(step.target ? { target: step.target } : {}),
+          ...(step.captureTarget ? { target: step.captureTarget } : {}),
           ...(step.modifiers?.length ? { modifiers: step.modifiers } : {}),
         },
-        effectForNavigation(step.navigated_to, urlToId),
+        effectForNavigation(step.navigatedTo, urlToId),
       );
     case "select":
+      if (!step.captureTarget) return null;
       return withEffect(
         {
           op: "select",
           id,
           page,
-          target: step.target,
+          target: step.captureTarget,
           selection: toSelection(step.values, step.labels),
         },
-        effectForNavigation(step.navigated_to, urlToId),
+        effectForNavigation(step.navigatedTo, urlToId),
       );
+    // `hover` only exists in Trace v3. Peers that negotiate v2 predate the
+    // step variant and fail to decode the whole result if we emit it.
+    case "hover":
+    case "scroll":
+    case "switch_tab":
+      return null;
   }
 }
 
-export interface ReducedTrace {
-  pages: PageRef[];
-  steps: Step[];
+interface ReducedTrace {
+  pages: PageRefV2[];
+  steps: StepV2[];
 }
 
 /**
  * Compile capture drafts into record-only trace v2 steps.
  * Variable inputs are NOT classified here — executing agents infer that at run time.
  */
-export function reduceTraceSteps(steps: DraftTraceStep[], startUrl?: string): ReducedTrace {
+function reduceTraceSteps(steps: RecordingDraftStep[], startUrl?: string): ReducedTrace {
   const collapsed = collapseNavigations(steps);
   const { pages, urlToId } = buildPageRegistry(collapsed, startUrl);
-  const out: Step[] = [];
+  const out: StepV2[] = [];
   let id = 1;
   let lastUrl = startUrl;
   for (const draft of collapsed) {
     if (draft.op === "navigate") lastUrl = draft.url;
-    else if ("navigated_to" in draft && draft.navigated_to) lastUrl = draft.navigated_to;
-    else if ("page_url" in draft && draft.page_url) lastUrl = draft.page_url;
+    else if ("navigatedTo" in draft && draft.navigatedTo) lastUrl = draft.navigatedTo;
+    else if (draft.pageUrl) lastUrl = draft.pageUrl;
     const step = toV2Step(draft, id, urlToId, lastUrl);
     if (!step) continue;
     out.push(step);
@@ -207,18 +189,27 @@ export function reduceTraceSteps(steps: DraftTraceStep[], startUrl?: string): Re
   return { pages, steps: out };
 }
 
-export function resolveTraceStartUrl(
-  drafts: DraftTraceStep[],
+function resolveTraceStartUrl(
+  drafts: RecordingDraftStep[],
   startUrl?: string,
-  pages?: PageRef[],
+  pages?: PageRefV2[],
 ): string {
-  if (startUrl) return startUrl;
-  const navigate = drafts.find((step): step is Extract<DraftTraceStep, { op: "navigate" }> => {
-    return step.op === "navigate";
-  });
-  if (navigate) return navigate.url;
-  for (const draft of drafts) {
-    if ("page_url" in draft && draft.page_url) return draft.page_url;
-  }
-  return pages?.[0]?.url ?? "about:blank";
+  return resolveDraftStartUrl(drafts, startUrl, pages?.[0]?.url);
+}
+
+export function buildTraceV2(input: {
+  steps: RecordingDraftStep[];
+  startedAt: string;
+  startUrl?: string;
+  purpose?: string;
+}): TraceV2 {
+  const { pages, steps } = reduceTraceSteps(input.steps, input.startUrl);
+  return {
+    recorded_at: new Date().toISOString(),
+    started_at: input.startedAt,
+    ...(input.purpose ? { purpose: input.purpose } : {}),
+    entry: { start_url: resolveTraceStartUrl(input.steps, input.startUrl, pages) },
+    pages,
+    steps,
+  };
 }

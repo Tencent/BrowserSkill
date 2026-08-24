@@ -61,7 +61,7 @@ fn bsk_status_json_returns_structured_payload() {
 
     assert!(parsed["pid"].as_u64().unwrap() > 0);
     assert!(!parsed["daemon_version"].as_str().unwrap().is_empty());
-    assert_eq!(parsed["protocol_version"], "1.0");
+    assert_eq!(parsed["protocol_version"], "1.1");
     assert!(parsed["sock_path"].as_str().is_some());
     assert_eq!(parsed["browsers"], serde_json::json!([]));
     assert_eq!(parsed["sessions"], serde_json::json!([]));

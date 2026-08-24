@@ -59,15 +59,9 @@ fn started_at_unix_ms() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    fn env_guard() -> &'static Mutex<()> {
-        static GUARD: Mutex<()> = Mutex::new(());
-        &GUARD
-    }
 
     fn with_temp_home<F: FnOnce()>(f: F) {
-        let _lock = env_guard().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::daemon::paths::test_env_lock();
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var(crate::daemon::paths::BSK_HOME_ENV, tmp.path());
