@@ -41,8 +41,7 @@ pub fn clear() {
 
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    GUARD.lock().unwrap_or_else(|e| e.into_inner())
+    crate::daemon::paths::test_env_lock()
 }
 
 #[cfg(test)]
