@@ -202,6 +202,7 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 |---------|---------|
 | `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |
 | `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
+| `bsk scroll-to <ref-or-selector>` | Scroll an element and its frame owners into the visible viewport |
 | `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |

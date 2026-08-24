@@ -207,6 +207,15 @@ fn parses_hover_with_settle() {
 }
 
 #[test]
+fn parses_scroll_to_target() {
+    let cli = parse(&["bsk", "scroll-to", "@e2", "--session", "s1"]);
+    let Command::ScrollTo(args) = cli.command else {
+        panic!("expected scroll-to command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e2"));
+}
+
+#[test]
 fn rejects_zero_click_count() {
     assert!(
         Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s1", "--count", "0"]).is_err()

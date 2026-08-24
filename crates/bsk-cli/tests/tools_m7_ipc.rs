@@ -1,5 +1,4 @@
-//! M7 integration: drive the 7 new tool RPCs (navigate /
-//! navigate_back / navigate_forward / reload / click / fill / press)
+//! M7 integration: drive interaction and navigation tool RPCs
 //! through the IPC + per-session queue + fake extension and assert
 //! the wire shapes line up. The extension stub mirrors each method's
 //! `*Result` so we exercise the daemon's serialise → forward →
@@ -15,8 +14,8 @@ use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
     ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, NavigateBackParams,
     NavigateBackResult, NavigateForwardParams, NavigateForwardResult, NavigateParams,
-    NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, SelectParams,
-    SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
+    NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, ScrollToParams,
+    ScrollToResult, SelectParams, SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -379,6 +378,51 @@ async fn click_round_trips_ref_and_modifiers() {
     .expect("click ok");
     assert_eq!(result.used_ref.as_deref(), Some("e3"));
     assert!((result.x - 12.5).abs() < f64::EPSILON);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scroll_to_round_trips_visible_bounds() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolScrollTo);
+        let params = req.params.clone().unwrap();
+        let parsed: ScrollToParams = serde_json::from_value(params).unwrap();
+        assert_eq!(parsed.ref_.as_deref(), Some("@e3"));
+        ResponseBody::Ok(
+            serde_json::to_value(ScrollToResult {
+                tab_id: 9,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: ScrollToResult = ipc_tool_call(
+        &sock,
+        Method::ToolScrollTo,
+        ScrollToParams {
+            session_id,
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("scroll-to ok");
+    assert_eq!(result.used_ref.as_deref(), Some("e3"));
+    assert_eq!(result.width, 100.0);
     handle.shutdown().await;
 }
 
