@@ -108,13 +108,37 @@ function captureError(
   });
 }
 
+async function cleanupClaimedDownload(downloads: DownloadsApi, downloadId: number): Promise<void> {
+  const lookup = async () => (await downloads.search({ id: downloadId }))[0];
+  const item = await lookup();
+  if (!item || item.state === "interrupted") return;
+  if (item.state === "complete") {
+    await downloads.removeFile(downloadId);
+    return;
+  }
+
+  try {
+    await downloads.cancel(downloadId);
+  } catch (cancelError) {
+    // Completion can win the race after the lookup but before cancellation.
+    // Reconcile against Chrome's authoritative state before declaring cleanup
+    // failed so every terminal state has one explicit cleanup path.
+    const reconciled = await lookup();
+    if (!reconciled || reconciled.state === "interrupted") return;
+    if (reconciled.state === "complete") {
+      await downloads.removeFile(downloadId);
+      return;
+    }
+    throw cancelError;
+  }
+}
+
 export async function captureBrowserDownload(
   options: DownloadCaptureOptions,
 ): Promise<DownloadCaptureResult | RpcError> {
   let click: ClickResult | undefined;
   let intent: DownloadIntent | undefined;
   let capturedId: number | undefined;
-  let capturedItem: chrome.downloads.DownloadItem | undefined;
   let settled = false;
   let succeeded = false;
   let failureResult: RpcError | undefined;
@@ -143,7 +167,6 @@ export async function captureBrowserDownload(
       return;
     }
     settled = true;
-    capturedItem = item;
     resolveCompletion(item);
   };
   const suggestDefault = (candidate: DownloadCandidate) => {
@@ -175,7 +198,6 @@ export async function captureBrowserDownload(
     candidate.suggested = true;
     clearTimeout(candidate.graceTimer);
     capturedId = candidate.item.id;
-    capturedItem = candidate.item;
     candidate.suggest({
       filename: `${options.browserRelativeDir}/${safeBasename(intent.suggestedFilename)}`,
       conflictAction: "overwrite",
@@ -225,7 +247,6 @@ export async function captureBrowserDownload(
   const createdListener = (item: chrome.downloads.DownloadItem) => {
     createdItems.set(item.id, item);
     if (capturedId !== item.id) return;
-    capturedItem = item;
     if (item.state === "interrupted") {
       fail(new Error(item.error ?? "download interrupted"));
     } else if (item.state === "complete") {
@@ -286,7 +307,6 @@ export async function captureBrowserDownload(
       .search({ id: capturedId })
       .then(([item]) => {
         if (!item || settled) return;
-        capturedItem = item;
         if (item.bytesReceived > (options.maxByteSize as number)) {
           fail(new Error(`download exceeds transfer limit ${options.maxByteSize}`));
         }
@@ -334,13 +354,8 @@ export async function captureBrowserDownload(
       if (candidate.item.id !== capturedId) suggestDefault(candidate);
     }
     if (!succeeded && capturedId !== undefined) {
-      const item = capturedItem ?? createdItems.get(capturedId);
       try {
-        if (item?.state === "complete") {
-          await options.downloads.removeFile(capturedId);
-        } else {
-          await options.downloads.cancel(capturedId);
-        }
+        await cleanupClaimedDownload(options.downloads, capturedId);
       } catch {
         if (failureResult?.data) failureResult.data.cleanup_state = "failed";
       }

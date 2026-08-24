@@ -493,6 +493,155 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({ item: { id: 21, state: "complete" } });
   });
 
+  it("removes a completed download when the final size exceeds the limit", async () => {
+    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
+    const onDeterminingFilename =
+      fakeEvent<
+        (
+          item: chrome.downloads.DownloadItem,
+          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+        ) => void | true
+      >();
+    const initial = {
+      id: 22,
+      url: "https://example.test/oversized.bin",
+      finalUrl: "https://example.test/oversized.bin",
+      filename: "oversized.bin",
+      state: "in_progress",
+      fileSize: -1,
+      totalBytes: -1,
+      bytesReceived: 0,
+    } as chrome.downloads.DownloadItem;
+    const complete = {
+      ...initial,
+      filename: "/profile/Downloads/BrowserSkill/tr_22/oversized.bin",
+      state: "complete",
+      fileSize: 8,
+      totalBytes: 8,
+      bytesReceived: 8,
+    } as chrome.downloads.DownloadItem;
+    const downloads: DownloadsApi = {
+      onCreated,
+      onChanged,
+      onDeterminingFilename,
+      search: vi.fn(async () => [complete]),
+      cancel: vi.fn(async () => {}),
+      removeFile: vi.fn(async () => {}),
+    };
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      onEvent: (handler) => {
+        cdpEvent = handler;
+        return { dispose: vi.fn() };
+      },
+    };
+
+    const result = await captureBrowserDownload({
+      cdp,
+      target: { tabId: 4 },
+      downloads,
+      browserRelativeDir: "BrowserSkill/tr_22",
+      maxByteSize: 4,
+      timeoutMs: 1_000,
+      trigger: async () => {
+        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+          url: initial.url,
+          suggestedFilename: initial.filename,
+        });
+        await new Promise<void>((resolve) => {
+          onDeterminingFilename.emit(initial, () => resolve());
+        });
+        onCreated.emit(initial);
+        onChanged.emit({ id: initial.id, state: { current: "complete" } });
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "download_capture_failed", effect_state: "committed" },
+    });
+    expect(downloads.removeFile).toHaveBeenCalledWith(initial.id);
+    expect(downloads.cancel).not.toHaveBeenCalled();
+  });
+
+  it("reconciles a download that completes while cancellation is being requested", async () => {
+    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
+    const onDeterminingFilename =
+      fakeEvent<
+        (
+          item: chrome.downloads.DownloadItem,
+          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+        ) => void | true
+      >();
+    const initial = {
+      id: 23,
+      url: "https://example.test/racing.bin",
+      finalUrl: "https://example.test/racing.bin",
+      filename: "racing.bin",
+      state: "in_progress",
+      fileSize: -1,
+      totalBytes: -1,
+      bytesReceived: 0,
+    } as chrome.downloads.DownloadItem;
+    const complete = {
+      ...initial,
+      filename: "/profile/Downloads/BrowserSkill/tr_23/racing.bin",
+      state: "complete",
+      fileSize: 4,
+      totalBytes: 4,
+      bytesReceived: 4,
+    } as chrome.downloads.DownloadItem;
+    const downloads: DownloadsApi = {
+      onCreated,
+      onChanged,
+      onDeterminingFilename,
+      search: vi.fn().mockResolvedValueOnce([initial]).mockResolvedValueOnce([complete]),
+      cancel: vi.fn(async () => {
+        throw new Error("download already complete");
+      }),
+      removeFile: vi.fn(async () => {}),
+    };
+    let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      onEvent: (handler) => {
+        cdpEvent = handler;
+        return { dispose: vi.fn() };
+      },
+    };
+
+    const result = await captureBrowserDownload({
+      cdp,
+      target: { tabId: 4 },
+      downloads,
+      browserRelativeDir: "BrowserSkill/tr_23",
+      timeoutMs: 80,
+      trigger: async () => {
+        cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
+          url: initial.url,
+          suggestedFilename: initial.filename,
+        });
+        await new Promise<void>((resolve) => {
+          onDeterminingFilename.emit(initial, () => resolve());
+        });
+        onCreated.emit(initial);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "download_capture_failed", effect_state: "committed" },
+    });
+    expect(downloads.cancel).toHaveBeenCalledWith(initial.id);
+    expect(downloads.removeFile).toHaveBeenCalledWith(initial.id);
+    expect(result).not.toMatchObject({ data: { cleanup_state: "failed" } });
+  });
+
   it("rejects ambiguous attribution without cancelling either unclaimed download", async () => {
     const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
     const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
