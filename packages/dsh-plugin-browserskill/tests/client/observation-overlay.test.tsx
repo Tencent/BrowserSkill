@@ -261,6 +261,7 @@ describe("ObservationOverlay", () => {
         addEventListener: (name: string, fn: () => void) => {
           listeners.set(name, [...(listeners.get(name) ?? []), fn]);
         },
+        close: vi.fn(),
       } as unknown as Window;
     });
     (window as unknown as Record<string, unknown>).documentPictureInPicture = { requestWindow };
@@ -273,6 +274,28 @@ describe("ObservationOverlay", () => {
     // Closing the PiP returns to the in-page card with state preserved.
     for (const fn of listeners.get("pagehide") ?? []) fn();
     await screen.findByTestId("obs-card");
+  });
+
+  it("closes the PiP window when the carrier unmounts", async () => {
+    const h = makeHarness([BUSY]);
+    const pipDoc = document.implementation.createHTMLDocument("pip");
+    const close = vi.fn();
+    const requestWindow = vi.fn(async () => {
+      return {
+        document: pipDoc,
+        addEventListener: () => {},
+        close,
+      } as unknown as Window;
+    });
+    (window as unknown as Record<string, unknown>).documentPictureInPicture = { requestWindow };
+    const { unmount } = render(<ObservationOverlay store={h.store} />);
+    const popout = await screen.findByRole("button", { name: /Pop out/ });
+    fireEvent.click(popout);
+    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
+    // Unmounting (tab close, conversation switch, plugin HMR) closes the PiP
+    // instead of leaving a blank window behind.
+    unmount();
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("renders the strip for two sessions and pins focus on click", async () => {

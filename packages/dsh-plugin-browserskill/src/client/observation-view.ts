@@ -140,5 +140,9 @@ export function usePip(): PipHandle {
       })
       .catch(() => {});
   }, []);
+  // Unmounting the carrier (tab close, conversation switch, plugin HMR) does
+  // not destroy the PiP browsing context: close it ourselves or it survives
+  // as a blank window. close() on an already-closed window is a no-op.
+  useEffect(() => () => pipWindow?.close(), [pipWindow]);
   return { pipWindow, pipSupported: pipApi() !== undefined, popOut };
 }
