@@ -12,12 +12,16 @@
  * inside the `SessionContext`.
  */
 export type BackendNodeId = number;
+export type RefCapability = "interact" | "screenshot";
+export type RefTargetKind = "dom" | "surface";
 
 export interface RefEntry {
   backendNodeId: BackendNodeId;
   tabId: number | null;
   frameId?: string;
   cdpSessionId?: string;
+  kind: RefTargetKind;
+  capabilities: RefCapability[];
   generation: number;
 }
 
@@ -28,6 +32,8 @@ export type RefInput =
       tabId: number;
       frameId?: string;
       cdpSessionId?: string;
+      kind?: RefTargetKind;
+      capabilities?: RefCapability[];
     };
 
 export class RefStore {
@@ -70,6 +76,8 @@ export class RefStore {
       tabId?: number;
       frameId?: string;
       cdpSessionId?: string;
+      kind?: RefTargetKind;
+      capabilities?: RefCapability[];
     } = {},
   ): void {
     this.map.set(normaliseRef(ref), {
@@ -77,6 +85,8 @@ export class RefStore {
       tabId: opts.tabId ?? null,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
       ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
+      kind: opts.kind ?? "dom",
+      capabilities: opts.capabilities ?? ["interact", "screenshot"],
       generation: this.generation,
     });
   }
@@ -94,6 +104,8 @@ export class RefStore {
       return {
         backendNodeId: input,
         tabId: null,
+        kind: "dom",
+        capabilities: ["interact", "screenshot"],
         generation: this.generation,
       };
     }
@@ -102,6 +114,8 @@ export class RefStore {
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),
       ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
+      kind: input.kind ?? "dom",
+      capabilities: input.capabilities ?? ["interact", "screenshot"],
       generation: this.generation,
     };
   }

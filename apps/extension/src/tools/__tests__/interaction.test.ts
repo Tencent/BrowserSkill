@@ -123,6 +123,29 @@ describe("handleClick", () => {
     expect(fake.cdp.send).not.toHaveBeenCalled();
   });
 
+  it("rejects screenshot-only visual surface refs before issuing CDP calls", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+    const fake = makeFakeCdp({});
+
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "ref_capability_denied", required_capability: "interact" },
+    });
+    expect(fake.cdp.send).not.toHaveBeenCalled();
+  });
+
   it("clicks by ref, computes the quad centre, dispatches three mouse events", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

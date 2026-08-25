@@ -23,6 +23,7 @@ export type ErrorCode =
 export type RpcErrorReason =
   | "agent_window_scope"
   | "element_not_visible"
+  | "ref_capability_denied"
   | "ref_not_found"
   | "selector_not_found"
   | "target_not_fillable"
