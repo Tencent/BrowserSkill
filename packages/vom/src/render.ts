@@ -9,6 +9,8 @@ import type {
   VomOptions,
   VomResult,
   VomScene,
+  VomVisualSurface,
+  VomVisualSurfaceSummary,
 } from "./types";
 
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
@@ -737,6 +739,70 @@ interface RenderState {
   duplicateRefNames: Set<string>;
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
+  visualSurfaces: Map<number | null, VomVisualSurface[]>;
+  visualSurfaceSummaries: Map<number | null, VomVisualSurfaceSummary[]>;
+}
+
+function groupedByParent<T extends { parentId: number | null }>(
+  items: T[],
+): Map<number | null, T[]> {
+  const grouped = new Map<number | null, T[]>();
+  for (const item of items) {
+    const siblings = grouped.get(item.parentId) ?? [];
+    siblings.push(item);
+    grouped.set(item.parentId, siblings);
+  }
+  return grouped;
+}
+
+function emitVisualEntries(parentId: number | null, depth: number, state: RenderState): void {
+  if (state.stopped) return;
+  for (const surface of state.visualSurfaces.get(parentId) ?? []) {
+    if (depth > state.maxDepth) {
+      state.truncated = true;
+      continue;
+    }
+    const ref = `e${state.nextRef}`;
+    const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
+    const layers = surface.memberCount > 1 ? `; layers=${surface.memberCount}` : "";
+    const line = `${"  ".repeat(depth)}@${ref} surface ${JSON.stringify(label)} [rendering=${surface.renderingKind}${layers}; visual-only; use: bsk screenshot --ref @${ref}]`;
+    const nextTokens = state.tokens + estimateTokens(line);
+    if (nextTokens > state.maxTokens) {
+      state.truncated = true;
+      state.stopped = true;
+      return;
+    }
+    state.lines.push(line);
+    state.tokens = nextTokens;
+    state.refs.push({
+      ref,
+      backendNodeId: surface.backendNodeId,
+      frameId: surface.frameId,
+      role: "surface",
+      name: label,
+      kind: "surface",
+      capabilities: ["screenshot"],
+      line: state.lines.length - 1,
+    });
+    state.nextRef += 1;
+  }
+
+  for (const summary of state.visualSurfaceSummaries.get(parentId) ?? []) {
+    if (depth > state.maxDepth) {
+      state.truncated = true;
+      continue;
+    }
+    const noun = summary.count === 1 ? "surface is" : "surfaces are";
+    const line = `${"  ".repeat(depth)}[${summary.count} additional visual ${noun} not represented]`;
+    const nextTokens = state.tokens + estimateTokens(line);
+    if (nextTokens > state.maxTokens) {
+      state.truncated = true;
+      state.stopped = true;
+      return;
+    }
+    state.lines.push(line);
+    state.tokens = nextTokens;
+  }
 }
 
 function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: RenderState): void {
@@ -812,6 +878,8 @@ function renderTree(
         ...(node.role ? { role: node.role } : {}),
         ...(name ? { name } : {}),
         ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+        kind: "dom",
+        capabilities: ["interact", "screenshot"],
         line: state.lines.length - 1,
       });
       state.nextRef += 1;
@@ -821,10 +889,12 @@ function renderTree(
     if (scope) emitActiveScopeBlock(scope, depth + 1, state);
 
     if ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state)) {
+      emitVisualEntries(node.id, depth + 1, state);
       continue;
     }
     renderTree(children, node.id, depth + 1, state);
   }
+  emitVisualEntries(parentId, depth, state);
 }
 
 function renderNodes(
@@ -833,6 +903,8 @@ function renderNodes(
   initialLines: string[],
   surfaces: CondSurface[] = [],
   activeScopeBlocks: ActiveScopeBlock[] = [],
+  visualSurfaces: VomVisualSurface[] = [],
+  visualSurfaceSummaries: VomVisualSurfaceSummary[] = [],
 ): RenderState {
   const children = buildChildren(nodes);
   const state: RenderState = {
@@ -851,6 +923,8 @@ function renderNodes(
     duplicateRefNames: duplicateReferenceNames(nodes),
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
+    visualSurfaces: groupedByParent(visualSurfaces),
+    visualSurfaceSummaries: groupedByParent(visualSurfaceSummaries),
   };
 
   renderTree(children, null, 1, state);
@@ -1056,7 +1130,17 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     "@layers 2 focus=L1",
     `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%`,
   ];
-  const state = renderNodes(visibleNodes, options, header, scene.surfaces, scene.activeScopeBlocks);
+  const visibleSurface = (parentId: number | null): boolean =>
+    parentId === null || included.has(parentId);
+  const state = renderNodes(
+    visibleNodes,
+    options,
+    header,
+    scene.surfaces,
+    scene.activeScopeBlocks,
+    scene.visualSurfaces?.filter((surface) => visibleSurface(surface.parentId)),
+    scene.visualSurfaceSummaries?.filter((summary) => visibleSurface(summary.parentId)),
+  );
   state.lines.push(renderPageOcclusionLine(hiddenCount));
 
   return {
@@ -1084,6 +1168,8 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     ],
     scene.surfaces,
     scene.activeScopeBlocks,
+    scene.visualSurfaces,
+    scene.visualSurfaceSummaries,
   );
 
   return {

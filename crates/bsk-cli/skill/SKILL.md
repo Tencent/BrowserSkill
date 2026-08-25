@@ -80,6 +80,8 @@ Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` /
 
 When VOM renders `[hover first: …]` on an element, the listed items are not currently clickable refs. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action.
 
+When `bsk observe` renders `@eN surface ... [visual-only; ...]`, the ref identifies a rendered canvas surface, not an interactable DOM control. Use `bsk screenshot --ref @eN --session <id>` to inspect its visible crop. Do not pass a visual surface ref to click, fill, hover, or select; those commands intentionally reject screenshot-only refs.
+
 ## Observation priority
 
 Start with `bsk observe` to understand page structure, text, controls, element refs, and conditional hover/focus surfaces. Use `bsk snapshot` only when you need the stricter static accessibility tree or VOM is insufficient. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:

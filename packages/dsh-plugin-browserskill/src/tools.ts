@@ -489,7 +489,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       ? "Capture an indented aria-tree snapshot of the session's active tab. Interactive elements " +
         "carry @eN refs for browser_interact actions. Prefer browser_inspect action=observe for a richer semantic view."
       : "Produce a semantic VOM observation of the session's active tab (roles, states, perception " +
-        "probes) with @eN refs for browser_interact actions. Read-only: never submits input.";
+        "probes) with @eN refs for browser_interact actions. Visual surface refs are screenshot-only; " +
+        "DOM refs support interaction. Read-only: never submits input.";
     register(
       defineTool({
         name,
@@ -752,12 +753,14 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       name: "inspect.screenshot",
       description:
         "Capture a PNG screenshot of the session's active tab, or crop to a snapshot ref element. " +
-        "Returns the image itself when the deployment supports image input, otherwise a file path.",
+        "This is the supported operation for visual surface refs emitted by browser_observe. Returns " +
+        "the image itself when the deployment supports image input, otherwise a file path.",
       parameters: {
         session: SESSION_PARAM,
         ref: {
           type: "string",
-          description: "Snapshot ref (@e3) from the last snapshot/observe; crops to that element.",
+          description:
+            "Ref (@e3) from the last snapshot/observe; crops to that DOM element or visual surface.",
         },
       },
       output: {
