@@ -3,7 +3,7 @@
 // `ref_not_found` errors for hard-failure tool paths.
 
 import type { SessionContext } from "@/session-manager/manager";
-import { normaliseRef } from "@/session-manager/ref-store";
+import { normaliseRef, type RefCapability, type RefTargetKind } from "@/session-manager/ref-store";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 
@@ -12,6 +12,8 @@ export interface SnapshotRefLookup {
   refKey: string;
   frameId?: string;
   cdpSessionId?: string;
+  kind: RefTargetKind;
+  capabilities: RefCapability[];
 }
 
 function refEntryForTab(ctx: SessionContext, refKey: string, tabId: number) {
@@ -37,6 +39,8 @@ export function lookupSnapshotRef(
     refKey,
     ...(entry.frameId ? { frameId: entry.frameId } : {}),
     ...(entry.cdpSessionId ? { cdpSessionId: entry.cdpSessionId } : {}),
+    kind: entry.kind,
+    capabilities: entry.capabilities,
   };
 }
 
@@ -49,6 +53,7 @@ export function resolveSnapshotRef(
   ctx: SessionContext,
   ref: string,
   tabId: number,
+  requiredCapability?: RefCapability,
 ): SnapshotRefLookup | RpcError {
   const looked = lookupSnapshotRef(ctx, ref, tabId);
   if (looked === null) {
@@ -56,6 +61,14 @@ export function resolveSnapshotRef(
       "not_found",
       "ref_not_found",
       `ref ${ref} unknown for tab ${tabId} in session ${ctx.sessionId}`,
+    );
+  }
+  if (requiredCapability && !looked.capabilities.includes(requiredCapability)) {
+    return rpcError(
+      "permission_denied",
+      "ref_capability_denied",
+      `ref ${ref} does not support ${requiredCapability}`,
+      { ref: looked.refKey, required_capability: requiredCapability, kind: looked.kind },
     );
   }
   return looked;

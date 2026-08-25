@@ -169,7 +169,7 @@ export async function resolveBackendNode(
     };
   }
   if (hasRef) {
-    const resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId);
+    const resolved = resolveSnapshotRef(ctx, params.ref as string, target.tabId, "interact");
     if (isRpcError(resolved)) return resolved;
     return {
       backendNodeId: resolved.backendNodeId,

@@ -13,6 +13,8 @@ describe("RefStore", () => {
       backendNodeId: 42,
       tabId: 7,
       generation: 0,
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
     });
     expect(s.size()).toBe(1);
     expect(s.isEmpty()).toBe(false);
@@ -46,6 +48,20 @@ describe("RefStore", () => {
       tabId: 7,
       frameId: "child-frame",
       cdpSessionId: "child-session",
+    });
+  });
+
+  it("preserves explicit capabilities for visual surface refs", () => {
+    const s = new RefStore();
+    s.set("e1", 42, {
+      tabId: 7,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+
+    expect(s.resolveEntry("e1")).toMatchObject({
+      kind: "surface",
+      capabilities: ["screenshot"],
     });
   });
 });

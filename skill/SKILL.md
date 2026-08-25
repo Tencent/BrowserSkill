@@ -73,6 +73,11 @@ CSS-only hover menu looks like from here. It hovers a bounded set of likely trig
 few seconds and touches the live page; once you know which element hides the menu, `bsk hover <ref>`
 is cheaper and more precise.
 
+When `bsk observe` renders `@eN surface ... [visual-only; ...]`, the ref identifies a rendered
+canvas surface, not an interactable DOM control. Use
+`bsk screenshot --ref @eN --session <id>` to inspect its visible crop. Do not pass a visual surface
+ref to click, fill, hover, or select; those commands intentionally reject screenshot-only refs.
+
 Escalate page reading only as needed:
 
 1. `bsk observe` for normal semantic understanding, text, controls, and refs.

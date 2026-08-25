@@ -40,6 +40,7 @@ use bsk_protocol::ErrorCode;
 pub mod reason {
     pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
     pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
+    pub const REF_CAPABILITY_DENIED: &str = "ref_capability_denied";
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
@@ -296,6 +297,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "fill encountered a browser or page-script error",
             hint: Some(
                 "observe the page before retrying because the field may already have changed; retry only if the intended result is missing and the target is still available",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::REF_CAPABILITY_DENIED) => RenderInfo {
+            summary: "snapshot ref does not support this operation",
+            hint: Some(
+                "visual surface refs are screenshot-only; run `bsk screenshot --ref <ref> --session <id>`",
             ),
             exit_code: base.exit_code,
         },
@@ -562,6 +570,18 @@ mod tests {
         assert!(hint.contains("bsk navigate <url>"));
         assert!(hint.contains("disable the conflicting extension"));
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn ref_capability_denied_explains_visual_surface_refs() {
+        let data = serde_json::json!({ "reason": reason::REF_CAPABILITY_DENIED });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(info.summary, "snapshot ref does not support this operation");
+        assert!(
+            info.hint.unwrap().contains("screenshot-only"),
+            "expected visual-surface-specific hint"
+        );
+        assert_eq!(info.exit_code, 1);
     }
 
     #[test]
