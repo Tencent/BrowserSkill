@@ -137,6 +137,9 @@ describe("client plugin registration", () => {
     const sessions = { binding: () => undefined };
     const ctx = {
       get: (key: string) => (key === "sessions" ? sessions : undefined),
+      // cordis ctx.inject: the betterSidebar carrier upgrade stays dormant in
+      // this composition (the callback only runs once the service exists).
+      inject: (_deps: string[], _fn: (injected: unknown) => unknown) => {},
       slots: {
         inject: (_name: string, fn: () => unknown) => fn(),
         register: (slot: { name: string; key?: string; id?: string }, view: unknown) => {

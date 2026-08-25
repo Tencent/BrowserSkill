@@ -1,7 +1,9 @@
 /**
  * dsh-plugin-browserskill browser half: the `browser_screenshot` keyed
- * toolview plus the observation overlay (live thumbnails + interrupt) floating
- * over the shell via the `shell.overlay` seat.
+ * toolview plus the observation overlay (live thumbnails + interrupt). The
+ * default carrier is a floating card on the `shell.overlay` seat; when the
+ * dsh-better-sidebar plugin provides its `betterSidebar` service, the view
+ * moves into a sidebar tab instead (see observation-sidebar.tsx).
  */
 
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
@@ -15,6 +17,7 @@ import { createElement } from "react";
 import "./bsk-tokens.nomodule.css";
 import "./bsk-ui.nomodule.css";
 import { ObservationOverlay } from "./ObservationOverlay";
+import { type BetterSidebarLike, registerObservationSidebar } from "./observation-sidebar";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
 import { ScreenshotToolView } from "./ScreenshotToolView";
 
@@ -79,6 +82,16 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject("shell.overlay", () =>
     ctx.slots.register({ name: "shell.overlay", id: "bsk-observation" }, () =>
       createElement(ObservationOverlay, { store }),
+    ),
+  );
+  // Optional carrier upgrade: when the dsh-better-sidebar plugin is installed,
+  // its service moves the tracking view into a sidebar tab (the floating
+  // overlay hides itself through the sidebar-mode flag). In profiles without
+  // the sidebar plugin this fiber never runs and nothing changes.
+  ctx.inject(["betterSidebar"], (injected) =>
+    registerObservationSidebar(
+      (injected as unknown as { betterSidebar: BetterSidebarLike }).betterSidebar,
+      store,
     ),
   );
 }

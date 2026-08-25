@@ -25,6 +25,13 @@ export class SessionRegistry {
   private readonly sessions = new Map<string, TrackedSession>();
   private currentId: string | undefined;
   /**
+   * bsk session id → the DSH session ids that may clean it up: the agent
+   * session that started it plus every ancestor along the seed lineage, so
+   * archiving a conversation at ANY level of the chain reaps its browsers
+   * (see archive-cleanup.ts).
+   */
+  private readonly dshOwners = new Map<string, ReadonlySet<string>>();
+  /**
    * Slots reserved by in-flight starts. reserveStart/completeStart/abandonStart
    * run synchronously around the async spawn, so concurrent starts can never
    * both pass the capacity check (check-and-reserve is atomic on the event loop).
@@ -72,10 +79,35 @@ export class SessionRegistry {
   /** Forget a session; falls back to the most recent remaining one. */
   remove(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.dshOwners.delete(sessionId);
     if (this.currentId === sessionId) {
       const rest = [...this.sessions.values()];
       this.currentId = rest.length > 0 ? rest[rest.length - 1].sessionId : undefined;
     }
+  }
+
+  /**
+   * Record which DSH conversation(s) a freshly started bsk session belongs
+   * to (the starting agent's session plus its ancestors). No-op without ids
+   * — e.g. a start whose caller carried no agent identity.
+   */
+  trackOwner(sessionId: string, dshSessionIds: readonly string[]): void {
+    if (dshSessionIds.length === 0 || !this.sessions.has(sessionId)) return;
+    this.dshOwners.set(sessionId, new Set(dshSessionIds));
+  }
+
+  /** bsk session ids owned by the given DSH conversation (or its descendants). */
+  ownedByDsh(dshSessionId: string): string[] {
+    const owned: string[] = [];
+    for (const [sessionId, owners] of this.dshOwners) {
+      if (owners.has(dshSessionId)) owned.push(sessionId);
+    }
+    return owned;
+  }
+
+  /** The DSH conversation ids owning one bsk session (empty when untracked). */
+  dshOwnersOf(sessionId: string): string[] {
+    return [...(this.dshOwners.get(sessionId) ?? [])];
   }
 
   /** Mark an owned session as most recently used (recency order refresh). */

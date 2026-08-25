@@ -39,6 +39,13 @@ export interface SessionObservation {
    * greys it out until it is stopped/removed. No more frames are requested.
    */
   dead?: boolean;
+  /**
+   * The DSH conversations this session belongs to (the starting agent's
+   * session plus its seed-lineage ancestors), recorded at start. Scoped
+   * surfaces (the better-sidebar tab) filter by it; absent means untracked
+   * ownership — visible only in the global (unscoped) view.
+   */
+  dshSessionIds?: string[];
 }
 
 /** Incremental event carried to subscribers (SSE on the wire). */
@@ -153,11 +160,13 @@ export class ObservationService {
   /** Register a fresh owned session (called from browser_session_start). */
   addSession(sessionId: string, url?: string): void {
     if (!this.deps.options.enabled || this.disposed) return;
+    const dshSessionIds = this.deps.registry.dshOwnersOf(sessionId);
     this.put({
       sessionId,
       ...(url !== undefined ? { url } : {}),
       action: "idle",
       since: this.scheduler.now(),
+      ...(dshSessionIds.length > 0 ? { dshSessionIds } : {}),
     });
     this.lastActivity.set(sessionId, this.scheduler.now());
     this.scheduleCapture(sessionId, 0);
@@ -226,6 +235,36 @@ export class ObservationService {
     const target = sessionId ?? this.deps.registry.current();
     if (target === undefined || !this.deps.registry.isOwned(target)) return false;
     return this.deps.runner.killFor(target) > 0;
+  }
+
+  /**
+   * Stop one owned session and close its Agent Window (the overlay's stop
+   * button — same end state as `browser_session_stop`). Never waits behind a
+   * hung in-flight command: tool children are killed first so the session's
+   * keyed queue drains immediately, and no further captures queue up. A
+   * session the daemon already forgot (dead strip entries) stops
+   * idempotently — the goal state (entry gone) is identical.
+   * @returns whether the session ended up stopped/removed.
+   */
+  async stopSession(sessionId: string): Promise<boolean> {
+    if (!this.deps.registry.isOwned(sessionId)) return false;
+    this.cancelCapture(sessionId);
+    this.deps.runner.killFor(sessionId);
+    const result = await this.deps.queue.run(sessionId, () =>
+      this.deps.runner.run(["session", "stop", sessionId], { timeoutMs: 30_000 }),
+    );
+    if (result.code !== 0) {
+      let code: string | undefined;
+      try {
+        code = (JSON.parse(result.stdout) as { code?: string }).code;
+      } catch {
+        code = undefined;
+      }
+      if (code !== "session_not_found") return false;
+    }
+    this.deps.registry.remove(sessionId);
+    this.removeSession(sessionId);
+    return true;
   }
 
   /**

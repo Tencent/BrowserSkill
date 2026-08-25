@@ -30,15 +30,49 @@
   color: var(--card-foreground);
 }
 
+/* Sidebar carrier: fill the better-sidebar tab area and let the body flex
+   (the tab content container owns the outer sizing). */
+.sidebar-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.sidebar-tab > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* The BSK product mark in the sidebar tab strip (the source artwork already
+   carries rounded corners — just soften the square to match). */
+.brand-icon {
+  display: block;
+  border-radius: 22%;
+}
+
 .header {
   display: flex;
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  cursor: move;
   user-select: none;
   touch-action: none;
   border-bottom: 1px solid var(--border);
+}
+
+/* Only the floating card drags by its header — the sidebar tab does not. */
+.header[data-draggable] {
+  cursor: move;
+}
+
+/* In the sidebar the status row is chrome, not a card edge: drop its bottom
+   border. A fixed-height bordered row can never track the shell header's
+   hairline across the panel boundary (its height varies per window), and
+   the BSK warm border tint clashes with the sidebar's neutral hairlines —
+   borderless, the stage's own background provides the separation. */
+.sidebar-tab .header {
+  border-bottom: none;
 }
 
 .status-text {
@@ -131,6 +165,12 @@
   border-top: 1px solid var(--border);
 }
 
+.actions-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .tool-wrap {
   position: relative;
   display: inline-flex;
@@ -165,8 +205,14 @@
   color: var(--destructive);
 }
 
-/* Hover the wrap (not just :hover on the button) so the tooltip target and
-   the left-corner resize overlay still light the icon up. */
+/* Stop session: danger-tinted like interrupt. */
+.tool-stop {
+  color: var(--destructive);
+}
+
+/* Hover the wrap (not just :hover on the button) so the tooltip target
+   lights the icon up too. The corner resize handles sit above this bar, so
+   the outer sliver of the corner-most buttons starts a resize instead. */
 .tool-wrap:hover .tool-button:not(:disabled) {
   color: var(--foreground);
   background: var(--accent);
@@ -179,6 +225,15 @@
 
 .tool-wrap:hover .tool-button:disabled {
   background: var(--accent);
+}
+
+/* The armed (confirm) state of the stop button: solid destructive fill so
+   the second click reads as final. Written at the wrap-hover specificity so
+   the hover rules above never wash it out. */
+.tool-button.tool-stop-armed,
+.tool-wrap:hover .tool-button.tool-stop-armed {
+  color: var(--destructive-foreground);
+  background: var(--destructive);
 }
 
 .hint {
@@ -203,13 +258,16 @@
   right: 0;
 }
 
-/* Invisible hit targets — no grip glyph; all four corners resize. */
+/* Invisible hit targets — no grip glyph; all four corners resize. Must sit
+   above the bottom .actions bar (z-index 3): it spans the full card width
+   and would otherwise swallow every pointer event aimed at the sw/se
+   corners. The top corners already win because .header is not positioned. */
 .resize-handle {
   position: absolute;
   width: 16px;
   height: 16px;
   touch-action: none;
-  z-index: 2;
+  z-index: 4;
 }
 
 .resize-handle[data-corner="nw"] {
