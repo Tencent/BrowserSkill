@@ -314,6 +314,15 @@ describe("ToolDispatcher", () => {
       clearDeviceMetricsOverride: vi.fn(async () => {}),
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     dispatcher.start();
@@ -495,6 +504,15 @@ describe("ToolDispatcher", () => {
       clearDeviceMetricsOverride: vi.fn(async () => {}),
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
 
@@ -573,6 +591,15 @@ describe("ToolDispatcher", () => {
       clearDeviceMetricsOverride: vi.fn(async () => {}),
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     const helpers = dispatcher as unknown as {
@@ -672,6 +699,15 @@ describe("ToolDispatcher", () => {
       clearDeviceMetricsOverride: vi.fn(async () => {}),
       setUserAgentOverride: vi.fn(async () => {}),
       setTouchEmulationEnabled: vi.fn(async () => {}),
+      startHar: vi.fn(),
+      harStatus: vi.fn(() => ({
+        active: false,
+        entry_count: 0,
+        in_flight: 0,
+        body_bytes: 0,
+        truncated: false,
+      })),
+      stopHar: vi.fn(),
     };
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     const helpers = dispatcher as unknown as {
