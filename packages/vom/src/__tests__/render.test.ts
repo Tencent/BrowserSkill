@@ -40,6 +40,7 @@ describe("renderVom single-layer page", () => {
         backendNodeId: 99,
         frameId: "child",
         renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
         label: "Data grid",
         memberCount: 2,
       },
@@ -53,6 +54,35 @@ describe("renderVom single-layer page", () => {
       expect.objectContaining({
         ref: "e1",
         backendNodeId: 99,
+        kind: "surface",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        capabilities: ["screenshot"],
+      }),
+    );
+  });
+
+  it("renders an unnamed visual surface with a stable generic label", () => {
+    const input = scene([node({ id: 1, role: "RootWebArea", frameId: "main" })]);
+    input.visualSurfaces = [
+      {
+        parentId: 1,
+        backendNodeId: 99,
+        frameId: "main",
+        renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        memberCount: 1,
+      },
+    ];
+
+    const out = renderVom(input);
+
+    expect(out.text).toContain(
+      '@e1 surface "canvas visual surface" [rendering=canvas; visual-only; use: bsk screenshot --ref @e1]',
+    );
+    expect(out.refs).toContainEqual(
+      expect.objectContaining({
+        ref: "e1",
+        name: "canvas visual surface",
         kind: "surface",
         capabilities: ["screenshot"],
       }),

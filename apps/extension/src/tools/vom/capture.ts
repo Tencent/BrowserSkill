@@ -11,7 +11,15 @@ import { childFrameProjection, type GeometryProjection, projectRectToViewport } 
 import type { CdpRunner } from "../shared";
 import { clearHover, waitForHover } from "./hover-perception";
 
-const REQUESTED_STYLES = ["position", "pointer-events", "cursor", "visibility", "opacity"] as const;
+const REQUESTED_STYLES = [
+  "position",
+  "pointer-events",
+  "cursor",
+  "visibility",
+  "opacity",
+  "overflow-x",
+  "overflow-y",
+] as const;
 const STYLE_COL = Object.fromEntries(
   REQUESTED_STYLES.map((name, index) => [name, index]),
 ) as Record<(typeof REQUESTED_STYLES)[number], number>;
@@ -39,6 +47,10 @@ export interface CapturedNode {
    * `textContent`: the live parser always sets it, hand-built fixtures may not.
    */
   cursor?: string;
+  overflowX?: string;
+  overflowY?: string;
+  /** True when this node or one of its DOM ancestors makes the subtree fully transparent/hidden. */
+  visuallySuppressed?: boolean;
   /**
    * Whether the live DOM snapshot provides a painted, non-hidden box for this
    * node. Semantic resolution uses this only for DOM fallback nodes; AX-backed
@@ -796,6 +808,8 @@ function parseDocumentNodes(
   const cursorCol = STYLE_COL.cursor;
   const visibilityCol = STYLE_COL.visibility;
   const opacityCol = STYLE_COL.opacity;
+  const overflowXCol = STYLE_COL["overflow-x"];
+  const overflowYCol = STYLE_COL["overflow-y"];
   const inputValues = sparseIndexMap(dn.inputValue);
   const textValues = sparseIndexMap(dn.textValue);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
@@ -821,6 +835,7 @@ function parseDocumentNodes(
 
   // Build CapturedNodes.
   const nodes: CapturedNode[] = [];
+  const visuallySuppressedByNodeIndex = new Array<boolean>(count).fill(false);
   for (let n = 0; n < count; n++) {
     if (excluded[n]) continue;
     const backendNodeId = dn.backendNodeId[n];
@@ -840,7 +855,11 @@ function parseDocumentNodes(
     let position = "static";
     let pointerEvents = "auto";
     let cursor = "auto";
+    let overflowX = "visible";
+    let overflowY = "visible";
     let rendered = false;
+    let visuallySuppressed =
+      parentIdx >= 0 ? visuallySuppressedByNodeIndex[parentIdx] === true : false;
     const li = layoutByNode.get(n);
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
@@ -863,12 +882,19 @@ function parseDocumentNodes(
       cursor = str(strings, styleRow[cursorCol]) || "auto";
       const visibility = str(strings, styleRow[visibilityCol]) || "visible";
       const opacity = str(strings, styleRow[opacityCol]) || "1";
+      overflowX = str(strings, styleRow[overflowXCol]) || "visible";
+      overflowY = str(strings, styleRow[overflowYCol]) || "visible";
+      visuallySuppressed ||=
+        visibility === "hidden" ||
+        visibility === "collapse" ||
+        (Number.parseFloat(opacity) || 0) <= 0;
       rendered =
         localRect !== null &&
         visibility !== "hidden" &&
         visibility !== "collapse" &&
         (Number.parseFloat(opacity) || 0) > 0;
     }
+    visuallySuppressedByNodeIndex[n] = visuallySuppressed;
 
     // Skip non-element nodes (#text, #cdata-section, etc.) — they carry no
     // geometry and are never queried by callers.
@@ -903,6 +929,9 @@ function parseDocumentNodes(
       position,
       pointerEvents,
       cursor,
+      overflowX,
+      overflowY,
+      visuallySuppressed,
       rendered,
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),
