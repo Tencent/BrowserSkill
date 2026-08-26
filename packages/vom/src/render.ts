@@ -10,7 +10,6 @@ import type {
   VomResult,
   VomScene,
   VomVisualSurface,
-  VomVisualSurfaceSummary,
 } from "./types";
 
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
@@ -740,7 +739,6 @@ interface RenderState {
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
   visualSurfaces: Map<number | null, VomVisualSurface[]>;
-  visualSurfaceSummaries: Map<number | null, VomVisualSurfaceSummary[]>;
 }
 
 function groupedByParent<T extends { parentId: number | null }>(
@@ -785,23 +783,6 @@ function emitVisualEntries(parentId: number | null, depth: number, state: Render
       line: state.lines.length - 1,
     });
     state.nextRef += 1;
-  }
-
-  for (const summary of state.visualSurfaceSummaries.get(parentId) ?? []) {
-    if (depth > state.maxDepth) {
-      state.truncated = true;
-      continue;
-    }
-    const noun = summary.count === 1 ? "surface is" : "surfaces are";
-    const line = `${"  ".repeat(depth)}[${summary.count} additional visual ${noun} not represented]`;
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
-      state.truncated = true;
-      state.stopped = true;
-      return;
-    }
-    state.lines.push(line);
-    state.tokens = nextTokens;
   }
 }
 
@@ -904,7 +885,6 @@ function renderNodes(
   surfaces: CondSurface[] = [],
   activeScopeBlocks: ActiveScopeBlock[] = [],
   visualSurfaces: VomVisualSurface[] = [],
-  visualSurfaceSummaries: VomVisualSurfaceSummary[] = [],
 ): RenderState {
   const children = buildChildren(nodes);
   const state: RenderState = {
@@ -924,7 +904,6 @@ function renderNodes(
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
     visualSurfaces: groupedByParent(visualSurfaces),
-    visualSurfaceSummaries: groupedByParent(visualSurfaceSummaries),
   };
 
   renderTree(children, null, 1, state);
@@ -1139,7 +1118,6 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     scene.surfaces,
     scene.activeScopeBlocks,
     scene.visualSurfaces?.filter((surface) => visibleSurface(surface.parentId)),
-    scene.visualSurfaceSummaries?.filter((summary) => visibleSurface(summary.parentId)),
   );
   state.lines.push(renderPageOcclusionLine(hiddenCount));
 
@@ -1169,7 +1147,6 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     scene.surfaces,
     scene.activeScopeBlocks,
     scene.visualSurfaces,
-    scene.visualSurfaceSummaries,
   );
 
   return {

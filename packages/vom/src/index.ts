@@ -19,5 +19,4 @@ export type {
   VomResult,
   VomScene,
   VomVisualSurface,
-  VomVisualSurfaceSummary,
 } from "./types";

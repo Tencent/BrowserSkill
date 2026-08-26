@@ -1,7 +1,8 @@
 import type { Rect } from "@browser-skill/vom";
 import type { RenderedSurface, RenderedSurfaceGroup } from "./types";
 
-const STACK_OVERLAP_RATIO = 0.9;
+const STACK_IOU_RATIO = 0.9;
+const STACK_SIZE_RATIO = 0.9;
 
 function area(rect: Rect): number {
   return Math.max(0, rect.w) * Math.max(0, rect.h);
@@ -15,19 +16,21 @@ function intersectionArea(a: Rect, b: Rect): number {
 
 function sameVisualStack(a: RenderedSurface, b: RenderedSurface): boolean {
   if (a.frameId !== b.frameId) return false;
-  const smallerArea = Math.min(area(a.visibleRect), area(b.visibleRect));
+  if (a.parentBackendNodeId !== b.parentBackendNodeId) return false;
+  const aArea = area(a.visibleRect);
+  const bArea = area(b.visibleRect);
+  const intersection = intersectionArea(a.visibleRect, b.visibleRect);
+  const union = aArea + bArea - intersection;
+  const widthRatio =
+    Math.min(a.visibleRect.w, b.visibleRect.w) / Math.max(a.visibleRect.w, b.visibleRect.w);
+  const heightRatio =
+    Math.min(a.visibleRect.h, b.visibleRect.h) / Math.max(a.visibleRect.h, b.visibleRect.h);
   return (
-    smallerArea > 0 &&
-    intersectionArea(a.visibleRect, b.visibleRect) / smallerArea >= STACK_OVERLAP_RATIO
+    union > 0 &&
+    intersection / union >= STACK_IOU_RATIO &&
+    widthRatio >= STACK_SIZE_RATIO &&
+    heightRatio >= STACK_SIZE_RATIO
   );
-}
-
-function unionRect(rects: Rect[]): Rect {
-  const x = Math.min(...rects.map((rect) => rect.x));
-  const y = Math.min(...rects.map((rect) => rect.y));
-  const right = Math.max(...rects.map((rect) => rect.x + rect.w));
-  const bottom = Math.max(...rects.map((rect) => rect.y + rect.h));
-  return { x, y, w: right - x, h: bottom - y };
 }
 
 function toGroup(members: RenderedSurface[]): RenderedSurfaceGroup {
@@ -38,12 +41,7 @@ function toGroup(members: RenderedSurface[]): RenderedSurfaceGroup {
     frameId: representative.frameId,
     members,
     representative,
-    rect: unionRect(members.map((surface) => surface.rect)),
-    visibleRect: unionRect(members.map((surface) => surface.visibleRect)),
     label: members.map((surface) => surface.label).find((label) => label !== undefined),
-    existenceConfidence: members.some((surface) => surface.existenceConfidence === "high")
-      ? "high"
-      : "low",
   };
 }
 
@@ -61,7 +59,7 @@ export function clusterRenderedSurfaces(surfaces: RenderedSurface[]): RenderedSu
     .sort(
       (a, b) =>
         a.frameId.localeCompare(b.frameId) ||
-        a.visibleRect.y - b.visibleRect.y ||
-        a.visibleRect.x - b.visibleRect.x,
+        a.representative.visibleRect.y - b.representative.visibleRect.y ||
+        a.representative.visibleRect.x - b.representative.visibleRect.x,
     );
 }

@@ -1087,7 +1087,13 @@ export async function captureVomObservation(
     ? projectRenderedSurfaces(
         decoratedScene,
         normalizedDocuments,
-        clusterRenderedSurfaces(discoverRenderedSurfaces(normalizedDocuments, captured.viewport)),
+        clusterRenderedSurfaces(
+          discoverRenderedSurfaces(
+            normalizedDocuments,
+            captured.viewport,
+            captured.excludedBackendNodeIds,
+          ),
+        ),
       )
     : decoratedScene;
   const rendered = renderVom(observedScene, {
