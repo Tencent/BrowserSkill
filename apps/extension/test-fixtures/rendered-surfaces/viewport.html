@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rendered Surface viewport matrix</title>
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { min-height: 1800px; padding: 16px; }
+      canvas { display: block; background: #fdebd0; border: 2px solid #ca6f1e; }
+      #partial { position: fixed; left: -70px; top: 120px; width: 180px; height: 100px; }
+      #below { position: absolute; left: 40px; top: 1350px; width: 240px; height: 120px; }
+    </style>
+  </head>
+  <body>
+    <h1>Viewport matrix</h1>
+    <p>The orange canvas on the left is intentionally clipped by the viewport.</p>
+    <canvas id="partial" aria-label="fixture-partial-viewport" width="180" height="100"></canvas>
+    <canvas id="below" aria-label="fixture-below-fold" width="240" height="120"></canvas>
+  </body>
+</html>
+

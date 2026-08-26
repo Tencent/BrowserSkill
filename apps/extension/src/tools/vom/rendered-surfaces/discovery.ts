@@ -10,12 +10,48 @@ function clean(value: string | undefined): string | undefined {
 }
 
 function intersectViewport(rect: Rect, viewport: Viewport): Rect | null {
-  const x = Math.max(0, rect.x);
-  const y = Math.max(0, rect.y);
-  const right = Math.min(viewport.width, rect.x + rect.w);
-  const bottom = Math.min(viewport.height, rect.y + rect.h);
+  return intersectRect(rect, { x: 0, y: 0, w: viewport.width, h: viewport.height });
+}
+
+function intersectRect(a: Rect, b: Rect): Rect | null {
+  const x = Math.max(a.x, b.x);
+  const y = Math.max(a.y, b.y);
+  const right = Math.min(a.x + a.w, b.x + b.w);
+  const bottom = Math.min(a.y + a.h, b.y + b.h);
   if (right <= x || bottom <= y) return null;
   return { x, y, w: right - x, h: bottom - y };
+}
+
+const CLIPPING_OVERFLOW = new Set(["auto", "clip", "hidden", "scroll"]);
+
+function clipToOverflowAncestors(
+  node: CapturedNode,
+  rect: Rect,
+  nodesByBackend: ReadonlyMap<number, CapturedNode>,
+): Rect | null {
+  let clipped: Rect | null = rect;
+  let parentBackendNodeId = node.parentBackendNodeId;
+  let guard = 0;
+  while (clipped && parentBackendNodeId !== null && guard <= nodesByBackend.size) {
+    const parent = nodesByBackend.get(parentBackendNodeId);
+    if (!parent) break;
+    if (parent.rect) {
+      const clipX = CLIPPING_OVERFLOW.has(parent.overflowX ?? "visible");
+      const clipY = CLIPPING_OVERFLOW.has(parent.overflowY ?? "visible");
+      if (clipX || clipY) {
+        const clipRect = {
+          x: clipX ? parent.rect.x : clipped.x,
+          y: clipY ? parent.rect.y : clipped.y,
+          w: clipX ? parent.rect.w : clipped.w,
+          h: clipY ? parent.rect.h : clipped.h,
+        };
+        clipped = intersectRect(clipped, clipRect);
+      }
+    }
+    parentBackendNodeId = parent.parentBackendNodeId;
+    guard += 1;
+  }
+  return clipped;
 }
 
 function excludedByDomPolicy(
@@ -27,6 +63,7 @@ function excludedByDomPolicy(
   let guard = 0;
   while (current && guard <= nodesByBackend.size) {
     if (excludedBackendNodeIds.has(current.backendNodeId)) return true;
+    if (current.visuallySuppressed === true) return true;
     const attrs = current.attrs;
     if (
       Object.prototype.hasOwnProperty.call(attrs, "hidden") ||
@@ -55,7 +92,10 @@ export function discoverRenderedSurfaces(
     for (const node of document.domNodes) {
       if (node.tag.toLowerCase() !== "canvas" || node.rendered !== true || !node.rect) continue;
       if (excludedByDomPolicy(node, nodesByBackend, excludedBackendNodeIds)) continue;
-      const visibleRect = intersectViewport(node.rect, viewport);
+      const viewportRect = intersectViewport(node.rect, viewport);
+      const visibleRect = viewportRect
+        ? clipToOverflowAncestors(node, viewportRect, nodesByBackend)
+        : null;
       if (!visibleRect) continue;
       const label = clean(node.attrs["aria-label"] ?? node.attrs.title);
       surfaces.push({

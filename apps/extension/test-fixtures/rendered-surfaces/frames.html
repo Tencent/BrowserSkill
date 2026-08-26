@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rendered Surface frame matrix</title>
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { padding: 16px; }
+      .frames { display: grid; grid-template-columns: repeat(3, 320px); gap: 16px; }
+      iframe { width: 300px; height: 300px; border: 2px solid #5d6d7e; }
+    </style>
+  </head>
+  <body>
+    <h1>Frame matrix</h1>
+    <div class="frames">
+      <iframe title="same-origin fixture" src="frame.html?label=fixture-same-origin-frame"></iframe>
+      <iframe title="cross-origin fixture" src="http://localhost:4173/frame.html?label=fixture-cross-origin-frame"></iframe>
+      <iframe title="nested fixture" src="frame.html?canvas=0&nested=1"></iframe>
+    </div>
+  </body>
+</html>

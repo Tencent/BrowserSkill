@@ -2,6 +2,7 @@
 // compound CDP node identity via the session RefStore, and build stable
 // `ref_not_found` errors for hard-failure tool paths.
 
+import type { Rect } from "@browser-skill/vom";
 import type { SessionContext } from "@/session-manager/manager";
 import { normaliseRef, type RefCapability, type RefTargetKind } from "@/session-manager/ref-store";
 import type { RpcError } from "@/transport/types";
@@ -12,6 +13,7 @@ export interface SnapshotRefLookup {
   refKey: string;
   frameId?: string;
   cdpSessionId?: string;
+  visibleRect?: Rect;
   kind: RefTargetKind;
   capabilities: RefCapability[];
 }
@@ -39,6 +41,7 @@ export function lookupSnapshotRef(
     refKey,
     ...(entry.frameId ? { frameId: entry.frameId } : {}),
     ...(entry.cdpSessionId ? { cdpSessionId: entry.cdpSessionId } : {}),
+    ...(entry.visibleRect ? { visibleRect: entry.visibleRect } : {}),
     kind: entry.kind,
     capabilities: entry.capabilities,
   };

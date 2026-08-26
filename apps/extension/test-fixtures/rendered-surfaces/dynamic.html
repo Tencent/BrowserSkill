@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rendered Surface dynamic matrix</title>
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { padding: 16px; }
+      .controls { display: flex; gap: 8px; margin-bottom: 16px; }
+      button { padding: 8px 12px; }
+      canvas { display: block; width: 260px; height: 120px; background: #e8daef; border: 2px solid #7d3c98; }
+    </style>
+  </head>
+  <body>
+    <h1>Dynamic Canvas lifecycle</h1>
+    <div class="controls">
+      <button id="insert" type="button">Insert canvas</button>
+      <button id="zero" type="button">Resize to zero</button>
+      <button id="restore" type="button">Restore size</button>
+      <button id="remove" type="button">Remove canvas</button>
+    </div>
+    <div id="mount"></div>
+    <script>
+      const mount = document.querySelector("#mount");
+      const getCanvas = () => mount.querySelector("canvas");
+      document.querySelector("#insert").addEventListener("click", () => {
+        if (getCanvas()) return;
+        const canvas = document.createElement("canvas");
+        canvas.width = 260;
+        canvas.height = 120;
+        canvas.setAttribute("aria-label", "fixture-dynamic");
+        mount.append(canvas);
+      });
+      document.querySelector("#zero").addEventListener("click", () => {
+        const canvas = getCanvas();
+        if (canvas) canvas.style.cssText = "width:0;height:0;border:0";
+      });
+      document.querySelector("#restore").addEventListener("click", () => {
+        const canvas = getCanvas();
+        if (canvas) canvas.removeAttribute("style");
+      });
+      document.querySelector("#remove").addEventListener("click", () => getCanvas()?.remove());
+    </script>
+  </body>
+</html>

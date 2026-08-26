@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rendered Surface discovery matrix</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+      body { padding: 16px; background: #f4f6f8; color: #17202a; }
+      h1 { margin: 0 0 12px; font-size: 20px; }
+      .matrix { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; }
+      .case { min-height: 150px; padding: 10px; overflow: hidden; border: 1px solid #aeb6bf; border-radius: 6px; background: white; }
+      .case h2 { margin: 0 0 8px; font-size: 13px; }
+      canvas { display: block; background: #d6eaf8; border: 2px solid #2874a6; }
+      .stack { position: relative; width: 180px; height: 90px; }
+      .stack canvas { position: absolute; inset: 0; width: 180px; height: 90px; }
+      .stack canvas + canvas { background: rgb(244 208 63 / 45%); border-color: #b7950b; }
+      .contained { position: relative; width: 190px; height: 100px; }
+      .contained > canvas:first-child { width: 190px; height: 100px; }
+      .contained > canvas:last-child { position: absolute; left: 55px; top: 30px; width: 70px; height: 40px; background: #fadbd8; border-color: #c0392b; }
+      .same-place { position: relative; width: 180px; height: 90px; }
+      .same-place > div { position: absolute; inset: 0; }
+      .same-place canvas { width: 180px; height: 90px; }
+      .same-place > div:last-child canvas { border-color: #7d3c98; background: rgb(210 180 222 / 35%); }
+      .clip-box { width: 100px; height: 70px; overflow: hidden; border: 2px dashed #566573; }
+      .partially-clipped { width: 140px; height: 60px; transform: translateX(45px); }
+      .fully-clipped { width: 80px; height: 50px; transform: translateX(130px); }
+      .tiny { width: 8px; height: 8px; border-width: 1px; }
+    </style>
+  </head>
+  <body>
+    <h1>Rendered Surface discovery matrix</h1>
+    <main class="matrix">
+      <section class="case">
+        <h2>Visible named canvas</h2>
+        <canvas aria-label="fixture-basic-large" width="200" height="90"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Tiny canvas remains addressable</h2>
+        <canvas class="tiny" aria-label="fixture-tiny-8px" width="8" height="8"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Visible but pointer-events none</h2>
+        <canvas aria-label="fixture-pointer-events-none" width="180" height="80" style="pointer-events: none"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Partial AX/fallback content</h2>
+        <canvas aria-label="fixture-partial-ax" width="180" height="80">
+          <button type="button">Fallback button must not suppress the surface</button>
+        </canvas>
+      </section>
+
+      <section class="case">
+        <h2>Two real rendering layers</h2>
+        <div class="stack">
+          <canvas aria-label="fixture-layered-group" width="180" height="90"></canvas>
+          <canvas width="180" height="90"></canvas>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>Contained canvases are independent</h2>
+        <div class="contained">
+          <canvas aria-label="fixture-contained-outer" width="190" height="100"></canvas>
+          <canvas aria-label="fixture-contained-inner" width="70" height="40"></canvas>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>Same geometry, different parents</h2>
+        <div class="same-place">
+          <div><canvas aria-label="fixture-different-parent-a" width="180" height="90"></canvas></div>
+          <div><canvas aria-label="fixture-different-parent-b" width="180" height="90"></canvas></div>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>Partially overflow-clipped</h2>
+        <div class="clip-box">
+          <canvas class="partially-clipped" aria-label="fixture-partially-overflow-clipped" width="140" height="60"></canvas>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>Fully overflow-clipped</h2>
+        <div class="clip-box">
+          <canvas class="fully-clipped" aria-label="fixture-fully-overflow-clipped" width="80" height="50"></canvas>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>CSS-hidden variants</h2>
+        <canvas aria-label="fixture-display-none" width="80" height="40" style="display: none"></canvas>
+        <canvas aria-label="fixture-visibility-hidden" width="80" height="40" style="visibility: hidden"></canvas>
+        <canvas aria-label="fixture-opacity-zero" width="80" height="40" style="opacity: 0"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Hidden ancestor variants</h2>
+        <div style="opacity: 0"><canvas aria-label="fixture-parent-opacity-zero" width="80" height="40"></canvas></div>
+        <div hidden><canvas aria-label="fixture-hidden-attribute" width="80" height="40"></canvas></div>
+        <div inert><canvas aria-label="fixture-inert-parent" width="80" height="40"></canvas></div>
+        <div aria-hidden="true"><canvas aria-label="fixture-aria-hidden-parent" width="80" height="40"></canvas></div>
+      </section>
+
+      <section class="case">
+        <h2>Zero-size and offscreen</h2>
+        <canvas aria-label="fixture-zero-size" width="80" height="40" style="width: 0; height: 0; border: 0"></canvas>
+        <canvas aria-label="fixture-offscreen-right" width="80" height="40" style="position: fixed; left: 5000px; top: 0"></canvas>
+      </section>
+    </main>
+  </body>
+</html>
+

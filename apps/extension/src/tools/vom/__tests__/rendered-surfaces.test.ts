@@ -89,6 +89,31 @@ describe("rendered surface discovery", () => {
     ).toEqual([expect.objectContaining({ backendNodeId: 2 })]);
   });
 
+  it("discovers unnamed canvases without guessing labels from engineering attributes", () => {
+    const canvas = domNode(2, {
+      attrs: {
+        id: "must-not-be-a-label",
+        class: "must-not-be-a-label",
+        "data-testid": "must-not-be-a-label",
+      },
+    });
+
+    expect(discoverRenderedSurfaces([document([canvas])], { width: 1280, height: 720 })).toEqual([
+      expect.not.objectContaining({
+        label: expect.anything(),
+      }),
+    ]);
+  });
+
+  it("treats blank explicit Canvas names as unnamed", () => {
+    expect(
+      discoverRenderedSurfaces(
+        [document([domNode(2, { attrs: { "aria-label": "   ", title: "\n\t" } })])],
+        { width: 1280, height: 720 },
+      ),
+    ).toEqual([expect.not.objectContaining({ label: expect.anything() })]);
+  });
+
   it("excludes canvases inside BrowserSkill-owned DOM subtrees", () => {
     const owner = domNode(1, { tag: "div", rect: null, localRect: null });
     const canvas = domNode(2, { parentBackendNodeId: 1 });
@@ -100,6 +125,48 @@ describe("rendered surface discovery", () => {
         new Set([1]),
       ),
     ).toEqual([]);
+  });
+
+  it("excludes canvases suppressed by a fully transparent ancestor", () => {
+    const owner = domNode(1, {
+      tag: "div",
+      rect: { x: 0, y: 0, w: 900, h: 600 },
+      visuallySuppressed: true,
+    });
+    const canvas = domNode(2, { parentBackendNodeId: 1 });
+
+    expect(
+      discoverRenderedSurfaces([document([owner, canvas])], { width: 1280, height: 720 }),
+    ).toEqual([]);
+  });
+
+  it("clips canvases to overflow ancestors and drops fully clipped canvases", () => {
+    const owner = domNode(1, {
+      tag: "div",
+      rect: { x: 10, y: 20, w: 100, h: 70 },
+      overflowX: "hidden",
+      overflowY: "hidden",
+    });
+    const partial = domNode(2, {
+      parentBackendNodeId: 1,
+      rect: { x: 55, y: 30, w: 140, h: 60 },
+    });
+    const fullyClipped = domNode(3, {
+      parentBackendNodeId: 1,
+      rect: { x: 140, y: 30, w: 80, h: 50 },
+    });
+
+    expect(
+      discoverRenderedSurfaces([document([owner, partial, fullyClipped])], {
+        width: 1280,
+        height: 720,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        backendNodeId: 2,
+        visibleRect: { x: 55, y: 30, w: 55, h: 60 },
+      }),
+    ]);
   });
 });
 
@@ -137,6 +204,7 @@ describe("rendered surface clustering and projection", () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0]?.members).toHaveLength(2);
+    expect(groups[0]?.label).toBeUndefined();
     expect(
       projectRenderedSurfaces(
         scene,

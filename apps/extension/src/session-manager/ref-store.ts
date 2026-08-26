@@ -1,3 +1,5 @@
+import type { Rect } from "@browser-skill/vom";
+
 /**
  * Per-session map from `@e<N>` snapshot refs to a CDP node address.
  *
@@ -20,6 +22,7 @@ export interface RefEntry {
   tabId: number | null;
   frameId?: string;
   cdpSessionId?: string;
+  visibleRect?: Rect;
   kind: RefTargetKind;
   capabilities: RefCapability[];
   generation: number;
@@ -32,6 +35,7 @@ export type RefInput =
       tabId: number;
       frameId?: string;
       cdpSessionId?: string;
+      visibleRect?: Rect;
       kind?: RefTargetKind;
       capabilities?: RefCapability[];
     };
@@ -84,6 +88,7 @@ export class RefStore {
       tabId?: number;
       frameId?: string;
       cdpSessionId?: string;
+      visibleRect?: Rect;
       kind?: RefTargetKind;
       capabilities?: RefCapability[];
     } = {},
@@ -94,6 +99,7 @@ export class RefStore {
       tabId: opts.tabId ?? null,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
       ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
+      ...(opts.visibleRect ? { visibleRect: opts.visibleRect } : {}),
       kind,
       capabilities: capabilitiesFor(kind, opts.capabilities),
       generation: this.generation,
@@ -124,6 +130,7 @@ export class RefStore {
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),
       ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
+      ...(input.visibleRect ? { visibleRect: input.visibleRect } : {}),
       kind,
       capabilities: capabilitiesFor(kind, input.capabilities),
       generation: this.generation,

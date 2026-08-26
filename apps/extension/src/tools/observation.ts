@@ -8,6 +8,7 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
+  type Rect,
   renderVom,
   type VomNode,
   type VomOptions,
@@ -194,6 +195,7 @@ async function captureElementScreenshot(
   backendNodeId: number,
   frameId?: string,
   visualSurface = false,
+  observedVisibleRect?: Rect,
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
@@ -205,7 +207,24 @@ async function captureElementScreenshot(
   );
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
-  const rect = geometry.topBounds;
+  const liveRect = geometry.topBounds;
+  const rect =
+    visualSurface && observedVisibleRect
+      ? (() => {
+          const x = Math.max(liveRect.x, observedVisibleRect.x);
+          const y = Math.max(liveRect.y, observedVisibleRect.y);
+          const right = Math.min(
+            liveRect.x + liveRect.width,
+            observedVisibleRect.x + observedVisibleRect.w,
+          );
+          const bottom = Math.min(
+            liveRect.y + liveRect.height,
+            observedVisibleRect.y + observedVisibleRect.h,
+          );
+          return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+        })()
+      : liveRect;
+  if (!rect) return { code: "permission_denied", message: "surface is no longer visible" };
   const scale = visualSurface
     ? Math.min(
         1,
@@ -351,6 +370,7 @@ export async function handleScreenshot(
           node.backendNodeId,
           node.frameId,
           node.kind === "surface",
+          node.visibleRect,
           signal,
         ),
       deps.sendToTab,
@@ -1236,6 +1256,7 @@ async function handleVomObservation(
             tabId: target.tabId,
             ...(ref.frameId ? { frameId: ref.frameId } : {}),
             ...(refTarget?.sessionId ? { cdpSessionId: refTarget.sessionId } : {}),
+            ...(ref.visibleRect ? { visibleRect: ref.visibleRect } : {}),
             ...(ref.kind ? { kind: ref.kind } : {}),
             ...(ref.capabilities ? { capabilities: ref.capabilities } : {}),
           },
