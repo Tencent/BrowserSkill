@@ -8,6 +8,7 @@
       body { padding: 12px; background: #fdfefe; }
       canvas { display: block; width: 220px; height: 90px; background: #d5f5e3; border: 2px solid #1e8449; }
       iframe { width: 280px; height: 150px; margin-top: 10px; border: 2px solid #85929e; }
+      #pointer-status { margin: 8px 0 0; min-height: 20px; }
     </style>
   </head>
   <body>
@@ -16,11 +17,34 @@
       const params = new URLSearchParams(location.search);
       const canvas = document.querySelector("#frame-canvas");
       if (params.get("canvas") === "0") canvas.remove();
-      else canvas.setAttribute("aria-label", params.get("label") || "fixture-frame-default");
+      else {
+        canvas.setAttribute("aria-label", params.get("label") || "fixture-frame-default");
+        if (params.get("interactive") === "1") {
+          const status = document.createElement("p");
+          status.id = "pointer-status";
+          status.setAttribute("aria-live", "polite");
+          status.textContent = "pointer status: idle";
+          canvas.insertAdjacentElement("afterend", status);
+          let hoverReady = false;
+          canvas.addEventListener("pointermove", () => {
+            hoverReady = false;
+            requestAnimationFrame(() => {
+              hoverReady = true;
+            });
+          });
+          canvas.addEventListener("pointerdown", (event) => {
+            status.textContent = `pointer status: down button=${event.button} buttons=${event.buttons} hoverReady=${hoverReady}`;
+            if (event.buttons === 1 && hoverReady) canvas.style.background = "#f9e79f";
+          });
+          canvas.addEventListener("click", () => {
+            status.textContent += "; click received";
+          });
+        }
+      }
       if (params.get("nested") === "1") {
         const iframe = document.createElement("iframe");
         iframe.title = "nested fixture frame";
-        iframe.src = "frame.html?label=fixture-nested-frame";
+        iframe.src = "frame.html?label=fixture-nested-frame&interactive=1";
         document.body.append(iframe);
       }
     </script>
