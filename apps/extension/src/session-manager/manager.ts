@@ -1,10 +1,12 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
+import { SurfaceCaptureStore } from "./surface-capture-store";
 
 export interface SessionContext {
   sessionId: string;
   agentWindowId: number;
   refStore: RefStore;
+  surfaceCaptures: SurfaceCaptureStore;
   borrowedTabs: Map<number, BorrowedTab>;
   /**
    * Tabs explicitly claimed by the agent because it created them. This
@@ -210,6 +212,7 @@ export class SessionManager {
         sessionId,
         agentWindowId: windowId,
         refStore: new RefStore(),
+        surfaceCaptures: new SurfaceCaptureStore({ now: this.now }),
         borrowedTabs: new Map(),
         // The home tab is the session's first explicit claim. Every other
         // tab remains free until `tab_create` or `tab_borrow` identifies it

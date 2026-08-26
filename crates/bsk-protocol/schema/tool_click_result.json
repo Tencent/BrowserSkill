@@ -8,12 +8,32 @@
     "y"
   ],
   "properties": {
+    "capture_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "dialogs": {
       "description": "Native JS dialogs observed and auto-handled during this call.",
       "type": "array",
       "items": {
         "$ref": "#/definitions/JavaScriptDialogInfo"
       }
+    },
+    "image_x": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "image_y": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
     },
     "tab_id": {
       "type": "integer",

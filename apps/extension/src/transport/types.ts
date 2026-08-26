@@ -49,6 +49,11 @@ export type RpcErrorReason =
   | "download_capture_failed"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
+  | "surface_capture_not_found"
+  | "surface_capture_expired"
+  | "surface_capture_consumed"
+  | "surface_capture_stale"
+  | "surface_coordinate_invalid"
   | "cleanup_failed";
 
 export type TransferEffectState = "none" | "committed" | "unknown";

@@ -76,12 +76,24 @@ is cheaper and more precise.
 When `bsk observe` renders
 `@eN surface ... [visual-only; requires=image-understanding; ...]`, the ref identifies rendered
 canvas content that is not represented by the text observation, not an interactable DOM control.
-Keep using any reliable DOM/AX text and controls that appear alongside it. If you can actually
-inspect image output, use `bsk screenshot --ref @eN --session <id>` to obtain the visible crop. If
-you lack multimodal or image-reading capability, do not take a screenshot and pretend to know its
-contents, and never guess coordinates; tell the user that they need to switch to a model with
-image-understanding capability. Do not pass a visual surface ref to click, fill, hover, or select;
-those commands intentionally reject screenshot-only refs.
+Keep using any reliable DOM/AX text and controls that appear alongside it. If you lack multimodal or
+image-reading capability, do not take a screenshot and pretend to know its contents, and never guess
+coordinates; tell the user that they need to switch to a model with image-understanding capability.
+
+If you can actually inspect image output, use `bsk screenshot --ref @eN --session <id>` to obtain
+the visible crop and its short-lived, single-use Surface capture id. Only when the task requires a
+point action and the image provides a clear target, bind that exact screenshot to the click command:
+
+```bash
+bsk click @eN --capture <capture-id> --image-x <px> --image-y <px> --session <id>
+```
+
+Coordinates are pixels in the returned capture image, not viewport CSS coordinates. Re-observing,
+navigating, scrolling, resizing, zooming, changing Frame projection, expiry, or reusing the capture
+makes the action fail; take a new Surface screenshot instead of adjusting or retrying coordinates.
+A point click does not reveal Canvas semantics and must not be followed by an assumed fill/press
+workflow. Without all three capture arguments, visual Surface refs remain screenshot-only and
+click/fill/hover/select reject them.
 
 Escalate page reading only as needed:
 
@@ -135,6 +147,7 @@ Required flags that are easy to get wrong:
 bsk fill <ref> --value <text>      bsk select <ref> --value <option-value>
 bsk screenshot --out <path>        bsk emulate --device <preset-id>
 bsk upload <ref> --file <path>     bsk download <ref> --out <path>
+bsk click <surface-ref> --capture <id> --image-x <px> --image-y <px>
 ```
 
 `select` matches an option's `value` attribute, not its visible label. Device preset ids are

@@ -271,6 +271,7 @@ export async function handleSessionStop(
 
   // Step 2: clear the per-session RefStore (review M6/M7 parity).
   ctx.refStore.clear();
+  ctx.surfaceCaptures.clear();
 
   clearRecordingForSession(params.session_id);
 

@@ -8,6 +8,16 @@
     "tab_id"
   ],
   "properties": {
+    "capture": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SurfaceCaptureInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "dialogs": {
       "type": "array",
       "items": {
@@ -109,6 +119,31 @@
         "prompt",
         "beforeunload"
       ]
+    },
+    "SurfaceCaptureInfo": {
+      "type": "object",
+      "required": [
+        "coordinate_space",
+        "expires_at",
+        "id",
+        "surface_ref"
+      ],
+      "properties": {
+        "coordinate_space": {
+          "type": "string"
+        },
+        "expires_at": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "surface_ref": {
+          "type": "string"
+        }
+      }
     }
   }
 }

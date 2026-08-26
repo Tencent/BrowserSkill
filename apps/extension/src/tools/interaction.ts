@@ -44,6 +44,7 @@ import {
   resolveTargetTab,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
+import { handleSurfacePointClick } from "./surface-point-action";
 
 export interface InteractionDeps {
   cdp: CdpRunner;
@@ -247,6 +248,11 @@ export async function handleClick(
   params: ClickParams,
   deps: InteractionDeps = getDefaultDeps(),
 ): Promise<ClickResult | RpcError> {
+  const hasSurfacePointParams =
+    params.capture_id !== undefined || params.image_x !== undefined || params.image_y !== undefined;
+  if (hasSurfacePointParams) {
+    return handleSurfacePointClick(manager, params, deps);
+  }
   const ctxOrErr = lookupSession(manager, params, "click");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;

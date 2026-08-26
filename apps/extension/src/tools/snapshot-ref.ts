@@ -16,6 +16,7 @@ export interface SnapshotRefLookup {
   visibleRect?: Rect;
   kind: RefTargetKind;
   capabilities: RefCapability[];
+  generation: number;
 }
 
 function refEntryForTab(ctx: SessionContext, refKey: string, tabId: number) {
@@ -44,6 +45,7 @@ export function lookupSnapshotRef(
     ...(entry.visibleRect ? { visibleRect: entry.visibleRect } : {}),
     kind: entry.kind,
     capabilities: entry.capabilities,
+    generation: entry.generation,
   };
 }
 

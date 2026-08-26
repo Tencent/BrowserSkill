@@ -16,6 +16,13 @@
         }
       ]
     },
+    "capture_id": {
+      "description": "Short-lived capture id returned by a visual Surface screenshot.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "click_count": {
       "description": "Number of consecutive mouse presses (double-click = 2).",
       "type": [
@@ -24,6 +31,22 @@
       ],
       "format": "uint32",
       "minimum": 1.0
+    },
+    "image_x": {
+      "description": "X coordinate in the capture image's pixel coordinate space.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "image_y": {
+      "description": "Y coordinate in the capture image's pixel coordinate space.",
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
     },
     "modifiers": {
       "type": [

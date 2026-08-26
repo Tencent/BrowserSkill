@@ -392,6 +392,7 @@ describe("handleScreenshot", () => {
     };
     expect(clip.clip).toMatchObject({ x: 25, y: 30, width: 50, height: 40 });
     expect(res).toMatchObject({ width: 100, height: 80 });
+    expect(res.capture?.id).toMatch(/^sc_/);
   });
 
   it("routes OOPIF surface geometry through its child session and captures top coordinates", async () => {

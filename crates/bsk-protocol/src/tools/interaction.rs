@@ -67,6 +67,15 @@ pub struct ClickParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub timeout_ms: Option<u32>,
+    /// Short-lived capture id returned by a visual Surface screenshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    /// X coordinate in the capture image's pixel coordinate space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_x: Option<f64>,
+    /// Y coordinate in the capture image's pixel coordinate space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_y: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -80,6 +89,12 @@ pub struct ClickResult {
     /// agents can correlate with a follow-up `tool.screenshot`.
     pub x: f64,
     pub y: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_y: Option<f64>,
     /// Native JS dialogs observed and auto-handled during this call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
@@ -288,6 +303,9 @@ mod tests {
             click_count: Some(1),
             modifiers: Some(vec![KeyModifier::Ctrl]),
             timeout_ms: Some(5_000),
+            capture_id: Some("sc_test".into()),
+            image_x: Some(160.0),
+            image_y: Some(90.0),
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(v.get("ref").and_then(|v| v.as_str()), Some("@e3"));

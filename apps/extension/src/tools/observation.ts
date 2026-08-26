@@ -254,7 +254,7 @@ async function captureElementScreenshot(
     if (!dims) {
       return { code: "cdp_failed", message: "Page.captureScreenshot returned invalid PNG data" };
     }
-    return { image_base64, width: dims.width, height: dims.height };
+    return { image_base64, width: dims.width, height: dims.height, topViewportRect };
   } catch (err) {
     return {
       code: "cdp_failed",
