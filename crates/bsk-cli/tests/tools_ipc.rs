@@ -238,6 +238,7 @@ async fn screenshot_returns_image_base64_with_dimensions() {
                 height: 600,
                 format: "png".into(),
                 tab_id: 7,
+                capture: None,
                 dialogs: vec![],
             })
             .unwrap(),
@@ -286,6 +287,7 @@ async fn screenshot_forwards_ref_to_extension() {
                 height: 60,
                 format: "png".into(),
                 tab_id: 7,
+                capture: None,
                 dialogs: vec![],
             })
             .unwrap(),

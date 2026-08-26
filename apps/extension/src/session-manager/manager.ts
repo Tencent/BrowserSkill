@@ -1,10 +1,12 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
+import { SurfaceCaptureStore } from "./surface-capture-store";
 
 export interface SessionContext {
   sessionId: string;
   agentWindowId: number;
   refStore: RefStore;
+  surfaceCaptures: SurfaceCaptureStore;
   borrowedTabs: Map<number, BorrowedTab>;
   createdAtMs: number;
 }
@@ -186,6 +188,7 @@ export class SessionManager {
         sessionId,
         agentWindowId: windowId,
         refStore: new RefStore(),
+        surfaceCaptures: new SurfaceCaptureStore({ now: this.now }),
         borrowedTabs: new Map(),
         createdAtMs: this.now(),
       };

@@ -189,6 +189,29 @@ fn parses_click_count_alias() {
 }
 
 #[test]
+fn parses_surface_capture_image_coordinates() {
+    let cli = parse(&[
+        "bsk",
+        "click",
+        "@e1",
+        "--session",
+        "s1",
+        "--capture",
+        "sc_test",
+        "--image-x",
+        "160.5",
+        "--image-y",
+        "-1",
+    ]);
+    let Command::Click(args) = cli.command else {
+        panic!("expected click command");
+    };
+    assert_eq!(args.capture.as_deref(), Some("sc_test"));
+    assert_eq!(args.image_x, Some(160.5));
+    assert_eq!(args.image_y, Some(-1.0));
+}
+
+#[test]
 fn parses_hover_with_settle() {
     let cli = parse(&[
         "bsk",

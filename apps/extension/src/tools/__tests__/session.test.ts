@@ -252,12 +252,23 @@ describe("handleSessionStop with auto-return", () => {
     expect(aw.remove).not.toHaveBeenCalled();
   });
 
-  it("clears the RefStore before window teardown", async () => {
+  it("clears refs and Surface captures before window teardown", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     // Insert a fake ref so we can verify clear() ran.
     ctx.refStore.set("e1", 123, { tabId: 7 });
+    ctx.surfaceCaptures.create({
+      sessionId: "aa11",
+      tabId: 7,
+      navigationIdentity: "navigation",
+      surface: { ref: "e1", backendNodeId: 123, observationGeneration: 0 },
+      topViewportRect: { x: 0, y: 0, w: 100, h: 50 },
+      imageWidth: 100,
+      imageHeight: 50,
+      viewportSignature: "viewport",
+      frameProjectionSignature: "frame",
+    });
     const state: FakeState = {
       tabs: new Map(),
       windowsClosed: new Set(),
@@ -266,5 +277,6 @@ describe("handleSessionStop with auto-return", () => {
     const { tabs, windows } = makeApis(state);
     await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
     expect(ctx.refStore.isEmpty()).toBe(true);
+    expect(ctx.surfaceCaptures.size()).toBe(0);
   });
 });

@@ -48,6 +48,8 @@ import {
   type ToolEffect,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
+import { surfaceVisibleRect } from "./surface-coordinate";
+import { captureSurfaceEnvironment } from "./surface-point-action";
 import {
   type CapturedNode,
   type CapturedViewModel,
@@ -194,7 +196,9 @@ async function captureElementScreenshot(
   visualSurface = false,
   observedVisibleRect?: Rect,
   signal?: AbortSignal,
-): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
+): Promise<
+  { image_base64: string; width: number; height: number; topViewportRect: Rect } | RpcError
+> {
   if (signal?.aborted) return cancelled("screenshot");
   const geometry = await resolveNodeGeometry(
     cdp,
@@ -204,24 +208,19 @@ async function captureElementScreenshot(
   );
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
-  const liveRect = geometry.topBounds;
-  const rect =
-    visualSurface && observedVisibleRect
-      ? (() => {
-          const x = Math.max(liveRect.x, observedVisibleRect.x);
-          const y = Math.max(liveRect.y, observedVisibleRect.y);
-          const right = Math.min(
-            liveRect.x + liveRect.width,
-            observedVisibleRect.x + observedVisibleRect.w,
-          );
-          const bottom = Math.min(
-            liveRect.y + liveRect.height,
-            observedVisibleRect.y + observedVisibleRect.h,
-          );
-          return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
-        })()
-      : liveRect;
-  if (!rect) return { code: "permission_denied", message: "surface is no longer visible" };
+  const topViewportRect = surfaceVisibleRect(
+    geometry.topBounds,
+    visualSurface ? observedVisibleRect : undefined,
+  );
+  if (!topViewportRect) {
+    return { code: "permission_denied", message: "surface is no longer visible" };
+  }
+  const rect = {
+    x: topViewportRect.x,
+    y: topViewportRect.y,
+    width: topViewportRect.w,
+    height: topViewportRect.h,
+  };
   const scale = visualSurface
     ? Math.min(
         1,
@@ -251,7 +250,7 @@ async function captureElementScreenshot(
       width: Math.round(rect.width),
       height: Math.round(rect.height),
     };
-    return { image_base64, width: dims.width, height: dims.height };
+    return { image_base64, width: dims.width, height: dims.height, topViewportRect };
   } catch (err) {
     return {
       code: "cdp_failed",
@@ -374,12 +373,46 @@ export async function handleScreenshot(
     );
     if (isRpcError(captured)) return captured;
     if (signal?.aborted) return cancelled("screenshot");
+    const capture =
+      node.kind === "surface"
+        ? await (async () => {
+            const environment = await captureSurfaceEnvironment(cdp, target.tabId, node.frameId);
+            if (isRpcError(environment)) return environment;
+            return ctx.surfaceCaptures.create({
+              sessionId: ctx.sessionId,
+              tabId: target.tabId,
+              navigationIdentity: environment.navigationIdentity,
+              surface: {
+                ref: node.refKey,
+                ...(node.frameId ? { frameId: node.frameId } : {}),
+                backendNodeId: node.backendNodeId,
+                observationGeneration: node.generation,
+              },
+              topViewportRect: captured.topViewportRect,
+              imageWidth: captured.width,
+              imageHeight: captured.height,
+              viewportSignature: environment.viewportSignature,
+              frameProjectionSignature: environment.frameProjectionSignature,
+            });
+          })()
+        : null;
+    if (capture && isRpcError(capture)) return capture;
     return withShotDialogs({
       image_base64: captured.image_base64,
       width: captured.width,
       height: captured.height,
       format: "png",
       tab_id: target.tabId,
+      ...(capture
+        ? {
+            capture: {
+              id: capture.id,
+              surface_ref: `@${capture.surface.ref}`,
+              coordinate_space: "capture-image-pixel" as const,
+              expires_at: capture.expiresAt,
+            },
+          }
+        : {}),
     });
   }
 
