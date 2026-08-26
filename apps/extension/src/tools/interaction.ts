@@ -32,6 +32,7 @@ import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
+import { dispatchMouseClick } from "./mouse-input";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -285,47 +286,15 @@ export async function handleClick(
   }
 
   try {
-    // Move first so hover state activates, then press → release.
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: centre.x,
-      y: centre.y,
-      modifiers,
-    });
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "click aborted" };
-    }
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: centre.x,
-      y: centre.y,
+    const dispatch = await dispatchMouseClick(deps.cdp, target.tabId, centre, {
       button,
       clickCount,
       modifiers,
+      signal: deps.signal,
     });
-    if (throwIfAborted(deps.signal)) {
-      try {
-        await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x: centre.x,
-          y: centre.y,
-          button,
-          clickCount,
-          modifiers,
-        });
-      } catch (err) {
-        console.debug("[bsk interaction] best-effort mouseReleased after abort failed", err);
-      }
+    if (dispatch === "cancelled") {
       return { code: "cancelled", message: "click aborted" };
     }
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: centre.x,
-      y: centre.y,
-      button,
-      clickCount,
-      modifiers,
-    });
   } catch (err) {
     return {
       code: "cdp_failed",

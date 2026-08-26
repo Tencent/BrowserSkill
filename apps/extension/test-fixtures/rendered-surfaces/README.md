@@ -77,6 +77,14 @@ Expected Surface labels:
 
 The cross-origin frame uses `http://localhost:4173` while the parent uses `http://127.0.0.1:4173`. With Chromium site isolation this exercises the OOPIF path without an external service.
 
+Each frame Canvas also exposes a `pointer status` live region. A successful
+screenshot-bound point click must report
+`down button=0 buttons=1 hoverReady=true; click received` and turn the Canvas
+yellow. The hover flag is set on the animation frame after `pointermove`, so the
+fixture verifies both child-document delivery and the scheduling boundary
+required before `pointerdown`, rather than merely validating projected
+coordinates or a successful CDP response.
+
 ### `viewport.html`
 
 Run with a `900x700` Agent Window.

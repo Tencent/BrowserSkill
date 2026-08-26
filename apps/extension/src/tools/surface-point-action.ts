@@ -4,6 +4,7 @@ import type { ClickParams, ClickResult, RpcError } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
+import { dispatchMouseClick } from "./mouse-input";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -33,6 +34,10 @@ export interface SurfacePointActionDeps {
   signal?: AbortSignal;
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
 }
+
+// Canvas-style controls commonly update their pointer hit-test on the next
+// animation frame. Leave a scheduling boundary after moving and before pressing.
+const SURFACE_POINTER_MOVE_SETTLE_MS = 32;
 
 function stale(message: string): RpcError {
   return rpcError("permission_denied", "surface_capture_stale", message);
@@ -249,54 +254,22 @@ export async function handleSurfacePointClick(
 
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
   let bypassEnabled = false;
-  let pressed = false;
-  const release = () =>
-    deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: point.x,
-      y: point.y,
-      button: "left",
-      clickCount: 1,
-      modifiers: 0,
-    });
   try {
     if (deps.bypassOverlay) {
       await deps.bypassOverlay(target.tabId, true);
       bypassEnabled = true;
     }
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-      modifiers: 0,
-    });
-    const beforePressAbort = aborted(deps.signal);
-    if (beforePressAbort) return beforePressAbort;
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: point.x,
-      y: point.y,
+    const dispatch = await dispatchMouseClick(deps.cdp, target.tabId, point, {
       button: "left",
       clickCount: 1,
       modifiers: 0,
+      signal: deps.signal,
+      moveSettleMs: SURFACE_POINTER_MOVE_SETTLE_MS,
     });
-    pressed = true;
-    const afterPressAbort = aborted(deps.signal);
-    if (afterPressAbort) {
-      await release();
-      pressed = false;
-      return afterPressAbort;
+    if (dispatch === "cancelled") {
+      return { code: "cancelled", message: "surface point click aborted" };
     }
-    await release();
-    pressed = false;
   } catch (error) {
-    if (pressed) {
-      try {
-        await release();
-      } catch (releaseError) {
-        console.debug("[bsk surface-point] best-effort mouse release failed", releaseError);
-      }
-    }
     return { code: "cdp_failed", message: error instanceof Error ? error.message : String(error) };
   } finally {
     if (bypassEnabled && deps.bypassOverlay) {
