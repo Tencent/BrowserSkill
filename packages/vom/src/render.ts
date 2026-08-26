@@ -832,6 +832,7 @@ function emitVisualEntries(parentId: number | null, depth: number, state: Render
       ref,
       backendNodeId: surface.backendNodeId,
       frameId: surface.frameId,
+      visibleRect: surface.visibleRect,
       role: "surface",
       name: label,
       kind: "surface",

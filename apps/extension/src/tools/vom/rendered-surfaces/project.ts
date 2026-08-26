@@ -87,6 +87,7 @@ export function projectRenderedSurfaces(
       backendNodeId: group.representative.backendNodeId,
       frameId: group.frameId,
       renderingKind: "canvas",
+      visibleRect: group.representative.visibleRect,
       ...(group.label ? { label: group.label } : {}),
       memberCount: group.members.length,
     });

@@ -96,6 +96,8 @@ export interface VomRef {
   ref: string;
   backendNodeId: number;
   frameId?: string;
+  /** Observation-time top-viewport crop for screenshot-only surfaces. */
+  visibleRect?: Rect;
   kind?: "dom" | "surface";
   capabilities?: VomRefCapability[];
 }
@@ -107,6 +109,7 @@ export interface VomVisualSurface {
   backendNodeId: number;
   frameId: string;
   renderingKind: "canvas";
+  visibleRect: Rect;
   label?: string;
   memberCount: number;
 }

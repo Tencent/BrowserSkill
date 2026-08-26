@@ -336,6 +336,40 @@ describe("handleScreenshot", () => {
     expect(clip.clip?.scale).toBeCloseTo(Math.sqrt(4_000_000 / (4096 * 4096)));
   });
 
+  it("crops a visual surface screenshot to its observation-time visible region", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      visibleRect: { x: 25, y: 30, w: 50, h: 40 },
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+      }),
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 200, 0, 200, 100, 0, 100]] }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    const clip = sent.find((call) => call.method === "Page.captureScreenshot")?.params as {
+      clip?: { x: number; y: number; width: number; height: number };
+    };
+    expect(clip.clip).toMatchObject({ x: 25, y: 30, width: 50, height: 40 });
+  });
+
   it("returns not_found for unknown ref", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
