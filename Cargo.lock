@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "bsk"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "anyhow",
  "bsk-protocol",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "bsk-protocol"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "schemars",
  "semver",
