@@ -57,18 +57,18 @@ describe("rendered surface discovery", () => {
     );
 
     expect(surfaces).toHaveLength(1);
-    expect(surfaces[0]).toMatchObject({ backendNodeId: 2, existenceConfidence: "high" });
+    expect(surfaces[0]).toMatchObject({ backendNodeId: 2 });
   });
 
-  it("keeps tiny canvases only as low-confidence discoveries", () => {
+  it("keeps tiny canvases as individually addressable exact discoveries", () => {
     const surfaces = discoverRenderedSurfaces(
       [document([domNode(2, { rect: { x: 1, y: 1, w: 8, h: 8 } })])],
       { width: 1280, height: 720 },
     );
-    expect(surfaces[0]?.existenceConfidence).toBe("low");
+    expect(surfaces).toEqual([expect.objectContaining({ backendNodeId: 2 })]);
   });
 
-  it("suppresses a canvas with a verified native accessibility mirror", () => {
+  it("keeps a surface when the canvas only has partial native accessibility content", () => {
     const axNodes = [
       {
         nodeId: "canvas",
@@ -86,6 +86,19 @@ describe("rendered surface discovery", () => {
     ] as SemanticAxNode[];
     expect(
       discoverRenderedSurfaces([document([domNode(2)], axNodes)], { width: 1280, height: 720 }),
+    ).toEqual([expect.objectContaining({ backendNodeId: 2 })]);
+  });
+
+  it("excludes canvases inside BrowserSkill-owned DOM subtrees", () => {
+    const owner = domNode(1, { tag: "div", rect: null, localRect: null });
+    const canvas = domNode(2, { parentBackendNodeId: 1 });
+
+    expect(
+      discoverRenderedSurfaces(
+        [document([owner, canvas])],
+        { width: 1280, height: 720 },
+        new Set([1]),
+      ),
     ).toEqual([]);
   });
 });
@@ -133,5 +146,43 @@ describe("rendered surface clustering and projection", () => {
     ).toMatchObject({
       visualSurfaces: [expect.objectContaining({ parentId: 10, backendNodeId: 3, memberCount: 2 })],
     });
+  });
+
+  it("does not merge a contained canvas with a larger independent canvas", () => {
+    const groups = clusterRenderedSurfaces([
+      ...discoverRenderedSurfaces(
+        [
+          document([
+            domNode(1, { tag: "main", rect: null, localRect: null }),
+            domNode(2, { parentBackendNodeId: 1 }),
+            domNode(3, {
+              parentBackendNodeId: 1,
+              rect: { x: 30, y: 40, w: 200, h: 100 },
+            }),
+          ]),
+        ],
+        { width: 1280, height: 720 },
+      ),
+    ]);
+
+    expect(groups).toHaveLength(2);
+  });
+
+  it("does not merge coincident canvases owned by different containers", () => {
+    const groups = clusterRenderedSurfaces(
+      discoverRenderedSurfaces(
+        [
+          document([
+            domNode(1, { tag: "section", rect: null, localRect: null }),
+            domNode(2, { tag: "section", rect: null, localRect: null }),
+            domNode(3, { parentBackendNodeId: 1 }),
+            domNode(4, { parentBackendNodeId: 2 }),
+          ]),
+        ],
+        { width: 1280, height: 720 },
+      ),
+    );
+
+    expect(groups).toHaveLength(2);
   });
 });

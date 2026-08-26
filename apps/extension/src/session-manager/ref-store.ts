@@ -36,6 +36,14 @@ export type RefInput =
       capabilities?: RefCapability[];
     };
 
+function capabilitiesFor(
+  kind: RefTargetKind,
+  capabilities: RefCapability[] | undefined,
+): RefCapability[] {
+  if (kind === "surface") return ["screenshot"];
+  return capabilities ?? ["interact", "screenshot"];
+}
+
 export class RefStore {
   private readonly map = new Map<string, RefEntry>();
   private generation = 0;
@@ -80,13 +88,14 @@ export class RefStore {
       capabilities?: RefCapability[];
     } = {},
   ): void {
+    const kind = opts.kind ?? "dom";
     this.map.set(normaliseRef(ref), {
       backendNodeId: id,
       tabId: opts.tabId ?? null,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
       ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
-      kind: opts.kind ?? "dom",
-      capabilities: opts.capabilities ?? ["interact", "screenshot"],
+      kind,
+      capabilities: capabilitiesFor(kind, opts.capabilities),
       generation: this.generation,
     });
   }
@@ -109,13 +118,14 @@ export class RefStore {
         generation: this.generation,
       };
     }
+    const kind = input.kind ?? "dom";
     return {
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),
       ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
-      kind: input.kind ?? "dom",
-      capabilities: input.capabilities ?? ["interact", "screenshot"],
+      kind,
+      capabilities: capabilitiesFor(kind, input.capabilities),
       generation: this.generation,
     };
   }

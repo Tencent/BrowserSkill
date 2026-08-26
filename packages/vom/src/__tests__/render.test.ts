@@ -29,7 +29,7 @@ function coreRefs(refs: ReturnType<typeof renderVom>["refs"]) {
 }
 
 describe("renderVom single-layer page", () => {
-  it("renders visual surfaces as screenshot-only refs and low-confidence counts as summaries", () => {
+  it("renders visual surfaces as screenshot-only refs", () => {
     const input = scene([
       node({ id: 1, role: "RootWebArea", frameId: "main" }),
       node({ id: 2, parentId: 1, role: "Iframe", frameId: "main", backendNodeId: 20 }),
@@ -40,19 +40,15 @@ describe("renderVom single-layer page", () => {
         backendNodeId: 99,
         frameId: "child",
         renderingKind: "canvas",
-        rect: { x: 10, y: 20, w: 800, h: 500 },
         label: "Data grid",
         memberCount: 2,
       },
     ];
-    input.visualSurfaceSummaries = [{ parentId: 2, frameId: "child", count: 3 }];
-
     const out = renderVom(input);
 
     expect(out.text).toContain(
       '@e1 surface "Data grid" [rendering=canvas; layers=2; visual-only; use: bsk screenshot --ref @e1]',
     );
-    expect(out.text).toContain("[3 additional visual surfaces are not represented]");
     expect(out.refs).toContainEqual(
       expect.objectContaining({
         ref: "e1",

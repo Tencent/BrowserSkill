@@ -64,4 +64,17 @@ describe("RefStore", () => {
       capabilities: ["screenshot"],
     });
   });
+
+  it("never grants ordinary interaction to a surface through defaults or caller input", () => {
+    const s = new RefStore();
+    s.set("e1", 42, { tabId: 7, kind: "surface" });
+    s.set("e2", 43, {
+      tabId: 7,
+      kind: "surface",
+      capabilities: ["interact", "screenshot"],
+    });
+
+    expect(s.resolveEntry("e1")?.capabilities).toEqual(["screenshot"]);
+    expect(s.resolveEntry("e2")?.capabilities).toEqual(["screenshot"]);
+  });
 });

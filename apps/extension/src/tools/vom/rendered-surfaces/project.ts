@@ -1,4 +1,4 @@
-import type { VomScene, VomVisualSurface, VomVisualSurfaceSummary } from "@browser-skill/vom";
+import type { VomScene, VomVisualSurface } from "@browser-skill/vom";
 import type { CapturedFrameDocument } from "../frame-capture";
 import type { SemanticAxNode } from "../semantic-graph";
 import type { RenderedSurfaceGroup } from "./types";
@@ -7,43 +7,69 @@ function frameBackendKey(frameId: string, backendNodeId: number): string {
   return `${frameId}\u0000${backendNodeId}`;
 }
 
-function nearestSceneParent(
-  scene: VomScene,
-  documents: CapturedFrameDocument<SemanticAxNode>[],
-  group: RenderedSurfaceGroup,
-): number | null {
-  const sceneByBackend = new Map(
-    scene.nodes.flatMap((node) =>
-      node.backendNodeId === undefined
-        ? []
-        : [[frameBackendKey(node.frameId ?? "", node.backendNodeId), node.id] as const],
-    ),
-  );
-  const document = documents.find((candidate) => candidate.frameId === group.frameId);
-  const domByBackend = new Map(document?.domNodes.map((node) => [node.backendNodeId, node]) ?? []);
+interface ProjectionIndex {
+  sceneByBackend: ReadonlyMap<string, number>;
+  documentByFrame: ReadonlyMap<string, CapturedFrameDocument<SemanticAxNode>>;
+  domByFrame: ReadonlyMap<
+    string,
+    ReadonlyMap<number, CapturedFrameDocument<SemanticAxNode>["domNodes"][number]>
+  >;
+  rootSceneIdByFrame: ReadonlyMap<string, number>;
+}
+
+function nearestSceneParent(index: ProjectionIndex, group: RenderedSurfaceGroup): number | null {
+  const document = index.documentByFrame.get(group.frameId);
+  const domByBackend = index.domByFrame.get(group.frameId) ?? new Map();
   let parentBackendNodeId = group.representative.parentBackendNodeId;
   let guard = 0;
   while (parentBackendNodeId !== null && guard <= domByBackend.size) {
-    const sceneId = sceneByBackend.get(frameBackendKey(group.frameId, parentBackendNodeId));
+    const sceneId = index.sceneByBackend.get(frameBackendKey(group.frameId, parentBackendNodeId));
     if (sceneId !== undefined) return sceneId;
     parentBackendNodeId = domByBackend.get(parentBackendNodeId)?.parentBackendNodeId ?? null;
     guard += 1;
   }
 
   if (document?.parentFrameId && document.ownerBackendNodeId !== undefined) {
-    const owner = sceneByBackend.get(
+    const owner = index.sceneByBackend.get(
       frameBackendKey(document.parentFrameId, document.ownerBackendNodeId),
     );
     if (owner !== undefined) return owner;
   }
 
-  return (
-    scene.nodes.find(
-      (node) =>
-        node.frameId === group.frameId &&
-        ["rootwebarea", "webarea"].includes(node.role?.toLowerCase() ?? ""),
-    )?.id ?? null
-  );
+  return index.rootSceneIdByFrame.get(group.frameId) ?? null;
+}
+
+function buildProjectionIndex(
+  scene: VomScene,
+  documents: CapturedFrameDocument<SemanticAxNode>[],
+): ProjectionIndex {
+  const rootSceneIdByFrame = new Map<string, number>();
+  for (const node of scene.nodes) {
+    if (
+      node.frameId &&
+      !rootSceneIdByFrame.has(node.frameId) &&
+      ["rootwebarea", "webarea"].includes(node.role?.toLowerCase() ?? "")
+    ) {
+      rootSceneIdByFrame.set(node.frameId, node.id);
+    }
+  }
+  return {
+    sceneByBackend: new Map(
+      scene.nodes.flatMap((node) =>
+        node.backendNodeId === undefined
+          ? []
+          : [[frameBackendKey(node.frameId ?? "", node.backendNodeId), node.id] as const],
+      ),
+    ),
+    documentByFrame: new Map(documents.map((document) => [document.frameId, document])),
+    domByFrame: new Map(
+      documents.map((document) => [
+        document.frameId,
+        new Map(document.domNodes.map((node) => [node.backendNodeId, node])),
+      ]),
+    ),
+    rootSceneIdByFrame,
+  };
 }
 
 export function projectRenderedSurfaces(
@@ -51,37 +77,23 @@ export function projectRenderedSurfaces(
   documents: CapturedFrameDocument<SemanticAxNode>[],
   groups: RenderedSurfaceGroup[],
 ): VomScene {
+  const index = buildProjectionIndex(scene, documents);
   const visualSurfaces: VomVisualSurface[] = [];
-  const summaryCounts = new Map<
-    string,
-    { parentId: number | null; frameId: string; count: number }
-  >();
 
   for (const group of groups) {
-    const parentId = nearestSceneParent(scene, documents, group);
-    if (group.existenceConfidence === "low") {
-      const key = `${group.frameId}\u0000${parentId ?? "root"}`;
-      const current = summaryCounts.get(key) ?? { parentId, frameId: group.frameId, count: 0 };
-      current.count += group.members.length;
-      summaryCounts.set(key, current);
-      continue;
-    }
+    const parentId = nearestSceneParent(index, group);
     visualSurfaces.push({
       parentId,
       backendNodeId: group.representative.backendNodeId,
       frameId: group.frameId,
       renderingKind: "canvas",
-      rect: group.visibleRect,
-      ...(group.representative.localRect ? { localRect: group.representative.localRect } : {}),
       ...(group.label ? { label: group.label } : {}),
       memberCount: group.members.length,
     });
   }
 
-  const visualSurfaceSummaries: VomVisualSurfaceSummary[] = [...summaryCounts.values()];
   return {
     ...scene,
     ...(visualSurfaces.length > 0 ? { visualSurfaces } : {}),
-    ...(visualSurfaceSummaries.length > 0 ? { visualSurfaceSummaries } : {}),
   };
 }
