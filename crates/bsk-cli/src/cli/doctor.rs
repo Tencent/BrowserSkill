@@ -606,8 +606,15 @@ mod m2_tests {
         let check = check_browsers_protocol_compatible(Some(&status));
         assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("alpha"));
-        assert!(check.detail.contains("still usable — continue, and upgrade soon"));
-        assert!(check.hint.is_none(), "a protocol-version note must not hint to stop");
+        assert!(
+            check
+                .detail
+                .contains("still usable — continue, and upgrade soon")
+        );
+        assert!(
+            check.hint.is_none(),
+            "a protocol-version note must not hint to stop"
+        );
     }
 
     #[test]
