@@ -19,7 +19,7 @@ import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
 import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
-import { registerBskSkill } from "./skill";
+import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
 import { type PluginConfig, registerTools } from "./tools";
 
 export const name = "dsh-plugin-browserskill";
@@ -95,6 +95,11 @@ export function apply(
   // ONLY model-visible advertisement — the tool suite reveals itself on a
   // successful skill invocation (or a session whose history already has one).
   const unregisterSkill = registerBskSkill(ctx);
+  // A same-name CLI skill left in ~/.agents is discovered in the nearer preset
+  // layer and shadows the global registration above. Re-register through every
+  // exact agent context at startup so DSH always loads the browser_* protocol
+  // instructions; the shared CLI skill remains untouched for other agents.
+  const disarmAgentSkill = armAgentScopedBskSkill(ctx);
   const removeSuite = resolved.lazyTools
     ? armLazyTools(ctx, () =>
         registerTools({ ctx, runner, registry, config: resolved, observation, queue }),
@@ -135,17 +140,15 @@ export function apply(
   ctx.effect(() => {
     return () => {
       removeSuite();
+      disarmAgentSkill();
       unregisterSkill();
       removeRoutes();
       disarmArchiveCleanup();
-      observation.dispose();
       runner.killAll();
       const stops = registry
         .ownedIds()
-        .map((sessionId) =>
-          runner.run(["session", "stop", sessionId], { timeoutMs: 15_000 }).catch(() => {}),
-        );
-      return Promise.all(stops).then(() => {});
+        .map((sessionId) => observation.stopSession(sessionId).catch(() => false));
+      return Promise.all(stops).then(() => observation.dispose());
     };
   });
 }

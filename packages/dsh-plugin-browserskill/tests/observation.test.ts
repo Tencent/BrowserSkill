@@ -78,7 +78,7 @@ function fakeRunner(
         if (opts.stopNotFound) {
           return {
             code: 4,
-            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stdout: JSON.stringify({ code: "not_found", message: "no such session" }),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -93,7 +93,7 @@ function fakeRunner(
         if (opts.screenshotNotFound) {
           return {
             code: 4,
-            stdout: JSON.stringify({ code: "session_not_found", message: "no such session" }),
+            stdout: JSON.stringify({ code: "not_found", message: "no such session" }),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -224,6 +224,57 @@ describe("state machine", () => {
 });
 
 describe("thumbnail cadence", () => {
+  it("gives foreground work priority and resumes with one fresh capture", async () => {
+    const scheduler = fakeScheduler();
+    let finishCapture: ((result: BskRunResult) => void) | undefined;
+    const killed: string[] = [];
+    const runner: FakeRunner = {
+      calls: [],
+      killed,
+      run(args) {
+        if (args[0] !== "screenshot") {
+          return Promise.resolve({
+            code: 0,
+            stdout: "{}",
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          });
+        }
+        return new Promise((resolve) => {
+          finishCapture = resolve;
+        });
+      },
+      killAll() {},
+      killFor(tag) {
+        killed.push(tag);
+        if (tag === "observation:s1" && finishCapture !== undefined) {
+          finishCapture({
+            code: 5,
+            stdout: JSON.stringify({ code: "cancelled", message: "cancelled" }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          });
+          finishCapture = undefined;
+          return 1;
+        }
+        return 0;
+      },
+    };
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => finishCapture !== undefined);
+
+    const release = service.acquireForeground("s1");
+    expect(killed).toEqual(["observation:s1"]);
+    await waitFor(() => scheduler.pending().length === 0);
+    release();
+    expect(service.isAvailable()).toBe(true);
+    expect(scheduler.pending()).toEqual([0]);
+  });
+
   it("captures immediately on add and after action end, then fast-cadences while active", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner();
@@ -351,7 +402,7 @@ describe("stopSession", () => {
     expect(registry.isOwned("s1")).toBe(true);
 
     await expect(service.stopSession("s1")).resolves.toBe(true);
-    expect(runner.killed).toEqual(["s1"]);
+    expect(runner.killed).toEqual(["observation:s1", "s1"]);
     const stop = runner.calls.find((c) => c.args[0] === "session" && c.args[1] === "stop");
     expect(stop?.args).toEqual(["session", "stop", "s1"]);
     expect(registry.isOwned("s1")).toBe(false);
@@ -380,13 +431,13 @@ describe("stopSession", () => {
     expect(events[events.length - 1]).toMatchObject({ type: "remove" });
   });
 
-  it("returns false and keeps the entry when the stop itself fails", async () => {
+  it("rejects and keeps the entry when the stop itself fails", async () => {
     const registry = new SessionRegistry(5);
     own(registry, "s1");
     const runner = fakeRunner({ stopFails: true });
     const { service } = setup({ registry, runner });
     service.addSession("s1");
-    await expect(service.stopSession("s1")).resolves.toBe(false);
+    await expect(service.stopSession("s1")).rejects.toThrow(/boom/);
     expect(registry.isOwned("s1")).toBe(true);
     expect(service.getState().map((s) => s.sessionId)).toEqual(["s1"]);
   });
@@ -590,7 +641,7 @@ describe("HTTP/SSE interface", () => {
   });
 });
 
-describe("availability and dead sessions", () => {
+describe("availability and missing sessions", () => {
   it("flips availability off after repeated global failures and back on success", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner({ screenshotFails: true });
@@ -610,23 +661,18 @@ describe("availability and dead sessions", () => {
     service.dispose();
   });
 
-  it("marks a session dead on session_not_found and stops asking for frames", async () => {
+  it("removes an owned ghost on not_found and stops asking for frames", async () => {
     const scheduler = fakeScheduler();
     const runner = fakeRunner({ screenshotNotFound: true });
-    const { service, events } = setup({ runner, scheduler });
+    const registry = new SessionRegistry(5);
+    own(registry, "s1");
+    const { service, events } = setup({ runner, scheduler, registry });
     service.addSession("s1");
     scheduler.runNext();
-    await waitFor(() => events.some((e) => e.type === "upsert" && e.session?.dead === true));
-    expect(service.getState()[0].dead).toBe(true);
-    expect(service.getState()[0].action).toBe("idle");
-    // No further captures are scheduled for a dead session.
-    expect(scheduler.pending()).toEqual([]);
-    // Instrumentation is dropped for dead sessions.
-    service.beginAction("s1", "clicking");
-    expect(service.getState()[0].action).toBe("idle");
-    // A dead session leaves cleanly.
-    service.removeSession("s1");
+    await waitFor(() => events.some((e) => e.type === "remove"));
     expect(service.getState()).toEqual([]);
+    expect(registry.isOwned("s1")).toBe(false);
+    expect(scheduler.pending()).toEqual([]);
   });
 
   it("clears lastError on the next action and keeps it on failure", () => {
