@@ -439,14 +439,48 @@ export function actionForLabel(label: string): string {
       return "observing";
     case "click":
       return "clicking";
+    case "hover":
+      return "hovering";
     case "fill":
       return "filling";
+    case "select":
+      return "selecting";
     case "press":
       return "pressing";
     case "screenshot":
       return "capturing";
     case "emulate":
       return "emulating";
+    case "tab list":
+      return "listing tabs";
+    case "tab create":
+      return "creating tab";
+    case "tab close":
+      return "closing tab";
+    case "tab select":
+      return "selecting tab";
+    case "tab borrow":
+      return "borrowing tab";
+    case "tab return":
+      return "returning tab";
+    case "navigate-back":
+      return "navigating back";
+    case "navigate-forward":
+      return "navigating forward";
+    case "reload":
+      return "reloading";
+    case "wait-for-navigation":
+      return "waiting for navigation";
+    case "request-help":
+      return "waiting for user";
+    case "get-html":
+      return "reading HTML";
+    case "console":
+      return "reading console";
+    case "network":
+      return "reading network";
+    case "window resize":
+      return "resizing window";
     default:
       return label;
   }

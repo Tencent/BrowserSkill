@@ -2,10 +2,10 @@
  * Progressive disclosure of the BrowserSkill agent skill through the harness's
  * official skill seam (`ctx.skills`). The catalog entry (name + description)
  * is resident; the body is loaded only when the model invokes the `skill`
- * tool. The markdown is build-time assembled into a static module (dsh
- * prelude + the canonical CLI skill body verbatim), so registration and every
- * pre-step catalog snapshot are pure in-memory reads — no disk, no process,
- * no daemon.
+ * tool. The dedicated DeepSeek Harness markdown is embedded into a static
+ * module at build time, so registration and every pre-step catalog snapshot
+ * are pure in-memory reads — no disk, no process, no daemon. The CLI-oriented
+ * repository skill is intentionally a separate interface.
  */
 
 import type { Context } from "@deepseek-ai/cordis";
@@ -26,7 +26,7 @@ interface SkillsLike {
 }
 
 /**
- * Publish the BSK skill as an embedded runtime skill. Returns the unregistration
+ * Publish the browser skill as an embedded runtime skill. Returns the unregistration
  * disposer. A composition without the `skills` service (or with dsh-tool-skill
  * retired) leaves the rest of the plugin unaffected — the no-op is silent.
  */

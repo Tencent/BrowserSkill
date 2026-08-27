@@ -1,4 +1,4 @@
-// BSK skill injection: registration wiring, catalog content, progressive-load
+// Browser skill injection: registration wiring, catalog content, progressive-load
 // weight, and silent degradation without the skill seam.
 
 import { describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ function fakeCtx(skills?: unknown) {
 }
 
 describe("registerBskSkill", () => {
-  it("registers the catalog entry with the assembled body", () => {
+  it("registers the catalog entry with the DSH browser-tool body", () => {
     const registrations: { skill: Record<string, unknown>; disposer: () => void }[] = [];
     const skills = {
       register(skill: Record<string, unknown>) {
@@ -26,23 +26,51 @@ describe("registerBskSkill", () => {
     expect(skill.name).toBe("browser-skill");
     expect(typeof skill.description).toBe("string");
     expect(String(skill.description)).toContain("browser_*");
-    // body = dsh prelude + canonical CLI skill body + dsh postlude
     const content = String(skill.content);
-    expect(content).toContain("browser_observe");
-    expect(String(skill.description)).toContain("never invoke bsk through bash or shell");
-    expect(content).toContain("Always call those injected `browser_*` tools");
-    expect(content).toContain("Never use `bash`, `shell`, `exec`");
-    expect(content).toContain("## DSH routing reminder");
-    expect(content.trimEnd()).toMatch(
-      /always begin with[\s\S]*`browser_session_start`[\s\S]*`browser_session_stop`\.$/,
-    );
-    expect(content).toContain("Owned sessions only");
+    const mentionedTools = [...new Set(content.match(/\bbrowser_[a-z][a-z_]*\b/g) ?? [])].sort();
+    expect(mentionedTools).toEqual([
+      "browser_click",
+      "browser_console",
+      "browser_emulate",
+      "browser_fill",
+      "browser_get_html",
+      "browser_hover",
+      "browser_navigate",
+      "browser_navigate_back",
+      "browser_navigate_forward",
+      "browser_network",
+      "browser_observe",
+      "browser_press",
+      "browser_reload",
+      "browser_request_help",
+      "browser_screenshot",
+      "browser_select",
+      "browser_session_list",
+      "browser_session_start",
+      "browser_session_stop",
+      "browser_snapshot",
+      "browser_tab_borrow",
+      "browser_tab_close",
+      "browser_tab_create",
+      "browser_tab_list",
+      "browser_tab_return",
+      "browser_tab_select",
+      "browser_wait_for_navigation",
+      "browser_window_resize",
+    ]);
+    expect(String(skill.description)).not.toMatch(/\bbsk\b/i);
+    expect(content).not.toMatch(/\bbsk\b/i);
+    expect(content).not.toMatch(/```(?:bash|sh|shell)\b/i);
+    expect(content).not.toMatch(/--[a-z]/);
+    expect(content).toContain("All browser operations must use the injected tools directly");
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
+    expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
     expect(content.length).toBeGreaterThan(10_000);
     expect(skill.source).toBe("bundled");
-    // the original YAML frontmatter must not leak into the body
-    expect(content.includes("name: browser-skill\ndescription:")).toBe(false);
+    // Source frontmatter is registration metadata and must not leak into the body.
+    expect(content.startsWith("---")).toBe(false);
+    expect(content).not.toContain("name: browser-skill\ndescription:");
     // disposer passthrough
     unregister();
     expect(skill.__disposed).toBe(true);
