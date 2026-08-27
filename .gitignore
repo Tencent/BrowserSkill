@@ -11,6 +11,10 @@ dist/
 # Logs
 *.log
 
+# Local browser evaluation artifacts
+evals/browser/results/
+evals/browser/agents.local.json
+
 # macOS
 .DS_Store
 

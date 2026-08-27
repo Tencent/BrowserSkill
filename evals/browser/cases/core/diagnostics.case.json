@@ -1,0 +1,48 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "diagnostics",
+  "title": "Console and network inspection",
+  "order": 50,
+  "suite": "core",
+  "tags": ["console", "network", "diagnostics"],
+  "fixture": { "startPath": "/diagnostics" },
+  "prompts": {
+    "en": "Open {url}. Use browser diagnostics to inspect the page console and recent network activity. Report the console marker and the token returned by the ping request, then close the browser session.",
+    "zh-CN": "打开 {url}。使用浏览器诊断能力检查页面 console 和最近的 network 活动，报告 console marker 以及 ping 请求返回的 token，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "inspect.console",
+    "inspect.network"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "diagnostic ping completed",
+        "type": "network.ping",
+        "minCount": 1
+      }
+    ],
+    "response": [
+      { "label": "reported console marker", "includes": "CONSOLE-61" },
+      { "label": "reported network token", "includes": "NETWORK-73" }
+    ],
+    "adapter": [
+      { "label": "console inspection was executed", "key": "consoleRead" },
+      { "label": "network inspection was executed", "key": "networkRead" },
+      { "label": "browser session was closed", "key": "sessionStopped" }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      { "action": "wait", "duration": "300ms" },
+      { "action": "console", "evidence": "consoleRead" },
+      { "action": "network", "evidence": "networkRead" },
+      { "action": "observe" }
+    ]
+  }
+}
