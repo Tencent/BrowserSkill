@@ -29,7 +29,7 @@ Drive the user's **real Chromium browser** (with their logins and cookies) throu
 ## Prerequisites
 
 1. `bsk` on `PATH` (Rust CLI from browser-skill)
-2. browser-skill **extension** loaded in Chromium and connected (popup shows green)
+2. browser-skill **extension** loaded in Chromium and connected (popup shows green, or an upgrade reminder — still connected; continue)
 3. Any `bsk` command auto-starts background services as needed; use `bsk doctor` if anything fails
 
 ## Mandatory workflow
@@ -299,7 +299,7 @@ bsk record stop [--output trace]   # terminal fallback if the browser panel is u
 | `2` | Protocol / transport — service unreachable, IPC failure | `bsk doctor`; check extension connected; retry the command |
 | `3` | Browser / CDP execution failed | Retry; simplify selector; check tab still open |
 | `4` | Timeout | Increase `--timeout`; try `--wait-until domcontentloaded` |
-| `5` | Version skew (CLI vs extension) | Upgrade/reinstall matching versions |
+| `5` | Unknown RPC method | This command is not implemented in the current build. Continue the task with other commands. If a newly added command is missing, suggest `bsk update`. |
 
 Human errors print `error:` + `hint:` on stderr; `--json` includes `code`, `message`, `hint`, `exit_code`.
 
