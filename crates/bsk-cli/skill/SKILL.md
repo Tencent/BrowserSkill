@@ -210,7 +210,7 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 
 | Command | Summary |
 |---------|---------|
-| `bsk evaluate <expression>` | Run JS in agent tab (see red lines); JS throw → stderr, **exit 0** |
+| `bsk evaluate <expression>` | Run JS in agent tab (see red lines). JS throw → stderr, **exit 0** (RPC success); use `--json` and check `.ok` to detect JS errors |
 | `bsk wait-for-navigation` | Block until load/DOM idle/etc. (`--wait-until`, `--timeout`) |
 | `bsk wait-ms <duration>` | Sleep (`500ms`, `2s`, `1m`; **no** `--session`) |
 
@@ -294,7 +294,7 @@ bsk record stop [--output trace]   # terminal fallback if the browser panel is u
 
 | Code | Meaning | What to do |
 |------|---------|------------|
-| `0` | Success (including `evaluate` where JS threw but RPC succeeded) | Continue |
+| `0` | Success (including `evaluate` where JS threw but RPC succeeded) | Continue; for `evaluate`, check `--json` `.ok` to distinguish JS success from RPC success |
 | `1` | User error — bad args, unknown session, tab not in Agent Window, stale ref | Fix args; `bsk session list`; re-snapshot |
 | `2` | Protocol / transport — service unreachable, IPC failure | `bsk doctor`; check extension connected; retry the command |
 | `3` | Browser / CDP execution failed | Retry; simplify selector; check tab still open |
