@@ -763,7 +763,7 @@ function emitVisualEntries(parentId: number | null, depth: number, state: Render
     const ref = `e${state.nextRef}`;
     const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
     const layers = surface.memberCount > 1 ? `; layers=${surface.memberCount}` : "";
-    const line = `${"  ".repeat(depth)}@${ref} surface ${JSON.stringify(label)} [rendering=${surface.renderingKind}${layers}; visual-only; use: bsk screenshot --ref @${ref}]`;
+    const line = `${"  ".repeat(depth)}@${ref} surface ${JSON.stringify(label)} [rendering=${surface.renderingKind}${layers}; visual-only; requires=image-understanding; use: bsk screenshot --ref @${ref}]`;
     const nextTokens = state.tokens + estimateTokens(line);
     if (nextTokens > state.maxTokens) {
       state.truncated = true;
