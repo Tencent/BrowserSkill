@@ -64,14 +64,17 @@ export interface BskRunner {
   killFor(tag: string): number;
 }
 
-const KILL_GRACE_MS = 2000;
+// Business RPCs translate SIGINT into the daemon's cancel(rpc_id) protocol.
+// Give that bounded reconciliation path time to settle before the hard kill.
+const KILL_GRACE_MS = 3000;
+const SESSION_BUSY_RETRY_DELAY_MS = 100;
 
 export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): BskRunner {
   const live = new Map<ChildProcess, string | undefined>();
 
   function killChild(child: ChildProcess): void {
     if (child.exitCode !== null || child.signalCode !== null) return;
-    child.kill("SIGTERM");
+    child.kill("SIGINT");
     const force = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }, KILL_GRACE_MS);
@@ -163,6 +166,60 @@ export function isCommandNotFound(error: unknown): boolean {
   );
 }
 
+/** True only for the daemon's transient per-session reconciliation window. */
+export function isSessionBusyResult(result: BskRunResult): boolean {
+  if (result.code === 0) return false;
+  try {
+    const body = JSON.parse(result.stdout) as BskErrorBody;
+    const reason =
+      typeof body.data === "object" && body.data !== null && "reason" in body.data
+        ? (body.data as { reason?: unknown }).reason
+        : undefined;
+    return reason === "session_busy";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Retry exactly once after the tiny daemon-settlement race that can follow a
+ * graceful SIGINT cancellation. Other errors and persistent busy states stay
+ * visible to callers.
+ */
+export async function runWithSessionBusyRetry(
+  run: () => Promise<BskRunResult>,
+  signal?: AbortSignal,
+): Promise<BskRunResult> {
+  const first = await run();
+  if (!isSessionBusyResult(first)) return first;
+  await abortableDelay(SESSION_BUSY_RETRY_DELAY_MS, signal);
+  return run();
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    timer.unref();
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    function done() {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("tool call aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 /** Install guidance shown when the bsk CLI cannot be spawned. */
 export function bskInstallMessage(bskPath: string): string {
   return (
@@ -182,7 +239,7 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     throw new BskError(`bsk ${commandLabel} timed out`, { timedOut: true });
   }
   const body = result.stdout.trim();
-  // Killed by our own interrupt (SIGTERM from killFor), not by the abort path:
+  // Killed by our own interrupt (SIGINT from killFor), not by the abort path:
   // say so instead of doubling the generic label into the message.
   if (result.code === null && !result.aborted && !result.timedOut) {
     throw new BskError(`bsk ${commandLabel} was interrupted (process killed)`);

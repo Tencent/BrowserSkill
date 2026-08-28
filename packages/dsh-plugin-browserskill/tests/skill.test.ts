@@ -1,8 +1,11 @@
 // Browser skill injection: registration wiring, catalog content, progressive-load
 // weight, and silent degradation without the skill seam.
 
+import { Context } from "@deepseek-ai/cordis";
+import { createScope, scopeTarget } from "@deepseek-ai/dsh-scope";
+import { SkillRegistry } from "@deepseek-ai/dsh-skill";
 import { describe, expect, it } from "vitest";
-import { registerBskSkill } from "../src/skill";
+import { armAgentScopedBskSkill, registerBskSkill } from "../src/skill";
 
 function fakeCtx(skills?: unknown) {
   return { get: (key: string) => (key === "skills" ? skills : undefined) } as never;
@@ -98,5 +101,90 @@ describe("registerBskSkill", () => {
     const disposer = registerBskSkill(fakeCtx());
     expect(typeof disposer).toBe("function");
     expect(() => disposer()).not.toThrow();
+  });
+});
+
+describe("armAgentScopedBskSkill", () => {
+  it("overrides a nearer legacy CLI skill when the DSH agent starts", async () => {
+    const root = new Context();
+    const skillFiber = root.plugin(SkillRegistry);
+    await skillFiber;
+
+    // The plugin's original registration is global.
+    registerBskSkill(skillFiber.ctx);
+
+    // Model the standard preset's filesystem discovery of
+    // ~/.agents/skills/browser-skill. Its nearer scope wins before the fix.
+    const presetKey = { preset: "standard" };
+    const presetScope = createScope(skillFiber.ctx, presetKey);
+    presetScope.ctx.skills.register({
+      name: "browser-skill",
+      description: "Legacy BrowserSkill CLI instructions",
+      content: "Use bsk shell commands.",
+      source: "user-agents",
+    });
+
+    const agentKey = { agent: "test-agent" };
+    const agentScope = createScope(skillFiber.ctx, agentKey, { parent: presetKey });
+    const agent = {
+      id: "test-agent",
+      ctx: agentScope.ctx,
+    } as never;
+    const agents = { list: () => [] };
+    const pluginCtx = skillFiber.ctx.extend({ agents });
+
+    const before = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
+    expect(before?.content).toBe("Use bsk shell commands.");
+    expect(before?.source).toBe("user-agents");
+
+    const disarm = armAgentScopedBskSkill(pluginCtx);
+    pluginCtx.emit(scopeTarget(agent, agentKey), "agent/session-start", {
+      agent,
+      source: "startup",
+    });
+
+    const after = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
+    expect(after?.content).toContain("All browser operations must use the injected tools directly");
+    expect(after?.content).not.toMatch(/\bbsk\b/i);
+    expect(after?.source).toBe("bundled");
+
+    disarm();
+    await agentScope.dispose();
+    await presetScope.dispose();
+    await skillFiber.dispose();
+  });
+
+  it("installs on existing agents for plugin reload and disposes registrations", () => {
+    const registered: Record<string, unknown>[] = [];
+    let disposed = 0;
+    const agent = {
+      ctx: fakeCtx({
+        register(skill: Record<string, unknown>) {
+          registered.push(skill);
+          return () => {
+            disposed += 1;
+          };
+        },
+      }),
+    } as never;
+    const listeners = new Map<string, (payload: { agent: never }) => void>();
+    const ctx = {
+      get: (key: string) => (key === "agents" ? { list: () => [agent] } : undefined),
+      on(event: string, listener: (payload: { agent: never }) => void) {
+        listeners.set(event, listener);
+        return () => listeners.delete(event);
+      },
+    } as never;
+
+    const disarm = armAgentScopedBskSkill(ctx);
+    expect(registered).toHaveLength(1);
+
+    // A later lifecycle notification for the same agent must not duplicate it.
+    listeners.get("agent/session-start")?.({ agent });
+    expect(registered).toHaveLength(1);
+
+    disarm();
+    expect(disposed).toBe(1);
+    expect(listeners.size).toBe(0);
   });
 });

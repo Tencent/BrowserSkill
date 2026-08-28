@@ -22,7 +22,13 @@ import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
 import { registerPhaseOneTools } from "./phase-one-tools";
 import type { KeyedExecutor } from "./queue";
-import { type BskRunner, bskInstallMessage, isCommandNotFound, parseBskJson } from "./runner";
+import {
+  type BskRunner,
+  bskInstallMessage,
+  isCommandNotFound,
+  parseBskJson,
+  runWithSessionBusyRetry,
+} from "./runner";
 import type { SessionRegistry } from "./sessions";
 import { SESSION_PARAM } from "./tool-params";
 
@@ -79,6 +85,8 @@ async function runBsk(
   observeSession?: string,
   runnerTimeoutMs?: number,
 ): Promise<unknown> {
+  const releaseForeground =
+    observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
   // beginAction must fire only when the task actually starts inside the
   // per-session queue — marking it while still queued would overwrite the
   // in-flight action's label (and flash it idle on a queued abort).
@@ -92,11 +100,15 @@ async function runBsk(
           began = true;
           deps.observation.beginAction(observeSession, actionForLabel(label));
         }
-        return deps.runner.run(args, {
-          signal: exec.signal,
-          timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
-          ...(observeSession !== undefined ? { tag: observeSession } : {}),
-        });
+        return runWithSessionBusyRetry(
+          () =>
+            deps.runner.run(args, {
+              signal: exec.signal,
+              timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
+              ...(observeSession !== undefined ? { tag: observeSession } : {}),
+            }),
+          exec.signal,
+        );
       };
       result =
         observeSession !== undefined
@@ -121,6 +133,7 @@ async function runBsk(
     if (observeSession !== undefined && began) {
       deps.observation.endAction(observeSession, actionError);
     }
+    releaseForeground?.();
   }
 }
 
@@ -267,22 +280,15 @@ export function registerTools(deps: ToolDeps): () => void {
           }
         } catch (error) {
           // A half-initialized session must not leak: stop it before surfacing.
-          // The stop funnels through the session's queue (an in-flight command
-          // — e.g. an observation capture — would otherwise make the daemon
-          // refuse it), with one retry for good measure.
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              const stopped = await deps.queue.run(reply.session_id, () =>
-                deps.runner.run(["session", "stop", reply.session_id], { timeoutMs: 30_000 }),
-              );
-              if (stopped.code === 0) break;
-            } catch {
-              // retry once, then give up quietly (registry/observation are
-              // cleaned below either way; the daemon reaps orphans).
-            }
+          // Reuse the same capture-preempting, idempotent path as explicit and
+          // overlay stops; local ownership is dropped even when daemon cleanup
+          // itself fails, because this start never becomes usable to the model.
+          try {
+            await deps.observation.stopSession(reply.session_id);
+          } catch {
+            registry.remove(reply.session_id);
+            deps.observation.removeSession(reply.session_id);
           }
-          registry.remove(reply.session_id);
-          deps.observation.removeSession(reply.session_id);
           throw error;
         }
         return {
@@ -326,9 +332,15 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         const sessionId = registry.resolveForStop(args.session);
-        await runBsk(deps, exec, ["session", "stop", sessionId], "session stop", sessionId);
-        registry.remove(sessionId);
-        deps.observation.removeSession(sessionId);
+        try {
+          const stopped = await deps.observation.stopSession(sessionId, exec.signal);
+          if (!stopped) throw new Error(`browser session ${sessionId} is not owned by this plugin`);
+        } catch (error) {
+          if (isCommandNotFound(error)) {
+            throw new Error(bskInstallMessage(deps.config.bskPath));
+          }
+          throw error;
+        }
         return { stopped: sessionId };
       },
       presentCall: (args) => ({
