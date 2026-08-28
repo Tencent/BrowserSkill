@@ -1,16 +1,17 @@
 // CDP capture adapter: DOMSnapshot.captureSnapshot + Page.getLayoutMetrics
 // → CapturedNode[] + Viewport. This is the ONLY VOM module that touches
 // raw CDP. The captureSnapshot reply is columnar (parallel arrays + a
-// shared string table); we request exactly three computed styles so the
-// `styles` columns are [position, pointer-events, cursor] in that order.
+// shared string table); requested computed styles are decoded through
+// STYLE_COL so capture and visibility policy share one explicit contract.
 
 import type { Rect, Viewport } from "@browser-skill/vom";
 import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
 import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
 import type { CdpRunner } from "../shared";
+import { clearHover, waitForHover } from "./hover-perception";
 
-const REQUESTED_STYLES = ["position", "pointer-events", "cursor"] as const;
+const REQUESTED_STYLES = ["position", "pointer-events", "cursor", "visibility", "opacity"] as const;
 const STYLE_COL = Object.fromEntries(
   REQUESTED_STYLES.map((name, index) => [name, index]),
 ) as Record<(typeof REQUESTED_STYLES)[number], number>;
@@ -38,6 +39,12 @@ export interface CapturedNode {
    * `textContent`: the live parser always sets it, hand-built fixtures may not.
    */
   cursor?: string;
+  /**
+   * Whether the live DOM snapshot provides a painted, non-hidden box for this
+   * node. Semantic resolution uses this only for DOM fallback nodes; AX-backed
+   * nodes remain authoritative even when they are outside the viewport.
+   */
+  rendered?: boolean;
   textContent?: string;
   formState?: "empty" | "filled" | "default";
   formValue?: string;
@@ -460,36 +467,6 @@ function hoverStateExpression(): string {
   })()`;
 }
 
-async function wait(ms: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(captureAbortError());
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
-  await cdp
-    .send(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: -10,
-      y: -10,
-    })
-    .catch(() =>
-      cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 }).catch(() => {
-        // best effort
-      }),
-    );
-}
-
 function capturedText(node: CapturedNode): string | undefined {
   const value =
     node.attrs["aria-label"] ?? node.attrs.title ?? node.attrs.alt ?? node.textContent ?? "";
@@ -669,7 +646,7 @@ async function probeHoverSurfaces(
         try {
           await clearHover(cdp, tabId);
           throwIfAborted(options.signal);
-          await wait(HOVER_SETTLE_MS, options.signal);
+          await waitForHover(HOVER_SETTLE_MS, options.signal);
           const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
             expression: hoverStateExpression(),
             returnByValue: true,
@@ -684,7 +661,7 @@ async function probeHoverSurfaces(
             y: candidate.y,
           });
           throwIfAborted(options.signal);
-          await wait(HOVER_SETTLE_MS, options.signal);
+          await waitForHover(HOVER_SETTLE_MS, options.signal);
           const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
             expression: hoverStateExpression(),
             returnByValue: true,
@@ -817,6 +794,8 @@ function parseDocumentNodes(
   const posCol = STYLE_COL.position;
   const peCol = STYLE_COL["pointer-events"];
   const cursorCol = STYLE_COL.cursor;
+  const visibilityCol = STYLE_COL.visibility;
+  const opacityCol = STYLE_COL.opacity;
   const inputValues = sparseIndexMap(dn.inputValue);
   const textValues = sparseIndexMap(dn.textValue);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
@@ -861,6 +840,7 @@ function parseDocumentNodes(
     let position = "static";
     let pointerEvents = "auto";
     let cursor = "auto";
+    let rendered = false;
     const li = layoutByNode.get(n);
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
@@ -881,6 +861,13 @@ function parseDocumentNodes(
       position = str(strings, styleRow[posCol]) || "static";
       pointerEvents = str(strings, styleRow[peCol]) || "auto";
       cursor = str(strings, styleRow[cursorCol]) || "auto";
+      const visibility = str(strings, styleRow[visibilityCol]) || "visible";
+      const opacity = str(strings, styleRow[opacityCol]) || "1";
+      rendered =
+        localRect !== null &&
+        visibility !== "hidden" &&
+        visibility !== "collapse" &&
+        (Number.parseFloat(opacity) || 0) > 0;
     }
 
     // Skip non-element nodes (#text, #cdata-section, etc.) — they carry no
@@ -916,6 +903,7 @@ function parseDocumentNodes(
       position,
       pointerEvents,
       cursor,
+      rendered,
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),
       ...(tag === "input" || tag === "textarea"
@@ -1020,7 +1008,13 @@ export async function captureViewModel(
   options: CaptureViewModelOptions = {},
 ): Promise<CapturedViewModel> {
   throwIfAborted(options.signal);
-  const metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  let metrics: LayoutMetricsReply = {};
+  try {
+    metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    console.debug("[bsk capture] layout metrics unavailable", error);
+  }
   throwIfAborted(options.signal);
   const dpr = devicePixelRatio(metrics);
   const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};

@@ -1656,7 +1656,7 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", cursor: "pointer" }),
+      expect.objectContaining({ id: 20, role: "button", name: "close", cursor: "pointer" }),
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
@@ -1732,7 +1732,7 @@ describe("buildVomScene", () => {
     };
 
     const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 20)).toBeUndefined();
     expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("link");
   });
 
@@ -1801,9 +1801,9 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", attrs: { "aria-label": "收藏" } }),
+      expect.objectContaining({ id: 20, role: "button", attrs: { "aria-label": "收藏" } }),
     );
-    expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 30)).toBeUndefined();
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
     expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
@@ -2131,7 +2131,7 @@ describe("buildVomScene", () => {
     });
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 21, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
+      { triggerId: 20, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
     ]);
     expect(renderVom(scene).text).toContain(
       '@e1 button "image" [hover first: My profile | Sign out]',
@@ -3153,6 +3153,98 @@ describe("handleSnapshot", () => {
       rect: { x: 400, y: 300, w: 200, h: 40 },
       localRect: { x: 400, y: 300, w: 200, h: 40 },
     });
+  });
+
+  it("decorates live observations with active controlled content", async () => {
+    const strings = [
+      "html",
+      "body",
+      "button",
+      "div",
+      "#text",
+      "role",
+      "tab",
+      "aria-selected",
+      "true",
+      "aria-controls",
+      "reviews-panel",
+      "id",
+      "static",
+      "auto",
+      "visible",
+      "1",
+      "A detailed review",
+    ];
+    const index = (value: string) => strings.indexOf(value);
+    const style = [index("static"), index("auto"), index("auto"), index("visible"), index("1")];
+    const snapshot = {
+      strings,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1, 1, 3],
+            nodeName: [index("html"), index("body"), index("button"), index("div"), index("#text")],
+            backendNodeId: [10, 11, 12, 13, 14],
+            attributes: [
+              [],
+              [],
+              [
+                index("role"),
+                index("tab"),
+                index("aria-selected"),
+                index("true"),
+                index("aria-controls"),
+                index("reviews-panel"),
+              ],
+              [index("id"), index("reviews-panel")],
+              [],
+            ],
+            nodeValue: [-1, -1, -1, -1, index("A detailed review")],
+          },
+          layout: {
+            nodeIndex: [0, 1, 2, 3, 4],
+            styles: [style, style, style, style, style],
+            bounds: [
+              [0, 0, 1000, 800],
+              [0, 0, 1000, 800],
+              [20, 20, 120, 40],
+              [20, 80, 500, 200],
+              [20, 80, 200, 20],
+            ],
+            paintOrders: [0, 0, 1, 1, 1],
+          },
+        },
+      ],
+    };
+    const ax: CdpAxNode[] = [
+      {
+        nodeId: "root",
+        backendDOMNodeId: 11,
+        role: { type: "role", value: "RootWebArea" },
+        childIds: ["reviews"],
+      },
+      {
+        nodeId: "reviews",
+        parentId: "root",
+        backendDOMNodeId: 12,
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Reviews" },
+        properties: [
+          { name: "selected", value: { value: true } },
+          { name: "controls", value: { value: "reviews-panel" } },
+        ],
+      },
+    ];
+
+    const result = await captureVomObservation(
+      makeOverlayDeps(ax, snapshot, VP_METRICS).cdp,
+      4,
+      "https://example.com",
+    );
+
+    expect(result.text).toContain('@e1 tab "Reviews"');
+    expect(result.text).toContain("[§ active: Reviews]");
+    expect(result.text).toContain("A detailed review");
   });
 
   it("does not leak form secrets through the record-safe observation payload", async () => {

@@ -36,7 +36,7 @@ function fakeSnapshotReply() {
         },
         layout: {
           nodeIndex: [1, 2, 3],
-          // styles columns follow requested computedStyles order: [position, pointer-events]
+          // Legacy fixture: omitted style columns fall back to visible defaults.
           styles: [
             [i("static"), i("auto")],
             [i("fixed"), i("auto")],
@@ -680,6 +680,46 @@ describe("captureViewModel", () => {
     const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
     expect(nodes.find((n) => n.backendNodeId === 12)?.cursor).toBe("pointer");
     expect(nodes.find((n) => n.backendNodeId === 11)?.cursor).toBe("auto");
+  });
+
+  it("captures painted visibility as DOM fallback evidence", async () => {
+    const S = ["html", "body", "button", "static", "auto", "visible", "hidden", "1", "0"];
+    const i = (value: string) => S.indexOf(value);
+    const snapshot = {
+      strings: S,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1, 1, 1],
+            nodeName: [i("html"), i("body"), i("button"), i("button"), i("button")],
+            backendNodeId: [10, 11, 12, 13, 14],
+            attributes: [[], [], [], [], []],
+          },
+          layout: {
+            nodeIndex: [1, 2, 3, 4],
+            styles: [
+              [i("static"), i("auto"), i("auto"), i("visible"), i("1")],
+              [i("static"), i("auto"), i("auto"), i("visible"), i("1")],
+              [i("static"), i("auto"), i("auto"), i("hidden"), i("1")],
+              [i("static"), i("auto"), i("auto"), i("visible"), i("0")],
+            ],
+            bounds: [
+              [0, 0, 1000, 800],
+              [10, 10, 100, 30],
+              [10, 50, 100, 30],
+              [10, 90, 100, 30],
+            ],
+            paintOrders: [0, 1, 2, 3],
+          },
+        },
+      ],
+    };
+
+    const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
+
+    expect(nodes.find((node) => node.backendNodeId === 12)?.rendered).toBe(true);
+    expect(nodes.find((node) => node.backendNodeId === 13)?.rendered).toBe(false);
+    expect(nodes.find((node) => node.backendNodeId === 14)?.rendered).toBe(false);
   });
 
   it("subtracts scroll offset to make rects viewport-relative", async () => {

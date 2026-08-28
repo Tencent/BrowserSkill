@@ -333,6 +333,84 @@ describe("renderVom single-layer page", () => {
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
   });
 
+  it("does not treat implementation CSS classes as control names", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          cursor: "pointer",
+          attrs: { onclick: "handleClick()" },
+          rect: { x: 20, y: 20, w: 40, h: 40 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "img",
+          tag: "svg",
+          attrs: { class: "kocomz" },
+        }),
+      ]),
+    );
+
+    expect(out.text).not.toContain("kocomz");
+    expect(out.refs).toEqual([]);
+  });
+
+  it("recovers icon controls only from explicit semantic icon evidence", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          cursor: "pointer",
+          attrs: { onclick: "handleFilter()" },
+          rect: { x: 20, y: 20, w: 40, h: 40 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "img",
+          tag: "svg",
+          attrs: { "aria-label": "Filter rows", class: "kocomz" },
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "Filter rows"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
+  it("keeps a semantic image as evidence for its clickable wrapper", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "generic",
+          cursor: "pointer",
+          rect: { x: 20, y: 20, w: 40, h: 40 },
+        }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "img",
+          name: "Account",
+          cursor: "pointer",
+          tag: "div",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "Account"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 2 }]);
+  });
+
   it("keeps the deepest custom control when wrapper and child both look clickable", () => {
     const out = renderVom(
       scene([
