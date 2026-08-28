@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "../shared";
-import { captureSurfaceEnvironment, handleSurfacePointClick } from "../surface-point-action";
+import {
+  captureSurfaceEnvironment,
+  resolveSurfacePointerTarget,
+  SURFACE_POINTER_MOVE_SETTLE_MS,
+} from "../surface-target";
 
 function fakeAgentWindow() {
   return {
@@ -15,7 +19,6 @@ function fakeBrowser() {
   let loaderId = "loader-1";
   let pageY = 0;
   let quad = [10, 20, 110, 20, 110, 60, 10, 60];
-  let dispatchFails = false;
   const sent: Array<{ method: string; params?: object }> = [];
   const cdp: CdpRunner = {
     send: vi.fn(async (_tabId: number, method: string, params?: object) => {
@@ -38,23 +41,12 @@ function fakeBrowser() {
         } as never;
       }
       if (method === "DOM.getContentQuads") return { quads: [quad] } as never;
-      if (method === "Input.dispatchMouseEvent") {
-        if (dispatchFails) throw new Error("input failed");
-        return {} as never;
-      }
       throw new Error(`unexpected CDP call ${method}`);
     }) as CdpRunner["send"],
     trackSessionTab: vi.fn(),
   };
-  const tabsApi = {
-    get: vi.fn(
-      async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
-    ),
-    query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
-  };
   return {
     cdp,
-    tabsApi,
     sent,
     setLoaderId: (value: string) => {
       loaderId = value;
@@ -64,9 +56,6 @@ function fakeBrowser() {
     },
     setQuad: (value: number[]) => {
       quad = value;
-    },
-    failDispatch: () => {
-      dispatchFails = true;
     },
   };
 }
@@ -104,33 +93,38 @@ async function setupCapture() {
 
 function pointParams(captureId: string) {
   return {
-    session_id: "aa11",
     ref: "@e3",
-    capture_id: captureId,
-    image_x: 50,
-    image_y: 20,
+    captureId,
+    imageX: 50,
+    imageY: 20,
   };
 }
 
-describe("Surface screenshot-bound point click", () => {
-  it("maps one fresh capture coordinate and dispatches exactly one trusted click", async () => {
-    const { manager, browser, capture } = await setupCapture();
-    const result = await handleSurfacePointClick(manager, pointParams(capture.id), browser);
+describe("Surface screenshot-bound pointer target", () => {
+  it("maps one fresh capture coordinate without executing an action", async () => {
+    const { context, browser, capture } = await setupCapture();
+    const result = await resolveSurfacePointerTarget(
+      context,
+      { tabId: 4 },
+      pointParams(capture.id),
+      { cdp: browser.cdp },
+    );
 
     if ("code" in result) throw new Error(JSON.stringify(result));
     expect(result).toMatchObject({
-      used_ref: "e3",
-      capture_id: capture.id,
-      image_x: 50,
-      image_y: 20,
-      x: 35,
-      y: 30,
+      usedRef: "e3",
+      point: { x: 35, y: 30 },
+      moveSettleMs: SURFACE_POINTER_MOVE_SETTLE_MS,
+      capture: { id: capture.id, imageX: 50, imageY: 20 },
     });
-    expect(browser.sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(
-      3,
-    );
+    expect(browser.sent.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
 
-    const repeated = await handleSurfacePointClick(manager, pointParams(capture.id), browser);
+    const repeated = await resolveSurfacePointerTarget(
+      context,
+      { tabId: 4 },
+      pointParams(capture.id),
+      { cdp: browser.cdp },
+    );
     expect(repeated).toMatchObject({
       code: "permission_denied",
       data: { reason: "surface_capture_consumed" },
@@ -138,7 +132,7 @@ describe("Surface screenshot-bound point click", () => {
   });
 
   it("rejects a new observation generation before sending input", async () => {
-    const { manager, context, browser, capture } = await setupCapture();
+    const { context, browser, capture } = await setupCapture();
     context.refStore.replace([
       [
         "e3",
@@ -151,7 +145,12 @@ describe("Surface screenshot-bound point click", () => {
       ],
     ]);
 
-    const result = await handleSurfacePointClick(manager, pointParams(capture.id), browser);
+    const result = await resolveSurfacePointerTarget(
+      context,
+      { tabId: 4 },
+      pointParams(capture.id),
+      { cdp: browser.cdp },
+    );
     expect(result).toMatchObject({
       code: "permission_denied",
       data: { reason: "surface_capture_stale" },
@@ -166,9 +165,14 @@ describe("Surface screenshot-bound point click", () => {
       (browser: ReturnType<typeof fakeBrowser>) =>
         browser.setQuad([11, 20, 111, 20, 111, 60, 11, 60]),
     ]) {
-      const { manager, browser, capture } = await setupCapture();
+      const { context, browser, capture } = await setupCapture();
       mutate(browser);
-      const result = await handleSurfacePointClick(manager, pointParams(capture.id), browser);
+      const result = await resolveSurfacePointerTarget(
+        context,
+        { tabId: 4 },
+        pointParams(capture.id),
+        { cdp: browser.cdp },
+      );
       expect(result).toMatchObject({
         code: "permission_denied",
         data: { reason: "surface_capture_stale" },
@@ -177,32 +181,25 @@ describe("Surface screenshot-bound point click", () => {
     }
   });
 
-  it("consumes the capture when coordinates or input dispatch fail", async () => {
+  it("consumes the capture when coordinate validation fails", async () => {
     const invalid = await setupCapture();
-    const outside = await handleSurfacePointClick(
-      invalid.manager,
-      { ...pointParams(invalid.capture.id), image_x: 200 },
-      invalid.browser,
+    const outside = await resolveSurfacePointerTarget(
+      invalid.context,
+      { tabId: 4 },
+      { ...pointParams(invalid.capture.id), imageX: 200 },
+      { cdp: invalid.browser.cdp },
     );
     expect(outside).toMatchObject({
       code: "invalid_params",
       data: { reason: "surface_coordinate_invalid" },
     });
     expect(
-      await handleSurfacePointClick(
-        invalid.manager,
+      await resolveSurfacePointerTarget(
+        invalid.context,
+        { tabId: 4 },
         pointParams(invalid.capture.id),
-        invalid.browser,
+        { cdp: invalid.browser.cdp },
       ),
-    ).toMatchObject({ data: { reason: "surface_capture_consumed" } });
-
-    const failed = await setupCapture();
-    failed.browser.failDispatch();
-    expect(
-      await handleSurfacePointClick(failed.manager, pointParams(failed.capture.id), failed.browser),
-    ).toMatchObject({ code: "cdp_failed" });
-    expect(
-      await handleSurfacePointClick(failed.manager, pointParams(failed.capture.id), failed.browser),
     ).toMatchObject({ data: { reason: "surface_capture_consumed" } });
   });
 
@@ -269,10 +266,6 @@ describe("Surface screenshot-bound point click", () => {
       getFrameGraph: vi.fn(async () => graph),
       trackSessionTab: vi.fn(),
     };
-    const tabsApi = {
-      get: vi.fn(async () => ({ id: 4, windowId: 100, active: true }) as chrome.tabs.Tab),
-      query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
-    };
     const environment = await captureSurfaceEnvironment(cdp, 4, "child");
     if ("code" in environment) throw new Error(environment.message);
     const entry = context.refStore.resolveEntry("e3");
@@ -294,20 +287,20 @@ describe("Surface screenshot-bound point click", () => {
       frameProjectionSignature: environment.frameProjectionSignature,
     });
 
-    const result = await handleSurfacePointClick(
-      manager,
+    const result = await resolveSurfacePointerTarget(
+      context,
+      { tabId: 4 },
       {
-        session_id: "aa11",
         ref: "@e3",
-        capture_id: capture.id,
-        image_x: 100,
-        image_y: 40,
+        captureId: capture.id,
+        imageX: 100,
+        imageY: 40,
       },
-      { cdp, tabsApi },
+      { cdp },
     );
 
     if ("code" in result) throw new Error(JSON.stringify(result));
-    expect(result).toMatchObject({ x: 170, y: 130 });
-    expect(sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(3);
+    expect(result).toMatchObject({ point: { x: 170, y: 130 } });
+    expect(sent.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
   });
 });

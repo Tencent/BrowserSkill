@@ -49,7 +49,7 @@ import {
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import { surfaceVisibleRect } from "./surface-coordinate";
-import { captureSurfaceEnvironment } from "./surface-point-action";
+import { captureSurfaceEnvironment } from "./surface-target";
 import {
   type CapturedNode,
   type CapturedViewModel,

@@ -44,7 +44,7 @@ import {
   resolveTargetTab,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
-import { handleSurfacePointClick } from "./surface-point-action";
+import { resolveSurfacePointerTarget } from "./surface-target";
 
 export interface InteractionDeps {
   cdp: CdpRunner;
@@ -221,6 +221,18 @@ async function resolveBackendNode(
 // tool.click
 // ---------------------------------------------------------------------------
 
+interface ResolvedClickPointerTarget {
+  point: { x: number; y: number };
+  usedRef?: string;
+  usedSelector?: string;
+  moveSettleMs: number;
+  capture?: {
+    id: string;
+    imageX: number;
+    imageY: number;
+  };
+}
+
 export async function handleClick(
   manager: SessionManager,
   params: ClickParams,
@@ -228,9 +240,6 @@ export async function handleClick(
 ): Promise<ClickResult | RpcError> {
   const hasSurfacePointParams =
     params.capture_id !== undefined || params.image_x !== undefined || params.image_y !== undefined;
-  if (hasSurfacePointParams) {
-    return handleSurfacePointClick(manager, params, deps);
-  }
   const ctxOrErr = lookupSession(manager, params, "click");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
@@ -242,39 +251,67 @@ export async function handleClick(
   if (denied) return denied;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
-  const node = await resolveBackendNode(deps.cdp, ctx, target, params, "click");
-  if (isRpcError(node)) return node;
+  const button: MouseButton = params.button ?? "left";
+  const clickCount = params.click_count ?? 1;
+  if (!Number.isSafeInteger(clickCount) || clickCount < 1) {
+    return { code: "invalid_params", message: "click_count must be a positive integer" };
+  }
+  const modifiers = modifiersBitfield(params.modifiers);
 
   if (throwIfAborted(deps.signal)) {
     return { code: "cancelled", message: "click aborted" };
   }
 
   deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-  const geometry = await resolveNodeGeometry(
-    deps.cdp,
-    target.tabId,
-    {
-      target: node.cdpTarget,
-      backendNodeId: node.backendNodeId,
-      ...(node.frameId ? { frameId: node.frameId } : {}),
-    },
-    { scrollIntoView: true },
-  );
-  if (isRpcError(geometry)) return geometry;
-  const centre = geometry.actionPoint;
+  const pointerTarget: ResolvedClickPointerTarget | RpcError = hasSurfacePointParams
+    ? await resolveSurfacePointerTarget(
+        ctx,
+        target,
+        {
+          ref: params.ref,
+          selector: params.selector,
+          captureId: params.capture_id,
+          imageX: params.image_x,
+          imageY: params.image_y,
+        },
+        {
+          cdp: deps.cdp,
+          signal: deps.signal,
+        },
+      )
+    : await (async () => {
+        const node = await resolveBackendNode(deps.cdp, ctx, target, params, "click");
+        if (isRpcError(node)) return node;
+        const geometry = await resolveNodeGeometry(
+          deps.cdp,
+          target.tabId,
+          {
+            target: node.cdpTarget,
+            backendNodeId: node.backendNodeId,
+            ...(node.frameId ? { frameId: node.frameId } : {}),
+          },
+          { scrollIntoView: true },
+        );
+        if (isRpcError(geometry)) return geometry;
+        return {
+          point: geometry.actionPoint,
+          usedRef: node.usedRef,
+          usedSelector: node.usedSelector,
+          moveSettleMs: 0,
+        };
+      })();
+  if (isRpcError(pointerTarget)) return pointerTarget;
 
   if (throwIfAborted(deps.signal)) {
     return { code: "cancelled", message: "click aborted" };
   }
 
-  const button: MouseButton = params.button ?? "left";
-  const clickCount = params.click_count ?? 1;
-  if (clickCount < 1) {
-    return { code: "invalid_params", message: "click_count must be greater than zero" };
-  }
-  const modifiers = modifiersBitfield(params.modifiers);
-
-  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
+  const overlayBlocking = await checkOverlayAtPoint(
+    deps.cdp,
+    target.tabId,
+    pointerTarget.point.x,
+    pointerTarget.point.y,
+  );
   let automationBypassEnabled = false;
   if (overlayBlocking && deps.bypassOverlay) {
     try {
@@ -286,11 +323,12 @@ export async function handleClick(
   }
 
   try {
-    const dispatch = await dispatchMouseClick(deps.cdp, target.tabId, centre, {
+    const dispatch = await dispatchMouseClick(deps.cdp, target.tabId, pointerTarget.point, {
       button,
       clickCount,
       modifiers,
       signal: deps.signal,
+      moveSettleMs: pointerTarget.moveSettleMs,
     });
     if (dispatch === "cancelled") {
       return { code: "cancelled", message: "click aborted" };
@@ -312,10 +350,17 @@ export async function handleClick(
 
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
-    used_ref: node.usedRef,
-    used_selector: node.usedSelector,
-    x: centre.x,
-    y: centre.y,
+    used_ref: pointerTarget.usedRef,
+    used_selector: pointerTarget.usedSelector,
+    x: pointerTarget.point.x,
+    y: pointerTarget.point.y,
+    ...(pointerTarget.capture
+      ? {
+          capture_id: pointerTarget.capture.id,
+          image_x: pointerTarget.capture.imageX,
+          image_y: pointerTarget.capture.imageY,
+        }
+      : {}),
   });
 }
 

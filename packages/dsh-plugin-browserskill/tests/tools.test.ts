@@ -478,12 +478,12 @@ describe("interaction tools", () => {
     emulate: { tab_id: 7, cleared: false },
   };
 
-  it("interact.click maps target, button, and click count", async () => {
+  it("interact.click maps target, button, click count, and modifiers", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
     const click = tools.get("interact.click");
     const value = (await click?.execute(
-      { target: "@e1", button: "right", clickCount: 2 },
+      { target: "@e1", button: "right", clickCount: 2, modifiers: ["ctrl", "shift"] },
       makeExec(),
     )) as { session: string; x: number; y: number };
     expect(value).toMatchObject({ session: "s1", x: 10, y: 20 });
@@ -495,6 +495,8 @@ describe("interaction tools", () => {
       "right",
       "--click-count",
       "2",
+      "--modifiers",
+      "ctrl,shift",
       "@e1",
     ]);
   });
@@ -973,7 +975,7 @@ describe("inspect.screenshot", () => {
       },
     });
     await startSession(tools);
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = await screenshot?.execute({ ref: "@e1" }, makeExec());
 
     expect(value).toMatchObject({
