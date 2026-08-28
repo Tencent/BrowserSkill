@@ -198,8 +198,9 @@ pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build    # tsdown -> lib/
 ## Publishing
 
 The GitHub Actions workflow **Release dsh plugin** publishes this package to npm
-as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id stays
-`dsh-plugin-browserskill`.
+as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id, client
+bundle registration, and `cordis.patch.yml` name are the same specifier so
+dsh can import and materialize the plugin without a ModuleLoader id mismatch.
 
 Trigger it by pushing a tag that matches `package.json`'s `version`:
 
