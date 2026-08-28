@@ -8,7 +8,8 @@ data-driven and discovered automatically. Adding a case does not require editing
 
 ## Design goals
 
-- Agent-neutral: prompts describe outcomes, not a particular tool schema.
+- Agent-neutral: prompts describe observable page goals so the same cases can run through different
+  agents and adapters.
 - Deterministic: pages run locally and use stable markers and run-scoped events.
 - Extensible: manifests, fixture modules, and workflows are auto-discovered.
 - Reproducible: generated cases record a seed and derive every DOM variation from it.

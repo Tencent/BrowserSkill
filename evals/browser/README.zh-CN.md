@@ -7,7 +7,8 @@ case、测试页面、`bsk` 直连流程和断言都会自动发现；新增 cas
 
 ## 核心原则
 
-- 与 Agent 无关：prompt 描述目标，不绑定 28 工具或 6 个领域工具。
+- 与 Agent 无关：prompt 只描述可观察的页面目标，同一套 case 可以被不同 Agent 和
+  adapter 使用。
 - 本地且确定：页面只依赖本地服务，使用稳定 marker 和按 run 隔离的事件。
 - 可扩展：manifest、fixture 和 workflow 都从目录自动发现。
 - 可复现：生成式页面的所有变化由 seed 决定，报告会保留 seed。
