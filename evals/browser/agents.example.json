@@ -1,0 +1,17 @@
+{
+  "agents": {
+    "dsh-local": {
+      "variant": "granular-28",
+      "command": "dsh",
+      "args": ["--profile", "headless", "{prompt}"],
+      "cwd": "../..",
+      "timeoutMs": 300000,
+      "metadata": {
+        "toolCount": 28
+      },
+      "metrics": {
+        "toolCallPattern": "browser[_-][a-z_-]+"
+      }
+    }
+  }
+}

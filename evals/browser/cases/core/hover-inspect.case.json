@@ -1,0 +1,59 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "hover-inspect",
+  "title": "Hover, local HTML, and screenshot",
+  "order": 30,
+  "suite": "core",
+  "tags": ["hover", "html", "screenshot"],
+  "fixture": { "startPath": "/hover-inspect" },
+  "prompts": {
+    "en": "Open {url}. Hover over Account, then choose Profile beta from the revealed menu. Inspect the local HTML around the Inspection card and capture a screenshot. Report both marker codes you find, then close the browser session.",
+    "zh-CN": "打开 {url}。把鼠标悬停在“Account”上，然后点击展开菜单中的“Profile beta”。检查 Inspection card 附近的局部 HTML，并截取页面截图。报告找到的两个标记代码，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "interact.hover",
+    "interact.click",
+    "inspect.html",
+    "inspect.screenshot"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "Account menu was hovered",
+        "type": "hover.menu_opened",
+        "minCount": 1
+      },
+      {
+        "label": "Profile beta was selected",
+        "type": "hover.profile_clicked",
+        "minCount": 1
+      }
+    ],
+    "response": [
+      { "label": "reported hover marker", "includes": "HOVER-17" },
+      { "label": "reported HTML marker", "includes": "INSPECT-27" }
+    ],
+    "adapter": [
+      { "label": "HTML inspection was executed", "key": "htmlInspected" },
+      { "label": "screenshot artifact was created", "key": "screenshotCreated" },
+      { "label": "browser session was closed", "key": "sessionStopped" }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      { "action": "hover", "selector": "#account-menu" },
+      { "action": "click", "selector": "#profile-link" },
+      { "action": "html", "evidence": "htmlInspected" },
+      {
+        "action": "screenshot",
+        "artifactName": "hover-inspect.png",
+        "evidence": "screenshotCreated"
+      }
+    ]
+  }
+}

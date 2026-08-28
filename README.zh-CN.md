@@ -178,6 +178,7 @@ Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；
 - `apps/extension` — 浏览器扩展
 - `packages/ui` 和 `packages/i18n` — 扩展 UI 共享支持
 - `packages/dsh-plugin-browserskill` — DeepSeek Harness 插件（`@wxg-prc-cpg/browser-skill-dsh-plugin`）
+- [`evals/browser`](evals/browser/README.zh-CN.md) — 确定性本地页面与 Agent 无关的浏览器能力测试台
 
 ## 许可证
 
