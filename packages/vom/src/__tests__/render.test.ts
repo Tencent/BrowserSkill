@@ -48,7 +48,7 @@ describe("renderVom single-layer page", () => {
     const out = renderVom(input);
 
     expect(out.text).toContain(
-      '@e1 surface "Data grid" [rendering=canvas; layers=2; visual-only; use: bsk screenshot --ref @e1]',
+      '@e1 surface "Data grid" [rendering=canvas; layers=2; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
     );
     expect(out.refs).toContainEqual(
       expect.objectContaining({
@@ -77,7 +77,7 @@ describe("renderVom single-layer page", () => {
     const out = renderVom(input);
 
     expect(out.text).toContain(
-      '@e1 surface "canvas visual surface" [rendering=canvas; visual-only; use: bsk screenshot --ref @e1]',
+      '@e1 surface "canvas visual surface" [rendering=canvas; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
     );
     expect(out.refs).toContainEqual(
       expect.objectContaining({

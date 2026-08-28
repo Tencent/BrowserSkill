@@ -819,7 +819,7 @@ function emitVisualEntries(parentId: number | null, depth: number, state: Render
     const ref = `e${state.nextRef}`;
     const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
     const layers = surface.memberCount > 1 ? `; layers=${surface.memberCount}` : "";
-    const line = `${"  ".repeat(depth)}@${ref} surface ${JSON.stringify(label)} [rendering=${surface.renderingKind}${layers}; visual-only; use: bsk screenshot --ref @${ref}]`;
+    const line = `${"  ".repeat(depth)}@${ref} surface ${JSON.stringify(label)} [rendering=${surface.renderingKind}${layers}; visual-only; requires=image-understanding; use: bsk screenshot --ref @${ref}]`;
     const nextTokens = state.tokens + estimateTokens(line);
     if (nextTokens > state.maxTokens) {
       state.truncated = true;
@@ -872,24 +872,34 @@ function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: Ren
   }
 }
 
+type RenderTask =
+  | { kind: "node"; node: VomNode; depth: number }
+  | { kind: "visual"; parentId: number | null; depth: number };
+
 function pushRenderChildren(
-  stack: Array<{ node: VomNode; depth: number }>,
+  stack: RenderTask[],
   children: readonly VomNode[],
   depth: number,
 ): void {
   for (let index = children.length - 1; index >= 0; index -= 1) {
-    stack.push({ node: children[index], depth });
+    stack.push({ kind: "node", node: children[index], depth });
   }
 }
 
 function renderTree(children: Map<number | null, VomNode[]>, state: RenderState): void {
-  const stack: Array<{ node: VomNode; depth: number }> = [];
+  const stack: RenderTask[] = [{ kind: "visual", parentId: null, depth: 1 }];
   pushRenderChildren(stack, children.get(null) ?? [], 1);
 
   while (stack.length > 0 && !state.stopped) {
-    const { node, depth } = stack.pop() as { node: VomNode; depth: number };
+    const task = stack.pop() as RenderTask;
+    if (task.kind === "visual") {
+      emitVisualEntries(task.parentId, task.depth, state);
+      continue;
+    }
+    const { node, depth } = task;
 
     if (!shouldRender(node)) {
+      stack.push({ kind: "visual", parentId: node.id, depth });
       pushRenderChildren(stack, children.get(node.id) ?? [], depth);
       continue;
     }
@@ -935,9 +945,9 @@ function renderTree(children: Map<number | null, VomNode[]>, state: RenderState)
       emitVisualEntries(node.id, depth + 1, state);
       continue;
     }
+    stack.push({ kind: "visual", parentId: node.id, depth: depth + 1 });
     pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
   }
-  emitVisualEntries(parentId, depth, state);
 }
 
 function renderNodes(
