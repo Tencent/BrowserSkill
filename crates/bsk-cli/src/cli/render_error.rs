@@ -252,7 +252,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::PermissionDenied, reason::REF_CAPABILITY_DENIED) => RenderInfo {
             summary: "snapshot ref does not support this operation",
             hint: Some(
-                "visual surface refs are screenshot-only; run `bsk screenshot --ref <ref> --session <id>`",
+                "visual surface refs are screenshot-only; inspect `bsk screenshot --ref <ref> --session <id>` with image-understanding capability",
             ),
             exit_code: base.exit_code,
         },
