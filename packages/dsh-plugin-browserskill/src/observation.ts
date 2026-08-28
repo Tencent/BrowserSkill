@@ -18,12 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import type { KeyedExecutor } from "./queue";
-import {
-  BskError,
-  type BskRunner,
-  parseBskJson,
-  runWithSessionBusyRetry,
-} from "./runner";
+import { BskError, type BskRunner, parseBskJson, runWithSessionBusyRetry } from "./runner";
 import type { SessionRegistry } from "./sessions";
 
 /** One owned session's live observation record (wire-stable shape). */
@@ -490,7 +485,6 @@ export class ObservationService {
     this.hashes.delete(sessionId);
     this.seqs.delete(sessionId);
   }
-
 }
 
 function isSessionNotFoundCode(code: string | undefined): boolean {
