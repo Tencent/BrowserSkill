@@ -44,6 +44,8 @@ pub mod reason {
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
+    pub const FOCUS_TARGET_UNRESOLVED: &str = "focus_target_unresolved";
+    pub const INPUT_NOT_APPLIED: &str = "input_not_applied";
     pub const TARGET_NOT_SELECT: &str = "target_not_select";
     pub const OPTION_NOT_FOUND: &str = "option_not_found";
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
@@ -231,6 +233,20 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "target element is not fillable",
             hint: Some(
                 "choose an input, textarea, or contenteditable element from the latest snapshot",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FOCUS_TARGET_UNRESOLVED) => RenderInfo {
+            summary: "focused frame target could not be determined",
+            hint: Some(
+                "pass an explicit --ref or --selector so the key event can be routed safely",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::INPUT_NOT_APPLIED) => RenderInfo {
+            summary: "the page did not retain the requested input",
+            hint: Some(
+                "refresh the snapshot and retry; the page may be rejecting or resetting controlled input",
             ),
             exit_code: base.exit_code,
         },
@@ -531,5 +547,21 @@ mod tests {
             "single-select requires exactly one option value"
         );
         assert!(info.hint.unwrap().contains("exactly one"));
+    }
+
+    #[test]
+    fn focus_target_unresolved_overrides_cdp_copy() {
+        let data = serde_json::json!({ "reason": reason::FOCUS_TARGET_UNRESOLVED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(info.summary, "focused frame target could not be determined");
+        assert!(info.hint.unwrap().contains("--ref"));
+    }
+
+    #[test]
+    fn input_not_applied_overrides_cdp_copy() {
+        let data = serde_json::json!({ "reason": reason::INPUT_NOT_APPLIED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(info.summary, "the page did not retain the requested input");
+        assert!(info.hint.unwrap().contains("rejecting"));
     }
 }

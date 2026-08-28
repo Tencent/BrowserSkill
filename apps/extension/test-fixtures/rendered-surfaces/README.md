@@ -93,6 +93,29 @@ Run with a `900x700` Agent Window.
 - `fixture-below-fold` is absent initially.
 - After scrolling it into view and observing again, `fixture-below-fold` must be represented with a fresh ref.
 
+### `input-frames.html`
+
+This page exercises generic frame-aware input routing. It contains a top-level
+input plus same-origin, cross-origin (OOPIF), and nested frame inputs. Each
+frame includes an input, textarea, contenteditable editor, and a controlled
+input that resets its value on the next animation frame.
+
+- `fill` must route focus, text insertion, DOM events, and readback through the
+  ref's owning CDP target.
+- `press --ref` must focus and dispatch every key event through that same target.
+- Untargeted `press` must follow the actual focused target or refuse when focus
+  ownership cannot be determined uniquely.
+- The rejecting input must return `input_not_applied`, never a successful
+  requested-value length.
+
+### `canvas-input.html`
+
+This is the PR3 end-to-end fixture. Its cross-origin frame contains a
+visual-only three-row Canvas. A screenshot-bound click on row 3 exposes and
+focuses a standard textbox; ordinary `fill` must then write and read back its
+real value through the textbox's owning target. The fixture deliberately does
+not provide a Canvas-specific fill action.
+
 ### `dynamic.html`
 
 Use the normal DOM buttons and re-observe after each action:

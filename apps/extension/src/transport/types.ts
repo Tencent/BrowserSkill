@@ -27,6 +27,8 @@ export type RpcErrorReason =
   | "ref_not_found"
   | "selector_not_found"
   | "target_not_fillable"
+  | "focus_target_unresolved"
+  | "input_not_applied"
   | "target_not_select"
   | "option_not_found"
   | "single_select_value_count"

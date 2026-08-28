@@ -19,6 +19,18 @@
       if (params.get("canvas") === "0") canvas.remove();
       else {
         canvas.setAttribute("aria-label", params.get("label") || "fixture-frame-default");
+        if (params.get("editor") === "1") {
+          const context = canvas.getContext("2d");
+          context.font = "14px system-ui, sans-serif";
+          context.textBaseline = "middle";
+          context.strokeStyle = "#1e8449";
+          context.fillStyle = "#145a32";
+          for (let row = 0; row < 3; row += 1) {
+            const top = row * 30;
+            context.strokeRect(0.5, top + 0.5, 219, 29);
+            context.fillText(`Row ${row + 1}`, 12, top + 15);
+          }
+        }
         if (params.get("interactive") === "1") {
           const status = document.createElement("p");
           status.id = "pointer-status";
@@ -39,6 +51,22 @@
           canvas.addEventListener("click", () => {
             status.textContent += "; click received";
           });
+          if (params.get("editor") === "1") {
+            canvas.addEventListener("click", (event) => {
+              const rect = canvas.getBoundingClientRect();
+              const canvasY = ((event.clientY - rect.top) / rect.height) * canvas.height;
+              const row = Math.min(2, Math.max(0, Math.floor(canvasY / 30)));
+              status.textContent += `; selected row=${row + 1}`;
+              document.querySelector("#canvas-cell-editor")?.remove();
+              if (row !== 2) return;
+              const editor = document.createElement("input");
+              editor.id = "canvas-cell-editor";
+              editor.setAttribute("aria-label", "selected canvas cell editor");
+              editor.placeholder = "Type into selected row 3";
+              canvas.insertAdjacentElement("afterend", editor);
+              editor.focus();
+            });
+          }
         }
       }
       if (params.get("nested") === "1") {

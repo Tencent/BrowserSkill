@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body { margin: 0; padding: 12px; font: 14px system-ui, sans-serif; }
+      label, textarea, input, [contenteditable] { display: block; margin: 8px 0; }
+      input, textarea, [contenteditable] { width: 240px; padding: 6px; border: 1px solid #85929e; }
+      iframe { width: 280px; height: 190px; border: 2px solid #85929e; }
+    </style>
+  </head>
+  <body>
+    <label>Frame input <input aria-label="frame input" /></label>
+    <label>Frame textarea <textarea aria-label="frame textarea"></textarea></label>
+    <div contenteditable="true" aria-label="frame editor"></div>
+    <label>Rejecting input <input id="rejecting" aria-label="rejecting input" /></label>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const rejecting = document.querySelector("#rejecting");
+      rejecting.addEventListener("input", () => requestAnimationFrame(() => { rejecting.value = ""; }));
+      if (params.get("nested") === "1") {
+        const iframe = document.createElement("iframe");
+        iframe.title = "nested input frame";
+        iframe.src = "input-frame.html";
+        document.body.append(iframe);
+      }
+    </script>
+  </body>
+</html>

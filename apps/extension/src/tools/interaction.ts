@@ -11,7 +11,7 @@
 //    commands.
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { CdpTarget } from "@/browser-driver/frame-graph";
+import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   ClickParams,
@@ -215,6 +215,108 @@ async function resolveBackendNode(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+interface InputDispatchContext {
+  target: CdpTarget;
+  cdp: CdpRunner;
+  backendNodeId?: number;
+  frameId?: string;
+  usedRef?: string;
+  usedSelector?: string;
+}
+
+function inputContextForNode(
+  cdp: CdpRunner,
+  node: Awaited<ReturnType<typeof resolveBackendNode>>,
+): (InputDispatchContext & { backendNodeId: number }) | RpcError {
+  if (isRpcError(node)) return node;
+  return {
+    target: node.cdpTarget,
+    cdp: cdpRunnerForTarget(cdp, node.cdpTarget),
+    backendNodeId: node.backendNodeId,
+    frameId: node.frameId,
+    usedRef: node.usedRef,
+    usedSelector: node.usedSelector,
+  };
+}
+
+interface FocusProbe {
+  hasFocus: boolean;
+  activeTag: string;
+}
+
+/** Resolve keyboard input to the CDP target that currently owns focus. */
+async function resolveFocusedInputContext(
+  cdp: CdpRunner,
+  tabId: number,
+): Promise<InputDispatchContext | RpcError> {
+  if (!cdp.getFrameGraph) {
+    return rpcError(
+      "cdp_failed",
+      "focus_target_unresolved",
+      "press cannot determine the focused frame target",
+    );
+  }
+
+  let targets: CdpTarget[];
+  try {
+    const graph = await cdp.getFrameGraph(tabId);
+    const unique = new Map<string, CdpTarget>();
+    unique.set(cdpTargetKey({ tabId }), { tabId });
+    for (const frame of graph.frames) unique.set(cdpTargetKey(frame.target), frame.target);
+    targets = [...unique.values()];
+  } catch (err) {
+    return rpcError(
+      "cdp_failed",
+      "focus_target_unresolved",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
+  const focused: Array<{ target: CdpTarget; probe: FocusProbe }> = [];
+  await Promise.all(
+    targets.map(async (candidate) => {
+      try {
+        const reply = await cdpRunnerForTarget(cdp, candidate).send<{
+          result?: { value?: FocusProbe };
+        }>(tabId, "Runtime.evaluate", {
+          expression: `(() => {
+            /* bsk-focus-target-probe */
+            const active = document.activeElement;
+            return {
+              hasFocus: document.hasFocus(),
+              activeTag: active instanceof Element ? active.tagName.toLowerCase() : ''
+            };
+          })()`,
+          returnByValue: true,
+        });
+        const probe = reply.result?.value;
+        if (probe?.hasFocus) focused.push({ target: candidate, probe });
+      } catch {
+        // A target may navigate or detach while the graph is being probed.
+      }
+    }),
+  );
+
+  // A top document whose active element is an iframe delegates focus to
+  // that frame. Removing those delegating targets leaves the deepest OOPIF
+  // target while same-process frames continue to use the shared root target.
+  const owners = focused.filter(
+    ({ probe }) => probe.activeTag !== "iframe" && probe.activeTag !== "frame",
+  );
+  if (owners.length !== 1) {
+    return rpcError(
+      "cdp_failed",
+      "focus_target_unresolved",
+      owners.length === 0
+        ? "press found no unique focused frame target"
+        : "press found multiple focused frame targets",
+      { candidate_count: owners.length },
+    );
+  }
+  const target = owners[0].target;
+  return { target, cdp: cdpRunnerForTarget(cdp, target) };
 }
 
 // ---------------------------------------------------------------------------
@@ -618,8 +720,9 @@ export async function handleFill(
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
-  if (isRpcError(node)) return node;
-  const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  const input = inputContextForNode(deps.cdp, node);
+  if (isRpcError(input)) return input;
+  const nodeCdp = input.cdp;
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -627,7 +730,7 @@ export async function handleFill(
       target.tabId,
       "DOM.describeNode",
       {
-        backendNodeId: node.backendNodeId,
+        backendNodeId: input.backendNodeId,
       },
     );
     if (!described.node || !isFillable(described.node)) {
@@ -640,15 +743,15 @@ export async function handleFill(
     const scrollErr = await scrollElementAndFramesIntoView(
       deps.cdp,
       target.tabId,
-      node.cdpTarget,
-      node.backendNodeId,
-      node.frameId,
+      input.target,
+      input.backendNodeId,
+      input.frameId,
     );
     if (scrollErr) return scrollErr;
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
-    await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+    await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: input.backendNodeId });
   } catch (err) {
     return {
       code: "cdp_failed",
@@ -660,7 +763,7 @@ export async function handleFill(
     return { code: "cancelled", message: "fill aborted" };
   }
 
-  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, node.backendNodeId);
+  const objectIdOrErr = await backendNodeToObject(nodeCdp, target.tabId, input.backendNodeId);
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
   const objectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
@@ -691,7 +794,7 @@ export async function handleFill(
     }
     // CDP `Input.insertText` handles IME / multi-byte input out of the
     // box, much more reliably than per-key `dispatchKeyEvent`.
-    await deps.cdp.send(target.tabId, "Input.insertText", { text: params.value });
+    await nodeCdp.send(target.tabId, "Input.insertText", { text: params.value });
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
@@ -704,6 +807,28 @@ export async function handleFill(
       }`,
       returnByValue: true,
     });
+    // Give controlled inputs one bounded browser-render turn to accept or
+    // reject the dispatched value before reporting success.
+    await nodeCdp.send(target.tabId, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        /* bsk-input-sync */
+        return new Promise((resolve) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(finish, 100);
+          if (typeof requestAnimationFrame !== 'function') { finish(); return; }
+          requestAnimationFrame(() => requestAnimationFrame(finish));
+        });
+      }`,
+      awaitPromise: true,
+      returnByValue: true,
+    });
   } catch (err) {
     return {
       code: "cdp_failed",
@@ -711,11 +836,56 @@ export async function handleFill(
     };
   }
 
+  if (throwIfAborted(deps.signal)) {
+    return { code: "cancelled", message: "fill aborted" };
+  }
+
+  let actualValue: string;
+  try {
+    const readback = await nodeCdp.send<{
+      result?: { value?: { supported?: boolean; value?: string } };
+    }>(target.tabId, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        /* bsk-input-readback */
+        if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
+          return { supported: true, value: this.value };
+        }
+        if (this.isContentEditable) {
+          return { supported: true, value: this.innerText ?? this.textContent ?? '' };
+        }
+        return { supported: false, value: '' };
+      }`,
+      returnByValue: true,
+    });
+    const state = readback.result?.value;
+    actualValue = typeof state?.value === "string" ? state.value : "";
+    const applied =
+      state?.supported === true &&
+      (clearBefore
+        ? actualValue === params.value
+        : params.value.length === 0 || actualValue.includes(params.value));
+    if (!applied) {
+      return rpcError(
+        "cdp_failed",
+        "input_not_applied",
+        "the page did not retain the requested input value",
+        { expected_value_length: params.value.length, actual_value_length: actualValue.length },
+      );
+    }
+  } catch (err) {
+    return rpcError(
+      "cdp_failed",
+      "input_not_applied",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
-    used_ref: node.usedRef,
-    used_selector: node.usedSelector,
-    value_length: params.value.length,
+    used_ref: input.usedRef,
+    used_selector: input.usedSelector,
+    value_length: actualValue.length,
   });
 }
 
@@ -890,31 +1060,38 @@ export async function handlePress(
     };
   }
 
+  let input: InputDispatchContext | RpcError;
   // Optional focus before key dispatch.
   if (params.ref || params.selector) {
     const node = await resolveBackendNode(deps.cdp, ctx, target, params, "press");
-    if (isRpcError(node)) return node;
-    const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+    const explicitInput = inputContextForNode(deps.cdp, node);
+    if (isRpcError(explicitInput)) return explicitInput;
+    input = explicitInput;
     try {
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       const scrollErr = await scrollElementAndFramesIntoView(
         deps.cdp,
         target.tabId,
-        node.cdpTarget,
-        node.backendNodeId,
-        node.frameId,
+        explicitInput.target,
+        explicitInput.backendNodeId,
+        explicitInput.frameId,
       );
       if (scrollErr) return scrollErr;
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "press aborted" };
       }
-      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+      await explicitInput.cdp.send(target.tabId, "DOM.focus", {
+        backendNodeId: explicitInput.backendNodeId,
+      });
     } catch (err) {
       return {
         code: "cdp_failed",
         message: err instanceof Error ? err.message : String(err),
       };
     }
+  } else {
+    input = await resolveFocusedInputContext(deps.cdp, target.tabId);
+    if (isRpcError(input)) return input;
   }
 
   if (throwIfAborted(deps.signal)) {
@@ -928,7 +1105,7 @@ export async function handlePress(
   try {
     let cancelled = false;
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+    await input.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
       type: "rawKeyDown",
       key: descriptor.key,
       code: descriptor.code,
@@ -942,7 +1119,7 @@ export async function handlePress(
       typeof descriptor.text === "string" &&
       descriptor.text.length > 0
     ) {
-      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+      await input.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "char",
         key: descriptor.key,
         code: descriptor.code,
@@ -959,7 +1136,7 @@ export async function handlePress(
         cancelled = true;
       }
     }
-    await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+    await input.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
       type: "keyUp",
       key: descriptor.key,
       code: descriptor.code,
