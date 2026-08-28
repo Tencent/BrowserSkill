@@ -581,9 +581,15 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           type: "integer",
           description: "Number of consecutive presses (double-click = 2).",
         },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
+          description: "Keyboard modifiers held during the click.",
+        },
         captureId: {
           type: "string",
-          description: "Short-lived Surface capture id returned by browser_screenshot.",
+          description:
+            "Short-lived Surface capture id returned by browser_inspect action=screenshot.",
         },
         imageX: {
           type: "number",
@@ -626,6 +632,9 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         const cmdArgs = ["click", "--session", sessionId];
         if (args.button !== undefined) cmdArgs.push("--button", args.button);
         if (args.clickCount !== undefined) cmdArgs.push("--click-count", String(args.clickCount));
+        if (args.modifiers !== undefined && args.modifiers.length > 0) {
+          cmdArgs.push("--modifiers", args.modifiers.join(","));
+        }
         if (args.captureId !== undefined) {
           cmdArgs.push(
             "--capture",

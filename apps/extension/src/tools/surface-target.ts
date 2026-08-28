@@ -1,19 +1,9 @@
 import type { CdpFrameGraph } from "@/browser-driver/frame-graph";
-import type { SessionManager } from "@/session-manager/manager";
-import type { ClickParams, ClickResult, RpcError } from "@/transport/types";
-import { attachDialogs, markDialogCursor } from "./dialogs";
+import type { SessionContext } from "@/session-manager/manager";
+import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
-import { dispatchMouseClick } from "./mouse-input";
-import {
-  type CdpRunner,
-  type ChromeTabsApi,
-  enforceAgentWindow,
-  isRpcError,
-  lookupSession,
-  normaliseRef,
-  resolveTargetTab,
-} from "./shared";
+import { type CdpRunner, isRpcError, normaliseRef } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import {
   mapImagePointToViewport,
@@ -28,16 +18,33 @@ export interface SurfaceCaptureEnvironment {
   frameProjectionSignature: string;
 }
 
-export interface SurfacePointActionDeps {
+export interface SurfaceTargetResolverDeps {
   cdp: CdpRunner;
-  tabsApi: ChromeTabsApi;
   signal?: AbortSignal;
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
+}
+
+export interface SurfacePointerTargetInput {
+  ref?: string;
+  selector?: string;
+  captureId?: string;
+  imageX?: number;
+  imageY?: number;
+}
+
+export interface ResolvedSurfacePointerTarget {
+  point: { x: number; y: number };
+  usedRef: string;
+  moveSettleMs: number;
+  capture: {
+    id: string;
+    imageX: number;
+    imageY: number;
+  };
 }
 
 // Canvas-style controls commonly update their pointer hit-test on the next
 // animation frame. Leave a scheduling boundary after moving and before pressing.
-const SURFACE_POINTER_MOVE_SETTLE_MS = 32;
+export const SURFACE_POINTER_MOVE_SETTLE_MS = 32;
 
 function stale(message: string): RpcError {
   return rpcError("permission_denied", "surface_capture_stale", message);
@@ -126,30 +133,21 @@ export async function captureSurfaceEnvironment(
   }
 }
 
-function validatePointParams(params: ClickParams): RpcError | null {
-  if (!params.capture_id || typeof params.capture_id !== "string") {
+function validatePointParams(input: SurfacePointerTargetInput): RpcError | null {
+  if (!input.captureId || typeof input.captureId !== "string") {
     return { code: "invalid_params", message: "surface point click requires capture_id" };
   }
-  if (typeof params.image_x !== "number" || !Number.isFinite(params.image_x)) {
+  if (typeof input.imageX !== "number" || !Number.isFinite(input.imageX)) {
     return { code: "invalid_params", message: "image_x must be a finite number" };
   }
-  if (typeof params.image_y !== "number" || !Number.isFinite(params.image_y)) {
+  if (typeof input.imageY !== "number" || !Number.isFinite(input.imageY)) {
     return { code: "invalid_params", message: "image_y must be a finite number" };
   }
-  if (!params.ref || params.selector) {
+  if (!input.ref || input.selector) {
     return {
       code: "invalid_params",
       message: "surface point click requires one Surface ref and does not accept a selector",
     };
-  }
-  if ((params.button ?? "left") !== "left" || (params.click_count ?? 1) !== 1) {
-    return {
-      code: "invalid_params",
-      message: "surface point click currently supports one left click only",
-    };
-  }
-  if (params.modifiers && params.modifiers.length > 0) {
-    return { code: "invalid_params", message: "surface point click does not accept modifiers" };
   }
   return null;
 }
@@ -160,27 +158,24 @@ function captureConsumeError(reason: "not_found" | "expired" | "consumed"): RpcE
 }
 
 function aborted(signal: AbortSignal | undefined): RpcError | null {
-  return signal?.aborted ? { code: "cancelled", message: "surface point click aborted" } : null;
+  return signal?.aborted
+    ? { code: "cancelled", message: "surface target resolution aborted" }
+    : null;
 }
 
-export async function handleSurfacePointClick(
-  manager: SessionManager,
-  params: ClickParams,
-  deps: SurfacePointActionDeps,
-): Promise<ClickResult | RpcError> {
-  const invalid = validatePointParams(params);
+/** Resolve one fresh Surface capture coordinate into a validated top-viewport pointer target. */
+export async function resolveSurfacePointerTarget(
+  ctx: SessionContext,
+  target: { tabId: number; url?: string },
+  input: SurfacePointerTargetInput,
+  deps: SurfaceTargetResolverDeps,
+): Promise<ResolvedSurfacePointerTarget | RpcError> {
+  const invalid = validatePointParams(input);
   if (invalid) return invalid;
-  const ctxOrError = lookupSession(manager, params, "click");
-  if (isRpcError(ctxOrError)) return ctxOrError;
-  const ctx = ctxOrError;
   const earlyAbort = aborted(deps.signal);
   if (earlyAbort) return earlyAbort;
-  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
-  if (isRpcError(target)) return target;
-  const denied = enforceAgentWindow(ctx, target, "click");
-  if (denied) return denied;
 
-  const consumed = ctx.surfaceCaptures.consume(params.capture_id as string);
+  const consumed = ctx.surfaceCaptures.consume(input.captureId as string);
   if (!consumed.ok) return captureConsumeError(consumed.reason);
   const capture = consumed.capture;
   const postConsumeAbort = aborted(deps.signal);
@@ -189,10 +184,10 @@ export async function handleSurfacePointClick(
   if (capture.sessionId !== ctx.sessionId || capture.tabId !== target.tabId) {
     return stale("surface capture belongs to a different session or tab");
   }
-  if (normaliseRef(params.ref as string) !== capture.surface.ref) {
+  if (normaliseRef(input.ref as string) !== capture.surface.ref) {
     return stale("surface ref does not match the capture");
   }
-  const node = resolveSnapshotRef(ctx, params.ref as string, target.tabId, "screenshot");
+  const node = resolveSnapshotRef(ctx, input.ref as string, target.tabId, "screenshot");
   if (isRpcError(node)) return stale(node.message);
   if (
     node.kind !== "surface" ||
@@ -241,8 +236,8 @@ export async function handleSurfacePointClick(
     capture.topViewportRect,
     capture.imageWidth,
     capture.imageHeight,
-    params.image_x as number,
-    params.image_y as number,
+    input.imageX as number,
+    input.imageY as number,
   );
   if (!point || !pointInRegion(point, geometry.topVisibleRegions)) {
     return rpcError(
@@ -252,42 +247,14 @@ export async function handleSurfacePointClick(
     );
   }
 
-  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-  let bypassEnabled = false;
-  try {
-    if (deps.bypassOverlay) {
-      await deps.bypassOverlay(target.tabId, true);
-      bypassEnabled = true;
-    }
-    const dispatch = await dispatchMouseClick(deps.cdp, target.tabId, point, {
-      button: "left",
-      clickCount: 1,
-      modifiers: 0,
-      signal: deps.signal,
-      moveSettleMs: SURFACE_POINTER_MOVE_SETTLE_MS,
-    });
-    if (dispatch === "cancelled") {
-      return { code: "cancelled", message: "surface point click aborted" };
-    }
-  } catch (error) {
-    return { code: "cdp_failed", message: error instanceof Error ? error.message : String(error) };
-  } finally {
-    if (bypassEnabled && deps.bypassOverlay) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch (error) {
-        console.debug("[bsk surface-point] overlay bypass disable failed", error);
-      }
-    }
-  }
-
-  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-    tab_id: target.tabId,
-    used_ref: capture.surface.ref,
-    x: point.x,
-    y: point.y,
-    capture_id: capture.id,
-    image_x: params.image_x,
-    image_y: params.image_y,
-  });
+  return {
+    point,
+    usedRef: capture.surface.ref,
+    moveSettleMs: SURFACE_POINTER_MOVE_SETTLE_MS,
+    capture: {
+      id: capture.id,
+      imageX: input.imageX as number,
+      imageY: input.imageY as number,
+    },
+  };
 }

@@ -325,7 +325,15 @@ export interface ScreenshotResult {
   height: number;
   format: string;
   tab_id: number;
+  capture?: SurfaceCaptureInfo;
   dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface SurfaceCaptureInfo {
+  id: string;
+  surface_ref: string;
+  coordinate_space: "capture-image-pixel";
+  expires_at: number;
 }
 
 export interface SnapshotParams {
@@ -446,6 +454,9 @@ export interface ClickParams {
   click_count?: number;
   modifiers?: KeyModifier[];
   timeout_ms?: number;
+  capture_id?: string;
+  image_x?: number;
+  image_y?: number;
 }
 
 export interface ClickResult {
@@ -454,6 +465,9 @@ export interface ClickResult {
   used_selector?: string;
   x: number;
   y: number;
+  capture_id?: string;
+  image_x?: number;
+  image_y?: number;
   dialogs?: JavaScriptDialogInfo[];
 }
 

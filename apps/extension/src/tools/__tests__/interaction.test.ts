@@ -11,6 +11,7 @@ import {
   parseKeySpec,
   resolveKeyDescriptor,
 } from "../interaction";
+import { captureSurfaceEnvironment } from "../surface-target";
 
 function fakeAgentWindow(ids: number[]) {
   let i = 0;
@@ -52,6 +53,61 @@ function makeFakeCdp(handlers: Record<string, (params: unknown) => unknown>) {
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
   return { cdp, tabsApi, sent };
+}
+
+async function makeSurfaceClickFixture(onMouse?: (params: Record<string, unknown>) => void) {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  const context = await manager.start("aa11");
+  context.refStore.set("e3", 99, {
+    tabId: 4,
+    kind: "surface",
+    visibleRect: { x: 10, y: 20, w: 100, h: 40 },
+  });
+  const fake = makeFakeCdp({
+    "Page.getFrameTree": () => ({
+      frameTree: {
+        frame: { id: "main", loaderId: "loader-1", url: "https://fixture.test/" },
+      },
+    }),
+    "Page.getLayoutMetrics": () => ({
+      cssLayoutViewport: { clientWidth: 800, clientHeight: 600, pageX: 0, pageY: 0 },
+      cssVisualViewport: {
+        clientWidth: 800,
+        clientHeight: 600,
+        pageX: 0,
+        pageY: 0,
+        scale: 1,
+      },
+    }),
+    "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+    "Runtime.evaluate": () => ({
+      result: { value: { overlayHostPresent: false, overlayHostConnected: false } },
+    }),
+    "Input.dispatchMouseEvent": (params) => {
+      onMouse?.(params as Record<string, unknown>);
+      return {};
+    },
+  });
+  const environment = await captureSurfaceEnvironment(fake.cdp, 4, undefined);
+  if ("code" in environment) throw new Error(environment.message);
+  const entry = context.refStore.resolveEntry("e3");
+  if (!entry) throw new Error("missing Surface ref");
+  const capture = context.surfaceCaptures.create({
+    sessionId: "aa11",
+    tabId: 4,
+    navigationIdentity: environment.navigationIdentity,
+    surface: {
+      ref: "e3",
+      backendNodeId: 99,
+      observationGeneration: entry.generation,
+    },
+    topViewportRect: { x: 10, y: 20, w: 100, h: 40 },
+    imageWidth: 200,
+    imageHeight: 80,
+    viewportSignature: environment.viewportSignature,
+    frameProjectionSignature: environment.frameProjectionSignature,
+  });
+  return { manager, context, fake, capture };
 }
 
 describe("modifiersBitfield", () => {
@@ -188,6 +244,74 @@ describe("handleClick", () => {
       button: "left",
       clickCount: 2,
     });
+  });
+
+  it.each([
+    "left",
+    "middle",
+    "right",
+  ] as const)("uses the common click executor for a %s-button Surface click", async (button) => {
+    const { manager, fake, capture } = await makeSurfaceClickFixture();
+    const result = await handleClick(
+      manager,
+      {
+        session_id: "aa11",
+        ref: "@e3",
+        capture_id: capture.id,
+        image_x: 50,
+        image_y: 20,
+        button,
+        click_count: 2,
+        modifiers: ["ctrl", "shift"],
+      },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in result) throw new Error(JSON.stringify(result));
+    expect(result).toMatchObject({
+      used_ref: "e3",
+      capture_id: capture.id,
+      image_x: 50,
+      image_y: 20,
+      x: 35,
+      y: 30,
+    });
+    const mouse = fake.sent.filter((call) => call.method === "Input.dispatchMouseEvent");
+    expect(mouse).toHaveLength(3);
+    expect(mouse[1].params).toMatchObject({
+      type: "mousePressed",
+      button,
+      clickCount: 2,
+      modifiers: 2 | 8,
+    });
+    expect(mouse[2].params).toMatchObject({
+      type: "mouseReleased",
+      button,
+      clickCount: 2,
+    });
+  });
+
+  it("consumes a Surface capture when the common click executor fails", async () => {
+    let mouseCalls = 0;
+    const { manager, fake, capture } = await makeSurfaceClickFixture((params) => {
+      mouseCalls += 1;
+      if (params.type === "mousePressed") throw new Error("input failed");
+    });
+    const params = {
+      session_id: "aa11",
+      ref: "@e3",
+      capture_id: capture.id,
+      image_x: 50,
+      image_y: 20,
+    };
+
+    expect(
+      await handleClick(manager, params, { cdp: fake.cdp, tabsApi: fake.tabsApi }),
+    ).toMatchObject({ code: "cdp_failed" });
+    expect(mouseCalls).toBe(2);
+    expect(
+      await handleClick(manager, params, { cdp: fake.cdp, tabsApi: fake.tabsApi }),
+    ).toMatchObject({ data: { reason: "surface_capture_consumed" } });
   });
 
   it("resolves frame refs in their CDP session and dispatches input in top coordinates", async () => {
