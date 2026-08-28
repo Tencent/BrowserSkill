@@ -36,6 +36,8 @@ Drive the user's **real Chromium browser** (with their logins and cookies) throu
 
 Every automation task **must** follow this lifecycle. Do **not** rely on idle timeouts (default session idle is 5 minutes).
 
+**Preflight before parallel tasks.** All sessions in a browser share one cookie jar, so two tasks hitting the same logged-in site overwrite each other's login state silently. Before running tasks in parallel, run `bsk session list` and `bsk tab list --session <id> --scope all --json` to check for domain overlap. If the target domain overlaps an active session's agent tab, run the tasks SERIALLY, or use a separate browser profile (install the extension there, then `bsk session start --browser <instance-id>`), since different profiles have isolated cookie jars. If you expect N parallel tasks, ensure ≥ N active sessions.
+
 ```
 1. bsk session start              → capture the 4-letter session id printed on stdout
 2. … every tool command …        → always pass --session <id>
