@@ -325,3 +325,180 @@ jobs:
 
           echo "Chrome Web Store submission created successfully:"
           jq '{itemId, state, warningInfo}' "$PUBLISH_RESPONSE"
+
+  publish-edge-addons:
+    needs: [resolve, build-extension]
+    runs-on: ubuntu-latest
+    environment: edge-addons
+    permissions:
+      contents: read
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: extension-zip
+          path: dist
+
+      - name: Validate Microsoft Edge Add-ons configuration
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.EDGE_ADDONS_API_KEY }}
+          CLIENT_ID: ${{ vars.EDGE_ADDONS_CLIENT_ID }}
+          PRODUCT_ID: ${{ vars.EDGE_ADDONS_PRODUCT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$API_KEY" ]; then
+            echo "::error::Environment secret EDGE_ADDONS_API_KEY is not configured"
+            exit 1
+          fi
+          if [ -z "$CLIENT_ID" ]; then
+            echo "::error::Environment variable EDGE_ADDONS_CLIENT_ID is not configured"
+            exit 1
+          fi
+          if [ -z "$PRODUCT_ID" ]; then
+            echo "::error::Environment variable EDGE_ADDONS_PRODUCT_ID is not configured"
+            exit 1
+          fi
+          if ! [[ "$PRODUCT_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::EDGE_ADDONS_PRODUCT_ID must be the Partner Center product GUID, not the public Edge Add-ons extension ID"
+            exit 1
+          fi
+
+          ARCHIVE="$(find dist -maxdepth 1 -name '*.zip' -type f -print -quit)"
+          if [ -z "$ARCHIVE" ]; then
+            echo "::error::No extension zip found in the downloaded artifact"
+            exit 1
+          fi
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload and publish Microsoft Edge Add-ons extension
+        shell: bash
+        env:
+          API_KEY: ${{ secrets.EDGE_ADDONS_API_KEY }}
+          CLIENT_ID: ${{ vars.EDGE_ADDONS_CLIENT_ID }}
+          PRODUCT_ID: ${{ vars.EDGE_ADDONS_PRODUCT_ID }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          API_ROOT="https://api.addons.microsoftedge.microsoft.com/v1"
+          UPLOAD_HEADERS="$RUNNER_TEMP/edge-upload-headers.txt"
+          UPLOAD_RESPONSE="$RUNNER_TEMP/edge-upload-response.json"
+          STATUS_RESPONSE="$RUNNER_TEMP/edge-status-response.json"
+          PUBLISH_HEADERS="$RUNNER_TEMP/edge-publish-headers.txt"
+          PUBLISH_RESPONSE="$RUNNER_TEMP/edge-publish-response.json"
+
+          operation_id_from_headers() {
+            local headers="$1"
+            local location
+            location="$(awk '
+              tolower($1) == "location:" {
+                sub(/\r$/, "")
+                sub(/^[^:]*:[[:space:]]*/, "")
+                print
+                exit
+              }
+            ' "$headers")"
+            location="${location%%\?*}"
+            printf '%s' "${location##*/}"
+          }
+
+          poll_operation() {
+            local operation_name="$1"
+            local status_url="$2"
+            local status="InProgress"
+            local http_status
+
+            for attempt in $(seq 1 30); do
+              sleep 5
+              http_status="$(curl --silent --show-error \
+                --output "$STATUS_RESPONSE" \
+                --write-out '%{http_code}' \
+                --header "Authorization: ApiKey $API_KEY" \
+                --header "X-ClientID: $CLIENT_ID" \
+                "$status_url")"
+              if [ "$http_status" -lt 200 ] || [ "$http_status" -ge 300 ]; then
+                echo "::error::Microsoft Edge Add-ons $operation_name status check failed with HTTP $http_status"
+                jq . "$STATUS_RESPONSE" || cat "$STATUS_RESPONSE"
+                exit 1
+              fi
+
+              status="$(jq -r '.status // empty' "$STATUS_RESPONSE")"
+              echo "$operation_name status check $attempt/30: $status"
+              case "$status" in
+                Succeeded)
+                  return 0
+                  ;;
+                InProgress)
+                  ;;
+                Failed)
+                  echo "::error::Microsoft Edge Add-ons $operation_name failed"
+                  jq . "$STATUS_RESPONSE"
+                  exit 1
+                  ;;
+                *)
+                  echo "::error::Microsoft Edge Add-ons returned an unknown $operation_name status: $status"
+                  jq . "$STATUS_RESPONSE"
+                  exit 1
+                  ;;
+              esac
+            done
+
+            echo "::error::Microsoft Edge Add-ons $operation_name did not complete after 30 checks"
+            jq . "$STATUS_RESPONSE"
+            exit 1
+          }
+
+          HTTP_STATUS="$(curl --silent --show-error \
+            --output "$UPLOAD_RESPONSE" \
+            --dump-header "$UPLOAD_HEADERS" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: ApiKey $API_KEY" \
+            --header "X-ClientID: $CLIENT_ID" \
+            --header "Content-Type: application/zip" \
+            --data-binary "@$ARCHIVE" \
+            "$API_ROOT/products/$PRODUCT_ID/submissions/draft/package")"
+          if [ "$HTTP_STATUS" != "202" ]; then
+            echo "::error::Microsoft Edge Add-ons upload failed with HTTP $HTTP_STATUS"
+            jq . "$UPLOAD_RESPONSE" || cat "$UPLOAD_RESPONSE"
+            exit 1
+          fi
+
+          UPLOAD_OPERATION_ID="$(operation_id_from_headers "$UPLOAD_HEADERS")"
+          if [ -z "$UPLOAD_OPERATION_ID" ]; then
+            echo "::error::Microsoft Edge Add-ons upload response has no Location operation ID"
+            cat "$UPLOAD_HEADERS"
+            exit 1
+          fi
+          poll_operation \
+            "package upload" \
+            "$API_ROOT/products/$PRODUCT_ID/submissions/draft/package/operations/$UPLOAD_OPERATION_ID"
+
+          HTTP_STATUS="$(curl --silent --show-error \
+            --output "$PUBLISH_RESPONSE" \
+            --dump-header "$PUBLISH_HEADERS" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: ApiKey $API_KEY" \
+            --header "X-ClientID: $CLIENT_ID" \
+            --header "Content-Type: application/json" \
+            --data "{\"notes\":\"Automated BrowserSkill extension v${RELEASE_VERSION} release from GitHub Actions.\"}" \
+            "$API_ROOT/products/$PRODUCT_ID/submissions")"
+          if [ "$HTTP_STATUS" != "202" ]; then
+            echo "::error::Microsoft Edge Add-ons publish failed with HTTP $HTTP_STATUS"
+            jq . "$PUBLISH_RESPONSE" || cat "$PUBLISH_RESPONSE"
+            exit 1
+          fi
+
+          PUBLISH_OPERATION_ID="$(operation_id_from_headers "$PUBLISH_HEADERS")"
+          if [ -z "$PUBLISH_OPERATION_ID" ]; then
+            echo "::error::Microsoft Edge Add-ons publish response has no Location operation ID"
+            cat "$PUBLISH_HEADERS"
+            exit 1
+          fi
+          poll_operation \
+            "submission" \
+            "$API_ROOT/products/$PRODUCT_ID/submissions/operations/$PUBLISH_OPERATION_ID"
+
+          echo "Microsoft Edge Add-ons submission created successfully:"
+          jq '{status, message, errorCode, errors}' "$STATUS_RESPONSE"
