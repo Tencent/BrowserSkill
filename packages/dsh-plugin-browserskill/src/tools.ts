@@ -784,7 +784,11 @@ export function registerTools(deps: ToolDeps): () => void {
               additionalProperties: false,
               properties: {
                 attachmentId: { type: "string", required: true },
-                mediaType: { type: "string", required: true, const: "image/png" },
+                mediaType: {
+                  type: "string",
+                  required: true,
+                  enum: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+                },
                 bytes: { type: "integer", required: true },
                 width: { type: "integer", required: true },
                 height: { type: "integer", required: true },
@@ -854,7 +858,7 @@ export function registerTools(deps: ToolDeps): () => void {
               ? {
                   image: {
                     attachmentId: String(ref.attachmentId),
-                    mediaType: "image/png" as const,
+                    mediaType: ref.mediaType,
                     bytes: ref.bytes,
                     width: ref.width,
                     height: ref.height,

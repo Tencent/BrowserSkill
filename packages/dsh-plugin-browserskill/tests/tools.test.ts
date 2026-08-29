@@ -794,6 +794,15 @@ describe("browser_screenshot", () => {
     return path;
   }
 
+  function jpegFile(): string {
+    const dir = mkdtempSync(join(tmpdir(), "bsk-test-"));
+    const path = join(dir, "shot.png");
+    // A JPEG SOI marker (FF D8 FF) even though the file is named ".png" —
+    // mirrors captureVisibleTab returning JPEG on some Chromium builds.
+    writeFileSync(path, Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0, 1, 2, 3, 4]));
+    return path;
+  }
+
   it("returns the PNG path when no attachment store is mounted", async () => {
     const path = pngFile();
     const { tools, calls } = setup({
@@ -857,6 +866,50 @@ describe("browser_screenshot", () => {
     expect(value.image).toMatchObject({ attachmentId: "att-1", mediaType: "image/png" });
     const rendered = screenshot?.output.render({}, value as never) as { type: string }[];
     expect(rendered.map((block) => block.type)).toEqual(["text", "image"]);
+  });
+
+  it("declares the real media type when capture bytes are JPEG, not a hard-coded PNG", async () => {
+    const path = jpegFile();
+    const services = {
+      attachments: {
+        imageLimits: {
+          mediaTypes: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+          maxImageBytes: 10_000_000,
+          maxMessageImageBytes: 10_000_000,
+        },
+        saveImage: async (input: { data: Uint8Array; mediaType: string; name?: string }) => ({
+          attachmentId: "att-jpeg",
+          mediaType: input.mediaType,
+          bytes: input.data.byteLength,
+          width: 800,
+          height: 600,
+          name: input.name,
+        }),
+      },
+      llm: {
+        resolveModelInfo: async () => ({ inputModalities: ["text", "image"] }),
+      },
+    };
+    const { tools } = setup(
+      {
+        "session start": START_REPLY("s1"),
+        screenshot: { tab_id: 7, width: 800, height: 600, format: "png", path, byte_size: 9 },
+      },
+      services,
+    );
+    await startSession(tools);
+    const exec = makeExec({
+      agent: {
+        session: { requestHeader: () => ({ config: { provider: "deepseek", model: "vl" } }) },
+        options: {},
+      },
+    });
+    const screenshot = tools.get("browser_screenshot");
+    const value = (await screenshot?.execute({}, exec)) as {
+      image?: { attachmentId: string; mediaType: string };
+    };
+    // The reference media type must reflect the sniffed JPEG bytes, not "image/png".
+    expect(value.image).toMatchObject({ attachmentId: "att-jpeg", mediaType: "image/jpeg" });
   });
 
   it("stays path-only when the model route is text-only", async () => {
