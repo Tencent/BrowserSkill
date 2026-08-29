@@ -1,6 +1,6 @@
 /**
- * dsh-plugin-browserskill browser half: the `browser_screenshot` keyed
- * toolview plus the observation overlay (live thumbnails + interrupt). The
+ * dsh-plugin-browserskill browser half: the `browser_inspect` keyed toolview
+ * plus the observation overlay (live thumbnails + interrupt). The
  * default carrier is a floating card on the `shell.overlay` seat; when the
  * dsh-better-sidebar plugin provides its `betterSidebar` service, the view
  * moves into a sidebar tab instead (see observation-sidebar.tsx).
@@ -16,10 +16,10 @@ import { createElement } from "react";
 // <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).
 import "./bsk-tokens.nomodule.css";
 import "./bsk-ui.nomodule.css";
+import { BrowserInspectToolView } from "./BrowserInspectToolView";
 import { ObservationOverlay } from "./ObservationOverlay";
 import { type BetterSidebarLike, registerObservationSidebar } from "./observation-sidebar";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
-import { ScreenshotToolView } from "./ScreenshotToolView";
 
 /** Required services: slots, session-scoped attachment reads, and the overlay seat. */
 export const inject = ["slots", "sessions"];
@@ -65,9 +65,9 @@ export function apply(ctx: ClientContext): void {
   const sessions = ctx.get("sessions") as unknown as ISessions;
   ctx.slots.inject("tool.call.toolview", () =>
     ctx.slots.register(
-      { name: "tool.call.toolview", key: "browser_screenshot" },
+      { name: "tool.call.toolview", key: "browser_inspect" },
       (props: ToolCallViewProps) =>
-        createElement(ScreenshotToolView, {
+        createElement(BrowserInspectToolView, {
           ...props,
           loadImage: (attachment: ImageAttachmentRef) =>
             loadSessionImage(sessions, props.sessionId, attachment),

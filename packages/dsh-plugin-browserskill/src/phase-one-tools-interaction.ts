@@ -23,10 +23,10 @@ export function registerPhaseOneInteractionTools(
 
   register(
     defineTool({
-      name: "browser_hover",
+      name: "interact.hover",
       description:
         "Move the mouse over a snapshot ref or CSS selector to reveal hover-triggered UI. " +
-        "Run browser_observe or browser_snapshot again afterwards to discover newly visible refs.",
+        "Run browser_inspect action=observe or snapshot afterwards to discover newly visible refs.",
       parameters: {
         target: {
           type: "string",
@@ -68,7 +68,7 @@ export function registerPhaseOneInteractionTools(
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
         requirePositive(args.settleMs, "settleMs");
-        const sessionId = registry.resolve(args.session, "browser_hover");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=hover)");
         const cmdArgs = ["hover", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.modifiers !== undefined && args.modifiers.length > 0) {
@@ -102,7 +102,7 @@ export function registerPhaseOneInteractionTools(
 
   register(
     defineTool({
-      name: "browser_select",
+      name: "interact.select",
       description:
         "Set a select element's option values. Pass one value for a normal select or multiple " +
         "values for a multi-select; values replace the current selection.",
@@ -155,7 +155,7 @@ export function registerPhaseOneInteractionTools(
         requireNonEmpty(args.target, "target");
         requirePositive(args.timeoutMs, "timeoutMs");
         if (args.values.length === 0) throw new Error("values must contain at least one option");
-        const sessionId = registry.resolve(args.session, "browser_select");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=select)");
         const cmdArgs = ["select", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         for (const value of args.values) cmdArgs.push("--value", value);

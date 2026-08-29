@@ -3,7 +3,7 @@
 export const SESSION_PARAM = {
   type: "string",
   description:
-    "bsk session id to act on; must be one created by this plugin's browser_session_start. " +
+    "bsk session id to act on; must be one created by browser_session with action=start. " +
     "Omit to use the current session (the one most recently started or used).",
 } as const;
 

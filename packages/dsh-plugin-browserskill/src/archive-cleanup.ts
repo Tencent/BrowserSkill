@@ -7,7 +7,7 @@
  * are hidden from every surface, so their Agent Windows would otherwise
  * linger with no way back to them.
  *
- * Ownership lineage: browser_session_start records the calling agent's
+ * Ownership lineage: browser_session action=start records the calling agent's
  * session id PLUS every ancestor along `header.parentSession` (a subagent's
  * browsers are reaped when any ancestor is archived, the root conversation
  * included). Lineage is resolved through the host session store; an
