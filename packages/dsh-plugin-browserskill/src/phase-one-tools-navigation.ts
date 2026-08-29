@@ -51,7 +51,7 @@ export function registerPhaseOneNavigationTools(
   const { registry } = deps;
 
   const registerHistory = (direction: "back" | "forward") => {
-    const toolName = `browser_navigate_${direction}` as const;
+    const toolName = `page.${direction}` as const;
     const command = `navigate-${direction}`;
     register(
       defineTool({
@@ -106,7 +106,7 @@ export function registerPhaseOneNavigationTools(
 
   register(
     defineTool({
-      name: "browser_reload",
+      name: "page.reload",
       description:
         "Reload the active Agent Window tab and wait for a lifecycle phase. Set hard=true to " +
         "bypass the HTTP cache.",
@@ -132,7 +132,7 @@ export function registerPhaseOneNavigationTools(
       },
       async execute(args, exec) {
         requirePositive(args.timeoutMs, "timeoutMs");
-        const sessionId = registry.resolve(args.session, "browser_reload");
+        const sessionId = registry.resolve(args.session, "browser_page(action=reload)");
         const cmdArgs = ["reload", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         appendWaitOptions(cmdArgs, args.waitUntil, args.timeoutMs);
@@ -163,7 +163,7 @@ export function registerPhaseOneNavigationTools(
 
   register(
     defineTool({
-      name: "browser_wait_for_navigation",
+      name: "page.wait",
       description:
         "Wait for a page lifecycle event on the active Agent Window tab. Use after an action " +
         "that may navigate when the action result itself does not wait for navigation.",
@@ -195,7 +195,7 @@ export function registerPhaseOneNavigationTools(
       },
       async execute(args, exec) {
         requirePositive(args.timeoutMs, "timeoutMs");
-        const sessionId = registry.resolve(args.session, "browser_wait_for_navigation");
+        const sessionId = registry.resolve(args.session, "browser_page(action=wait)");
         const timeoutMs = args.timeoutMs ?? 30_000;
         const cmdArgs = ["wait-for-navigation", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);

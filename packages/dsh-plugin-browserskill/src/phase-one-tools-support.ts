@@ -143,7 +143,7 @@ export function registerPhaseOneSupportTools(
 
   register(
     defineTool({
-      name: "browser_request_help",
+      name: "assist.request-help",
       description:
         "Pause browser automation and ask the user to complete an in-page step such as login, " +
         "captcha, OTP, or confirmation. After continued/completed, observe again before using refs.",
@@ -233,7 +233,7 @@ export function registerPhaseOneSupportTools(
         if (criteria?.stableForMs !== undefined && criteria.stableForMs < 0) {
           throw new Error("completionCriteria.stableForMs must be zero or greater");
         }
-        const sessionId = registry.resolve(args.session, "browser_request_help");
+        const sessionId = registry.resolve(args.session, "browser_assist(action=request-help)");
         const timeoutMs = args.timeoutMs ?? 300_000;
         const cmdArgs = [
           "request-help",
@@ -285,10 +285,10 @@ export function registerPhaseOneSupportTools(
 
   register(
     defineTool({
-      name: "browser_get_html",
+      name: "inspect.html",
       description:
         "Read raw DOM HTML from the active Agent Window tab, optionally scoped to a fresh " +
-        "snapshot ref. Use only when browser_observe/browser_snapshot cannot answer the question.",
+        "snapshot ref. Use only when browser_inspect observe/snapshot cannot answer the question.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -326,7 +326,7 @@ export function registerPhaseOneSupportTools(
           if (!isSnapshotRef(args.ref)) throw new Error("ref must be a snapshot ref such as @e3");
         }
         requirePositive(args.maxBytes, "maxBytes");
-        const sessionId = registry.resolve(args.session, "browser_get_html");
+        const sessionId = registry.resolve(args.session, "browser_inspect(action=html)");
         const cmdArgs = ["get-html", "--session", sessionId];
         appendTabId(cmdArgs, args.tabId);
         if (args.ref !== undefined) cmdArgs.push("--ref", args.ref);
@@ -361,7 +361,7 @@ export function registerPhaseOneSupportTools(
 
   register(
     defineTool({
-      name: "browser_console",
+      name: "inspect.console",
       description:
         "Read buffered console messages, browser log entries, and JavaScript exceptions from a tab. " +
         "This is read-only and does not evaluate JavaScript.",
@@ -448,7 +448,7 @@ export function registerPhaseOneSupportTools(
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         validateDebugArgs(args);
-        const sessionId = registry.resolve(args.session, "browser_console");
+        const sessionId = registry.resolve(args.session, "browser_inspect(action=console)");
         const cmdArgs = ["console", "--session", sessionId];
         appendDebugOptions(cmdArgs, args);
         if (args.includeStack === true) cmdArgs.push("--include-stack");
@@ -493,7 +493,7 @@ export function registerPhaseOneSupportTools(
 
   register(
     defineTool({
-      name: "browser_network",
+      name: "inspect.network",
       description:
         "Read buffered network responses and failures from a tab. Returns metadata only; request " +
         "and response headers and bodies are not captured.",
@@ -552,7 +552,7 @@ export function registerPhaseOneSupportTools(
       isConcurrencySafe: () => true,
       async execute(args, exec) {
         validateDebugArgs(args);
-        const sessionId = registry.resolve(args.session, "browser_network");
+        const sessionId = registry.resolve(args.session, "browser_inspect(action=network)");
         const cmdArgs = ["network", "--session", sessionId];
         appendDebugOptions(cmdArgs, args);
         const reply = (await runtime.run(exec, cmdArgs, "network", sessionId)) as {
@@ -592,7 +592,7 @@ export function registerPhaseOneSupportTools(
 
   register(
     defineTool({
-      name: "browser_window_resize",
+      name: "assist.resize",
       description: "Resize the owned session's Agent Window using outer CSS-pixel dimensions.",
       parameters: {
         width: {
@@ -629,7 +629,7 @@ export function registerPhaseOneSupportTools(
         if (args.width < 100 || args.width > 7680 || args.height < 100 || args.height > 7680) {
           throw new Error("width and height must each be in the range 100..=7680");
         }
-        const sessionId = registry.resolve(args.session, "browser_window_resize");
+        const sessionId = registry.resolve(args.session, "browser_assist(action=resize)");
         const reply = (await runtime.run(
           exec,
           [

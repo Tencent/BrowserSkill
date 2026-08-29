@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it, vi } from "vitest";
+import { registerBrowserTools } from "../src/browser-tools";
 import { ObservationService } from "../src/observation";
 import { KeyedExecutor } from "../src/queue";
 import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
-import { type PluginConfig, registerTools } from "../src/tools";
+import type { PluginConfig } from "../src/tools";
 
 const CONFIG: PluginConfig = {
   bskPath: "bsk",
@@ -84,8 +85,66 @@ function fakeRunner(responses: Record<string, unknown>) {
   };
 }
 
+const ACTION_ROUTES: Record<string, readonly [string, string]> = {
+  "session.start": ["browser_session", "start"],
+  "session.stop": ["browser_session", "stop"],
+  "session.list": ["browser_session", "list"],
+  "page.navigate": ["browser_page", "navigate"],
+  "page.back": ["browser_page", "back"],
+  "page.forward": ["browser_page", "forward"],
+  "page.reload": ["browser_page", "reload"],
+  "page.wait": ["browser_page", "wait"],
+  "inspect.observe": ["browser_inspect", "observe"],
+  "inspect.snapshot": ["browser_inspect", "snapshot"],
+  "inspect.html": ["browser_inspect", "html"],
+  "inspect.screenshot": ["browser_inspect", "screenshot"],
+  "inspect.console": ["browser_inspect", "console"],
+  "inspect.network": ["browser_inspect", "network"],
+  "interact.click": ["browser_interact", "click"],
+  "interact.hover": ["browser_interact", "hover"],
+  "interact.fill": ["browser_interact", "fill"],
+  "interact.select": ["browser_interact", "select"],
+  "interact.press": ["browser_interact", "press"],
+  "tabs.list": ["browser_tabs", "list"],
+  "tabs.create": ["browser_tabs", "create"],
+  "tabs.select": ["browser_tabs", "select"],
+  "tabs.close": ["browser_tabs", "close"],
+  "tabs.borrow": ["browser_tabs", "borrow"],
+  "tabs.return": ["browser_tabs", "return"],
+  "assist.resize": ["browser_assist", "resize"],
+  "assist.emulate": ["browser_assist", "emulate"],
+  "assist.request-help": ["browser_assist", "request-help"],
+};
+
+class TestToolRegistry extends Map<string, ToolDefinition> {
+  override get(name: string): ToolDefinition | undefined {
+    const direct = super.get(name);
+    if (direct !== undefined) return direct;
+    const route = ACTION_ROUTES[name];
+    if (route === undefined) return undefined;
+    const [toolName, action] = route;
+    const tool = super.get(toolName);
+    if (tool === undefined) return undefined;
+    const withAction = (args: unknown) => ({
+      action,
+      ...(args as Record<string, unknown>),
+    });
+    return {
+      ...tool,
+      output: {
+        ...tool.output,
+        render: (args, value) => tool.output.render(withAction(args) as never, value),
+      },
+      execute: (args, exec) => tool.execute(withAction(args) as never, exec),
+      isConcurrencySafe: (args) => tool.isConcurrencySafe?.(withAction(args) as never) === true,
+      presentCall: (args) => tool.presentCall?.(withAction(args) as never),
+      presentResult: (args, result) => tool.presentResult?.(withAction(args) as never, result),
+    } as ToolDefinition;
+  }
+}
+
 function makeCtx(services: Record<string, unknown> = {}) {
-  const tools = new Map<string, ToolDefinition>();
+  const tools = new TestToolRegistry();
   const ctx = {
     tools: { register: (def: ToolDefinition) => tools.set(def.name, def) },
     get: (key: string) => services[key],
@@ -118,7 +177,7 @@ function setup(
   const { runner, calls } = fakeRunner(responses);
   const registry = new SessionRegistry(maxSessions);
   const config = { ...CONFIG, maxSessions };
-  registerTools({
+  registerBrowserTools({
     ctx: ctx as never,
     runner: runner as BskRunner,
     registry,
@@ -130,56 +189,98 @@ function setup(
 }
 
 async function startSession(tools: Map<string, ToolDefinition>, sessionId = "s1") {
-  const tool = tools.get("browser_session_start");
-  if (tool === undefined) throw new Error("browser_session_start not registered");
+  const tool = tools.get("session.start");
+  if (tool === undefined) throw new Error("session.start not registered");
   return tool.execute({}, makeExec()) as Promise<{ sessionId: string }>;
 }
 
 const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chrome-1" });
 
+const EXPECTED_ACTIONS = {
+  browser_session: ["start", "stop", "list"],
+  browser_page: ["navigate", "back", "forward", "reload", "wait"],
+  browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network"],
+  browser_interact: ["click", "hover", "fill", "select", "press"],
+  browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
+  browser_assist: ["resize", "emulate", "request-help"],
+} as const;
+
 describe("tool registration", () => {
-  it("registers the full browser tool suite", () => {
+  it("registers exactly six public schemas with the complete action contract", () => {
     const { tools } = setup({});
-    expect([...tools.keys()].sort()).toEqual([
-      "browser_click",
-      "browser_console",
-      "browser_emulate",
-      "browser_fill",
-      "browser_get_html",
-      "browser_hover",
-      "browser_navigate",
-      "browser_navigate_back",
-      "browser_navigate_forward",
-      "browser_network",
-      "browser_observe",
-      "browser_press",
-      "browser_reload",
-      "browser_request_help",
-      "browser_screenshot",
-      "browser_select",
-      "browser_session_list",
-      "browser_session_start",
-      "browser_session_stop",
-      "browser_snapshot",
-      "browser_tab_borrow",
-      "browser_tab_close",
-      "browser_tab_create",
-      "browser_tab_list",
-      "browser_tab_return",
-      "browser_tab_select",
-      "browser_wait_for_navigation",
-      "browser_window_resize",
-    ]);
+    expect([...tools.keys()].sort()).toEqual(Object.keys(EXPECTED_ACTIONS).sort());
+    for (const [name, actions] of Object.entries(EXPECTED_ACTIONS)) {
+      const properties = tools.get(name)?.parameters.properties as
+        | Record<string, unknown>
+        | undefined;
+      expect(properties?.action).toMatchObject({ enum: [...actions] });
+    }
+  });
+
+  it("requires an action on every public tool", async () => {
+    const { tools } = setup({});
+    for (const name of Object.keys(EXPECTED_ACTIONS)) {
+      await expect(tools.get(name)?.execute({}, makeExec())).rejects.toThrow(/invalid arguments/i);
+    }
   });
 
   it("validates model args through defineTool (missing required param)", async () => {
     const { tools } = setup({});
-    const navigate = tools.get("browser_navigate");
+    const navigate = tools.get("page.navigate");
     await expect(navigate?.execute({}, makeExec())).rejects.toThrow(/invalid arguments/);
   });
 });
 
-describe("browser_session_start", () => {
+describe("action dispatch", () => {
+  it("rejects actions outside the public contract", async () => {
+    const { tools } = setup({});
+    await expect(
+      tools.get("browser_page")?.execute({ action: "unsupported" }, makeExec()),
+    ).rejects.toThrow(/invalid arguments|unsupported browser action/i);
+  });
+
+  it("dispatches through the existing operation definitions", async () => {
+    const { tools, calls, registry } = setup({
+      "session start": START_REPLY("s1"),
+      navigate: { tab_id: 7, url: "https://example.test/", reached: "load" },
+      observe: SNAPSHOT_REPLY,
+      fill: { tab_id: 7, value_length: 5 },
+      "tab list": { tabs: [] },
+      "window resize": { window_id: 9, width: 900, height: 700 },
+    });
+    await tools.get("browser_session")?.execute({ action: "start" }, makeExec());
+    await tools
+      .get("browser_page")
+      ?.execute({ action: "navigate", url: "https://example.test/" }, makeExec());
+    await tools.get("browser_inspect")?.execute({ action: "observe" }, makeExec());
+    await tools
+      .get("browser_interact")
+      ?.execute({ action: "fill", target: "@e1", value: "hello" }, makeExec());
+    await tools.get("browser_tabs")?.execute({ action: "list" }, makeExec());
+    await tools
+      .get("browser_assist")
+      ?.execute({ action: "resize", width: 900, height: 700 }, makeExec());
+
+    expect(registry.current()).toBe("s1");
+    expect(calls.map(({ args }) => args)).toEqual([
+      ["session", "start"],
+      ["navigate", "--session", "s1", "https://example.test/"],
+      ["observe", "--session", "s1"],
+      ["fill", "--session", "s1", "--value", "hello", "@e1"],
+      ["tab", "list", "--session", "s1"],
+      ["window", "resize", "--session", "s1", "--width", "900", "--height", "700"],
+    ]);
+  });
+
+  it("keeps action-specific validation in the private operation", async () => {
+    const { tools } = setup({});
+    await expect(
+      tools.get("browser_page")?.execute({ action: "navigate" }, makeExec()),
+    ).rejects.toThrow(/url.*required|invalid arguments/i);
+  });
+});
+
+describe("session.start", () => {
   it("maps the start reply and tracks the session as current", async () => {
     const { tools, registry } = setup({ "session start": START_REPLY("s1") });
     const value = await startSession(tools);
@@ -193,7 +294,7 @@ describe("browser_session_start", () => {
       emulate: { tab_id: 7, cleared: false },
       navigate: { tab_id: 7, url: "https://example.com", reached: "load" },
     });
-    const tool = tools.get("browser_session_start");
+    const tool = tools.get("session.start");
     const value = (await tool?.execute(
       { width: 1280, height: 800, url: "https://example.com", device: "iphone-14", noFocus: true },
       makeExec(),
@@ -218,7 +319,7 @@ describe("browser_session_start", () => {
 
   it("requires width and height together", async () => {
     const { tools } = setup({ "session start": START_REPLY("s1") });
-    const tool = tools.get("browser_session_start");
+    const tool = tools.get("session.start");
     await expect(tool?.execute({ width: 1280 }, makeExec())).rejects.toThrow(/together/);
   });
 
@@ -228,7 +329,7 @@ describe("browser_session_start", () => {
       "session stop": {},
     });
     // navigate has no canned response -> non-zero exit -> error.
-    const tool = tools.get("browser_session_start");
+    const tool = tools.get("session.start");
     await expect(tool?.execute({ url: "https://example.com" }, makeExec())).rejects.toThrow(
       /navigate/,
     );
@@ -246,7 +347,7 @@ describe("multi-session behavior", () => {
   it("operation tools default to the current session and echo it back", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const snapshot = tools.get("browser_snapshot");
+    const snapshot = tools.get("inspect.snapshot");
     const value = (await snapshot?.execute({}, makeExec())) as {
       session: string;
       refCount: number;
@@ -262,7 +363,7 @@ describe("multi-session behavior", () => {
     });
     await startSession(tools, "s1");
     await startSession(tools, "s2");
-    const snapshot = tools.get("browser_snapshot");
+    const snapshot = tools.get("inspect.snapshot");
     const value = (await snapshot?.execute({ session: "s1" }, makeExec())) as {
       session: string;
     };
@@ -275,7 +376,7 @@ describe("multi-session behavior", () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
     const callsBefore = calls.length;
-    const snapshot = tools.get("browser_snapshot");
+    const snapshot = tools.get("inspect.snapshot");
     await expect(snapshot?.execute({ session: "other" }, makeExec())).rejects.toThrow(
       /does not belong to this plugin/,
     );
@@ -284,8 +385,8 @@ describe("multi-session behavior", () => {
 
   it("fails with guidance when no session exists", async () => {
     const { tools } = setup(responses);
-    const snapshot = tools.get("browser_snapshot");
-    await expect(snapshot?.execute({}, makeExec())).rejects.toThrow(/browser_session_start/);
+    const snapshot = tools.get("inspect.snapshot");
+    await expect(snapshot?.execute({}, makeExec())).rejects.toThrow(/browser_session action=start/);
   });
 
   it("enforces the configured session cap before spawning", async () => {
@@ -295,7 +396,7 @@ describe("multi-session behavior", () => {
       1,
     );
     await startSession(tools);
-    const start = tools.get("browser_session_start");
+    const start = tools.get("session.start");
     await expect(start?.execute({}, makeExec())).rejects.toThrow(/session limit/);
     // A rejected start must not spawn another bsk session (no leaked session).
     expect(calls.filter((c) => c.args.join(" ").startsWith("session start"))).toHaveLength(1);
@@ -307,7 +408,7 @@ describe("multi-session behavior", () => {
       {},
       1,
     );
-    const start = tools.get("browser_session_start");
+    const start = tools.get("session.start");
     if (start === undefined) throw new Error("not registered");
     // Two truly concurrent starts against a cap of 1: exactly one may spawn.
     const outcomes = await Promise.allSettled([
@@ -325,7 +426,7 @@ describe("multi-session behavior", () => {
   it("refuses to stop a session the plugin did not create", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const stop = tools.get("browser_session_stop");
+    const stop = tools.get("session.stop");
     await expect(stop?.execute({ session: "ext7" }, makeExec())).rejects.toThrow(
       /does not belong to this plugin/,
     );
@@ -334,14 +435,14 @@ describe("multi-session behavior", () => {
   });
 });
 
-describe("browser_session_stop / list", () => {
+describe("session.stop / list", () => {
   it("stops the current session and clears the registry", async () => {
     const { tools, calls, registry } = setup({
       "session start": START_REPLY("s1"),
       "session stop": {},
     });
     await startSession(tools);
-    const stop = tools.get("browser_session_stop");
+    const stop = tools.get("session.stop");
     const value = (await stop?.execute({}, makeExec())) as { stopped: string };
     expect(value.stopped).toBe("s1");
     expect(calls[1].args).toEqual(["session", "stop", "s1"]);
@@ -354,7 +455,7 @@ describe("browser_session_stop / list", () => {
     });
     await startSession(tools);
     await startSession(tools);
-    const list = tools.get("browser_session_list");
+    const list = tools.get("session.list");
     const value = (await list?.execute({}, makeExec())) as {
       sessions: { sessionId: string; current: boolean }[];
     };
@@ -377,10 +478,10 @@ describe("interaction tools", () => {
     emulate: { tab_id: 7, cleared: false },
   };
 
-  it("browser_click maps target, button, and click count", async () => {
+  it("interact.click maps target, button, and click count", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const click = tools.get("browser_click");
+    const click = tools.get("interact.click");
     const value = (await click?.execute(
       { target: "@e1", button: "right", clickCount: 2 },
       makeExec(),
@@ -398,10 +499,10 @@ describe("interaction tools", () => {
     ]);
   });
 
-  it("browser_fill passes value and --no-clear", async () => {
+  it("interact.fill passes value and --no-clear", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const fill = tools.get("browser_fill");
+    const fill = tools.get("interact.fill");
     await fill?.execute({ target: "e2", value: "hello", noClear: true }, makeExec());
     expect(calls[1].args).toEqual([
       "fill",
@@ -414,20 +515,20 @@ describe("interaction tools", () => {
     ]);
   });
 
-  it("browser_press picks --ref for snapshot refs and --selector otherwise", async () => {
+  it("interact.press picks --ref for snapshot refs and --selector otherwise", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const press = tools.get("browser_press");
+    const press = tools.get("interact.press");
     await press?.execute({ key: "Enter", target: "@e3" }, makeExec());
     expect(calls[1].args).toEqual(["press", "--session", "s1", "--ref", "@e3", "Enter"]);
     await press?.execute({ key: "Ctrl+A", target: "#field" }, makeExec());
     expect(calls[2].args).toEqual(["press", "--session", "s1", "--selector", "#field", "Ctrl+A"]);
   });
 
-  it("browser_navigate converts waitUntil and timeoutMs", async () => {
+  it("page.navigate converts waitUntil and timeoutMs", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
-    const navigate = tools.get("browser_navigate");
+    const navigate = tools.get("page.navigate");
     const value = (await navigate?.execute(
       { url: "https://a.test", waitUntil: "networkidle", timeoutMs: 1500 },
       makeExec(),
@@ -445,16 +546,16 @@ describe("interaction tools", () => {
     ]);
   });
 
-  it("browser_emulate rejects off combined with overrides", async () => {
+  it("assist.emulate rejects off combined with overrides", async () => {
     const { tools } = setup(responses);
     await startSession(tools);
-    const emulate = tools.get("browser_emulate");
+    const emulate = tools.get("assist.emulate");
     await expect(emulate?.execute({ off: true, device: "iphone-14" }, makeExec())).rejects.toThrow(
       /mutually exclusive/,
     );
   });
 
-  it("browser_hover and browser_select map their structured arguments", async () => {
+  it("interact.hover and interact.select map their structured arguments", async () => {
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),
       hover: { tab_id: 7, used_ref: "@e3", x: 12, y: 24 },
@@ -468,7 +569,7 @@ describe("interaction tools", () => {
     });
     await startSession(tools);
     const hovered = (await tools
-      .get("browser_hover")
+      .get("interact.hover")
       ?.execute(
         { target: "@e3", modifiers: ["shift"], settleMs: 250, timeoutMs: 2000 },
         makeExec(),
@@ -488,7 +589,7 @@ describe("interaction tools", () => {
     ]);
 
     const selected = (await tools
-      .get("browser_select")
+      .get("interact.select")
       ?.execute({ target: "@e4", values: ["a", "b"], tabId: 7 }, makeExec())) as {
       selectedValues: string[];
       selectedLabels: string[];
@@ -546,25 +647,25 @@ describe("phase-one tab tools", () => {
     });
     await startSession(tools);
 
-    const listed = (await tools
-      .get("browser_tab_list")
-      ?.execute({ scope: "agent" }, makeExec())) as { tabs: { tabId: number }[] };
+    const listed = (await tools.get("tabs.list")?.execute({ scope: "agent" }, makeExec())) as {
+      tabs: { tabId: number }[];
+    };
     expect(listed.tabs[0].tabId).toBe(7);
     const created = (await tools
-      .get("browser_tab_create")
+      .get("tabs.create")
       ?.execute({ url: "https://new.test", active: false, index: 1 }, makeExec())) as {
       tabId: number;
     };
     expect(created.tabId).toBe(8);
-    await tools.get("browser_tab_close")?.execute({ tabId: 8 }, makeExec());
-    await tools.get("browser_tab_select")?.execute({ tabId: 7 }, makeExec());
-    const borrowed = (await tools
-      .get("browser_tab_borrow")
-      ?.execute({ tabId: 20 }, makeExec())) as { originalWindowId: number };
+    await tools.get("tabs.close")?.execute({ tabId: 8 }, makeExec());
+    await tools.get("tabs.select")?.execute({ tabId: 7 }, makeExec());
+    const borrowed = (await tools.get("tabs.borrow")?.execute({ tabId: 20 }, makeExec())) as {
+      originalWindowId: number;
+    };
     expect(borrowed.originalWindowId).toBe(9);
-    const returned = (await tools
-      .get("browser_tab_return")
-      ?.execute({ tabId: 20 }, makeExec())) as { fallback: boolean };
+    const returned = (await tools.get("tabs.return")?.execute({ tabId: 20 }, makeExec())) as {
+      fallback: boolean;
+    };
     expect(returned.fallback).toBe(false);
 
     expect(calls.slice(1).map((call) => call.args)).toEqual([
@@ -614,15 +715,14 @@ describe("phase-one navigation tools", () => {
     });
     await startSession(tools);
     await tools
-      .get("browser_navigate_back")
+      .get("page.back")
       ?.execute({ tabId: 7, waitUntil: "commit", timeoutMs: 1000 }, makeExec());
-    await tools.get("browser_navigate_forward")?.execute({}, makeExec());
-    await tools
-      .get("browser_reload")
-      ?.execute({ hard: true, waitUntil: "networkidle" }, makeExec());
-    const waited = (await tools
-      .get("browser_wait_for_navigation")
-      ?.execute({ timeoutMs: 2500 }, makeExec())) as { reached: string; errorText: string };
+    await tools.get("page.forward")?.execute({}, makeExec());
+    await tools.get("page.reload")?.execute({ hard: true, waitUntil: "networkidle" }, makeExec());
+    const waited = (await tools.get("page.wait")?.execute({ timeoutMs: 2500 }, makeExec())) as {
+      reached: string;
+      errorText: string;
+    };
     expect(waited).toMatchObject({ reached: "timeout", errorText: "no navigation" });
     expect(calls[1].args).toEqual([
       "navigate-back",
@@ -668,7 +768,7 @@ describe("phase-one support tools", () => {
       },
     });
     await startSession(tools);
-    const value = (await tools.get("browser_request_help")?.execute(
+    const value = (await tools.get("assist.request-help")?.execute(
       {
         prompt: "Please sign in",
         title: "Login required",
@@ -736,17 +836,17 @@ describe("phase-one support tools", () => {
     });
     await startSession(tools);
     const html = (await tools
-      .get("browser_get_html")
+      .get("inspect.html")
       ?.execute({ ref: "@e2", maxBytes: 2048 }, makeExec())) as { html: string };
     expect(html.html).toBe("<main>Hi</main>");
     const consoleValue = (await tools
-      .get("browser_console")
+      .get("inspect.console")
       ?.execute({ since: 1, limit: 10, includeStack: true }, makeExec())) as {
       entries: { stackTrace: { functionName: string }[] }[];
     };
     expect(consoleValue.entries[0].stackTrace[0].functionName).toBe("run");
     const networkValue = (await tools
-      .get("browser_network")
+      .get("inspect.network")
       ?.execute({ tabId: 7, maxTextChars: 512 }, makeExec())) as {
       entries: { mimeType: string }[];
     };
@@ -764,7 +864,7 @@ describe("phase-one support tools", () => {
       "window resize": { window_id: 2, width: 1280, height: 800 },
     });
     await startSession(tools);
-    const resize = tools.get("browser_window_resize");
+    const resize = tools.get("assist.resize");
     const value = (await resize?.execute({ width: 1280, height: 800 }, makeExec())) as {
       windowId: number;
     };
@@ -785,7 +885,7 @@ describe("phase-one support tools", () => {
   });
 });
 
-describe("browser_screenshot", () => {
+describe("inspect.screenshot", () => {
   function pngFile(): string {
     const dir = mkdtempSync(join(tmpdir(), "bsk-test-"));
     const path = join(dir, "shot.png");
@@ -810,7 +910,7 @@ describe("browser_screenshot", () => {
       screenshot: { tab_id: 7, width: 800, height: 600, format: "png", path, byte_size: 8 },
     });
     await startSession(tools);
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({ ref: "@e1" }, makeExec())) as {
       path: string;
       image?: unknown;
@@ -859,7 +959,7 @@ describe("browser_screenshot", () => {
         options: {},
       },
     });
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({}, exec)) as {
       image?: { attachmentId: string; mediaType: string };
     };
@@ -937,7 +1037,7 @@ describe("browser_screenshot", () => {
         options: {},
       },
     });
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({}, exec)) as { image?: unknown; path: string };
     expect(value.image).toBeUndefined();
     expect(value.path).toBe(path);
@@ -950,14 +1050,14 @@ describe("error and cancellation semantics", () => {
       "session start": START_REPLY("s1"),
     });
     await startSession(tools);
-    const snapshot = tools.get("browser_snapshot");
+    const snapshot = tools.get("inspect.snapshot");
     await expect(snapshot?.execute({}, makeExec())).rejects.toThrow(/no canned response/);
   });
 
   it("turns an aborted child into an AbortError", async () => {
     const { tools } = setup({ "session start": START_REPLY("s1") });
     await startSession(tools);
-    const snapshot = tools.get("browser_snapshot");
+    const snapshot = tools.get("inspect.snapshot");
     const controller = new AbortController();
     controller.abort();
     const exec = makeExec({ signal: controller.signal });
@@ -974,7 +1074,7 @@ describe("error and cancellation semantics", () => {
       killAll() {},
       killFor: () => 0,
     };
-    registerTools({
+    registerBrowserTools({
       ctx: ctx as never,
       runner,
       registry,
@@ -982,7 +1082,7 @@ describe("error and cancellation semantics", () => {
       observation: disabledObservation({ ctx, runner, registry }),
       queue: new KeyedExecutor(),
     });
-    const start = tools.get("browser_session_start");
+    const start = tools.get("session.start");
     await expect(start?.execute({}, makeExec())).rejects.toThrow(/BrowserSkill must be installed/);
   });
 });
@@ -990,7 +1090,7 @@ describe("error and cancellation semantics", () => {
 describe("presentation", () => {
   it("presents calls as terminal cards with the bsk command line", () => {
     const { tools } = setup({});
-    const click = tools.get("browser_click");
+    const click = tools.get("interact.click");
     const view = click?.presentCall?.({ target: "@e1" }) as {
       card: string;
       title: string;
@@ -1001,7 +1101,7 @@ describe("presentation", () => {
 
   it("presents results as terminal cards carrying the rendered text", () => {
     const { tools } = setup({});
-    const click = tools.get("browser_click");
+    const click = tools.get("interact.click");
     const view = click?.presentResult?.({ target: "@e1" }, {
       content: [{ type: "text", text: "clicked" }],
       isError: false,
@@ -1011,7 +1111,7 @@ describe("presentation", () => {
 
   it("projects the text block of multi-block results (screenshot text + image)", () => {
     const { tools } = setup({});
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const view = screenshot?.presentResult?.({}, {
       content: [
         { type: "text", text: "[session s1] screenshot of tab 7" },
@@ -1070,7 +1170,7 @@ describe("screenshot scratch file lifecycle", () => {
   function setupWithRunner(runner: BskRunner, services: Record<string, unknown> = {}) {
     const { ctx, tools } = makeCtx(services);
     const registry = new SessionRegistry(5);
-    registerTools({
+    registerBrowserTools({
       ctx: ctx as never,
       runner,
       registry,
@@ -1105,7 +1205,7 @@ describe("screenshot scratch file lifecycle", () => {
         options: {},
       },
     });
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({}, exec)) as { image?: unknown; path: string };
     expect(value.image).toBeDefined();
     const out = calls.find((c) => c.args[0] === "screenshot")?.args.at(-1);
@@ -1117,7 +1217,7 @@ describe("screenshot scratch file lifecycle", () => {
     const { runner, calls } = outWritingRunner();
     const { tools } = setupWithRunner(runner);
     await startSession(tools);
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({}, makeExec())) as { image?: unknown; path: string };
     expect(value.image).toBeUndefined();
     const out = calls.find((c) => c.args[0] === "screenshot")?.args.at(-1);
@@ -1192,11 +1292,18 @@ describe("observation action instrumentation timing", () => {
       queue,
       options: { enabled: true, thumbnailIntervalMs: 1500, idleIntervalMs: 8000 },
     });
-    registerTools({ ctx: ctx as never, runner, registry, config: CONFIG, observation, queue });
+    registerBrowserTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      config: CONFIG,
+      observation,
+      queue,
+    });
 
     await startSession(tools);
-    const navigate = tools.get("browser_navigate");
-    const snapshot = tools.get("browser_snapshot");
+    const navigate = tools.get("page.navigate");
+    const snapshot = tools.get("inspect.snapshot");
     const a = navigate?.execute({ url: "http://x" }, makeExec()) as Promise<unknown>;
     // A starts immediately (empty queue) and blocks on the gate.
     await vi.waitFor(() =>

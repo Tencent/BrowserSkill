@@ -1,7 +1,7 @@
 import type { ToolDefinition, ToolResult, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import type { ToolDeps } from "./tools";
 
-export type ToolRegistrar = (definition: ToolDefinition) => () => void;
+export type ToolRegistrar = (definition: ToolDefinition) => void;
 
 type TerminalPresentation = { card: "terminal"; output: string; exitCode: number } | undefined;
 

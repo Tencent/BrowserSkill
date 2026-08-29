@@ -7,7 +7,7 @@ import type { ToolDeps } from "./tools";
 const TAB_ID_REQUIRED = {
   type: "integer",
   required: true,
-  description: "Chrome tab id returned by browser_tab_list or browser_tab_create.",
+  description: "Chrome tab id returned by browser_tabs list or create.",
 } as const;
 
 interface RawTabInfo {
@@ -29,7 +29,7 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_list",
+      name: "tabs.list",
       description:
         "List tabs visible to an owned browser session. Other sessions' Agent Windows remain " +
         "hidden; use scope=user to find a user tab before borrowing it.",
@@ -83,7 +83,7 @@ export function registerPhaseOneTabTools(
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tab_list");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=list)");
         const cmdArgs = ["tab", "list", "--session", sessionId];
         if (args.scope !== undefined) cmdArgs.push("--scope", args.scope);
         const reply = (await runtime.run(exec, cmdArgs, "tab list", sessionId)) as {
@@ -118,7 +118,7 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_create",
+      name: "tabs.create",
       description:
         "Create a tab inside the owned session's Agent Window. The tab is focused by default; " +
         "set active=false to open it in the background.",
@@ -148,7 +148,7 @@ export function registerPhaseOneTabTools(
       },
       async execute(args, exec) {
         if (args.url !== undefined) requireNonEmpty(args.url, "url");
-        const sessionId = registry.resolve(args.session, "browser_tab_create");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=create)");
         const cmdArgs = ["tab", "create", "--session", sessionId];
         if (args.url !== undefined) cmdArgs.push("--url", args.url);
         if (args.active === false) cmdArgs.push("--no-active");
@@ -185,7 +185,7 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_close",
+      name: "tabs.close",
       description: "Close a tab in the owned session's Agent Window.",
       parameters: { tabId: TAB_ID_REQUIRED, session: SESSION_PARAM },
       output: {
@@ -202,7 +202,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tab_close");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=close)");
         const reply = (await runtime.run(
           exec,
           ["tab", "close", String(args.tabId), "--session", sessionId],
@@ -228,7 +228,7 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_select",
+      name: "tabs.select",
       description: "Focus a tab in the owned session's Agent Window.",
       parameters: { tabId: TAB_ID_REQUIRED, session: SESSION_PARAM },
       output: {
@@ -249,7 +249,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tab_select");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=select)");
         const reply = (await runtime.run(
           exec,
           ["tab", "select", String(args.tabId), "--session", sessionId],
@@ -275,10 +275,10 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_borrow",
+      name: "tabs.borrow",
       description:
         "Move a user-window tab into the owned session's Agent Window for controlled interaction. " +
-        "Return it with browser_tab_return when finished; stopping the session also auto-returns it.",
+        "Return it with browser_tabs action=return; stopping the session also auto-returns it.",
       parameters: { tabId: TAB_ID_REQUIRED, session: SESSION_PARAM },
       output: {
         schema: {
@@ -302,7 +302,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tab_borrow");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=borrow)");
         const reply = (await runtime.run(
           exec,
           ["tab", "borrow", String(args.tabId), "--session", sessionId],
@@ -339,7 +339,7 @@ export function registerPhaseOneTabTools(
 
   register(
     defineTool({
-      name: "browser_tab_return",
+      name: "tabs.return",
       description: "Return a borrowed tab to its original user window and tab-strip position.",
       parameters: { tabId: TAB_ID_REQUIRED, session: SESSION_PARAM },
       output: {
@@ -365,7 +365,7 @@ export function registerPhaseOneTabTools(
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_tab_return");
+        const sessionId = registry.resolve(args.session, "browser_tabs(action=return)");
         const reply = (await runtime.run(
           exec,
           ["tab", "return", String(args.tabId), "--session", sessionId],

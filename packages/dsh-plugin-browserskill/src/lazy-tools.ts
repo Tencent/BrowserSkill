@@ -1,6 +1,6 @@
 /**
  * Lazy tool-schema injection ("progressive disclosure", final stage): with
- * `lazyTools` on (the default), the 28 browser_* tool schemas stay OUT of the
+ * `lazyTools` on (the default), the six browser tool schemas stay OUT of the
  * system prompt until the `browser-skill` skill has actually been invoked —
  * the skill catalog entry is the only advertisement. One successful
  * invocation (model tool call, or a user's `/browser-skill` gesture) reveals
@@ -96,7 +96,7 @@ export function hasSuccessfulSkillInvocation(events: readonly SessionEventLike[]
 /**
  * Arm the lazy reveal. Returns a disposer tearing down listeners and — when
  * the reveal already happened — the tool suite itself.
- * @param registerSuite - registers the 28 browser_* tools, returns their disposer.
+ * @param registerSuite - registers the six browser tools and returns their disposer.
  */
 export function armLazyTools(ctx: Context, registerSuite: () => () => void): () => void {
   let suiteDisposer: (() => void) | undefined;

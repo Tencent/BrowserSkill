@@ -32,44 +32,22 @@ describe("registerBskSkill", () => {
     const content = String(skill.content);
     const mentionedTools = [...new Set(content.match(/\bbrowser_[a-z][a-z_]*\b/g) ?? [])].sort();
     expect(mentionedTools).toEqual([
-      "browser_click",
-      "browser_console",
-      "browser_emulate",
-      "browser_fill",
-      "browser_get_html",
-      "browser_hover",
-      "browser_navigate",
-      "browser_navigate_back",
-      "browser_navigate_forward",
-      "browser_network",
-      "browser_observe",
-      "browser_press",
-      "browser_reload",
-      "browser_request_help",
-      "browser_screenshot",
-      "browser_select",
-      "browser_session_list",
-      "browser_session_start",
-      "browser_session_stop",
-      "browser_snapshot",
-      "browser_tab_borrow",
-      "browser_tab_close",
-      "browser_tab_create",
-      "browser_tab_list",
-      "browser_tab_return",
-      "browser_tab_select",
-      "browser_wait_for_navigation",
-      "browser_window_resize",
+      "browser_assist",
+      "browser_inspect",
+      "browser_interact",
+      "browser_page",
+      "browser_session",
+      "browser_tabs",
     ]);
     expect(String(skill.description)).not.toMatch(/\bbsk\b/i);
     expect(content).not.toMatch(/\bbsk\b/i);
     expect(content).not.toMatch(/```(?:bash|sh|shell)\b/i);
     expect(content).not.toMatch(/--[a-z]/);
-    expect(content).toContain("All browser operations must use the injected tools directly");
+    expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
     expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
-    expect(content.length).toBeGreaterThan(10_000);
+    expect(content.length).toBeGreaterThan(6_000);
     expect(skill.source).toBe("bundled");
     // Source frontmatter is registration metadata and must not leak into the body.
     expect(content.startsWith("---")).toBe(false);
@@ -144,7 +122,7 @@ describe("armAgentScopedBskSkill", () => {
     });
 
     const after = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
-    expect(after?.content).toContain("All browser operations must use the injected tools directly");
+    expect(after?.content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(after?.content).not.toMatch(/\bbsk\b/i);
     expect(after?.source).toBe("bundled");
 
