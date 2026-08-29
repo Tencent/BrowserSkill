@@ -1004,7 +1004,7 @@ describe("inspect.screenshot", () => {
         options: {},
       },
     });
-    const screenshot = tools.get("browser_screenshot");
+    const screenshot = tools.get("inspect.screenshot");
     const value = (await screenshot?.execute({}, exec)) as {
       image?: { attachmentId: string; mediaType: string };
     };
