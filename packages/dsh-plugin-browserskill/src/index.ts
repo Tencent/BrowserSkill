@@ -23,7 +23,7 @@ import { SessionRegistry } from "./sessions";
 import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
 import type { PluginConfig } from "./tools";
 
-export const name = "dsh-plugin-browserskill";
+export const name = "@wxg-prc-cpg/browser-skill-dsh-plugin";
 export const inject = ["tools"];
 
 /** Runtime configuration schema (validated and defaulted by Cordis). */
