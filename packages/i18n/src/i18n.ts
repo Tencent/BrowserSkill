@@ -5,6 +5,8 @@ import { initReactI18next } from "react-i18next";
 import { bindChromeStorageLanguageSync, getLanguageDetectionOptions } from "./chrome-storage-sync";
 import enUSCommon from "./locales/en-US/common.json";
 import enUSExtension from "./locales/en-US/extension.json";
+import koKRCommon from "./locales/ko-KR/common.json";
+import koKRExtension from "./locales/ko-KR/extension.json";
 import zhCNCommon from "./locales/zh-CN/common.json";
 import zhCNExtension from "./locales/zh-CN/extension.json";
 
@@ -16,6 +18,10 @@ const resources = {
   "en-US": {
     common: enUSCommon,
     extension: enUSExtension,
+  },
+  "ko-KR": {
+    common: koKRCommon,
+    extension: koKRExtension,
   },
 } as const;
 

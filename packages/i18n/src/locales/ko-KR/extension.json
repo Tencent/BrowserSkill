@@ -1,0 +1,94 @@
+{
+  "popup": {
+    "brandCategory": "브라우저 자동화",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "연결되지 않음",
+      "connecting": "연결 중…",
+      "connected": "연결됨",
+      "version_skew": "프로토콜 불일치",
+      "disabled": "연결 꺼짐"
+    },
+    "stateDetail": {
+      "disconnected": "BrowserSkill을 열어 연결하세요.",
+      "connecting": "BrowserSkill에 연결 중…",
+      "connected": "자동화 작업을 수행할 준비가 되었습니다.",
+      "version_skew": "일부 기능을 사용하지 못할 수 있습니다."
+    },
+    "stateBadge": {
+      "disconnected": "대기",
+      "connecting": "시작 중",
+      "connected": "준비됨",
+      "version_skew": "조치 필요",
+      "disabled": "꺼짐"
+    },
+    "connectionToggleTitle": "BrowserSkill 연결",
+    "controlHintsToggleTitle": "제어 표시",
+    "controlHintsToggleHint": "에이전트가 페이지를 제어하는 동안 상태 표시와 주황색 테두리를 표시합니다.",
+    "controlHintsInfoLabel": "제어 표시에 관하여",
+    "versionSkewWarning": "확장 프로그램 프로토콜 v{{extensionProtocol}}, 데몬 프로토콜 v{{daemonProtocol}}.",
+    "upgradeAvailable": "업그레이드 가능",
+    "launcher": {
+      "title": "빠른 작업"
+    },
+    "back": "뒤로",
+    "runtimeTitle": "런타임",
+    "daemonVersion": "데몬 v{{version}}",
+    "extensionVersion": "확장 프로그램 v{{version}}",
+    "extensionVersionHint": "확장 프로그램 버전",
+    "daemonVersionHint": "bsk 버전",
+    "protocolVersion": "프로토콜 v{{version}}",
+    "extensionProtocol": "확장 프로그램 프로토콜 v{{version}}",
+    "daemonProtocol": "데몬 프로토콜 v{{version}}",
+    "instanceTitle": "인스턴스 ID",
+    "instanceDescription": "이 브라우저의 고유 연결 식별자",
+    "copy": "복사",
+    "copied": "복사됨",
+    "copyInstanceId": "인스턴스 ID 복사",
+    "record": {
+      "sectionTitle": "작업 기록",
+      "cardDesc": "에이전트가 참고할 수 있도록 작업 기록",
+      "sectionHint": "기록 지침을 생성합니다. 에이전트에게 보내 작업 기록을 시작하면, 에이전트가 생성된 trace 번들을 참고하여 유사한 작업을 자동화할 수 있습니다.",
+      "topicLabel": "작업 주제(선택 사항)",
+      "topicPlaceholder": "예: 게시물 작성",
+      "startUrlLabel": "시작 URL(선택 사항)",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "기록 지침 복사",
+      "copied": "복사됨",
+      "hintDisconnected": "연결 후 사용할 수 있습니다",
+      "promptTemplate": "BrowserSkill의 `bsk` CLI를 사용해 지금부터 제가 수행할 브라우저 작업을 기록하세요.\n\n단계:\n1. 다음을 실행하세요: {{command}}\n2. 기록이 시작됐다고 알려주면, 열린 창에서 제가 직접 작업하겠습니다.\n3. 제가 완료를 누른 후 생성된 `./trace` 번들(`trace.json` + `states/`)을 읽고 제가 수행한 작업을 요약하세요."
+    }
+  },
+  "controlOverlay": {
+    "status": "에이전트가 제어 중",
+    "interrupt": "중단",
+    "interrupting": "중단 중…"
+  },
+  "borrowConfirmation": {
+    "title": "탭 사용을 허용할까요?",
+    "titleInactive": "에이전트가 탭 사용을 요청했습니다",
+    "body": "AI 에이전트가 이 탭을 작업 공간으로 옮기려고 합니다. 요청을 거절하거나 허용할 수 있습니다.",
+    "targetTab": "대상 탭:",
+    "autoDeny": "{{count}}초 후 요청이 만료됩니다",
+    "deny": "거절",
+    "allow": "허용",
+    "notificationTitle": "BrowserSkill: 에이전트가 탭 사용을 요청했습니다",
+    "notificationBody": "브라우저에서 \"{{tabTitle}}\" 탭 사용 요청을 허용하거나 거절하세요."
+  },
+  "helpRequest": {
+    "title": "에이전트가 도움을 요청했습니다",
+    "compactStatus": "에이전트가 이 단계를 완료할 때까지 기다리고 있습니다",
+    "noteLabel": "에이전트에게 남길 메모(선택 사항)",
+    "notePlaceholder": "에이전트에게 메모 남기기(선택 사항)",
+    "continue": "완료하고 제어권 돌려주기",
+    "cancel": "요청 취소",
+    "collapse": "접기",
+    "expand": "펼치기",
+    "dragHandle": "드래그하여 이동",
+    "notificationTitle": "BrowserSkill: 에이전트가 도움을 요청했습니다"
+  },
+  "recordOverlay": {
+    "recording": "작업 기록 중",
+    "finish": "완료"
+  }
+}
