@@ -65,7 +65,7 @@ fn render_human(s: &StatusResult) {
         let bold = "\x1b[1m";
         let reset = "\x1b[0m";
         eprintln!(
-            "{bold}{yellow}warning:{reset} {} browser(s) have protocol version drift from the daemon{reset}",
+            "{bold}{yellow}note:{reset} {} browser(s) report a different protocol version; still usable — continue, and run `bsk update` soon{reset}",
             s.version_skew_browsers.len()
         );
         for skew in &s.version_skew_browsers {
@@ -75,7 +75,7 @@ fn render_human(s: &StatusResult) {
                 skew.label.clone()
             };
             eprintln!(
-                "  {} ({}) — protocol ext {} vs daemon {} (app ext v{}, daemon v{}) — please align protocol versions",
+                "  {} ({}) — protocol ext {} vs CLI {} (app ext v{}, CLI v{}) — still usable; please upgrade",
                 skew.instance_id,
                 label,
                 display_protocol(&skew.client_protocol_version),

@@ -6,27 +6,27 @@
       "disconnected": "Disconnected",
       "connecting": "Connecting…",
       "connected": "Connected",
-      "version_skew": "Protocol mismatch",
+      "version_skew": "Connected",
       "disabled": "Connection off"
     },
     "stateDetail": {
       "disconnected": "Open BrowserSkill to connect.",
       "connecting": "Connecting to BrowserSkill…",
       "connected": "Ready for automation tasks.",
-      "version_skew": "Some features may be unavailable."
+      "version_skew": "Protocol versions differ. Please upgrade."
     },
     "stateBadge": {
       "disconnected": "Standby",
       "connecting": "Igniting",
       "connected": "Ready",
-      "version_skew": "Action needed",
+      "version_skew": "Upgradable",
       "disabled": "Off"
     },
     "connectionToggleTitle": "BrowserSkill connection",
     "controlHintsToggleTitle": "Control hints",
     "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "controlHintsInfoLabel": "About control hints",
-    "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, daemon v{{daemonProtocol}}.",
+    "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, CLI protocol v{{cliProtocol}}. Protocol versions differ — please upgrade.",
     "upgradeAvailable": "Upgradable",
     "launcher": {
       "title": "Quick actions"
