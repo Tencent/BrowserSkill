@@ -50,6 +50,11 @@ pub mod reason {
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
+    pub const SURFACE_CAPTURE_NOT_FOUND: &str = "surface_capture_not_found";
+    pub const SURFACE_CAPTURE_EXPIRED: &str = "surface_capture_expired";
+    pub const SURFACE_CAPTURE_CONSUMED: &str = "surface_capture_consumed";
+    pub const SURFACE_CAPTURE_STALE: &str = "surface_capture_stale";
+    pub const SURFACE_COORDINATE_INVALID: &str = "surface_coordinate_invalid";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
     pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
 }
@@ -232,7 +237,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::PermissionDenied, reason::REF_CAPABILITY_DENIED) => RenderInfo {
             summary: "snapshot ref does not support this operation",
             hint: Some(
-                "visual surface refs are screenshot-only; inspect `bsk screenshot --ref <ref> --session <id>` with image-understanding capability",
+                "visual Surface refs require image understanding; inspect `bsk screenshot --ref <ref> --session <id>`, then bind its capture id and image coordinates to `bsk click`",
             ),
             exit_code: base.exit_code,
         },
@@ -275,6 +280,41 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "the browser could not capture the tab image",
             hint: Some(
                 "both the visible-tab capture and the CDP compositor fallback failed inside the browser; this points at a browser-side rendering/readback issue — try reloading the tab, restarting the browser, or upgrading/downgrading Chrome",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SURFACE_CAPTURE_NOT_FOUND) => RenderInfo {
+            summary: "surface capture transaction was not found",
+            hint: Some(
+                "take a fresh surface screenshot and use its capture id with coordinates from that image",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::SURFACE_CAPTURE_EXPIRED) => RenderInfo {
+            summary: "surface capture transaction has expired",
+            hint: Some(
+                "take a fresh surface screenshot, then click promptly with that capture id and image coordinates",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::SURFACE_CAPTURE_CONSUMED) => RenderInfo {
+            summary: "surface capture transaction was already used",
+            hint: Some(
+                "each capture id is single-use; take a fresh surface screenshot before another point action",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::SURFACE_CAPTURE_STALE) => RenderInfo {
+            summary: "page state changed since the surface screenshot",
+            hint: Some(
+                "take a fresh surface screenshot and choose coordinates from the new image before retrying",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SURFACE_COORDINATE_INVALID) => RenderInfo {
+            summary: "surface image coordinate is invalid",
+            hint: Some(
+                "use finite pixel coordinates inside the captured image; its top-left corner is (0, 0)",
             ),
             exit_code: base.exit_code,
         },
@@ -391,7 +431,7 @@ mod tests {
         let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
         assert_eq!(info.summary, "snapshot ref does not support this operation");
         assert!(
-            info.hint.unwrap().contains("screenshot-only"),
+            info.hint.unwrap().contains("capture id"),
             "expected visual-surface-specific hint"
         );
         assert_eq!(info.exit_code, 1);
@@ -437,6 +477,25 @@ mod tests {
         );
         // Still the browser/CDP failure bucket.
         assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn surface_capture_stale_requests_a_fresh_screenshot() {
+        let data = serde_json::json!({ "reason": reason::SURFACE_CAPTURE_STALE });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(
+            info.summary,
+            "page state changed since the surface screenshot"
+        );
+        assert!(info.hint.unwrap().contains("fresh surface screenshot"));
+    }
+
+    #[test]
+    fn surface_coordinate_invalid_explains_image_pixel_bounds() {
+        let data = serde_json::json!({ "reason": reason::SURFACE_COORDINATE_INVALID });
+        let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
+        assert_eq!(info.summary, "surface image coordinate is invalid");
+        assert!(info.hint.unwrap().contains("top-left corner is (0, 0)"));
     }
 
     #[test]

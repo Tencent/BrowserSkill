@@ -354,6 +354,9 @@ async fn click_round_trips_ref_and_modifiers() {
                 used_selector: None,
                 x: 12.5,
                 y: 34.0,
+                capture_id: None,
+                image_x: None,
+                image_y: None,
                 dialogs: vec![],
             })
             .unwrap(),
@@ -373,6 +376,9 @@ async fn click_round_trips_ref_and_modifiers() {
             click_count: Some(1),
             modifiers: Some(vec![KeyModifier::Ctrl, KeyModifier::Shift]),
             timeout_ms: Some(5_000),
+            capture_id: None,
+            image_x: None,
+            image_y: None,
         },
     )
     .await
@@ -610,6 +616,9 @@ async fn m7_tools_propagate_extension_errors() {
             click_count: None,
             modifiers: None,
             timeout_ms: Some(5_000),
+            capture_id: None,
+            image_x: None,
+            image_y: None,
         },
     )
     .await

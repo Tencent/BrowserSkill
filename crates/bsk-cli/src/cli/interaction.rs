@@ -136,6 +136,18 @@ pub struct ClickArgs {
 
     #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
     pub timeout: u32,
+
+    /// Capture id returned by `bsk screenshot --ref <surface>`.
+    #[arg(long)]
+    pub capture: Option<String>,
+
+    /// X coordinate in capture-image pixels. Requires `--capture` and `--image-y`.
+    #[arg(long = "image-x", allow_hyphen_values = true)]
+    pub image_x: Option<f64>,
+
+    /// Y coordinate in capture-image pixels. Requires `--capture` and `--image-x`.
+    #[arg(long = "image-y", allow_hyphen_values = true)]
+    pub image_y: Option<f64>,
 }
 
 pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
@@ -147,6 +159,14 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     )?;
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
+    let point_arg_count = usize::from(args.capture.is_some())
+        + usize::from(args.image_x.is_some())
+        + usize::from(args.image_y.is_some());
+    if point_arg_count != 0 && point_arg_count != 3 {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--capture, --image-x, and --image-y must be given together"
+        )));
+    }
     let params = ClickParams {
         session_id: args.session.clone(),
         ref_,
@@ -160,6 +180,9 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
             Some(modifiers)
         },
         timeout_ms: Some(args.timeout),
+        capture_id: args.capture.clone(),
+        image_x: args.image_x,
+        image_y: args.image_y,
     };
     let reply: ClickResult = call(
         info.sock_path,
@@ -183,6 +206,14 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
                 "click ok tab={} target={target} at=({}, {})",
                 reply.tab_id, reply.x, reply.y
             );
+            if let Some(capture_id) = &reply.capture_id {
+                println!(
+                    "capture={} image=({}, {}) coordinate_space=capture-image-pixel",
+                    capture_id,
+                    reply.image_x.unwrap_or_default(),
+                    reply.image_y.unwrap_or_default()
+                );
+            }
             print_dialog_summaries(&reply.dialogs);
         }
     }

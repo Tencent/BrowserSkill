@@ -26,12 +26,14 @@ describe("lookupSnapshotRef", () => {
       refKey: "e3",
       kind: "dom",
       capabilities: ["interact", "screenshot"],
+      generation: 0,
     });
     expect(lookupSnapshotRef(ctx, "e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
       kind: "dom",
       capabilities: ["interact", "screenshot"],
+      generation: 0,
     });
   });
 
@@ -68,6 +70,7 @@ describe("resolveSnapshotRef", () => {
       cdpSessionId: "child-session",
       kind: "dom" as const,
       capabilities: ["interact", "screenshot"] as const,
+      generation: 0,
     };
     expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
     expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
@@ -115,6 +118,7 @@ describe("resolveSnapshotRef", () => {
       refKey: "e3",
       kind: "dom",
       capabilities: ["interact", "screenshot"],
+      generation: 0,
     });
   });
 

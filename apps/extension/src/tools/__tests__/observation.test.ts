@@ -67,6 +67,9 @@ function makeFakeCdp(handlers: Record<string, (params?: object) => unknown>) {
     if (!handler && method === "Page.getLayoutMetrics") {
       return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
     }
+    if (!handler && method === "Page.getFrameTree") {
+      return { frameTree: { frame: { id: "main", loaderId: "loader-1", url: "https://test/" } } };
+    }
     if (!handler) throw new Error(`unexpected CDP call ${method}`);
     return handler(params);
   });
@@ -334,6 +337,11 @@ describe("handleScreenshot", () => {
     };
     expect(clip.clip).toMatchObject({ width: 4096, height: 4096 });
     expect(clip.clip?.scale).toBeCloseTo(Math.sqrt(4_000_000 / (4096 * 4096)));
+    expect(res.capture).toMatchObject({
+      surface_ref: "@e5",
+      coordinate_space: "capture-image-pixel",
+    });
+    expect(ctx.surfaceCaptures.size()).toBe(1);
   });
 
   it("crops a visual surface screenshot to its observation-time visible region", async () => {
@@ -368,6 +376,7 @@ describe("handleScreenshot", () => {
       clip?: { x: number; y: number; width: number; height: number };
     };
     expect(clip.clip).toMatchObject({ x: 25, y: 30, width: 50, height: 40 });
+    expect(res.capture?.id).toMatch(/^sc_/);
   });
 
   it("returns not_found for unknown ref", async () => {

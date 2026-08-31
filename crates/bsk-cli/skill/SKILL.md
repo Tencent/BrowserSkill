@@ -80,7 +80,15 @@ Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` /
 
 When VOM renders `[hover first: …]` on an element, the listed items are not currently clickable refs. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action.
 
-When `bsk observe` renders `@eN surface ... [visual-only; requires=image-understanding; ...]`, the ref identifies rendered canvas content that is not represented by the text observation, not an interactable DOM control. Keep using any reliable DOM/AX text and controls that appear alongside it. If you can actually inspect image output, use `bsk screenshot --ref @eN --session <id>` to obtain the visible crop. If you lack multimodal or image-reading capability, do not take a screenshot and pretend to know its contents, and never guess coordinates; tell the user that they need to switch to a model with image-understanding capability. Do not pass a visual surface ref to click, fill, hover, or select; those commands intentionally reject screenshot-only refs.
+When `bsk observe` renders `@eN surface ... [visual-only; requires=image-understanding; ...]`, the ref identifies rendered canvas content that is not represented by the text observation, not an interactable DOM control. Keep using any reliable DOM/AX text and controls that appear alongside it. If you lack multimodal or image-reading capability, do not take a screenshot and pretend to know its contents, and never guess coordinates; tell the user that they need to switch to a model with image-understanding capability.
+
+If you can actually inspect image output, use `bsk screenshot --ref @eN --session <id>` to obtain the visible crop and its short-lived, single-use Surface capture id. Only when the task requires a point action and the image provides a clear target, bind that exact screenshot to the same general click command:
+
+```bash
+bsk click @eN --capture <capture-id> --image-x <px> --image-y <px> --session <id>
+```
+
+Coordinates are pixels in the returned capture image, not viewport CSS coordinates. Re-observing, navigating, scrolling, resizing, zooming, changing Frame projection, expiry, or reusing the capture makes the action fail; take a new Surface screenshot instead of adjusting or retrying coordinates. A point click does not reveal Canvas semantics and must not be followed by an assumed fill/press workflow. Without all three capture arguments, visual Surface refs remain screenshot-only and click/fill/hover/select reject them.
 
 ## Observation priority
 
@@ -176,7 +184,7 @@ bsk emulate --session <id> --off
 | `bsk snapshot` | First-choice static page understanding: accessibility tree with `@eN` element refs |
 | `bsk observe` | Semantic VOM observation with bounded perception probes for conditional surfaces |
 | `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
-| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
+| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional); Surface crops return a short-lived capture id |
 
 ### Console & network debugging (read-only; require `--session`)
 
@@ -202,7 +210,7 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 
 | Command | Summary |
 |---------|---------|
-| `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |
+| `bsk click <ref-or-selector>` | Click a DOM element (`--button`, `--click-count`, `--modifiers`), or perform one screenshot-bound Surface point click with `--capture`, `--image-x`, and `--image-y` |
 | `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
 | `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |

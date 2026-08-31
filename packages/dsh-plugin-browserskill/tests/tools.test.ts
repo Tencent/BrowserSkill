@@ -478,12 +478,12 @@ describe("interaction tools", () => {
     emulate: { tab_id: 7, cleared: false },
   };
 
-  it("interact.click maps target, button, and click count", async () => {
+  it("interact.click maps target, button, click count, and modifiers", async () => {
     const { tools, calls } = setup(responses);
     await startSession(tools);
     const click = tools.get("interact.click");
     const value = (await click?.execute(
-      { target: "@e1", button: "right", clickCount: 2 },
+      { target: "@e1", button: "right", clickCount: 2, modifiers: ["ctrl", "shift"] },
       makeExec(),
     )) as { session: string; x: number; y: number };
     expect(value).toMatchObject({ session: "s1", x: 10, y: 20 });
@@ -495,6 +495,43 @@ describe("interaction tools", () => {
       "right",
       "--click-count",
       "2",
+      "--modifiers",
+      "ctrl,shift",
+      "@e1",
+    ]);
+  });
+
+  it("interact.click forwards a complete Surface capture coordinate transaction", async () => {
+    const { tools, calls } = setup({
+      ...responses,
+      click: {
+        tab_id: 7,
+        used_ref: "e1",
+        x: 110,
+        y: 70,
+        capture_id: "sc_test",
+        image_x: 200,
+        image_y: 100,
+      },
+    });
+    await startSession(tools);
+    const click = tools.get("interact.click");
+    const value = await click?.execute(
+      { target: "@e1", captureId: "sc_test", imageX: 200, imageY: 100 },
+      makeExec(),
+    );
+
+    expect(value).toMatchObject({ captureId: "sc_test", x: 110, y: 70 });
+    expect(calls[1].args).toEqual([
+      "click",
+      "--session",
+      "s1",
+      "--capture",
+      "sc_test",
+      "--image-x",
+      "200",
+      "--image-y",
+      "100",
       "@e1",
     ]);
   });
@@ -921,6 +958,32 @@ describe("inspect.screenshot", () => {
     expect(calls[1].args).toContain("--ref");
     const rendered = screenshot?.output.render({ session: "s1" }, value as never);
     expect(rendered?.every((block) => block.type === "text")).toBe(true);
+  });
+
+  it("returns Surface capture metadata alongside the screenshot", async () => {
+    const path = pngFile();
+    const { tools } = setup({
+      "session start": START_REPLY("s1"),
+      screenshot: {
+        tab_id: 7,
+        width: 800,
+        height: 600,
+        format: "png",
+        path,
+        byte_size: 8,
+        capture: { id: "sc_test", expires_at: 1700000030000 },
+      },
+    });
+    await startSession(tools);
+    const screenshot = tools.get("inspect.screenshot");
+    const value = await screenshot?.execute({ ref: "@e1" }, makeExec());
+
+    expect(value).toMatchObject({
+      captureId: "sc_test",
+      captureExpiresAt: 1700000030000,
+    });
+    const rendered = screenshot?.output.render({ session: "s1" }, value as never);
+    expect(rendered?.[0]).toMatchObject({ type: "text", text: expect.stringContaining("sc_test") });
   });
 
   it("commits the image through the attachment store on an image-capable route", async () => {

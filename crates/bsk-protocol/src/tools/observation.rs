@@ -208,8 +208,18 @@ pub struct ScreenshotResult {
     /// Always `"png"` in v0.1; reserved for future JPEG / WebP support.
     pub format: String,
     pub tab_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<SurfaceCaptureInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct SurfaceCaptureInfo {
+    pub id: String,
+    pub surface_ref: String,
+    pub coordinate_space: String,
+    pub expires_at: u64,
 }
 
 #[cfg(test)]
@@ -293,6 +303,12 @@ mod tests {
             height: 600,
             format: "png".into(),
             tab_id: 7,
+            capture: Some(SurfaceCaptureInfo {
+                id: "sc_test".into(),
+                surface_ref: "@e3".into(),
+                coordinate_space: "capture-image-pixel".into(),
+                expires_at: 1_700_000_030_000,
+            }),
             dialogs: vec![],
         };
         let v = serde_json::to_value(&r).unwrap();
