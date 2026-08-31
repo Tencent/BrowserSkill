@@ -24,10 +24,14 @@ describe("lookupSnapshotRef", () => {
     expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
     });
     expect(lookupSnapshotRef(ctx, "e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
     });
   });
 
@@ -53,6 +57,8 @@ describe("resolveSnapshotRef", () => {
       tabId: 4,
       frameId: "child-frame",
       cdpSessionId: "child-session",
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
     });
 
     const expected = {
@@ -60,6 +66,8 @@ describe("resolveSnapshotRef", () => {
       refKey: "e3",
       frameId: "child-frame",
       cdpSessionId: "child-session",
+      kind: "dom" as const,
+      capabilities: ["interact", "screenshot"] as const,
     };
     expect(lookupSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
     expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual(expected);
@@ -105,6 +113,28 @@ describe("resolveSnapshotRef", () => {
     expect(resolveSnapshotRef(ctx, "@e3", 4)).toEqual({
       backendNodeId: 1234,
       refKey: "e3",
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
+    });
+  });
+
+  it("rejects an operation outside the ref's declared capabilities", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, {
+      tabId: 4,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+
+    expect(resolveSnapshotRef(ctx, "@e3", 4, "interact")).toMatchObject({
+      code: "permission_denied",
+      message: "ref @e3 does not support interact",
+      data: {
+        reason: "ref_capability_denied",
+        required_capability: "interact",
+        kind: "surface",
+      },
     });
   });
 });

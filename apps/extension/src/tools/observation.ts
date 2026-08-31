@@ -8,6 +8,7 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
+  type Rect,
   renderVom,
   type VomNode,
   type VomOptions,
@@ -60,6 +61,11 @@ import {
   projectRecordSafeObservation,
 } from "./vom/record-safe-observation";
 import {
+  clusterRenderedSurfaces,
+  discoverRenderedSurfaces,
+  projectRenderedSurfaces,
+} from "./vom/rendered-surfaces";
+import {
   buildSemanticGraph,
   buildSemanticVomScene,
   normalizeSemanticStructure,
@@ -89,6 +95,9 @@ export const normaliseRef = sharedNormaliseRef;
 // ---------------------------------------------------------------------------
 // screenshot — `tool.screenshot`
 // ---------------------------------------------------------------------------
+
+const VISUAL_SURFACE_SCREENSHOT_MAX_EDGE = 2_048;
+const VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS = 4_000_000;
 
 /**
  * Strip the `data:image/...;base64,` prefix from a Chrome
@@ -182,6 +191,8 @@ async function captureElementScreenshot(
   target: CdpTarget,
   backendNodeId: number,
   frameId?: string,
+  visualSurface = false,
+  observedVisibleRect?: Rect,
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
@@ -189,11 +200,36 @@ async function captureElementScreenshot(
     cdp,
     tabId,
     { target, backendNodeId, ...(frameId ? { frameId } : {}) },
-    { scrollIntoView: true },
+    { scrollIntoView: !visualSurface },
   );
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
-  const rect = geometry.topBounds;
+  const liveRect = geometry.topBounds;
+  const rect =
+    visualSurface && observedVisibleRect
+      ? (() => {
+          const x = Math.max(liveRect.x, observedVisibleRect.x);
+          const y = Math.max(liveRect.y, observedVisibleRect.y);
+          const right = Math.min(
+            liveRect.x + liveRect.width,
+            observedVisibleRect.x + observedVisibleRect.w,
+          );
+          const bottom = Math.min(
+            liveRect.y + liveRect.height,
+            observedVisibleRect.y + observedVisibleRect.h,
+          );
+          return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+        })()
+      : liveRect;
+  if (!rect) return { code: "permission_denied", message: "surface is no longer visible" };
+  const scale = visualSurface
+    ? Math.min(
+        1,
+        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.width,
+        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.height,
+        Math.sqrt(VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS / (rect.width * rect.height)),
+      )
+    : 1;
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
@@ -203,7 +239,7 @@ async function captureElementScreenshot(
         y: rect.y,
         width: rect.width,
         height: rect.height,
-        scale: 1,
+        scale,
       },
     });
     if (signal?.aborted) return cancelled("screenshot");
@@ -310,7 +346,7 @@ export async function handleScreenshot(
     if (!deps.cdp) {
       return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
     }
-    const node = resolveSnapshotRef(ctx, ref, target.tabId);
+    const node = resolveSnapshotRef(ctx, ref, target.tabId, "screenshot");
     if (isRpcError(node)) return node;
     if (signal?.aborted) return cancelled("screenshot");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -330,6 +366,8 @@ export async function handleScreenshot(
           nodeTarget,
           node.backendNodeId,
           node.frameId,
+          node.kind === "surface",
+          node.visibleRect,
           signal,
         ),
       deps.sendToTab,
@@ -1023,6 +1061,7 @@ async function captureForVom(
 
 export interface CaptureVomObservationOptions extends VomOptions {
   conditionalSurfaceProbe?: boolean;
+  renderedSurfaceDiscovery?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
 }
@@ -1064,7 +1103,20 @@ export async function captureVomObservation(
     ),
   );
   const decoratedScene = attachCapturedSceneAnnotations(scene, normalizedDocuments, captured);
-  const rendered = renderVom(decoratedScene, {
+  const observedScene = options.renderedSurfaceDiscovery
+    ? projectRenderedSurfaces(
+        decoratedScene,
+        normalizedDocuments,
+        clusterRenderedSurfaces(
+          discoverRenderedSurfaces(
+            normalizedDocuments,
+            captured.viewport,
+            captured.excludedBackendNodeIds,
+          ),
+        ),
+      )
+    : decoratedScene;
+  const rendered = renderVom(observedScene, {
     maxDepth: options.maxDepth,
     maxTokens: options.maxTokens,
     redactValues: options.redactValues,
@@ -1115,6 +1167,7 @@ async function handleVomObservation(
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
       conditionalSurfaceProbe: effectiveConditionalSurfaceProbe,
+      renderedSurfaceDiscovery: toolName === "observe",
       hoverProbeBypassOverlay: deps.hoverProbeBypassOverlay,
       signal,
     });
@@ -1132,6 +1185,9 @@ async function handleVomObservation(
             tabId: target.tabId,
             ...(ref.frameId ? { frameId: ref.frameId } : {}),
             ...(refTarget?.sessionId ? { cdpSessionId: refTarget.sessionId } : {}),
+            ...(ref.visibleRect ? { visibleRect: ref.visibleRect } : {}),
+            ...(ref.kind ? { kind: ref.kind } : {}),
+            ...(ref.capabilities ? { capabilities: ref.capabilities } : {}),
           },
         ] as const;
       }),

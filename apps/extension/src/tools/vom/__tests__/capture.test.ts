@@ -722,6 +722,44 @@ describe("captureViewModel", () => {
     expect(nodes.find((node) => node.backendNodeId === 14)?.rendered).toBe(false);
   });
 
+  it("propagates fully transparent ancestor suppression to painted descendants", async () => {
+    const S = ["html", "body", "div", "canvas", "static", "auto", "visible", "1", "0"];
+    const i = (value: string) => S.indexOf(value);
+    const snapshot = {
+      strings: S,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1, 2],
+            nodeName: [i("html"), i("body"), i("div"), i("canvas")],
+            backendNodeId: [10, 11, 12, 13],
+            attributes: [[], [], [], []],
+          },
+          layout: {
+            nodeIndex: [1, 2, 3],
+            styles: [
+              [i("static"), i("auto"), i("auto"), i("visible"), i("1")],
+              [i("static"), i("auto"), i("auto"), i("visible"), i("0")],
+              [i("static"), i("auto"), i("auto"), i("visible"), i("1")],
+            ],
+            bounds: [
+              [0, 0, 1000, 800],
+              [10, 10, 200, 100],
+              [10, 10, 200, 100],
+            ],
+            paintOrders: [0, 1, 2],
+          },
+        },
+      ],
+    };
+
+    const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
+    const canvas = nodes.find((node) => node.backendNodeId === 13);
+
+    expect(canvas?.rendered).toBe(true);
+    expect(canvas?.visuallySuppressed).toBe(true);
+  });
+
   it("subtracts scroll offset to make rects viewport-relative", async () => {
     const cdp = {
       send: vi.fn(async (_t: number, method: string) => {

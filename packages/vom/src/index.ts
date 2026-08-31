@@ -15,6 +15,8 @@ export type {
   VomNode,
   VomOptions,
   VomRef,
+  VomRefCapability,
   VomResult,
   VomScene,
+  VomVisualSurface,
 } from "./types";

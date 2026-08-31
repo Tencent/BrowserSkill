@@ -29,6 +29,66 @@ function coreRefs(refs: ReturnType<typeof renderVom>["refs"]) {
 }
 
 describe("renderVom single-layer page", () => {
+  it("renders visual surfaces as screenshot-only refs", () => {
+    const input = scene([
+      node({ id: 1, role: "RootWebArea", frameId: "main" }),
+      node({ id: 2, parentId: 1, role: "Iframe", frameId: "main", backendNodeId: 20 }),
+    ]);
+    input.visualSurfaces = [
+      {
+        parentId: 2,
+        backendNodeId: 99,
+        frameId: "child",
+        renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        label: "Data grid",
+        memberCount: 2,
+      },
+    ];
+    const out = renderVom(input);
+
+    expect(out.text).toContain(
+      '@e1 surface "Data grid" [rendering=canvas; layers=2; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
+    );
+    expect(out.refs).toContainEqual(
+      expect.objectContaining({
+        ref: "e1",
+        backendNodeId: 99,
+        kind: "surface",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        capabilities: ["screenshot"],
+      }),
+    );
+  });
+
+  it("renders an unnamed visual surface with a stable generic label", () => {
+    const input = scene([node({ id: 1, role: "RootWebArea", frameId: "main" })]);
+    input.visualSurfaces = [
+      {
+        parentId: 1,
+        backendNodeId: 99,
+        frameId: "main",
+        renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        memberCount: 1,
+      },
+    ];
+
+    const out = renderVom(input);
+
+    expect(out.text).toContain(
+      '@e1 surface "canvas visual surface" [rendering=canvas; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
+    );
+    expect(out.refs).toContainEqual(
+      expect.objectContaining({
+        ref: "e1",
+        name: "canvas visual surface",
+        kind: "surface",
+        capabilities: ["screenshot"],
+      }),
+    );
+  });
+
   it("does not derive handle context across frame scopes", () => {
     const out = renderVom(
       scene([
