@@ -11,7 +11,7 @@ use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     ClickParams, ClickResult, FillParams, FillResult, HoverParams, HoverResult, KeyModifier,
-    MouseButton, PressParams, PressResult, SelectParams, SelectResult,
+    MouseButton, PressParams, PressResult, SelectParams, SelectResult, TypeParams, TypeResult,
 };
 use clap::{Args, ValueEnum};
 
@@ -93,6 +93,27 @@ fn split_target(
             "pass exactly one of: <target>, --ref, or --selector"
         ))),
     }
+}
+
+fn split_type_target(
+    positional: Option<String>,
+    explicit_ref: Option<String>,
+    explicit_selector: Option<String>,
+    focused: bool,
+) -> Result<(Option<String>, Option<String>), CliError> {
+    if focused {
+        if positional.is_some() || explicit_ref.is_some() || explicit_selector.is_some() {
+            return Err(CliError::Local(anyhow::anyhow!(
+                "pass a target or --focused, not both"
+            )));
+        }
+        return Ok((None, None));
+    }
+    split_target(positional, explicit_ref, explicit_selector).map_err(|_| {
+        CliError::Local(anyhow::anyhow!(
+            "type requires exactly one of: <target>, --ref, --selector, or --focused"
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +405,95 @@ pub fn dispatch_fill(args: FillArgs, format: Format) -> Result<(), CliError> {
 }
 
 // ---------------------------------------------------------------------------
+// bsk type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Args)]
+#[group(id = "type_destination", required = true, multiple = false)]
+pub struct TypeDestinationArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector to focus before insertion.
+    #[arg(value_name = "TARGET")]
+    pub target: Option<String>,
+
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    /// Insert into the unique focused text-entry target instead of focusing a target.
+    #[arg(long)]
+    pub focused: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TypeArgs {
+    #[command(flatten)]
+    pub destination: TypeDestinationArgs,
+
+    /// Text to dispatch through the live keyboard/IME editing session.
+    #[arg(long)]
+    pub text: String,
+
+    #[arg(long)]
+    pub session: String,
+
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+
+    #[arg(long, default_value = "30s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+}
+
+pub fn dispatch_type(args: TypeArgs, format: Format) -> Result<(), CliError> {
+    let (ref_, selector) = split_type_target(
+        args.destination.target.clone(),
+        args.destination.ref_.clone(),
+        args.destination.selector.clone(),
+        args.destination.focused,
+    )?;
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    let params = TypeParams {
+        session_id: args.session.clone(),
+        text: args.text.clone(),
+        ref_,
+        selector,
+        focused: args.destination.focused,
+        tab_id: args.tab_id,
+        timeout_ms: Some(args.timeout),
+    };
+    let reply: TypeResult = call(
+        info.sock_path,
+        Method::ToolType,
+        params,
+        "type-1",
+        args.timeout,
+    )?;
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply)
+                    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            let target = if args.destination.focused {
+                "focused".into()
+            } else {
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref())
+            };
+            println!(
+                "type dispatched tab={} target={target} length={} verification=dispatched",
+                reply.tab_id, reply.text_length
+            );
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // bsk press
 // ---------------------------------------------------------------------------
 
@@ -657,6 +767,52 @@ mod tests {
         assert_eq!(parsed.args.target.as_deref(), Some("@e138"));
         assert_eq!(parsed.args.value, "deepseek");
         assert_eq!(parsed.args.session, "ohli");
+    }
+
+    #[test]
+    fn type_clap_accepts_explicit_target_and_text_flag() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        #[command(name = "type")]
+        struct Wrapper {
+            #[command(flatten)]
+            args: TypeArgs,
+        }
+
+        let parsed =
+            Wrapper::try_parse_from(["type", "@e138", "--text", "测试", "--session", "ohli"])
+                .expect("type args should parse");
+        assert_eq!(parsed.args.destination.target.as_deref(), Some("@e138"));
+        assert_eq!(parsed.args.text, "测试");
+        assert_eq!(parsed.args.session, "ohli");
+    }
+
+    #[test]
+    fn type_targeting_requires_exactly_one_explicit_mode() {
+        use clap::Parser;
+
+        #[derive(Parser)]
+        #[command(name = "type")]
+        struct Wrapper {
+            #[command(flatten)]
+            args: TypeArgs,
+        }
+
+        let parsed =
+            Wrapper::try_parse_from(["type", "--focused", "--text", "测试", "--session", "ohli"])
+                .expect("focused type args should parse");
+        assert!(parsed.args.destination.focused);
+        assert!(parsed.args.destination.target.is_none());
+
+        let focused = split_type_target(None, None, None, true).unwrap();
+        assert_eq!(focused, (None, None));
+
+        let missing = split_type_target(None, None, None, false).unwrap_err();
+        assert!(missing.to_string().contains("--focused"));
+
+        let mixed = split_type_target(Some("@e1".into()), None, None, true).unwrap_err();
+        assert!(mixed.to_string().contains("not both"));
     }
 
     #[test]

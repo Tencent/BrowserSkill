@@ -43,7 +43,7 @@ use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
-use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs};
+use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs, TypeArgs};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
@@ -170,6 +170,9 @@ pub enum Command {
 
     /// Fill an input / textarea / contenteditable.
     Fill(FillArgs),
+
+    /// Insert text into an explicit target or focused keyboard/IME editing session.
+    Type(TypeArgs),
 
     /// Dispatch a keyboard key combo.
     Press(PressArgs),

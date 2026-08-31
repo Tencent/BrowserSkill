@@ -7,6 +7,7 @@ import {
   handleHover,
   handlePress,
   handleSelect,
+  handleType,
   modifiersBitfield,
   parseKeySpec,
   resolveKeyDescriptor,
@@ -34,6 +35,15 @@ function makeFakeCdp(handlers: Record<string, (params: unknown) => unknown>) {
     if (!h && method === "Page.getLayoutMetrics") {
       return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
     }
+    if (
+      !h &&
+      method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression ?? "").includes(
+        "bsk-focus-target-probe",
+      )
+    ) {
+      return { result: { value: { hasFocus: true, activeTag: "input" } } };
+    }
     if (!h) throw new Error(`unexpected CDP call ${method}`);
     return h(params);
   };
@@ -45,6 +55,10 @@ function makeFakeCdp(handlers: Record<string, (params: unknown) => unknown>) {
       params?: object,
     ) => Promise<T>,
     trackSessionTab: vi.fn(),
+    getFrameGraph: vi.fn(async (tabId) => ({
+      rootFrameId: "main",
+      frames: [{ frameId: "main", target: { tabId } }],
+    })),
   };
   const tabsApi = {
     get: vi.fn(
@@ -53,6 +67,29 @@ function makeFakeCdp(handlers: Record<string, (params: unknown) => unknown>) {
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
   return { cdp, tabsApi, sent };
+}
+
+function fillRuntimeReadback(value: string) {
+  return (params: unknown) => {
+    const fn = String((params as { functionDeclaration?: string }).functionDeclaration ?? "");
+    if (fn.includes("bsk-editable-state")) {
+      return {
+        result: {
+          value: {
+            supported: true,
+            connected: true,
+            focused: true,
+            value,
+            kind: "input",
+          },
+        },
+      };
+    }
+    if (fn.includes("bsk-editable-selection")) {
+      return { result: { value: { selected: true } } };
+    }
+    return { result: { type: "undefined" } };
+  };
 }
 
 async function makeSurfaceClickFixture(onMouse?: (params: Record<string, unknown>) => void) {
@@ -733,7 +770,7 @@ describe("handleFill", () => {
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
-      "Runtime.callFunctionOn": () => ({ result: { type: "undefined" } }),
+      "Runtime.callFunctionOn": fillRuntimeReadback("hello"),
       "Input.insertText": () => ({}),
     });
     const res = await handleFill(
@@ -747,13 +784,13 @@ describe("handleFill", () => {
     expect(res.used_ref).toBe("e1");
     const insert = fake.sent.find((c) => c.method === "Input.insertText");
     expect(insert?.params).toEqual({ text: "hello" });
-    // clear_before defaults to true → callFunctionOn invoked once to
-    // clear, once to fire input/change after typing.
+    // clear_before defaults to true, so the edit transaction prepares a
+    // replacement selection and performs a settled live-value readback.
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
     expect(callFns.length).toBeGreaterThanOrEqual(2);
   });
 
-  it("clear_before=false skips the wipe call", async () => {
+  it("clear_before=false skips replacement selection", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 1, { tabId: 4 });
@@ -766,9 +803,20 @@ describe("handleFill", () => {
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
         const fn = (p as { functionDeclaration?: string }).functionDeclaration ?? "";
-        // No "this.value = ''" clearing on a no-clear path; only the
-        // post-input dispatchEvent.
-        expect(fn).not.toMatch(/this\.value\s*=\s*''/);
+        if (fn.includes("bsk-editable-state")) {
+          return {
+            result: {
+              value: {
+                supported: true,
+                connected: true,
+                focused: true,
+                value: "existingx",
+                kind: "textarea",
+              },
+            },
+          };
+        }
+        expect(fn).not.toMatch(/dispatchEvent|\.value\s*=/);
         return { result: { type: "undefined" } };
       },
       "Input.insertText": () => ({}),
@@ -779,7 +827,7 @@ describe("handleFill", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi },
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.value_length).toBe(1);
+    expect(res.value_length).toBe(9);
   });
 
   it("treats contenteditable=true as fillable", async () => {
@@ -797,7 +845,7 @@ describe("handleFill", () => {
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-3" } }),
-      "Runtime.callFunctionOn": () => ({ result: { type: "undefined" } }),
+      "Runtime.callFunctionOn": fillRuntimeReadback("rich"),
       "Input.insertText": () => ({}),
     });
     const res = await handleFill(
@@ -808,7 +856,103 @@ describe("handleFill", () => {
     expect("code" in res).toBe(false);
   });
 
-  it("stops before Input.insertText when abort fires after clearing", async () => {
+  it("routes OOPIF focus, text, DOM events, and readback through the node target", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 77, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({ "DOM.scrollIntoViewIfNeeded": () => ({}) });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 12,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const childCalls: string[] = [];
+    fake.cdp.sendToTarget = vi.fn(async (target, method, params) => {
+      expect(target).toEqual({ tabId: 4, sessionId: "child-session" });
+      childCalls.push(method);
+      if (method === "DOM.describeNode") {
+        return { node: { backendNodeId: 77, nodeName: "INPUT", attributes: [] } };
+      }
+      if (method === "DOM.scrollIntoViewIfNeeded" || method === "DOM.focus") return {};
+      if (method === "DOM.resolveNode") return { object: { objectId: "child-input" } };
+      if (method === "Input.insertText") {
+        expect(params).toEqual({ text: "中文输入" });
+        return {};
+      }
+      if (method === "Runtime.callFunctionOn") {
+        const fn = String((params as { functionDeclaration?: string }).functionDeclaration ?? "");
+        if (fn.includes("bsk-editable-state")) {
+          return {
+            result: {
+              value: {
+                supported: true,
+                connected: true,
+                focused: true,
+                value: "中文输入",
+                kind: "input",
+              },
+            },
+          };
+        }
+        if (fn.includes("bsk-editable-selection")) {
+          return { result: { value: { selected: true } } };
+        }
+        return { result: { type: "undefined" } };
+      }
+      throw new Error(`unexpected child call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handleFill(
+      sm,
+      { session_id: "aa11", ref: "@e1", value: "中文输入" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in res) throw new Error(JSON.stringify(res));
+    expect(res.value_length).toBe(4);
+    expect(childCalls).toContain("DOM.focus");
+    expect(childCalls).toContain("Input.insertText");
+    expect(childCalls.filter((method) => method === "Runtime.callFunctionOn")).toHaveLength(4);
+    expect(fake.sent.some((call) => call.method === "Input.insertText")).toBe(false);
+  });
+
+  it("returns input_not_applied when a controlled input resets the value", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 8, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.describeNode": () => ({ node: { backendNodeId: 8, nodeName: "INPUT" } }),
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.focus": () => ({}),
+      "DOM.resolveNode": () => ({ object: { objectId: "controlled" } }),
+      "Input.insertText": () => ({}),
+      "Runtime.callFunctionOn": fillRuntimeReadback(""),
+    });
+
+    const res = await handleFill(
+      sm,
+      { session_id: "aa11", ref: "@e1", value: "rejected" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_applied", expected_value_length: 8, actual_value_length: 0 },
+    });
+  });
+
+  it("stops before Input.insertText when abort fires after preparing replacement", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e1", 555, { tabId: 4 });
@@ -820,8 +964,25 @@ describe("handleFill", () => {
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-1" } }),
-      "Runtime.callFunctionOn": () => {
-        abort.abort();
+      "Runtime.callFunctionOn": (params) => {
+        const fn = String((params as { functionDeclaration?: string }).functionDeclaration ?? "");
+        if (fn.includes("bsk-editable-state")) {
+          return {
+            result: {
+              value: {
+                supported: true,
+                connected: true,
+                focused: true,
+                value: "",
+                kind: "input",
+              },
+            },
+          };
+        }
+        if (fn.includes("bsk-editable-selection")) {
+          abort.abort();
+          return { result: { value: { selected: true } } };
+        }
         return { result: { type: "undefined" } };
       },
       "Input.insertText": () => ({}),
@@ -861,6 +1022,204 @@ describe("handleFill", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "DOM.focus")).toBe(false);
+  });
+});
+
+describe("handleType", () => {
+  it("requires an explicit target mode instead of silently using focus", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({});
+
+    const missing = await handleType(
+      sm,
+      { session_id: "aa11", text: "x" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(missing).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("focused=true"),
+    });
+
+    const mixed = await handleType(
+      sm,
+      { session_id: "aa11", ref: "@e1", focused: true, text: "x" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(mixed).toMatchObject({
+      code: "invalid_params",
+      message: expect.stringContaining("not both"),
+    });
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it("routes committed IME text through the explicit OOPIF target without DOM readback", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 77, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({ "DOM.scrollIntoViewIfNeeded": () => ({}) });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 12,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const childCalls: Array<{ method: string; params?: object }> = [];
+    fake.cdp.sendToTarget = vi.fn(async (_target, method, params) => {
+      childCalls.push({ method, params });
+      if (method === "DOM.describeNode") {
+        return { node: { backendNodeId: 77, nodeName: "TEXTAREA", attributes: [] } };
+      }
+      return {};
+    }) as CdpRunner["sendToTarget"];
+
+    const result = await handleType(
+      sm,
+      { session_id: "aa11", ref: "@e1", text: "测试" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in result) throw new Error(JSON.stringify(result));
+    expect(result).toMatchObject({
+      tab_id: 4,
+      used_ref: "e1",
+      text_length: 2,
+      verification: "dispatched",
+    });
+    expect(childCalls.map((call) => call.method)).toEqual([
+      "DOM.describeNode",
+      "DOM.scrollIntoViewIfNeeded",
+      "DOM.focus",
+      "Input.dispatchKeyEvent",
+      "Input.insertText",
+      "Input.dispatchKeyEvent",
+    ]);
+    expect(fake.sent.some((call) => call.method.startsWith("Input."))).toBe(false);
+    expect(childCalls.some((call) => call.method === "Runtime.callFunctionOn")).toBe(false);
+  });
+
+  it("uses the focused OOPIF only when focused mode resolves a text-entry target", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "Runtime.evaluate": () => ({
+        result: { value: { hasFocus: true, activeTag: "iframe", textEntry: false } },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const childCalls: string[] = [];
+    fake.cdp.sendToTarget = vi.fn(async (_target, method) => {
+      childCalls.push(method);
+      if (method === "Runtime.evaluate") {
+        return {
+          result: { value: { hasFocus: true, activeTag: "textarea", textEntry: true } },
+        };
+      }
+      return {};
+    }) as CdpRunner["sendToTarget"];
+
+    const result = await handleType(
+      sm,
+      { session_id: "aa11", focused: true, text: "A" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    if ("code" in result) throw new Error(JSON.stringify(result));
+    expect(result).toMatchObject({ text_length: 1, verification: "dispatched" });
+    expect(childCalls).toEqual([
+      "Runtime.evaluate",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+    ]);
+    expect(fake.sent.some((call) => call.method.startsWith("Input."))).toBe(false);
+  });
+
+  it("refuses focused mode when focus is not owned by a text-entry target", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "Runtime.evaluate": () => ({
+        result: { value: { hasFocus: true, activeTag: "button", textEntry: false } },
+      }),
+    });
+
+    const result = await handleType(
+      sm,
+      { session_id: "aa11", focused: true, text: "x" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "focus_target_unresolved", candidate_count: 0 },
+    });
+    expect(fake.sent.some((call) => call.method.startsWith("Input."))).toBe(false);
+  });
+
+  it("rejects explicit non-text input controls", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 77, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.describeNode": () => ({
+        node: { backendNodeId: 77, nodeName: "INPUT", attributes: ["type", "checkbox"] },
+      }),
+    });
+
+    const result = await handleType(
+      sm,
+      { session_id: "aa11", ref: "@e1", text: "x" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(result).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "target_not_fillable" },
+    });
+    expect(fake.sent.some((call) => call.method.startsWith("Input."))).toBe(false);
+  });
+
+  it("rejects a Surface ref instead of treating it as a text target", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 77, {
+      tabId: 4,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+    const fake = makeFakeCdp({});
+
+    const result = await handleType(
+      sm,
+      { session_id: "aa11", ref: "@e1", text: "x" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(result).toMatchObject({
+      code: "permission_denied",
+      data: { reason: "ref_capability_denied", required_capability: "interact" },
+    });
   });
 });
 
@@ -1000,6 +1359,125 @@ describe("handlePress", () => {
     const focus = fake.sent.find((c) => c.method === "DOM.focus");
     expect(focus?.params).toEqual({ backendNodeId: 555 });
     expect(res.key).toBe("Enter");
+  });
+
+  it("routes ref-targeted key events through the OOPIF session", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, {
+      tabId: 4,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+    });
+    const fake = makeFakeCdp({ "DOM.scrollIntoViewIfNeeded": () => ({}) });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 12,
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const childCalls: string[] = [];
+    fake.cdp.sendToTarget = vi.fn(async (_target, method) => {
+      childCalls.push(method);
+      return {};
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter", ref: "@e1" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expectPressOk(res);
+    expect(childCalls).toEqual([
+      "DOM.scrollIntoViewIfNeeded",
+      "DOM.focus",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+    ]);
+    expect(fake.sent.some((call) => call.method === "Input.dispatchKeyEvent")).toBe(false);
+  });
+
+  it("routes an untargeted press to the uniquely focused OOPIF session", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "Runtime.evaluate": () => ({
+        result: { value: { hasFocus: true, activeTag: "iframe" } },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          target: { tabId: 4, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const childCalls: string[] = [];
+    fake.cdp.sendToTarget = vi.fn(async (_target, method) => {
+      childCalls.push(method);
+      if (method === "Runtime.evaluate") {
+        return { result: { value: { hasFocus: true, activeTag: "textarea" } } };
+      }
+      return {};
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "a" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expectPressOk(res);
+    expect(childCalls).toEqual([
+      "Runtime.evaluate",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+      "Input.dispatchKeyEvent",
+    ]);
+  });
+
+  it("refuses an untargeted press when focus ownership is ambiguous", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "Runtime.evaluate": () => ({
+        result: { value: { hasFocus: true, activeTag: "input" } },
+      }),
+    });
+    fake.cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        { frameId: "child", target: { tabId: 4, sessionId: "child-session" } },
+      ],
+    }));
+    fake.cdp.sendToTarget = vi.fn(async () => ({
+      result: { value: { hasFocus: true, activeTag: "textarea" } },
+    })) as CdpRunner["sendToTarget"];
+
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Enter" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+
+    expect(res).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "focus_target_unresolved", candidate_count: 2 },
+    });
+    expect(fake.sent.some((call) => call.method === "Input.dispatchKeyEvent")).toBe(false);
   });
 
   it("stops before focus when abort fires after press scroll", async () => {

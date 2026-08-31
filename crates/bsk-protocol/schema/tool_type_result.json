@@ -1,11 +1,11 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SnapshotResult",
+  "title": "TypeResult",
   "type": "object",
   "required": [
-    "ref_count",
     "tab_id",
-    "text"
+    "text_length",
+    "verification"
   ],
   "properties": {
     "dialogs": {
@@ -14,25 +14,30 @@
         "$ref": "#/definitions/JavaScriptDialogInfo"
       }
     },
-    "ref_count": {
-      "description": "Number of `@e<N>` refs registered for this session by this snapshot. Equivalent to the size of the new ref-store map.",
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "text_length": {
+      "description": "UTF-16 code-unit length of text accepted for dispatch.",
       "type": "integer",
       "format": "uint32",
       "minimum": 0.0
     },
-    "tab_id": {
-      "description": "Tab the snapshot was actually computed for (after resolving the optional `tab_id` default).",
-      "type": "integer",
-      "format": "int64"
+    "used_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "text": {
-      "description": "Indented aria-snapshot text. Refs are rendered as `@e<N>` so the agent can copy them into subsequent `tool.click` / `tool.fill` / `tool.type` targets.",
-      "type": "string"
+    "used_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
-    "truncated": {
-      "description": "Whether the rendered tree was truncated because of `max_depth` / `max_tokens`. Agents may re-run with looser caps.",
-      "default": false,
-      "type": "boolean"
+    "verification": {
+      "$ref": "#/definitions/TypeVerification"
     }
   },
   "definitions": {
@@ -102,6 +107,17 @@
         "confirm",
         "prompt",
         "beforeunload"
+      ]
+    },
+    "TypeVerification": {
+      "oneOf": [
+        {
+          "description": "Chromium accepted the complete keyboard/IME dispatch transaction. The caller must observe the application output to verify business state.",
+          "type": "string",
+          "enum": [
+            "dispatched"
+          ]
+        }
       ]
     }
   }

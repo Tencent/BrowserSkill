@@ -74,6 +74,8 @@ pub enum Method {
     ToolHover,
     #[serde(rename = "tool.fill")]
     ToolFill,
+    #[serde(rename = "tool.type")]
+    ToolType,
     #[serde(rename = "tool.press")]
     ToolPress,
     #[serde(rename = "tool.select")]
@@ -154,6 +156,7 @@ impl Method {
             | Method::ToolReload
             | Method::ToolClick
             | Method::ToolFill
+            | Method::ToolType
             | Method::ToolPress
             | Method::ToolSelect
             | Method::ToolEvaluate
@@ -247,6 +250,13 @@ mod tests {
     }
 
     #[test]
+    fn type_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("tool.type")).unwrap();
+        assert_eq!(method, Method::ToolType);
+        assert_eq!(serde_json::to_value(method).unwrap(), json!("tool.type"));
+    }
+
+    #[test]
     fn cancel_params_and_result_round_trip() {
         let params: CancelParams = serde_json::from_value(json!({ "rpc_id": "wait-1" })).unwrap();
         assert_eq!(params.rpc_id, "wait-1");
@@ -284,6 +294,7 @@ mod tests {
         assert!(Method::ToolReload.is_mutating());
         assert!(Method::ToolClick.is_mutating());
         assert!(Method::ToolFill.is_mutating());
+        assert!(Method::ToolType.is_mutating());
         assert!(Method::ToolPress.is_mutating());
         assert!(Method::ToolSelect.is_mutating());
         assert!(Method::ToolEvaluate.is_mutating());

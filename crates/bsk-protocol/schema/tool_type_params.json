@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TypeParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "text"
+  ],
+  "properties": {
+    "focused": {
+      "description": "Explicitly dispatch to the unique focused text-entry target instead of focusing a ref or selector.",
+      "type": "boolean"
+    },
+    "ref": {
+      "description": "Target to focus before dispatching text. Exactly one targeting mode must be selected: `ref` / `selector`, or `focused=true`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "text": {
+      "description": "Text to dispatch to the live editing session. Unlike `fill`, `type` does not require the focused DOM editable to retain this text.",
+      "type": "string"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  }
+}

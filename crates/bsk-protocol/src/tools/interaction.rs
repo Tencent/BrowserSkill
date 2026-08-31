@@ -1,5 +1,5 @@
-//! DOM interaction tools (`tool.click`, `tool.fill`, `tool.press`,
-//! `tool.select`).
+//! DOM interaction tools (`tool.click`, `tool.fill`, `tool.type`,
+//! `tool.press`, `tool.select`).
 //!
 //! Element-targeted tools accept either a snapshot `ref` (`@e<N>` form,
 //! normalised against the session's RefStore) **or** a CSS selector
@@ -189,6 +189,60 @@ pub struct FillResult {
 }
 
 // ---------------------------------------------------------------------------
+// type
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TypeParams {
+    pub session_id: String,
+    /// Text to dispatch to the live editing session. Unlike `fill`, `type`
+    /// does not require the focused DOM editable to retain this text.
+    pub text: String,
+    /// Target to focus before dispatching text. Exactly one targeting mode
+    /// must be selected: `ref` / `selector`, or `focused=true`.
+    #[serde(
+        rename = "ref",
+        alias = "ref_",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ref_: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Explicitly dispatch to the unique focused text-entry target instead
+    /// of focusing a ref or selector.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub focused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TypeVerification {
+    /// Chromium accepted the complete keyboard/IME dispatch transaction.
+    /// The caller must observe the application output to verify business state.
+    Dispatched,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TypeResult {
+    pub tab_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_selector: Option<String>,
+    /// UTF-16 code-unit length of text accepted for dispatch.
+    pub text_length: u32,
+    pub verification: TypeVerification,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // press
 // ---------------------------------------------------------------------------
 
@@ -349,6 +403,50 @@ mod tests {
         assert_eq!(v, json!("ctrl"));
         let v = serde_json::to_value(KeyModifier::Meta).unwrap();
         assert_eq!(v, json!("meta"));
+    }
+
+    #[test]
+    fn type_payloads_distinguish_dispatch_from_value_verification() {
+        let params = TypeParams {
+            session_id: "abcd".into(),
+            text: "测试".into(),
+            ref_: Some("@e3".into()),
+            selector: None,
+            focused: false,
+            tab_id: Some(4),
+            timeout_ms: Some(5_000),
+        };
+        let encoded = serde_json::to_value(&params).unwrap();
+        assert_eq!(encoded["ref"], json!("@e3"));
+        assert_eq!(encoded["text"], json!("测试"));
+        assert!(encoded.get("focused").is_none());
+
+        let focused = TypeParams {
+            session_id: "abcd".into(),
+            text: "hello".into(),
+            ref_: None,
+            selector: None,
+            focused: true,
+            tab_id: None,
+            timeout_ms: None,
+        };
+        assert_eq!(
+            serde_json::to_value(focused).unwrap()["focused"],
+            json!(true)
+        );
+
+        let result = TypeResult {
+            tab_id: 4,
+            used_ref: Some("e3".into()),
+            used_selector: None,
+            text_length: 2,
+            verification: TypeVerification::Dispatched,
+            dialogs: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["verification"],
+            json!("dispatched")
+        );
     }
 
     #[test]

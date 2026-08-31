@@ -27,6 +27,8 @@ export type RpcErrorReason =
   | "ref_not_found"
   | "selector_not_found"
   | "target_not_fillable"
+  | "focus_target_unresolved"
+  | "input_not_applied"
   | "target_not_select"
   | "option_not_found"
   | "single_select_value_count"
@@ -479,6 +481,26 @@ export interface FillResult {
   used_ref?: string;
   used_selector?: string;
   value_length: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface TypeParams {
+  session_id: string;
+  text: string;
+  ref?: string;
+  selector?: string;
+  /** Explicitly dispatch to the unique focused text-entry target. */
+  focused?: boolean;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface TypeResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  text_length: number;
+  verification: "dispatched";
   dialogs?: JavaScriptDialogInfo[];
 }
 

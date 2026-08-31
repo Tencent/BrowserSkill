@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Frame input routing matrix</title>
+    <style>
+      body { padding: 16px; font: 14px system-ui, sans-serif; }
+      .frames { display: grid; grid-template-columns: repeat(3, 320px); gap: 16px; }
+      iframe { width: 300px; height: 430px; border: 2px solid #5d6d7e; }
+      input { padding: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Frame input routing matrix</h1>
+    <label>Top input <input aria-label="top input" /></label>
+    <div class="frames">
+      <iframe title="same-origin inputs" src="input-frame.html"></iframe>
+      <iframe title="cross-origin inputs" src="http://localhost:4173/input-frame.html"></iframe>
+      <iframe title="nested inputs" src="input-frame.html?nested=1"></iframe>
+    </div>
+  </body>
+</html>
