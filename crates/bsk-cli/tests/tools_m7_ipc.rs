@@ -16,7 +16,7 @@ use bsk_protocol::tools::{
     ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, NavigateBackParams,
     NavigateBackResult, NavigateForwardParams, NavigateForwardResult, NavigateParams,
     NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, SelectParams,
-    SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
+    SelectResult, SessionStartParams, SessionStartResult, WaitUntil, WheelParams, WheelResult,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -379,6 +379,55 @@ async fn click_round_trips_ref_and_modifiers() {
     .expect("click ok");
     assert_eq!(result.used_ref.as_deref(), Some("e3"));
     assert!((result.x - 12.5).abs() < f64::EPSILON);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wheel_round_trips_native_deltas_and_point() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolWheel);
+        let params: WheelParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.selector.as_deref(), Some("#panel"));
+        assert_eq!(params.delta_x, 10.0);
+        assert_eq!(params.delta_y, 600.0);
+        ResponseBody::Ok(
+            serde_json::to_value(WheelResult {
+                tab_id: 9,
+                used_ref: None,
+                used_selector: Some("#panel".into()),
+                x: 320.0,
+                y: 240.0,
+                delta_x: 10.0,
+                delta_y: 600.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: WheelResult = ipc_tool_call(
+        &sock,
+        Method::ToolWheel,
+        WheelParams {
+            session_id,
+            ref_: None,
+            selector: Some("#panel".into()),
+            tab_id: None,
+            delta_x: 10.0,
+            delta_y: 600.0,
+            modifiers: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("wheel ok");
+    assert_eq!(result.used_selector.as_deref(), Some("#panel"));
+    assert_eq!((result.delta_x, result.delta_y), (10.0, 600.0));
     handle.shutdown().await;
 }
 

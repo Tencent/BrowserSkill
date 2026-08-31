@@ -207,6 +207,27 @@ fn parses_hover_with_settle() {
 }
 
 #[test]
+fn parses_wheel_with_target_and_deltas() {
+    let cli = parse(&[
+        "bsk",
+        "wheel",
+        "#panel",
+        "--delta-x",
+        "12.5",
+        "--delta-y",
+        "600",
+        "--session",
+        "s1",
+    ]);
+    let Command::Wheel(args) = cli.command else {
+        panic!("expected wheel command");
+    };
+    assert_eq!(args.target.as_deref(), Some("#panel"));
+    assert_eq!(args.delta_x, 12.5);
+    assert_eq!(args.delta_y, 600.0);
+}
+
+#[test]
 fn rejects_zero_click_count() {
     assert!(
         Cli::try_parse_from(["bsk", "click", "@e1", "--session", "s1", "--count", "0"]).is_err()
