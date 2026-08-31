@@ -444,6 +444,39 @@ export interface HoverResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface FocusParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface FocusResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  focused: boolean;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface BlurParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface BlurResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  was_focused: boolean;
+  focused: boolean;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 export interface FillParams {
   session_id: string;
   value: string;

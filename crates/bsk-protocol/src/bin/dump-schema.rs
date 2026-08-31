@@ -79,6 +79,10 @@ fn main() {
     dump!(ClickResult, "tool_click_result");
     dump!(HoverParams, "tool_hover_params");
     dump!(HoverResult, "tool_hover_result");
+    dump!(FocusParams, "tool_focus_params");
+    dump!(FocusResult, "tool_focus_result");
+    dump!(BlurParams, "tool_blur_params");
+    dump!(BlurResult, "tool_blur_result");
     dump!(FillParams, "tool_fill_params");
     dump!(FillResult, "tool_fill_result");
     dump!(PressParams, "tool_press_params");
