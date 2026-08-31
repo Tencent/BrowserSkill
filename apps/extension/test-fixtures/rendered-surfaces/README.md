@@ -97,14 +97,25 @@ Run with a `900x700` Agent Window.
 
 This page exercises generic frame-aware input routing. It contains a top-level
 input plus same-origin, cross-origin (OOPIF), and nested frame inputs. Each
-frame includes an input, textarea, contenteditable editor, and a controlled
-input that resets its value on the next animation frame.
+frame includes an input, textarea, contenteditable editor, an input that
+replaces its DOM node after accepted input, an input that rejects synthetic
+DOM events, a transient keyboard/IME input proxy that consumes and clears its
+DOM value, and a controlled input that resets its value on the next animation
+frame.
 
 - `fill` must route focus, text insertion, DOM events, and readback through the
   ref's owning CDP target.
 - `press --ref` must focus and dispatch every key event through that same target.
 - Untargeted `press` must follow the actual focused target or refuse when focus
   ownership cannot be determined uniquely.
+- The remounting input must retain the value through its replacement node.
+- The trusted input must be filled without synthetic `input` / `change` events.
+- `type` must deliver ASCII key events and committed non-ASCII IME/software
+  keyboard insertion to the input proxy. Its DOM value remains empty while
+  `proxy output` retains the consumed text; the result reports
+  `verification=dispatched`, not a retained DOM value.
+- `type` must reject an omitted target unless `focused=true` is explicit, and
+  focused mode must reject focus that is not owned by a text-entry target.
 - The rejecting input must return `input_not_applied`, never a successful
   requested-value length.
 

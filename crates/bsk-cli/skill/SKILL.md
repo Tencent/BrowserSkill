@@ -70,9 +70,30 @@ bsk navigate <url> --session <id>
 bsk observe --session <id>           → primary semantic VOM view; reveals hover/focus surfaces
 bsk snapshot --session <id>          → static aria tree fallback when VOM is insufficient
 bsk hover @e3 --session <id>          → reveal hover-triggered menus before re-observing/clicking
-bsk click @e4 --session <id>          → or bsk fill, bsk select, bsk press
+bsk click @e4 --session <id>          → or bsk fill, bsk type, bsk select, bsk press
 bsk observe --session <id>             → again after navigation / DOM change
 ```
+
+### Choosing `fill`, `type`, and `press`
+
+Choose by the intended postcondition, not by whether observation happens to
+render `textbox [empty]`:
+
+- `fill` sets a field's retained value. Use it when success means the target
+  value must equal the requested text; it replaces existing content by default.
+- `type` inserts text at the active caret/selection in a live editing session.
+  Use it when the application must consume keyboard/IME text; it never clears
+  first and reports dispatch only.
+- `press` sends a discrete key or shortcut such as `Enter`, `Tab`, or `Ctrl+A`.
+  Do not encode special keys inside `type --text`.
+
+`type` requires an explicit targeting mode: pass a ref/selector when one is
+available, or pass `--focused` only after an immediately preceding action in
+the same tab deliberately established a text-entry focus. Never use `fill`
+as a probe and never automatically retry a failed `fill` with `type`: an
+application may already have consumed the text before clearing its proxy DOM
+value. Re-observe first. After `type`, verify the application output with one
+observation or screenshot; `verification=dispatched` is not business success.
 
 **Refs invalidate after navigation** — always re-snapshot before clicking, filling, or selecting on a new page.
 
@@ -88,7 +109,7 @@ If you can actually inspect image output, use `bsk screenshot --ref @eN --sessio
 bsk click @eN --capture <capture-id> --image-x <px> --image-y <px> --session <id>
 ```
 
-Coordinates are pixels in the returned capture image, not viewport CSS coordinates. Re-observing, navigating, scrolling, resizing, zooming, changing Frame projection, expiry, or reusing the capture makes the action fail; take a new Surface screenshot instead of adjusting or retrying coordinates. A point click does not reveal Canvas semantics and must not be followed by an assumed fill/press workflow. Without all three capture arguments, visual Surface refs remain screenshot-only and click/fill/hover/select reject them.
+Coordinates are pixels in the returned capture image, not viewport CSS coordinates. Re-observing, navigating, scrolling, resizing, zooming, changing Frame projection, expiry, or reusing the capture makes the action fail; take a new Surface screenshot instead of adjusting or retrying coordinates. A point click does not reveal Canvas semantics and must not be followed by an assumed fill/type/press workflow. Re-observe first: if the application exposes a real DOM editable, use its new ref; use `type --focused` only when the observation and immediately preceding click establish a focused text-entry session without a usable ref. Without all three capture arguments, visual Surface refs remain screenshot-only and click/fill/type/hover/select reject them.
 
 ## Observation priority
 
@@ -212,7 +233,9 @@ Both capture from the moment the tab is attached and read a bounded per-tab buff
 |---------|---------|
 | `bsk click <ref-or-selector>` | Click a DOM element (`--button`, `--click-count`, `--modifiers`), or perform one screenshot-bound Surface point click with `--capture`, `--image-x`, and `--image-y` |
 | `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
-| `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
+| `bsk fill <ref-or-selector> --value <text>` | Replace and verify a field's retained value |
+| `bsk type <ref-or-selector> --text <text>` | Insert keyboard/IME text into an explicitly targeted editing session; reports dispatch only |
+| `bsk type --focused --text <text>` | Insert into the unique focused text-entry session after an intentional focus-producing action |
 | `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
 | `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
 

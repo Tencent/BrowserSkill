@@ -484,6 +484,26 @@ export interface FillResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface TypeParams {
+  session_id: string;
+  text: string;
+  ref?: string;
+  selector?: string;
+  /** Explicitly dispatch to the unique focused text-entry target. */
+  focused?: boolean;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface TypeResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  text_length: number;
+  verification: "dispatched";
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 export interface PressParams {
   session_id: string;
   key: string;

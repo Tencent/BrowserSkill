@@ -1,5 +1,5 @@
-// DOM interaction tools — `tool.click`, `tool.fill`, `tool.press`, and
-// `tool.select`.
+// DOM interaction tools — `tool.click`, `tool.fill`, `tool.type`,
+// `tool.press`, and `tool.select`.
 //
 // All interaction tools:
 // 1. Resolve target tab (sandbox: must be inside Agent Window).
@@ -27,8 +27,11 @@ import type {
   RpcError,
   SelectParams,
   SelectResult,
+  TypeParams,
+  TypeResult,
 } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
+import { fillEditable } from "./editable-input";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry, scrollElementAndFramesIntoView } from "./frame-geometry";
@@ -45,6 +48,7 @@ import {
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 import { resolveSurfacePointerTarget } from "./surface-target";
+import { dispatchTextInput } from "./text-input";
 
 export interface InteractionDeps {
   cdp: CdpRunner;
@@ -244,18 +248,20 @@ function inputContextForNode(
 interface FocusProbe {
   hasFocus: boolean;
   activeTag: string;
+  textEntry: boolean;
 }
 
 /** Resolve keyboard input to the CDP target that currently owns focus. */
 async function resolveFocusedInputContext(
   cdp: CdpRunner,
   tabId: number,
+  mode: "press" | "type",
 ): Promise<InputDispatchContext | RpcError> {
   if (!cdp.getFrameGraph) {
     return rpcError(
       "cdp_failed",
       "focus_target_unresolved",
-      "press cannot determine the focused frame target",
+      `${mode} cannot determine the focused frame target`,
     );
   }
 
@@ -284,9 +290,21 @@ async function resolveFocusedInputContext(
           expression: `(() => {
             /* bsk-focus-target-probe */
             const active = document.activeElement;
+            const inputType = active instanceof HTMLInputElement ? active.type.toLowerCase() : '';
+            const nonTextInputTypes = new Set([
+              'button', 'checkbox', 'color', 'date', 'datetime-local', 'file',
+              'hidden', 'image', 'month', 'radio', 'range', 'reset', 'submit',
+              'time', 'week'
+            ]);
+            const role = active instanceof Element ? active.getAttribute('role') : null;
             return {
               hasFocus: document.hasFocus(),
-              activeTag: active instanceof Element ? active.tagName.toLowerCase() : ''
+              activeTag: active instanceof Element ? active.tagName.toLowerCase() : '',
+              textEntry:
+                (active instanceof HTMLInputElement && !nonTextInputTypes.has(inputType)) ||
+                active instanceof HTMLTextAreaElement ||
+                (active instanceof HTMLElement && active.isContentEditable) ||
+                role === 'textbox' || role === 'searchbox'
             };
           })()`,
           returnByValue: true,
@@ -302,16 +320,17 @@ async function resolveFocusedInputContext(
   // A top document whose active element is an iframe delegates focus to
   // that frame. Removing those delegating targets leaves the deepest OOPIF
   // target while same-process frames continue to use the shared root target.
-  const owners = focused.filter(
-    ({ probe }) => probe.activeTag !== "iframe" && probe.activeTag !== "frame",
-  );
+  const owners = focused.filter(({ probe }) => {
+    if (probe.activeTag === "iframe" || probe.activeTag === "frame") return false;
+    return mode !== "type" || probe.textEntry;
+  });
   if (owners.length !== 1) {
     return rpcError(
       "cdp_failed",
       "focus_target_unresolved",
       owners.length === 0
-        ? "press found no unique focused frame target"
-        : "press found multiple focused frame targets",
+        ? `${mode} found no unique focused${mode === "type" ? " text-entry" : " frame"} target`
+        : `${mode} found multiple focused frame targets`,
       { candidate_count: owners.length },
     );
   }
@@ -682,6 +701,47 @@ function isFillable(node: DescribedNode): boolean {
   return false;
 }
 
+/** `type` also supports custom text-entry widgets that expose an ARIA role. */
+function isTypeTarget(node: DescribedNode): boolean {
+  const tag = (node.nodeName ?? "").toUpperCase();
+  const attrs = node.attributes ?? [];
+  const attributes = new Map<string, string>();
+  for (let i = 0; i + 1 < attrs.length; i += 2) {
+    attributes.set(attrs[i].toLowerCase(), attrs[i + 1].toLowerCase());
+  }
+  if (tag === "TEXTAREA") return true;
+  if (tag === "INPUT") {
+    const type = attributes.get("type") ?? "text";
+    return !new Set([
+      "button",
+      "checkbox",
+      "color",
+      "date",
+      "datetime-local",
+      "file",
+      "hidden",
+      "image",
+      "month",
+      "radio",
+      "range",
+      "reset",
+      "submit",
+      "time",
+      "week",
+    ]).has(type);
+  }
+  const contentEditable = attributes.get("contenteditable");
+  if (
+    contentEditable === "" ||
+    contentEditable === "true" ||
+    contentEditable === "plaintext-only"
+  ) {
+    return true;
+  }
+  const role = attributes.get("role");
+  return role === "textbox" || role === "searchbox";
+}
+
 type SelectMutationResult =
   | {
       ok: true;
@@ -767,125 +827,114 @@ export async function handleFill(
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
   const objectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
-
-  try {
-    if (clearBefore) {
-      // Clear input/textarea value or wipe contenteditable innerText,
-      // then fire `input` so frameworks observe the empty state.
-      await nodeCdp.send(target.tabId, "Runtime.callFunctionOn", {
-        objectId,
-        functionDeclaration: `function() {
-          if (this.isContentEditable) { this.textContent = ''; }
-          else {
-            const proto = this instanceof HTMLTextAreaElement
-              ? HTMLTextAreaElement.prototype
-              : HTMLInputElement.prototype;
-            const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
-            if (descriptor && descriptor.set) descriptor.set.call(this, '');
-            else this.value = '';
-          }
-          this.dispatchEvent(new Event('input', { bubbles: true }));
-        }`,
-        returnByValue: true,
-      });
-    }
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
-    }
-    // CDP `Input.insertText` handles IME / multi-byte input out of the
-    // box, much more reliably than per-key `dispatchKeyEvent`.
-    await nodeCdp.send(target.tabId, "Input.insertText", { text: params.value });
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
-    }
-    // Fire `input` + `change` so React / Vue controlled inputs commit.
-    await nodeCdp.send(target.tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: `function() {
-        this.dispatchEvent(new Event('input', { bubbles: true }));
-        this.dispatchEvent(new Event('change', { bubbles: true }));
-      }`,
-      returnByValue: true,
-    });
-    // Give controlled inputs one bounded browser-render turn to accept or
-    // reject the dispatched value before reporting success.
-    await nodeCdp.send(target.tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: `function() {
-        /* bsk-input-sync */
-        return new Promise((resolve) => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve();
-          };
-          const timer = setTimeout(finish, 100);
-          if (typeof requestAnimationFrame !== 'function') { finish(); return; }
-          requestAnimationFrame(() => requestAnimationFrame(finish));
-        });
-      }`,
-      awaitPromise: true,
-      returnByValue: true,
-    });
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-
-  if (throwIfAborted(deps.signal)) {
-    return { code: "cancelled", message: "fill aborted" };
-  }
-
-  let actualValue: string;
-  try {
-    const readback = await nodeCdp.send<{
-      result?: { value?: { supported?: boolean; value?: string } };
-    }>(target.tabId, "Runtime.callFunctionOn", {
-      objectId,
-      functionDeclaration: `function() {
-        /* bsk-input-readback */
-        if (this instanceof HTMLInputElement || this instanceof HTMLTextAreaElement) {
-          return { supported: true, value: this.value };
-        }
-        if (this.isContentEditable) {
-          return { supported: true, value: this.innerText ?? this.textContent ?? '' };
-        }
-        return { supported: false, value: '' };
-      }`,
-      returnByValue: true,
-    });
-    const state = readback.result?.value;
-    actualValue = typeof state?.value === "string" ? state.value : "";
-    const applied =
-      state?.supported === true &&
-      (clearBefore
-        ? actualValue === params.value
-        : params.value.length === 0 || actualValue.includes(params.value));
-    if (!applied) {
-      return rpcError(
-        "cdp_failed",
-        "input_not_applied",
-        "the page did not retain the requested input value",
-        { expected_value_length: params.value.length, actual_value_length: actualValue.length },
-      );
-    }
-  } catch (err) {
-    return rpcError(
-      "cdp_failed",
-      "input_not_applied",
-      err instanceof Error ? err.message : String(err),
-    );
-  }
+  const fillResult = await fillEditable(
+    nodeCdp,
+    target.tabId,
+    objectId,
+    params.value,
+    clearBefore,
+    deps.signal,
+  );
+  if (isRpcError(fillResult)) return fillResult;
 
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
     used_ref: input.usedRef,
     used_selector: input.usedSelector,
-    value_length: actualValue.length,
+    value_length: fillResult.value.length,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// tool.type
+// ---------------------------------------------------------------------------
+
+export async function handleType(
+  manager: SessionManager,
+  params: TypeParams,
+  deps: InteractionDeps = getDefaultDeps(),
+): Promise<TypeResult | RpcError> {
+  if (!params || typeof params.text !== "string") {
+    return { code: "invalid_params", message: "type requires a text string" };
+  }
+  if (params.focused !== undefined && typeof params.focused !== "boolean") {
+    return { code: "invalid_params", message: "type focused must be a boolean" };
+  }
+  const hasExplicitTarget =
+    (typeof params.ref === "string" && params.ref.length > 0) ||
+    (typeof params.selector === "string" && params.selector.length > 0);
+  if (params.focused === true && hasExplicitTarget) {
+    return {
+      code: "invalid_params",
+      message: "type: pass a ref/selector or focused=true, not both",
+    };
+  }
+  if (params.focused !== true && !hasExplicitTarget) {
+    return {
+      code: "invalid_params",
+      message: "type requires a ref/selector or focused=true",
+    };
+  }
+  const ctxOrErr = lookupSession(manager, params, "type");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "type aborted" };
+  const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
+  if (isRpcError(target)) return target;
+  const denied = enforceAgentWindow(ctx, target, "type");
+  if (denied) return denied;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+
+  let input: InputDispatchContext | RpcError;
+  if (hasExplicitTarget) {
+    const node = await resolveBackendNode(deps.cdp, ctx, target, params, "type");
+    const explicitInput = inputContextForNode(deps.cdp, node);
+    if (isRpcError(explicitInput)) return explicitInput;
+    input = explicitInput;
+    try {
+      const described = await explicitInput.cdp.send<{ node?: DescribedNode }>(
+        target.tabId,
+        "DOM.describeNode",
+        { backendNodeId: explicitInput.backendNodeId },
+      );
+      if (!described.node || !isTypeTarget(described.node)) {
+        return rpcError(
+          "invalid_params",
+          "target_not_fillable",
+          `element ${described.node?.nodeName ?? "?"} not text-editable`,
+        );
+      }
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const scrollErr = await scrollElementAndFramesIntoView(
+        deps.cdp,
+        target.tabId,
+        explicitInput.target,
+        explicitInput.backendNodeId,
+        explicitInput.frameId,
+      );
+      if (scrollErr) return scrollErr;
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "type aborted" };
+      await explicitInput.cdp.send(target.tabId, "DOM.focus", {
+        backendNodeId: explicitInput.backendNodeId,
+      });
+    } catch (err) {
+      return { code: "cdp_failed", message: err instanceof Error ? err.message : String(err) };
+    }
+  } else {
+    input = await resolveFocusedInputContext(deps.cdp, target.tabId, "type");
+    if (isRpcError(input)) return input;
+  }
+
+  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  const dispatchError = await dispatchTextInput(input.cdp, target.tabId, params.text, deps.signal);
+  if (dispatchError) return dispatchError;
+
+  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+    tab_id: target.tabId,
+    used_ref: input.usedRef,
+    used_selector: input.usedSelector,
+    text_length: params.text.length,
+    verification: "dispatched",
   });
 }
 
@@ -1090,7 +1139,7 @@ export async function handlePress(
       };
     }
   } else {
-    input = await resolveFocusedInputContext(deps.cdp, target.tabId);
+    input = await resolveFocusedInputContext(deps.cdp, target.tabId, "press");
     if (isRpcError(input)) return input;
   }
 

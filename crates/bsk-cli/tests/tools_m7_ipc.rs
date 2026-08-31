@@ -1,5 +1,4 @@
-//! M7 integration: drive the 7 new tool RPCs (navigate /
-//! navigate_back / navigate_forward / reload / click / fill / press)
+//! M7 integration: drive the navigation and interaction tool RPCs
 //! through the IPC + per-session queue + fake extension and assert
 //! the wire shapes line up. The extension stub mirrors each method's
 //! `*Result` so we exercise the daemon's serialise → forward →
@@ -16,7 +15,8 @@ use bsk_protocol::tools::{
     ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, NavigateBackParams,
     NavigateBackResult, NavigateForwardParams, NavigateForwardResult, NavigateParams,
     NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, SelectParams,
-    SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
+    SelectResult, SessionStartParams, SessionStartResult, TypeParams, TypeResult, TypeVerification,
+    WaitUntil,
 };
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
@@ -434,6 +434,51 @@ async fn fill_round_trips_clear_before_default() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn type_round_trips_dispatched_verification() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolType);
+        let p: TypeParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(p.text, "测试");
+        assert!(!p.focused);
+        ResponseBody::Ok(
+            serde_json::to_value(TypeResult {
+                tab_id: 12,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                text_length: 2,
+                verification: TypeVerification::Dispatched,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: TypeResult = ipc_tool_call(
+        &sock,
+        Method::ToolType,
+        TypeParams {
+            session_id,
+            text: "测试".into(),
+            ref_: Some("@e3".into()),
+            selector: None,
+            focused: false,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("type ok");
+    assert_eq!(result.text_length, 2);
+    assert_eq!(result.verification, TypeVerification::Dispatched);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn press_round_trips_compound_key() {
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;
@@ -535,6 +580,7 @@ async fn m7_tools_propagate_extension_errors() {
         | Method::ToolReload
         | Method::ToolClick
         | Method::ToolFill
+        | Method::ToolType
         | Method::ToolPress
         | Method::ToolSelect => ResponseBody::Err(RpcError {
             code: ErrorCode::CdpFailed,
@@ -641,6 +687,23 @@ async fn m7_tools_propagate_extension_errors() {
     .await
     .unwrap_err();
     assert_eq!(fill.code, ErrorCode::CdpFailed);
+
+    let type_result = ipc_tool_call::<_, Value>(
+        &sock,
+        Method::ToolType,
+        TypeParams {
+            session_id: session_id.clone(),
+            text: "hello".into(),
+            ref_: Some("@e1".into()),
+            selector: None,
+            focused: false,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(type_result.code, ErrorCode::CdpFailed);
 
     let press = ipc_tool_call::<_, Value>(
         &sock,

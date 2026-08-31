@@ -33,8 +33,8 @@ pub struct SnapshotParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotResult {
     /// Indented aria-snapshot text. Refs are rendered as `@e<N>` so the
-    /// agent can copy them into subsequent `tool.click` / `tool.fill`
-    /// selectors.
+    /// agent can copy them into subsequent `tool.click` / `tool.fill` /
+    /// `tool.type` targets.
     pub text: String,
     /// Number of `@e<N>` refs registered for this session by this
     /// snapshot. Equivalent to the size of the new ref-store map.

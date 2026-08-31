@@ -14,9 +14,38 @@
     <label>Frame input <input aria-label="frame input" /></label>
     <label>Frame textarea <textarea aria-label="frame textarea"></textarea></label>
     <div contenteditable="true" aria-label="frame editor"></div>
+    <label>Remounting input <span id="remount-host"><input aria-label="remounting input" /></span></label>
+    <label>Trusted input <input id="trusted" aria-label="trusted input" /></label>
+    <label>Input proxy <input id="proxy" aria-label="input proxy" /></label>
+    <output id="proxy-output" aria-label="proxy output">proxy output: empty</output>
     <label>Rejecting input <input id="rejecting" aria-label="rejecting input" /></label>
     <script>
       const params = new URLSearchParams(location.search);
+      const remountHost = document.querySelector("#remount-host");
+      const armRemount = (input) => {
+        input.addEventListener("input", () => {
+          const replacement = document.createElement("input");
+          replacement.setAttribute("aria-label", "remounting input");
+          replacement.value = input.value;
+          armRemount(replacement);
+          input.replaceWith(replacement);
+          replacement.focus();
+        }, { once: true });
+      };
+      armRemount(remountHost.querySelector("input"));
+      const trusted = document.querySelector("#trusted");
+      trusted.addEventListener("input", (event) => {
+        if (!event.isTrusted) requestAnimationFrame(() => { trusted.value = ""; });
+      });
+      const proxy = document.querySelector("#proxy");
+      const proxyOutput = document.querySelector("#proxy-output");
+      let proxyValue = "";
+      proxy.addEventListener("input", (event) => {
+        if (event.isComposing) return;
+        proxyValue += event.data ?? proxy.value;
+        proxy.value = "";
+        proxyOutput.textContent = `proxy output: ${proxyValue || "empty"}`;
+      });
       const rejecting = document.querySelector("#rejecting");
       rejecting.addEventListener("input", () => requestAnimationFrame(() => { rejecting.value = ""; }));
       if (params.get("nested") === "1") {

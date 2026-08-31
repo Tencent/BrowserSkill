@@ -28,6 +28,7 @@ import type {
   ScreenshotParams,
   SelectParams,
   SnapshotParams,
+  TypeParams,
   WaitForNavigationParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
@@ -35,7 +36,14 @@ import { handleConsole } from "./console";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
-import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
+import {
+  handleClick,
+  handleFill,
+  handleHover,
+  handlePress,
+  handleSelect,
+  handleType,
+} from "./interaction";
 import {
   handleNavigate,
   handleNavigateBack,
@@ -491,6 +499,17 @@ export class ToolDispatcher {
             ),
           signal,
         );
+      case "tool.type":
+        return this.withHoverReleaseForRequest(
+          req.params as TypeParams,
+          () =>
+            handleType(
+              this.sessions,
+              req.params as TypeParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
       case "tool.press":
         return this.withHoverReleaseForRequest(
           req.params as PressParams,
@@ -717,6 +736,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.click":
     case "tool.hover":
     case "tool.fill":
+    case "tool.type":
     case "tool.press":
     case "tool.select":
     case "tool.evaluate":
