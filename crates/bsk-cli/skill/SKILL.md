@@ -67,7 +67,7 @@ Write operations only affect tabs in the **Agent Window** (or tabs you **borrowe
 
 ```
 bsk navigate <url> --session <id>
-bsk observe --session <id>           → primary semantic VOM view; reveals hover/focus surfaces
+bsk observe --session <id>           → primary semantic VOM view
 bsk snapshot --session <id>          → static aria tree fallback when VOM is insufficient
 bsk hover @e3 --session <id>          → reveal hover-triggered menus before re-observing/clicking
 bsk click @e4 --session <id>          → or bsk fill, bsk select, bsk press
@@ -80,11 +80,13 @@ Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` /
 
 When VOM renders `[hover first: …]` on an element, the listed items are not currently clickable refs. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action.
 
+`bsk observe` does not hover the page on its own. When a menu bar, toolbar, or icon row looks like it must hide content behind hover and you cannot tell which element to hover, add `--probe-hover` for one observation: it moves the real cursor over a bounded set of likely triggers to discover hover-only menus and tooltips. It costs a few seconds and touches the live page, so prefer `bsk hover <ref>` once you know the trigger.
+
 ## Observation priority
 
-Start with `bsk observe` to understand page structure, text, controls, element refs, and conditional hover/focus surfaces. Use `bsk snapshot` only when you need the stricter static accessibility tree or VOM is insufficient. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
+Start with `bsk observe` to understand page structure, text, controls, and element refs. Use `bsk snapshot` only when you need the stricter static accessibility tree or VOM is insufficient. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
 
-1. `bsk observe` — primary semantic VOM observation; may run bounded perception probes such as hover-surface discovery
+1. `bsk observe` — primary semantic VOM observation; add `--probe-hover` only when hover-only content is suspected
 2. `bsk snapshot` — strict static accessibility tree fallback
 3. `bsk get-html` — when hidden DOM, metadata, or markup details are required
 4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
@@ -172,7 +174,7 @@ bsk emulate --session <id> --off
 | Command | Summary |
 |---------|---------|
 | `bsk snapshot` | First-choice static page understanding: accessibility tree with `@eN` element refs |
-| `bsk observe` | Semantic VOM observation with bounded perception probes for conditional surfaces |
+| `bsk observe` | Semantic VOM observation; `--probe-hover` adds bounded active hover probing for conditional surfaces |
 | `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
 | `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
 
@@ -319,7 +321,7 @@ Always **`bsk session stop <id>`** in a `finally`-style path so the Agent Window
 2. **No long borrow** — do not leave a user's personal tab in the Agent Window across unrelated tasks.
 3. **No skip stop** — always `bsk session stop <id>`; never assume idle timeout will clean up.
 4. **No post-success control** — once the user’s goal (or last trace step) is met, do not keep operating the page; stop the session unless they asked to keep it open.
-5. **No raw observe escalation before snapshot/observe** — use `bsk snapshot` first; use `bsk observe` when VOM semantics or conditional surfaces help. Only use `bsk get-html` or `bsk screenshot` when snapshot/observe is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot/observe ref — never skip observation just to grab a visual.
+5. **No raw observe escalation before snapshot/observe** — use `bsk snapshot` first; use `bsk observe` when VOM semantics help. Only use `bsk get-html` or `bsk screenshot` when snapshot/observe is insufficient. Element screenshots (`--ref @eN`) still require a fresh snapshot/observe ref — never skip observation just to grab a visual.
 6. **`evaluate` is powerful and risky** — use only when snapshot + click/fill/select cannot suffice; never on credential surfaces.
 
 ---

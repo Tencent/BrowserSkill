@@ -383,7 +383,11 @@ export class ToolDispatcher {
                 ? {
                     cdp: this.cdp,
                     tabsApi: chromeTabsCaptureApi,
-                    conditionalSurfaceProbe: !this.hasHoverLatchForScope(hoverScope),
+                    // Active hover probing is opt-in. A held hover latch still
+                    // suppresses it, because probing would move the cursor off
+                    // the element the caller is deliberately holding.
+                    conditionalSurfaceProbe:
+                      params.probe_hover === true && !this.hasHoverLatchForScope(hoverScope),
                     hoverProbeBypassOverlay: bypassOverlay,
                   }
                 : undefined,

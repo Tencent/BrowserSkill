@@ -132,6 +132,37 @@ describe("tooltip name enrichment", () => {
     expect(cdp.sendToTarget).not.toHaveBeenCalled();
   });
 
+  it("remembers controls that revealed no tooltip so the miss is paid once", async () => {
+    const cdp: CdpRunner = {
+      send: vi.fn(async () => ({})) as CdpRunner["send"],
+      sendToTarget: vi.fn(async (_target, method) => {
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 31 };
+        if (method === "DOM.resolveNode") return { object: { objectId: "button-801" } };
+        if (method === "Runtime.callFunctionOn") return { result: { value: [] } };
+        return {};
+      }) as CdpRunner["sendToTarget"],
+    };
+
+    const documents = [
+      document({ tabId: 11, sessionId: "miss-session" }, 801, undefined, "miss-frame"),
+    ];
+    const graph = semantics(documents);
+
+    const first = await probeTooltipNames(cdp, 11, documents, graph);
+    expect(first.size).toBe(0);
+    const hoversAfterFirst = vi
+      .mocked(cdp.send)
+      .mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent").length;
+    expect(hoversAfterFirst).toBeGreaterThan(0);
+
+    const second = await probeTooltipNames(cdp, 11, documents, graph);
+    expect(second.size).toBe(0);
+    expect(
+      vi.mocked(cdp.send).mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent")
+        .length,
+    ).toBe(hoversAfterFirst);
+  });
+
   it("keeps tooltip evidence isolated across sibling frame sessions", async () => {
     let hoveredX = -10;
     const cdp: CdpRunner = {
