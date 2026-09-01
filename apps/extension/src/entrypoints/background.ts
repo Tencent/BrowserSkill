@@ -4,7 +4,11 @@ import { ConnectionController } from "@/lib/connection-controller";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
+  getDaemonWsUrl,
+  isDaemonWsUrl,
   setConnectionEnabled as persistConnectionEnabled,
+  setDaemonWsUrl as persistDaemonWsUrl,
+  STORAGE_KEYS,
   setLabel,
 } from "@/lib/instance-id";
 import { startKeepalive } from "@/lib/keepalive";
@@ -277,22 +281,43 @@ export default defineBackground(() => {
     chrome.idle.setDetectionInterval?.(60);
   }
 
+  if (typeof chrome.storage?.onChanged?.addListener === "function") {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local") return;
+      const change = changes[STORAGE_KEYS.DAEMON_WS_URL];
+      if (!change) return;
+      if (typeof change.newValue !== "string") return;
+      void applyDaemonWsUrl(change.newValue, { persist: false });
+    });
+  }
+
   void (async () => {
     const connectionEnabled = await getConnectionEnabled();
-    await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
-      beforeDisconnect: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup before disconnect was incomplete", report);
-        }
+    const daemonWsUrl = await getDaemonWsUrl();
+    await transport.setUrl(daemonWsUrl);
+    await controller.attach(
+      transport,
+      detectBrowserMeta(),
+      connectionEnabled,
+      {
+        beforeDisconnect: async () => {
+          const report = await cleanupAfterDisconnect();
+          if (report.failures.length > 0) {
+            console.warn(
+              "[browser-skill] session cleanup before disconnect was incomplete",
+              report,
+            );
+          }
+        },
+        onDisconnected: async () => {
+          const report = await cleanupAfterDisconnect();
+          if (report.failures.length > 0) {
+            console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
+          }
+        },
       },
-      onDisconnected: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
-        }
-      },
-    });
+      daemonWsUrl,
+    );
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
   });
@@ -346,10 +371,11 @@ export default defineBackground(() => {
         if (msg.kind === "set_label") {
           void setLabel(msg.value).then(() => controller.refreshLabel());
         } else if (msg.kind === "set_port") {
-          // Placeholder for the future custom-port UI; warn loudly so
-          // any reintroduced popup control is caught instead of
-          // silently doing nothing (review M4/M5 C2).
+          // Legacy placeholder; the popup's runtime endpoint control sends
+          // set_daemon_ws_url with the full ws:// or wss:// address.
           console.warn("[browser-skill] set_port is not wired yet; ignoring", msg.value);
+        } else if (msg.kind === "set_daemon_ws_url") {
+          void applyDaemonWsUrl(msg.value);
         } else if (msg.kind === "set_connection_enabled") {
           void controller
             .setConnectionEnabled(msg.value)
@@ -359,6 +385,26 @@ export default defineBackground(() => {
     });
     connection.onDisconnect.addListener(() => unsubscribe());
   });
+
+  async function applyDaemonWsUrl(
+    value: string,
+    options: { persist?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const nextUrl = value.trim();
+      if (!isDaemonWsUrl(nextUrl)) {
+        throw new Error("daemon WebSocket URL must start with ws:// or wss:// and include a host");
+      }
+      if (options.persist !== false) {
+        await persistDaemonWsUrl(nextUrl);
+      }
+      controller.setDaemonWsUrl(nextUrl);
+      await transport.setUrl(nextUrl);
+      reconnectIfNeeded();
+    } catch (err) {
+      console.warn("[browser-skill] invalid daemon WebSocket URL; ignoring", err);
+    }
+  }
 
   // Stash on globalThis so the SW DevTools can poke at internals.
   // Dev-only to avoid leaking internals to inspectors in shipped builds

@@ -3,8 +3,10 @@ import type { ConnectionState, ProtocolFrame } from "./types";
 
 const DEFAULT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 5_000;
+const DEFAULT_OPEN_PROBE_TIMEOUT_MS = 1_000;
 
 export type WebSocketFactory = (url: string) => WebSocket;
+export type WebSocketOpenProbe = (url: string) => boolean | Promise<boolean>;
 
 export interface ReconnectOptions {
   initialDelayMs?: number;
@@ -18,6 +20,13 @@ export interface WSTransportOptions {
    * Inject a fake WebSocket constructor in tests; defaults to `globalThis.WebSocket`.
    */
   webSocketFactory?: WebSocketFactory;
+  /**
+   * Optional quiet availability check before constructing `WebSocket`.
+   * Chrome reports failed classic WebSocket handshakes in chrome://extensions,
+   * so the default uses `WebSocketStream` when available and falls back to
+   * allowing the classic connection on browsers without that API.
+   */
+  openProbe?: WebSocketOpenProbe | null;
 }
 
 interface CloseLikeEvent {
@@ -27,6 +36,47 @@ interface CloseLikeEvent {
 
 interface MessageLikeEvent {
   data: unknown;
+}
+
+interface WebSocketStreamLike {
+  opened: Promise<unknown>;
+  close?: (options?: { closeCode?: number; reason?: string }) => void;
+}
+
+type WebSocketStreamConstructor = new (
+  url: string,
+  options?: { signal?: AbortSignal },
+) => WebSocketStreamLike;
+
+function defaultOpenProbe(url: string): boolean | Promise<boolean> {
+  const ctor = (globalThis as { WebSocketStream?: WebSocketStreamConstructor }).WebSocketStream;
+  if (!ctor) return true;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_OPEN_PROBE_TIMEOUT_MS);
+  let stream: WebSocketStreamLike;
+  try {
+    stream = new ctor(url, { signal: controller.signal });
+  } catch {
+    clearTimeout(timer);
+    return Promise.resolve(false);
+  }
+
+  return stream.opened.then(
+    () => {
+      clearTimeout(timer);
+      try {
+        stream.close?.({ closeCode: 1000, reason: "probe complete" });
+      } catch {
+        // ignore
+      }
+      return true;
+    },
+    () => {
+      clearTimeout(timer);
+      return false;
+    },
+  );
 }
 
 /**
@@ -40,12 +90,14 @@ interface MessageLikeEvent {
  *    (1s, 2s, 4s, …, capped at 5s) until `disconnect()` is called.
  */
 export class WSTransport implements Transport {
-  private readonly url: string;
+  private url: string;
   private readonly factory: WebSocketFactory;
+  private readonly openProbe: WebSocketOpenProbe | null;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
 
   private socket: WebSocket | null = null;
+  private openingSocket = false;
   private currentState: ConnectionState = "disconnected";
   private explicitlyClosed = false;
   private reconnectAttempt = 0;
@@ -54,6 +106,7 @@ export class WSTransport implements Transport {
   private connectingPromise: Promise<void> | null = null;
   private resolveConnect: ((value: void) => void) | null = null;
   private rejectConnect: ((reason: Error) => void) | null = null;
+  private lastSocketError: Error | null = null;
 
   private readonly messageHandlers = new Set<FrameHandler>();
   private readonly stateHandlers = new Set<ConnectionStateHandler>();
@@ -61,12 +114,20 @@ export class WSTransport implements Transport {
   constructor(options: WSTransportOptions) {
     this.url = options.url;
     this.factory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
+    this.openProbe = options.openProbe === undefined ? defaultOpenProbe : options.openProbe;
     this.initialDelayMs = options.reconnect?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = options.reconnect?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
   }
 
   get state(): ConnectionState {
     return this.currentState;
+  }
+
+  async setUrl(url: string): Promise<void> {
+    const next = url.trim();
+    if (this.url === next) return;
+    this.url = next;
+    await this.disconnect();
   }
 
   connect(): Promise<void> {
@@ -81,7 +142,7 @@ export class WSTransport implements Transport {
     if (this.connectingPromise) {
       // A previous physical attempt closed before reaching OPEN. Keep the
       // original caller's promise, but start the next socket generation.
-      if (!this.socket) this.openSocket();
+      if (!this.socket && !this.openingSocket) void this.openSocket();
       return this.connectingPromise;
     }
 
@@ -89,7 +150,7 @@ export class WSTransport implements Transport {
       this.resolveConnect = resolve;
       this.rejectConnect = reject;
     });
-    this.openSocket();
+    void this.openSocket();
     return this.connectingPromise;
   }
 
@@ -147,14 +208,47 @@ export class WSTransport implements Transport {
     };
   }
 
-  private openSocket(): void {
+  private async openSocket(): Promise<void> {
+    if (this.openingSocket) return;
+    this.openingSocket = true;
     this.setState("connecting");
     const generation = ++this.socketGeneration;
-    const socket = this.factory(this.url);
+    const probeResult = this.canOpenSocket();
+    const canOpen = typeof probeResult === "boolean" ? probeResult : await probeResult;
+    if (!this.isCurrentGeneration(generation)) {
+      this.openingSocket = false;
+      return;
+    }
+    if (!canOpen) {
+      this.openingSocket = false;
+      this.setState("disconnected", this.connectionError());
+      this.scheduleReconnect();
+      return;
+    }
+    let socket: WebSocket;
+    try {
+      socket = this.factory(this.url);
+    } catch (err) {
+      this.openingSocket = false;
+      this.setState("disconnected", this.connectionError(err));
+      this.scheduleReconnect();
+      return;
+    }
+    if (!this.isCurrentGeneration(generation)) {
+      this.openingSocket = false;
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      return;
+    }
     this.socket = socket;
+    this.openingSocket = false;
 
     socket.addEventListener("open", () => {
       if (!this.isCurrentSocket(socket, generation)) return;
+      this.lastSocketError = null;
       this.reconnectAttempt = 0;
       this.setState("connected");
       const resolve = this.resolveConnect;
@@ -174,6 +268,8 @@ export class WSTransport implements Transport {
     });
 
     socket.addEventListener("error", () => {
+      if (!this.isCurrentSocket(socket, generation)) return;
+      this.lastSocketError = this.connectionError();
       // The 'close' handler always fires after 'error' in browsers, so we
       // just record the error and let close drive reconnect logic.
     });
@@ -203,7 +299,9 @@ export class WSTransport implements Transport {
       this.setState("disconnected");
       return;
     }
-    this.setState("disconnected");
+    const error = this.lastSocketError;
+    this.lastSocketError = null;
+    this.setState("disconnected", error ?? undefined);
     this.scheduleReconnect();
   }
 
@@ -224,12 +322,32 @@ export class WSTransport implements Transport {
     return this.socket === socket && this.socketGeneration === generation;
   }
 
-  private setState(next: ConnectionState): void {
+  private isCurrentGeneration(generation: number): boolean {
+    return this.socketGeneration === generation && !this.explicitlyClosed;
+  }
+
+  private canOpenSocket(): boolean | Promise<boolean> {
+    if (!this.openProbe) return true;
+    try {
+      return this.openProbe(this.url);
+    } catch {
+      return false;
+    }
+  }
+
+  private connectionError(cause?: unknown): Error {
+    const suffix = cause instanceof Error && cause.message ? ` (${cause.message})` : "";
+    return new Error(
+      `Cannot reach daemon WebSocket endpoint ${this.url}. Start bsk or check the SSH tunnel.${suffix}`,
+    );
+  }
+
+  private setState(next: ConnectionState, error?: Error): void {
     if (this.currentState === next) return;
     this.currentState = next;
     for (const h of this.stateHandlers) {
       try {
-        h(next);
+        h(next, error);
       } catch (err) {
         console.error("[WSTransport] state handler threw", err);
       }

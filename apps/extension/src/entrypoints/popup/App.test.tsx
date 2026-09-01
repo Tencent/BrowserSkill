@@ -20,6 +20,7 @@ const baseSnapshot: SnapshotInfo = {
   instanceId: "",
   label: "",
   extensionVersion: EXTENSION_VERSION,
+  daemonWsUrl: "ws://127.0.0.1:52800",
   handshake: null,
   lastError: null,
   connectionEnabled: true,
@@ -33,6 +34,7 @@ function openRecordView() {
 describe("App", () => {
   const setLabel = vi.fn();
   const setConnectionEnabled = vi.fn();
+  const setDaemonWsUrl = vi.fn();
 
   beforeEach(() => {
     mockUseConnectionState.mockReturnValue({
@@ -40,6 +42,7 @@ describe("App", () => {
       statusState: "disconnected",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
@@ -116,6 +119,7 @@ describe("App", () => {
       statusState: "connected",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
 
     render(<App />);
@@ -155,6 +159,7 @@ describe("App", () => {
       statusState: "disabled",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
 
     render(<App />);
@@ -180,6 +185,7 @@ describe("App", () => {
       statusState: "connected",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
 
     render(<App />);
@@ -223,6 +229,7 @@ describe("App", () => {
       statusState: "connected",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
 
     render(<App />);
@@ -263,6 +270,7 @@ describe("App", () => {
       statusState: "version_skew",
       setLabel,
       setConnectionEnabled,
+      setDaemonWsUrl,
     });
 
     render(<App />);
@@ -281,6 +289,36 @@ describe("App", () => {
     expect(copyButton.getAttribute("disabled")).toBeNull();
     fireEvent.click(copyButton);
     expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies a runtime daemon WebSocket URL from the popup", () => {
+    render(<App />);
+
+    const input = screen.getByLabelText("Daemon 连接地址");
+    fireEvent.change(input, { target: { value: "ws://127.0.0.1:52801" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并重连 daemon WebSocket" }));
+
+    expect(setDaemonWsUrl).toHaveBeenCalledWith("ws://127.0.0.1:52801");
+  });
+
+  it("shows daemon connection failures as localized popup copy", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        lastError: "Cannot reach daemon WebSocket endpoint ws://127.0.0.1:52800",
+      },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+      setDaemonWsUrl,
+    });
+
+    render(<App />);
+
+    expect(
+      screen.getByText("无法连接到 ws://127.0.0.1:52800。请启动 bsk，或检查 SSH 隧道。"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/Cannot reach daemon WebSocket endpoint/)).toBeNull();
   });
 });
 
@@ -354,7 +392,7 @@ describe("control hints toggle", () => {
 
     const info = await screen.findByRole("button", { name: "控制提示说明" });
     expect(info).toBeTruthy();
-    const tooltip = screen.getByRole("tooltip");
+    const tooltip = screen.getByText("Agent 控制页面时显示提示条和橙色闪光。");
     expect(tooltip.textContent).toBe("Agent 控制页面时显示提示条和橙色闪光。");
     // Hidden until the info button is hovered or focused.
     expect(tooltip.className).toContain("opacity-0");

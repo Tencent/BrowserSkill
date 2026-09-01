@@ -67,13 +67,29 @@ function lastSocket(): FakeSocket {
   return s;
 }
 
+async function drainMicrotasks(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+const globalWithWebSocketStream = globalThis as { WebSocketStream?: unknown };
+let originalWebSocketStream: unknown;
+
 describe("WSTransport", () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
+    originalWebSocketStream = globalWithWebSocketStream.WebSocketStream;
+    globalWithWebSocketStream.WebSocketStream = undefined;
     FakeSocket.instances = [];
   });
 
   afterEach(() => {
+    if (originalWebSocketStream === undefined) {
+      delete globalWithWebSocketStream.WebSocketStream;
+    } else {
+      globalWithWebSocketStream.WebSocketStream = originalWebSocketStream;
+    }
     vi.useRealTimers();
   });
 
@@ -88,6 +104,85 @@ describe("WSTransport", () => {
     lastSocket().open();
     await connectPromise;
     expect(t.state).toBe("connected");
+  });
+
+  it("skips classic WebSocket construction when the quiet open probe cannot connect", async () => {
+    const openProbe = vi.fn(async () => false);
+    const errors: string[] = [];
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      reconnect: { initialDelayMs: 1_000, maxDelayMs: 1_000 },
+      openProbe,
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    t.onConnectionStateChange((_state, error) => {
+      if (error) errors.push(error.message);
+    });
+
+    void t.connect();
+    await drainMicrotasks();
+
+    expect(openProbe).toHaveBeenCalledWith("ws://127.0.0.1:52800");
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(t.state).toBe("disconnected");
+    expect(errors[0]).toContain("Cannot reach daemon WebSocket endpoint ws://127.0.0.1:52800");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+    expect(openProbe).toHaveBeenCalledTimes(2);
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it("uses WebSocketStream as the default quiet open probe when available", async () => {
+    const openedUrls: string[] = [];
+    class RejectingWebSocketStream {
+      opened = Promise.reject(new Error("connection refused"));
+
+      constructor(url: string) {
+        openedUrls.push(url);
+      }
+    }
+    globalWithWebSocketStream.WebSocketStream = RejectingWebSocketStream;
+
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+
+    void t.connect();
+    await drainMicrotasks();
+
+    expect(openedUrls).toEqual(["ws://127.0.0.1:52800"]);
+    expect(FakeSocket.instances).toHaveLength(0);
+    expect(t.state).toBe("disconnected");
+  });
+
+  it("closes a successful WebSocketStream probe before opening the real socket", async () => {
+    const openedUrls: string[] = [];
+    const closeProbe = vi.fn();
+    class OpeningWebSocketStream {
+      opened = Promise.resolve({});
+      close = closeProbe;
+
+      constructor(url: string) {
+        openedUrls.push(url);
+      }
+    }
+    globalWithWebSocketStream.WebSocketStream = OpeningWebSocketStream;
+
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+
+    const connectPromise = t.connect();
+    await drainMicrotasks();
+
+    expect(openedUrls).toEqual(["ws://127.0.0.1:52800"]);
+    expect(closeProbe).toHaveBeenCalledWith({ closeCode: 1000, reason: "probe complete" });
+    expect(FakeSocket.instances).toHaveLength(1);
+    lastSocket().open();
+    await connectPromise;
   });
 
   it("emits connection state transitions disconnected → connecting → connected", async () => {
@@ -143,6 +238,26 @@ describe("WSTransport", () => {
 
     await vi.advanceTimersByTimeAsync(5_000);
     expect(FakeSocket.instances.length).toBe(1);
+  });
+
+  it("uses the updated URL after setUrl()", async () => {
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    const firstConnect = t.connect();
+    const first = lastSocket();
+    first.open();
+    await firstConnect;
+
+    await t.setUrl("ws://127.0.0.1:52801");
+    expect(first.closeCalls).toBeGreaterThan(0);
+
+    const secondConnect = t.connect();
+    expect(lastSocket().url).toBe("ws://127.0.0.1:52801");
+    lastSocket().open();
+    await secondConnect;
+    expect(t.state).toBe("connected");
   });
 
   it("backs off exponentially across consecutive failed reconnects (1s, 2s, 4s, …, capped at 5s)", async () => {

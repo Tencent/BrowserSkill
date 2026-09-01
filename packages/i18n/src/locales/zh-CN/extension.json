@@ -26,6 +26,13 @@
     "controlHintsToggleTitle": "控制提示",
     "controlHintsToggleHint": "Agent 控制页面时显示提示条和橙色闪光。",
     "controlHintsInfoLabel": "控制提示说明",
+    "daemonWsUrlTitle": "Daemon 连接地址",
+    "daemonWsUrlHint": "连接远程 daemon 时，推荐使用 SSH 隧道转发端口，再填写对应的 WebSocket 地址。保存后会自动重连。",
+    "daemonWsUrlInfoLabel": "Daemon 连接地址说明",
+    "daemonWsUrlApply": "保存并重连 daemon WebSocket",
+    "daemonWsUrlCurrent": "当前已使用该地址",
+    "daemonWsUrlInvalid": "请输入 ws:// 或 wss:// 开头且包含主机的地址",
+    "daemonWsUrlConnectError": "无法连接到 {{url}}。请启动 bsk，或检查 SSH 隧道。",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，CLI 协议 v{{cliProtocol}}。协议版本不同，请及时升级。",
     "upgradeAvailable": "可升级",
     "launcher": {

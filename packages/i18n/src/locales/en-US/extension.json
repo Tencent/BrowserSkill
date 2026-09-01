@@ -26,6 +26,13 @@
     "controlHintsToggleTitle": "Control hints",
     "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "controlHintsInfoLabel": "About control hints",
+    "daemonWsUrlTitle": "Daemon endpoint",
+    "daemonWsUrlHint": "For a remote daemon, we recommend forwarding the port with an SSH tunnel, then entering the matching WebSocket URL. Saving reconnects automatically.",
+    "daemonWsUrlInfoLabel": "About the daemon endpoint",
+    "daemonWsUrlApply": "Save and reconnect daemon WebSocket",
+    "daemonWsUrlCurrent": "This endpoint is already active",
+    "daemonWsUrlInvalid": "Enter a ws:// or wss:// URL with a host",
+    "daemonWsUrlConnectError": "Cannot connect to {{url}}. Start bsk or check the SSH tunnel.",
     "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, CLI protocol v{{cliProtocol}}. Protocol versions differ — please upgrade.",
     "upgradeAvailable": "Upgradable",
     "launcher": {

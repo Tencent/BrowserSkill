@@ -16,6 +16,7 @@ export interface SnapshotInfo {
   instanceId: string;
   label: string;
   extensionVersion: string;
+  daemonWsUrl: string;
   handshake: HandshakeResult | null;
   lastError: string | null;
   connectionEnabled: boolean;
@@ -42,6 +43,7 @@ export class ConnectionController {
   private handshake: HandshakeResult | null = null;
   private instanceId = "";
   private label = "";
+  private daemonWsUrl = __BSK_DAEMON_WS_URL__;
   private lastError: string | null = null;
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
@@ -72,6 +74,7 @@ export class ConnectionController {
       instanceId: this.instanceId,
       label: this.label,
       extensionVersion: EXTENSION_VERSION,
+      daemonWsUrl: this.daemonWsUrl,
       handshake: this.handshake,
       lastError: this.lastError,
       connectionEnabled: this.connectionEnabled,
@@ -83,14 +86,19 @@ export class ConnectionController {
     browser: { name: string; version: string },
     connectionEnabled = true,
     lifecycleHooks: ConnectionLifecycleHooks = {},
+    daemonWsUrl = __BSK_DAEMON_WS_URL__,
   ): Promise<void> {
     this.transport = transport;
     this.connectionEnabled = connectionEnabled;
     this.lifecycleHooks = lifecycleHooks;
+    this.daemonWsUrl = daemonWsUrl;
     this.instanceId = await getOrCreateInstanceId();
     this.label = await getLabel();
 
-    transport.onConnectionStateChange((s) => {
+    transport.onConnectionStateChange((s, error) => {
+      if (error && this.connectionEnabled) {
+        this.lastError = error.message;
+      }
       if (s === "disconnected") {
         // An in-flight handshake belongs to the dead connection — cancel it so
         // a late resolution can never clobber the next attempt.
@@ -110,6 +118,7 @@ export class ConnectionController {
       }
       if (!this.connectionEnabled) return;
       if (s === "connected") {
+        this.lastError = null;
         this.startHandshake(browser);
         return;
       }
@@ -153,6 +162,14 @@ export class ConnectionController {
 
   async refreshLabel(): Promise<void> {
     this.label = await getLabel();
+    this.fire();
+  }
+
+  setDaemonWsUrl(url: string): void {
+    if (this.daemonWsUrl === url) return;
+    this.daemonWsUrl = url;
+    this.handshake = null;
+    this.lastError = null;
     this.fire();
   }
 

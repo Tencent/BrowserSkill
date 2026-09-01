@@ -5,7 +5,7 @@ export interface Disposable {
 }
 
 export type FrameHandler = (msg: ProtocolFrame) => void;
-export type ConnectionStateHandler = (state: ConnectionState) => void;
+export type ConnectionStateHandler = (state: ConnectionState, error?: Error) => void;
 
 /**
  * Abstraction over a bidirectional protocol channel (§4.7).

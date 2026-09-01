@@ -119,9 +119,9 @@ function makeMockTransport(initialState: ConnectionState = "disconnected") {
       stateHandlers.add(handler);
       return { dispose: () => stateHandlers.delete(handler) };
     }),
-    emitState(next: ConnectionState) {
+    emitState(next: ConnectionState, error?: Error) {
       state = next;
-      for (const h of stateHandlers) h(next);
+      for (const h of stateHandlers) h(next, error);
     },
     emitMessage(frame: ProtocolFrame) {
       for (const handler of messageHandlers) handler(frame);
@@ -193,6 +193,21 @@ describe("ConnectionController connectionEnabled", () => {
     await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
   });
 
+  it("surfaces transport connection errors in the popup snapshot", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+
+    transport.emitState(
+      "disconnected",
+      new Error("Cannot reach daemon WebSocket endpoint ws://127.0.0.1:52800"),
+    );
+
+    expect(controller.snapshot().lastError).toBe(
+      "Cannot reach daemon WebSocket endpoint ws://127.0.0.1:52800",
+    );
+  });
+
   it("reconnects when connection is re-enabled", async () => {
     const controller = new ConnectionController();
     const transport = makeMockTransport();
@@ -201,6 +216,25 @@ describe("ConnectionController connectionEnabled", () => {
 
     expect(transport.connect).toHaveBeenCalled();
     expect(controller.snapshot().connectionEnabled).toBe(true);
+  });
+
+  it("surfaces the configured daemon WebSocket URL in snapshots", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(
+      transport,
+      { name: "Chrome", version: "120" },
+      false,
+      {},
+      "ws://127.0.0.1:52801",
+    );
+
+    expect(controller.snapshot().daemonWsUrl).toBe("ws://127.0.0.1:52801");
+
+    controller.setDaemonWsUrl("ws://127.0.0.1:52802");
+    expect(controller.snapshot().daemonWsUrl).toBe("ws://127.0.0.1:52802");
+    expect(controller.snapshot().handshake).toBeNull();
+    expect(controller.snapshot().lastError).toBeNull();
   });
 
   it("ignores transport state changes while disabled", async () => {

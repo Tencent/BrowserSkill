@@ -8,6 +8,7 @@ import {
   RiInformationLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { isDaemonWsUrl } from "@/lib/instance-id";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
@@ -30,6 +31,8 @@ const STATE_BADGE_KEYS = {
   disabled: "popup.stateBadge.disabled",
 } as const satisfies Record<PopupStatusState, string>;
 
+const DAEMON_CONNECT_ERROR_PREFIX = "Cannot reach daemon WebSocket endpoint ";
+
 function getLogoSrc() {
   if (typeof chrome !== "undefined" && chrome.runtime?.getURL) {
     return chrome.runtime.getURL("icon/logo.png");
@@ -39,12 +42,13 @@ function getLogoSrc() {
 
 export function App() {
   const { t } = useTranslation("extension");
-  const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
+  const { snapshot, statusState, setConnectionEnabled, setDaemonWsUrl } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
   const [startUrlDraft, setStartUrlDraft] = useState("");
+  const [daemonUrlDraft, setDaemonUrlDraft] = useState(__BSK_DAEMON_WS_URL__);
   // Bumped on every successful copy so the "copied" toast re-shows (and its
   // auto-hide timer restarts) even when the copied content is unchanged.
   const [copiedTick, setCopiedTick] = useState(0);
@@ -66,6 +70,10 @@ export function App() {
     setCopiedTick(0);
   }, [snapshot.instanceId]);
 
+  useEffect(() => {
+    setDaemonUrlDraft(snapshot.daemonWsUrl || __BSK_DAEMON_WS_URL__);
+  }, [snapshot.daemonWsUrl]);
+
   // Hide the copied toast when the command changes (topic / start URL edits).
   useEffect(() => {
     setCopiedTick(0);
@@ -84,6 +92,19 @@ export function App() {
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
+  const daemonUrlCurrent = snapshot.daemonWsUrl || __BSK_DAEMON_WS_URL__;
+  const daemonUrlTrimmed = daemonUrlDraft.trim();
+  const daemonUrlDirty = daemonUrlTrimmed !== daemonUrlCurrent;
+  const daemonUrlValid = isDaemonWsUrl(daemonUrlTrimmed);
+  const canApplyDaemonUrl = daemonUrlDirty && daemonUrlValid;
+  const daemonUrlActionTitle = !daemonUrlValid
+    ? t("popup.daemonWsUrlInvalid")
+    : daemonUrlDirty
+      ? t("popup.daemonWsUrlApply")
+      : t("popup.daemonWsUrlCurrent");
+  const popupError = snapshot.lastError?.startsWith(DAEMON_CONNECT_ERROR_PREFIX)
+    ? t("popup.daemonWsUrlConnectError", { url: daemonUrlCurrent })
+    : snapshot.lastError;
 
   const copyInstanceId = async () => {
     if (!snapshot.instanceId || !navigator.clipboard?.writeText) return;
@@ -113,6 +134,11 @@ export function App() {
     if (!recordReady || !navigator.clipboard?.writeText) return;
     await navigator.clipboard.writeText(recordPrompt);
     setCopiedTick((tick) => tick + 1);
+  };
+
+  const applyDaemonUrl = () => {
+    if (!canApplyDaemonUrl) return;
+    setDaemonWsUrl(daemonUrlTrimmed);
   };
 
   const headerTitle =
@@ -253,12 +279,72 @@ export function App() {
             </div>
           </section>
 
-          {snapshot.lastError && (
+          <section
+            className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
+            data-slot="popup-daemon-url-card"
+          >
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="flex min-w-0 items-center gap-1">
+                <Label htmlFor="bsk-daemon-ws-url" className="truncate text-sm font-medium">
+                  {t("popup.daemonWsUrlTitle")}
+                </Label>
+                <span className="group relative inline-flex shrink-0">
+                  <button
+                    type="button"
+                    aria-label={t("popup.daemonWsUrlInfoLabel")}
+                    data-slot="popup-daemon-url-info"
+                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  >
+                    <RiInformationLine className="size-3.5" aria-hidden />
+                  </button>
+                  <span
+                    id="bsk-daemon-ws-url-hint"
+                    role="tooltip"
+                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                  >
+                    {t("popup.daemonWsUrlHint")}
+                  </span>
+                </span>
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-6 shrink-0 rounded-md"
+                disabled={!canApplyDaemonUrl}
+                aria-label={t("popup.daemonWsUrlApply")}
+                title={daemonUrlActionTitle}
+                onClick={applyDaemonUrl}
+                data-slot="popup-daemon-url-apply"
+              >
+                <RiCheckLine className="size-3.5" aria-hidden />
+              </Button>
+            </div>
+            <Input
+              id="bsk-daemon-ws-url"
+              type="url"
+              value={daemonUrlDraft}
+              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                setDaemonUrlDraft(event.target.value)
+              }
+              onKeyDown={(event) => {
+                if (event.key === "Enter") applyDaemonUrl();
+              }}
+              aria-invalid={!daemonUrlValid}
+              aria-describedby="bsk-daemon-ws-url-hint"
+              title={daemonUrlValid ? t("popup.daemonWsUrlHint") : t("popup.daemonWsUrlInvalid")}
+              placeholder="ws://127.0.0.1:52800"
+              className="mt-0 h-8 font-mono text-xs"
+              data-slot="popup-daemon-url-input"
+            />
+          </section>
+
+          {popupError && (
             <div
-              className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
+              className="break-words rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"
             >
-              {snapshot.lastError}
+              {popupError}
             </div>
           )}
 

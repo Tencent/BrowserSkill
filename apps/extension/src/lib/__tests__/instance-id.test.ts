@@ -2,11 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import {
   getConnectionEnabled,
   getControlHintsHidden,
+  getDaemonWsUrl,
   getLabel,
   getOrCreateInstanceId,
+  isDaemonWsUrl,
+  normalizeDaemonWsUrl,
   STORAGE_KEYS,
   setConnectionEnabled,
   setControlHintsHidden,
+  setDaemonWsUrl,
   setLabel,
 } from "../instance-id";
 
@@ -94,6 +98,36 @@ describe("instance-id", () => {
     await setConnectionEnabled(false, backend);
     expect(store[STORAGE_KEYS.CONNECTION_ENABLED]).toBe(false);
     expect(await getConnectionEnabled(backend)).toBe(false);
+  });
+
+  it("validates daemon WebSocket URLs", () => {
+    expect(isDaemonWsUrl("ws://127.0.0.1:52800")).toBe(true);
+    expect(isDaemonWsUrl("wss://example.com/bsk")).toBe(true);
+    expect(isDaemonWsUrl("http://127.0.0.1:52800")).toBe(false);
+    expect(isDaemonWsUrl("ws://user:pass@example.com")).toBe(false);
+    expect(isDaemonWsUrl("")).toBe(false);
+  });
+
+  it("getDaemonWsUrl falls back when unset or invalid", async () => {
+    const fallback = "ws://127.0.0.1:52800";
+    const { backend } = fakeStorage();
+    expect(await getDaemonWsUrl(backend, fallback)).toBe(fallback);
+
+    const invalid = fakeStorage({ [STORAGE_KEYS.DAEMON_WS_URL]: "http://example.com" });
+    expect(await getDaemonWsUrl(invalid.backend, fallback)).toBe(fallback);
+    expect(normalizeDaemonWsUrl("  ws://127.0.0.1:52801  ", fallback)).toBe("ws://127.0.0.1:52801");
+  });
+
+  it("setDaemonWsUrl persists a valid runtime URL and rejects invalid values", async () => {
+    const { backend, store } = fakeStorage();
+    await expect(setDaemonWsUrl(" ws://127.0.0.1:52801 ", backend)).resolves.toBe(
+      "ws://127.0.0.1:52801",
+    );
+    expect(store[STORAGE_KEYS.DAEMON_WS_URL]).toBe("ws://127.0.0.1:52801");
+
+    await expect(setDaemonWsUrl("http://127.0.0.1:52801", backend)).rejects.toThrow(
+      /WebSocket URL/,
+    );
   });
 
   it("getControlHintsHidden returns false when storage is empty", async () => {

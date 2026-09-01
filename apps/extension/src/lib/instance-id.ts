@@ -2,6 +2,7 @@ const STORAGE_KEY = "bsk_instance_id";
 const LABEL_STORAGE_KEY = "bh_label";
 const CONNECTION_ENABLED_KEY = "bh_connection_enabled";
 const CONTROL_HINTS_HIDDEN_KEY = "bsk_control_hints_hidden";
+const DAEMON_WS_URL_STORAGE_KEY = "BSK_DAEMON_WS_URL";
 
 export interface StorageBackend {
   get(keys: string | string[]): Promise<Record<string, unknown>>;
@@ -106,6 +107,46 @@ export async function setConnectionEnabled(
   await storage.set({ [CONNECTION_ENABLED_KEY]: enabled });
 }
 
+export function isDaemonWsUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") return false;
+    if (!parsed.host) return false;
+    if (parsed.username || parsed.password) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeDaemonWsUrl(value: unknown, fallback: string): string {
+  if (typeof value !== "string") return fallback;
+  const trimmed = value.trim();
+  return isDaemonWsUrl(trimmed) ? trimmed : fallback;
+}
+
+export async function getDaemonWsUrl(
+  storage: StorageBackend = defaultStorage(),
+  fallback: string = __BSK_DAEMON_WS_URL__,
+): Promise<string> {
+  const items = await storage.get(DAEMON_WS_URL_STORAGE_KEY);
+  return normalizeDaemonWsUrl(items[DAEMON_WS_URL_STORAGE_KEY], fallback);
+}
+
+export async function setDaemonWsUrl(
+  url: string,
+  storage: StorageBackend = defaultStorage(),
+): Promise<string> {
+  const trimmed = url.trim();
+  if (!isDaemonWsUrl(trimmed)) {
+    throw new Error("daemon WebSocket URL must start with ws:// or wss:// and include a host");
+  }
+  await storage.set({ [DAEMON_WS_URL_STORAGE_KEY]: trimmed });
+  return trimmed;
+}
+
 /**
  * User preference for the in-page control hints (status pill + orange glow
  * shown while the Agent controls a tab). Defaults to shown when unset or
@@ -132,4 +173,5 @@ export const STORAGE_KEYS = {
   LABEL: LABEL_STORAGE_KEY,
   CONNECTION_ENABLED: CONNECTION_ENABLED_KEY,
   CONTROL_HINTS_HIDDEN: CONTROL_HINTS_HIDDEN_KEY,
+  DAEMON_WS_URL: DAEMON_WS_URL_STORAGE_KEY,
 } as const;
