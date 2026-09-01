@@ -1,3 +1,4 @@
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import type { Transport } from "@/transport/transport";
 import type { EventFrame } from "@/transport/types";
 import type { SessionManager } from "./manager";
@@ -24,6 +25,7 @@ export interface SessionEventHandlerOptions {
    * `chrome.storage.session` "sessions live" flag (review M4/M5 I3).
    */
   onSessionsChanged?: () => void;
+  diagnostics?: DiagnosticSink;
 }
 
 function chromeWindowEvents(): WindowRemovedListener {
@@ -50,6 +52,11 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
 
   const onRemoved = (windowId: number): void => {
     const ctx = manager.findByWindowId(windowId);
+    options.diagnostics?.("chrome.window.removed", {
+      window_id: windowId,
+      matched_session_id: ctx?.sessionId ?? null,
+      live_session_ids: manager.list().map((entry) => entry.sessionId),
+    });
     if (!ctx) return;
     const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
       tab_id: tabId,
@@ -81,7 +88,16 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
         };
         try {
           transport.send(event);
+          options.diagnostics?.("session.window_closed.sent", {
+            session_id: ctx.sessionId,
+            window_id: windowId,
+          });
         } catch (err) {
+          options.diagnostics?.("session.window_closed.send_failed", {
+            session_id: ctx.sessionId,
+            window_id: windowId,
+            error: err,
+          });
           console.warn("[bh] could not push session.window_closed event", err);
         }
       })

@@ -1,3 +1,4 @@
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import type { ConnectionStateHandler, Disposable, FrameHandler, Transport } from "./transport";
 import type { ConnectionState, ProtocolFrame } from "./types";
 
@@ -18,6 +19,7 @@ export interface WSTransportOptions {
    * Inject a fake WebSocket constructor in tests; defaults to `globalThis.WebSocket`.
    */
   webSocketFactory?: WebSocketFactory;
+  diagnostics?: DiagnosticSink;
 }
 
 interface CloseLikeEvent {
@@ -44,6 +46,7 @@ export class WSTransport implements Transport {
   private readonly factory: WebSocketFactory;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
+  private readonly diagnostics?: DiagnosticSink;
 
   private socket: WebSocket | null = null;
   private currentState: ConnectionState = "disconnected";
@@ -63,6 +66,7 @@ export class WSTransport implements Transport {
     this.factory = options.webSocketFactory ?? ((url: string) => new WebSocket(url));
     this.initialDelayMs = options.reconnect?.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS;
     this.maxDelayMs = options.reconnect?.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
+    this.diagnostics = options.diagnostics;
   }
 
   get state(): ConnectionState {
@@ -70,6 +74,13 @@ export class WSTransport implements Transport {
   }
 
   connect(): Promise<void> {
+    this.diagnostics?.("transport.connect.requested", {
+      state: this.currentState,
+      socket_generation: this.socketGeneration,
+      has_socket: this.socket !== null,
+      has_connecting_promise: this.connectingPromise !== null,
+      has_reconnect_timer: this.reconnectTimer !== null,
+    });
     if (this.currentState === "connected") return Promise.resolve();
 
     this.explicitlyClosed = false;
@@ -94,6 +105,11 @@ export class WSTransport implements Transport {
   }
 
   async disconnect(): Promise<void> {
+    this.diagnostics?.("transport.disconnect.requested", {
+      state: this.currentState,
+      socket_generation: this.socketGeneration,
+      has_socket: this.socket !== null,
+    });
     this.explicitlyClosed = true;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -124,6 +140,12 @@ export class WSTransport implements Transport {
 
   send(msg: ProtocolFrame): void {
     if (!this.socket || this.socket.readyState !== 1 /* OPEN */) {
+      this.diagnostics?.("transport.send.rejected", {
+        state: this.currentState,
+        socket_generation: this.socketGeneration,
+        socket_ready_state: this.socket?.readyState ?? null,
+        frame_kind: "method" in msg ? msg.method : "event" in msg ? msg.event : "response",
+      });
       throw new Error("[WSTransport] cannot send while not connected");
     }
     this.socket.send(JSON.stringify(msg));
@@ -152,10 +174,16 @@ export class WSTransport implements Transport {
     const generation = ++this.socketGeneration;
     const socket = this.factory(this.url);
     this.socket = socket;
+    this.diagnostics?.("transport.socket.created", {
+      socket_generation: generation,
+      reconnect_attempt: this.reconnectAttempt,
+      url: this.url,
+    });
 
     socket.addEventListener("open", () => {
       if (!this.isCurrentSocket(socket, generation)) return;
       this.reconnectAttempt = 0;
+      this.diagnostics?.("transport.socket.open", { socket_generation: generation });
       this.setState("connected");
       const resolve = this.resolveConnect;
       this.resolveConnect = null;
@@ -174,6 +202,7 @@ export class WSTransport implements Transport {
     });
 
     socket.addEventListener("error", () => {
+      this.diagnostics?.("transport.socket.error", { socket_generation: generation });
       // The 'close' handler always fires after 'error' in browsers, so we
       // just record the error and let close drive reconnect logic.
     });
@@ -197,7 +226,16 @@ export class WSTransport implements Transport {
   }
 
   private handleClose(socket: WebSocket, generation: number, _ev: CloseLikeEvent): void {
-    if (!this.isCurrentSocket(socket, generation)) return;
+    const isCurrent = this.isCurrentSocket(socket, generation);
+    this.diagnostics?.("transport.socket.close", {
+      socket_generation: generation,
+      current_socket_generation: this.socketGeneration,
+      is_current: isCurrent,
+      explicitly_closed: this.explicitlyClosed,
+      close_code: _ev.code ?? null,
+      close_reason: _ev.reason ?? "",
+    });
+    if (!isCurrent) return;
     this.socket = null;
     if (this.explicitlyClosed) {
       this.setState("disconnected");
@@ -211,9 +249,18 @@ export class WSTransport implements Transport {
     if (this.reconnectTimer) return;
     const delay = Math.min(this.initialDelayMs * 2 ** this.reconnectAttempt, this.maxDelayMs);
     this.reconnectAttempt += 1;
+    this.diagnostics?.("transport.reconnect.scheduled", {
+      delay_ms: delay,
+      reconnect_attempt: this.reconnectAttempt,
+      socket_generation: this.socketGeneration,
+    });
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.explicitlyClosed) return;
+      this.diagnostics?.("transport.reconnect.timer_fired", {
+        reconnect_attempt: this.reconnectAttempt,
+        socket_generation: this.socketGeneration,
+      });
       void this.connect().catch((err) => {
         console.debug("[WSTransport] reconnect attempt failed", err);
       });
@@ -226,7 +273,13 @@ export class WSTransport implements Transport {
 
   private setState(next: ConnectionState): void {
     if (this.currentState === next) return;
+    const previous = this.currentState;
     this.currentState = next;
+    this.diagnostics?.("transport.state.changed", {
+      previous,
+      next,
+      socket_generation: this.socketGeneration,
+    });
     for (const h of this.stateHandlers) {
       try {
         h(next);

@@ -223,6 +223,14 @@ impl BrowserRegistry {
                 "browser reconnect: replacing previous registration"
             );
         }
+        tracing::info!(
+            diagnostic = true,
+            event = "browser.registry.insert",
+            id = %client.id,
+            generation = client.generation,
+            previous_generation = guard.get(&client.id).map(|previous| previous.generation),
+            "diagnostic browser registry mutation"
+        );
         guard.insert(client.id.clone(), client);
     }
 
@@ -239,16 +247,31 @@ impl BrowserRegistry {
     /// took over the same `id` while the old socket was tearing down
     /// (review M4/M5 round 2 Important #1). Returns the removed entry
     /// when a removal actually happened.
+    #[track_caller]
     pub fn remove_if_generation_matches(
         &self,
         id: &BrowserId,
         generation: u64,
     ) -> Option<std::sync::Arc<BrowserClient>> {
+        let caller = std::panic::Location::caller();
         let mut guard = self.inner.lock().expect("browser registry poisoned");
-        match guard.get(id) {
+        let current_generation = guard.get(id).map(|current| current.generation);
+        let removed = match guard.get(id) {
             Some(current) if current.generation == generation => guard.remove(id),
             _ => None,
-        }
+        };
+        tracing::info!(
+            diagnostic = true,
+            event = "browser.registry.remove_if_generation_matches",
+            id = %id,
+            requested_generation = generation,
+            ?current_generation,
+            removed = removed.is_some(),
+            caller_file = caller.file(),
+            caller_line = caller.line(),
+            "diagnostic browser registry mutation"
+        );
+        removed
     }
 
     pub fn get(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {

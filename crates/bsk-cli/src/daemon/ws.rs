@@ -233,6 +233,14 @@ async fn drive_connection(
         .ok_or_else(|| anyhow!("handshake missing params"))?;
     let params: HandshakeParams = serde_json::from_value(params_raw)
         .map_err(|err| anyhow!("invalid HandshakeParams: {err}"))?;
+    info!(
+        diagnostic = true,
+        event = "browser.handshake.received",
+        browser = %params.instance_id,
+        extension_version = %params.version,
+        extension_protocol = %params.protocol_version,
+        "diagnostic browser handshake"
+    );
 
     // Version compatibility (design §10, M10.4): protocol_version only.
     let our_app_version: Version = env!("CARGO_PKG_VERSION")
@@ -350,7 +358,7 @@ async fn drive_connection(
     // Pump loop: outbound frames from sink → ws; inbound from ws → resolve.
     let pump_state = Arc::clone(&state);
     let pump_browser = Arc::clone(&client);
-    let result_outcome: anyhow::Result<()> = async {
+    let result_outcome: anyhow::Result<String> = async {
         loop {
             tokio::select! {
                 outbound = rx.recv() => {
@@ -359,7 +367,7 @@ async fn drive_connection(
                             let json = serde_json::to_string(&frame)?;
                             writer.send(Message::Text(json)).await?;
                         }
-                        None => break,
+                        None => break Ok("outbound_channel_closed".to_string()),
                     }
                 }
                 msg = reader.next() => {
@@ -381,18 +389,37 @@ async fn drive_connection(
                             pump_browser.touch();
                         }
                         Some(Ok(Message::Frame(_))) => {}
-                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Close(frame))) => {
+                            let reason = frame
+                                .map(|frame| format!("peer_close code={:?} reason={}", frame.code, frame.reason))
+                                .unwrap_or_else(|| "peer_close_without_frame".to_string());
+                            break Ok(reason);
+                        }
+                        None => break Ok("peer_eof".to_string()),
                         Some(Err(err)) => {
                             warn!(%err, "ws read error");
-                            break;
+                            break Ok(format!("read_error: {err}"));
                         }
                     }
                 }
             }
         }
-        Ok(())
     }
     .await;
+    let pump_exit_reason = match &result_outcome {
+        Ok(reason) => reason.clone(),
+        Err(err) => format!("pump_error: {err:#}"),
+    };
+    info!(
+        diagnostic = true,
+        event = "browser.websocket.pump_exit",
+        id = %browser_id,
+        generation,
+        reason = %pump_exit_reason,
+        last_seen_idle_ms = client.idle_for().as_millis() as u64,
+        session_ids = ?state.sessions.ids_for_browser(&browser_id),
+        "diagnostic browser websocket exit"
+    );
 
     // Cleanup: drop browser + purge its sessions, but only if the
     // registry still holds *this* generation. If a reconnect already
@@ -416,7 +443,7 @@ async fn drive_connection(
             "browser disconnected; newer reconnect already owns this id, leaving sessions intact"
         );
     }
-    result_outcome
+    result_outcome.map(|_| ())
 }
 
 async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClient>, text: &str) {
@@ -441,6 +468,38 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 // that we know it speaks the heartbeat.
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
+            }
+            bsk_protocol::EventKind::BrowserDiagnostic => {
+                let entries = ev.payload.get("entries").and_then(|value| value.as_array());
+                info!(
+                    diagnostic = true,
+                    event = "extension.diagnostic.batch",
+                    browser = %client.id,
+                    generation = client.generation,
+                    worker_boot_id = ev.payload.get("worker_boot_id").and_then(|value| value.as_str()).unwrap_or("unknown"),
+                    count = entries.map_or(0, Vec::len),
+                    "received extension diagnostic batch"
+                );
+                if let Some(entries) = entries {
+                    for entry in entries {
+                        info!(
+                            diagnostic = true,
+                            event = "extension.diagnostic.entry",
+                            browser = %client.id,
+                            generation = client.generation,
+                            entry = %entry,
+                            "extension diagnostic"
+                        );
+                    }
+                } else {
+                    warn!(
+                        diagnostic = true,
+                        event = "extension.diagnostic.invalid",
+                        browser = %client.id,
+                        payload = %ev.payload,
+                        "extension diagnostic payload missing entries"
+                    );
+                }
             }
             bsk_protocol::EventKind::SessionWindowClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);

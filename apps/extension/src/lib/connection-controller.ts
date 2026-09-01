@@ -6,6 +6,7 @@ import {
 } from "../transport/handshake";
 import type { Transport } from "../transport/transport";
 import type { ConnectionState, HandshakeResult } from "../transport/types";
+import type { DiagnosticSink } from "./diagnostics";
 import { getLabel, getOrCreateInstanceId } from "./instance-id";
 import { compareProtocol, parseProtocolMajor } from "./semver";
 
@@ -51,6 +52,11 @@ export class ConnectionController {
   private handshakeAbort: AbortController | null = null;
   private handshakeRetryTimer: ReturnType<typeof setTimeout> | null = null;
   private suppressDisconnectRecovery = false;
+  private readonly diagnostics?: DiagnosticSink;
+
+  constructor(diagnostics?: DiagnosticSink) {
+    this.diagnostics = diagnostics;
+  }
 
   get isConnectionEnabled(): boolean {
     return this.connectionEnabled;
@@ -89,8 +95,20 @@ export class ConnectionController {
     this.lifecycleHooks = lifecycleHooks;
     this.instanceId = await getOrCreateInstanceId();
     this.label = await getLabel();
+    this.diagnostics?.("controller.attach", {
+      instance_id: this.instanceId,
+      connection_enabled: connectionEnabled,
+      transport_state: transport.state,
+    });
 
     transport.onConnectionStateChange((s) => {
+      this.diagnostics?.("controller.transport_state", {
+        transport_state: s,
+        controller_state: this.currentState,
+        connection_generation: this.connectionGeneration,
+        suppress_disconnect_recovery: this.suppressDisconnectRecovery,
+        recovery_inflight: this.disconnectRecovery !== null,
+      });
       if (s === "disconnected") {
         // An in-flight handshake belongs to the dead connection — cancel it so
         // a late resolution can never clobber the next attempt.
@@ -103,6 +121,9 @@ export class ConnectionController {
             // handshake bounce); the caller owns the reconnect policy there.
             this.suppressDisconnectRecovery = false;
           } else {
+            this.diagnostics?.("controller.disconnect_recovery.requested", {
+              connection_generation: this.connectionGeneration,
+            });
             void this.recoverFromDisconnect();
           }
         }
@@ -161,6 +182,12 @@ export class ConnectionController {
     const generation = ++this.connectionGeneration;
     const abort = new AbortController();
     this.handshakeAbort = abort;
+    this.diagnostics?.("controller.handshake.started", {
+      connection_generation: generation,
+      browser_name: browser.name,
+      browser_version: browser.version,
+      instance_id: this.instanceId,
+    });
     void this.runHandshake(browser, generation, abort.signal);
   }
 
@@ -197,11 +224,21 @@ export class ConnectionController {
       }
       this.clearHandshakeRetry();
       this.lastError = null;
+      this.diagnostics?.("controller.handshake.completed", {
+        connection_generation: generation,
+        verdict: verdict.kind,
+        daemon_version: outcome.result.version,
+        daemon_protocol: outcome.result.protocol_version,
+      });
       this.setState(verdict.kind);
     } catch (err) {
       if (generation !== this.connectionGeneration || signal.aborted || isAbortError(err)) return;
       this.handshake = null;
       this.lastError = err instanceof Error ? err.message : String(err);
+      this.diagnostics?.("controller.handshake.failed", {
+        connection_generation: generation,
+        error: err,
+      });
       // Bounce the half-open socket deliberately; the retry timer below owns
       // the reconnect, so skip unexpected-loss recovery for this disconnect.
       this.suppressDisconnectRecovery = true;
@@ -228,23 +265,57 @@ export class ConnectionController {
   }
 
   private recoverFromDisconnect(): Promise<void> {
-    if (this.disconnectRecovery) return this.disconnectRecovery;
+    if (this.disconnectRecovery) {
+      this.diagnostics?.("controller.disconnect_recovery.coalesced", {
+        connection_generation: this.connectionGeneration,
+      });
+      return this.disconnectRecovery;
+    }
     const recovery = (async () => {
+      const recoveryGeneration = this.connectionGeneration;
+      this.diagnostics?.("controller.disconnect_recovery.started", {
+        recovery_generation: recoveryGeneration,
+      });
       // WSTransport schedules its reconnect timer immediately after notifying
       // state listeners. Yield once, then disconnect explicitly so that timer
       // is cancelled before local session teardown begins.
       await Promise.resolve();
-      if (!this.connectionEnabled || !this.transport) return;
+      if (!this.connectionEnabled || !this.transport) {
+        this.diagnostics?.("controller.disconnect_recovery.skipped", {
+          recovery_generation: recoveryGeneration,
+          reason: "disabled_or_missing_transport",
+        });
+        return;
+      }
       // Another path already reconnected while we yielded — nothing to do.
-      if (this.currentState !== "disconnected") return;
+      if (this.currentState !== "disconnected") {
+        this.diagnostics?.("controller.disconnect_recovery.skipped", {
+          recovery_generation: recoveryGeneration,
+          reason: "state_already_changed",
+          current_state: this.currentState,
+        });
+        return;
+      }
       await this.transport.disconnect().catch(() => {});
       try {
+        this.diagnostics?.("controller.disconnect_cleanup.started", {
+          recovery_generation: recoveryGeneration,
+          current_generation: this.connectionGeneration,
+        });
         await this.lifecycleHooks.onDisconnected?.();
+        this.diagnostics?.("controller.disconnect_cleanup.completed", {
+          recovery_generation: recoveryGeneration,
+          current_generation: this.connectionGeneration,
+        });
       } catch (err) {
         console.warn("[browser-skill] session cleanup after disconnect failed", err);
       }
       if (!this.connectionEnabled) return;
       try {
+        this.diagnostics?.("controller.disconnect_reconnect.started", {
+          recovery_generation: recoveryGeneration,
+          current_generation: this.connectionGeneration,
+        });
         await this.transport.connect();
       } catch (err) {
         this.lastError = err instanceof Error ? err.message : String(err);
@@ -252,22 +323,39 @@ export class ConnectionController {
       }
     })();
     this.disconnectRecovery = recovery.finally(() => {
+      this.diagnostics?.("controller.disconnect_recovery.completed", {
+        connection_generation: this.connectionGeneration,
+        current_state: this.currentState,
+      });
       this.disconnectRecovery = null;
     });
     return this.disconnectRecovery;
   }
 
   private cancelHandshake(): void {
+    const previousGeneration = this.connectionGeneration;
     this.connectionGeneration += 1;
+    this.diagnostics?.("controller.handshake.cancelled", {
+      previous_generation: previousGeneration,
+      next_generation: this.connectionGeneration,
+      had_abort_controller: this.handshakeAbort !== null,
+    });
     this.handshakeAbort?.abort();
     this.handshakeAbort = null;
   }
 
   private scheduleHandshakeRetry(browser: { name: string; version: string }): void {
     if (this.handshakeRetryTimer || !this.connectionEnabled) return;
+    this.diagnostics?.("controller.handshake_retry.scheduled", {
+      delay_ms: HANDSHAKE_RETRY_DELAY_MS,
+      connection_generation: this.connectionGeneration,
+    });
     this.handshakeRetryTimer = setTimeout(() => {
       this.handshakeRetryTimer = null;
       if (!this.connectionEnabled || !this.transport) return;
+      this.diagnostics?.("controller.handshake_retry.timer_fired", {
+        connection_generation: this.connectionGeneration,
+      });
       void this.transport.connect().catch((err) => {
         this.lastError = err instanceof Error ? err.message : String(err);
         this.setState("disconnected");

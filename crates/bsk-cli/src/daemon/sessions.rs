@@ -105,12 +105,22 @@ impl SessionRegistry {
 
     pub fn insert(&self, session: Session) {
         let session_id = session.id.clone();
+        let browser_id = session.browser_id.clone();
+        let agent_window_id = session.agent_window_id;
         let mut sessions = self.inner.lock().expect("session registry poisoned");
         sessions.insert(session_id.clone(), session);
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
-            .insert(session_id, Instant::now());
+            .insert(session_id.clone(), Instant::now());
+        tracing::info!(
+            diagnostic = true,
+            event = "session.registry.insert",
+            session = %session_id,
+            browser = %browser_id,
+            ?agent_window_id,
+            "diagnostic session registry mutation"
+        );
     }
 
     /// Reserve a fresh, collision-free [`SessionId`] under the registry
@@ -152,6 +162,13 @@ impl SessionRegistry {
                 .lock()
                 .expect("session activity registry poisoned")
                 .insert(candidate.clone(), Instant::now());
+            tracing::info!(
+                diagnostic = true,
+                event = "session.registry.reserve",
+                session = %candidate,
+                browser = %browser_id,
+                "diagnostic session registry mutation"
+            );
             return Some(candidate);
         }
         None
@@ -169,13 +186,24 @@ impl SessionRegistry {
         let mut guard = self.inner.lock().expect("session registry poisoned");
         let session = guard.get_mut(session_id)?;
         session.agent_window_id = agent_window_id;
+        tracing::info!(
+            diagnostic = true,
+            event = "session.registry.commit",
+            session = %session_id,
+            browser = %session.browser_id,
+            ?agent_window_id,
+            "diagnostic session registry mutation"
+        );
         Some(session.clone())
     }
 
     /// Drop a placeholder reservation, used on extension error/timeout
     /// paths so failed reservations do not accumulate.
+    #[track_caller]
     pub fn cancel_reservation(&self, session_id: &SessionId) {
-        self.inner
+        let caller = std::panic::Location::caller();
+        let removed = self
+            .inner
             .lock()
             .expect("session registry poisoned")
             .remove(session_id);
@@ -183,9 +211,20 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .remove(session_id);
+        tracing::info!(
+            diagnostic = true,
+            event = "session.registry.cancel_reservation",
+            session = %session_id,
+            existed = removed.is_some(),
+            caller_file = caller.file(),
+            caller_line = caller.line(),
+            "diagnostic session registry mutation"
+        );
     }
 
+    #[track_caller]
     pub fn remove(&self, id: &SessionId) -> Option<Session> {
+        let caller = std::panic::Location::caller();
         let removed = self
             .inner
             .lock()
@@ -195,6 +234,17 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .remove(id);
+        tracing::info!(
+            diagnostic = true,
+            event = "session.registry.remove",
+            session = %id,
+            existed = removed.is_some(),
+            browser = removed.as_ref().map(|session| session.browser_id.0.as_str()),
+            agent_window_id = removed.as_ref().and_then(|session| session.agent_window_id),
+            caller_file = caller.file(),
+            caller_line = caller.line(),
+            "diagnostic session registry mutation"
+        );
         removed
     }
 
@@ -243,7 +293,9 @@ impl SessionRegistry {
     }
 
     /// Drop all sessions owned by `browser_id` (e.g. on disconnect).
+    #[track_caller]
     pub fn purge_browser(&self, browser_id: &BrowserId) -> Vec<Session> {
+        let caller = std::panic::Location::caller();
         let mut guard = self.inner.lock().expect("session registry poisoned");
         let drained: Vec<Session> = guard
             .values()
@@ -260,6 +312,20 @@ impl SessionRegistry {
         for session in &drained {
             activity.remove(&session.id);
         }
+        let session_ids: Vec<&str> = drained
+            .iter()
+            .map(|session| session.id.0.as_str())
+            .collect();
+        tracing::info!(
+            diagnostic = true,
+            event = "session.registry.purge_browser",
+            browser = %browser_id,
+            sessions = ?session_ids,
+            count = drained.len(),
+            caller_file = caller.file(),
+            caller_line = caller.line(),
+            "diagnostic session registry mutation"
+        );
         drained
     }
 

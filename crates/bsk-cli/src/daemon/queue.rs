@@ -41,7 +41,7 @@ use bsk_protocol::{ErrorCode, Frame, Method, RequestFrame, ResponseBody, RpcErro
 use rand::Rng;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::abort::AbortToken;
 use super::browsers::BrowserRegistry;
@@ -515,6 +515,16 @@ async fn forward_one(
     sessions: &Arc<SessionRegistry>,
     job: &ToolJob,
 ) -> Result<Value, RpcError> {
+    let started = std::time::Instant::now();
+    info!(
+        diagnostic = true,
+        event = "tool.dispatch.started",
+        session = %sid,
+        method = ?job.method,
+        has_inflight = job.inflight.is_some(),
+        has_lifecycle_cancel = job.lifecycle_cancel.is_some(),
+        "diagnostic tool dispatch"
+    );
     // Pre-flight: a cancel that landed while this job was still in
     // the per-session channel must short-circuit before any session
     // / browser resolution work, and before any WS frame leaves the
@@ -535,6 +545,13 @@ async fn forward_one(
         ));
     }
     let Some(session) = sessions.get(sid) else {
+        warn!(
+            diagnostic = true,
+            event = "tool.dispatch.session_missing",
+            session = %sid,
+            method = ?job.method,
+            "diagnostic tool dispatch"
+        );
         return Err(RpcError {
             code: ErrorCode::NotFound,
             message: format!("session {sid} no longer exists"),
@@ -542,6 +559,14 @@ async fn forward_one(
         });
     };
     let Some(client) = browsers.get(&session.browser_id) else {
+        warn!(
+            diagnostic = true,
+            event = "tool.dispatch.browser_missing",
+            session = %sid,
+            method = ?job.method,
+            browser = %session.browser_id,
+            "diagnostic tool dispatch"
+        );
         return Err(RpcError {
             code: ErrorCode::NotFound,
             message: "owning browser is no longer connected".into(),
@@ -558,6 +583,16 @@ async fn forward_one(
         method: job.method.clone(),
         params: Some(job.params.clone()),
     });
+    info!(
+        diagnostic = true,
+        event = "tool.dispatch.forwarding",
+        session = %sid,
+        method = ?job.method,
+        browser = %session.browser_id,
+        browser_generation = client.generation,
+        ws_rpc_id = %rpc_id,
+        "diagnostic tool dispatch"
+    );
     // Promote the inflight entry to "forwarded" AND push the WS
     // request frame to the sink inside the same critical section
     // (review round 2 C1). The closure runs while the entry's inner
@@ -717,6 +752,18 @@ async fn forward_one(
             });
         }
     };
+    info!(
+        diagnostic = true,
+        event = "tool.dispatch.response",
+        session = %sid,
+        method = ?job.method,
+        browser = %session.browser_id,
+        browser_generation = client.generation,
+        ws_rpc_id = %rpc_id,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        response_is_error = matches!(&response.body, ResponseBody::Err(_)),
+        "diagnostic tool dispatch"
+    );
     match response.body {
         ResponseBody::Ok(v) => Ok(v),
         ResponseBody::Err(err) => Err(err),

@@ -1,3 +1,4 @@
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
@@ -23,6 +24,7 @@ export interface BorrowReservation {
 export interface SessionManagerOptions {
   agentWindow?: AgentWindowApi;
   now?: () => number;
+  diagnostics?: DiagnosticSink;
 }
 
 /** Options for starting a session's Agent Window. */
@@ -83,10 +85,12 @@ export class SessionManager {
   private readonly borrowReservations = new Map<number, string>();
   private readonly agentWindow: AgentWindowApi;
   private readonly now: () => number;
+  private readonly diagnostics?: DiagnosticSink;
 
   constructor(options: SessionManagerOptions = {}) {
     this.agentWindow = options.agentWindow ?? chromeAgentWindowApi;
     this.now = options.now ?? Date.now;
+    this.diagnostics = options.diagnostics;
   }
 
   has(sessionId: string): boolean {
@@ -169,6 +173,13 @@ export class SessionManager {
    * daemon in the `tool.session_start` reply.
    */
   async start(sessionId: string, opts: SessionStartOptions = {}): Promise<SessionContext> {
+    this.diagnostics?.("session_manager.start.requested", {
+      session_id: sessionId,
+      existing_session_ids: this.list().map((ctx) => ctx.sessionId),
+      focused: opts.focused ?? null,
+      size: opts.size ?? null,
+      signal_aborted: opts.signal?.aborted ?? false,
+    });
     if (this.sessions.has(sessionId)) {
       throw new Error(`[bh] session ${sessionId} already exists`);
     }
@@ -178,6 +189,10 @@ export class SessionManager {
     try {
       const { signal: _signal, ...createOptions } = opts;
       windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
+      this.diagnostics?.("session_manager.window.created", {
+        session_id: sessionId,
+        agent_window_id: windowId,
+      });
       throwIfSessionStartAborted(opts.signal);
       await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
       throwIfSessionStartAborted(opts.signal);
@@ -191,8 +206,18 @@ export class SessionManager {
       };
       this.sessions.set(sessionId, ctx);
       this.windowIndex.set(windowId, sessionId);
+      this.diagnostics?.("session_manager.start.committed", {
+        session_id: sessionId,
+        agent_window_id: windowId,
+        live_session_ids: this.list().map((entry) => entry.sessionId),
+      });
       return ctx;
     } catch (startupError) {
+      this.diagnostics?.("session_manager.start.failed", {
+        session_id: sessionId,
+        agent_window_id: windowId,
+        error: startupError,
+      });
       if (windowId !== null) {
         try {
           await this.agentWindow.remove(windowId);
@@ -216,12 +241,28 @@ export class SessionManager {
     options: { dropOnly?: boolean } = {},
   ): Promise<SessionContext | null> {
     const ctx = this.sessions.get(sessionId);
+    this.diagnostics?.("session_manager.stop.requested", {
+      session_id: sessionId,
+      drop_only: options.dropOnly ?? false,
+      existed: ctx !== undefined,
+      live_session_ids: this.list().map((entry) => entry.sessionId),
+    });
     if (!ctx) return null;
     if (!options.dropOnly) {
       await this.agentWindow.remove(ctx.agentWindowId);
+      this.diagnostics?.("session_manager.window.removed", {
+        session_id: sessionId,
+        agent_window_id: ctx.agentWindowId,
+      });
     }
     this.sessions.delete(sessionId);
     this.windowIndex.delete(ctx.agentWindowId);
+    this.diagnostics?.("session_manager.stop.committed", {
+      session_id: sessionId,
+      agent_window_id: ctx.agentWindowId,
+      drop_only: options.dropOnly ?? false,
+      live_session_ids: this.list().map((entry) => entry.sessionId),
+    });
     return ctx;
   }
 

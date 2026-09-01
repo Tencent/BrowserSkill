@@ -40,6 +40,8 @@ pub(crate) const DAEMONIZED_ENV: &str = "BSK_DAEMONIZED";
 /// daemon lock, IPC socket, and WS port — before taking over.
 pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 
+const LUMI_DIAGNOSTIC_BUILD: &str = "lumi-session-loss-v1";
+
 /// Concrete daemon configuration resolved from CLI flags / defaults.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -251,6 +253,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             pid = info.pid,
             ws_port = info.ws_port,
             sock = %sock_path.display(),
+            diagnostic_build = LUMI_DIAGNOSTIC_BUILD,
             "daemon ready"
         );
 
@@ -588,7 +591,9 @@ pub(crate) fn spawn_update_check_task(
                     // The session gate is read after the fetch, as late
                     // as possible before the binary gets replaced.
                     let active_sessions = state.sessions.len();
-                    let auto_update = update::auto_update_enabled() && exe_path.is_some();
+                    // Keep this local diagnostic build in place until a
+                    // reproduction has uploaded its extension-side evidence.
+                    let auto_update = false;
                     update::auto_update_step(
                         candidate.as_ref(),
                         auto_update,
@@ -732,7 +737,11 @@ fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
 
     let log_dir = paths::log_dir().ok();
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        // Lumi commonly runs with RUST_LOG=warn. This local build must retain
+        // BrowserSkill's INFO diagnostics even under that host-wide setting.
+        .add_directive("bsk=info".parse().expect("valid diagnostic log directive"));
 
     let (file_layer, guard) = if let Some(dir) = log_dir {
         let appender = tracing_appender::rolling::daily(&dir, "daemon.log");

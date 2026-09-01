@@ -58,6 +58,10 @@ pub enum EventKind {
     BrowserDisconnected,
     #[serde(rename = "browser.connected")]
     BrowserConnected,
+    /// Structured diagnostics emitted by locally instrumented extension
+    /// builds. Production peers may ignore this event safely.
+    #[serde(rename = "browser.diagnostic")]
+    BrowserDiagnostic,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -254,6 +258,27 @@ mod tests {
         let wire = serde_json::json!({ "event": "system.heartbeat", "payload": {} });
         let frame: EventFrame = serde_json::from_value(wire).unwrap();
         assert_eq!(frame.event, EventKind::SystemHeartbeat);
+    }
+
+    #[test]
+    fn browser_diagnostic_event_frame_round_trips_from_extension_shape() {
+        let wire = serde_json::json!({
+            "event": "browser.diagnostic",
+            "payload": {
+                "schema_version": 1,
+                "worker_boot_id": "worker-1",
+                "entries": [{ "event": "extension.worker.started" }]
+            }
+        });
+        let frame: EventFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(frame.event, EventKind::BrowserDiagnostic);
+        assert_eq!(
+            frame
+                .payload
+                .get("worker_boot_id")
+                .and_then(|value| value.as_str()),
+            Some("worker-1")
+        );
     }
 
     #[test]

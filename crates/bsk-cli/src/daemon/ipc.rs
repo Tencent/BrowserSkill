@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
@@ -197,7 +197,22 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
         let status = status.clone();
         let state = Arc::clone(&state);
         Box::pin(async move {
-            match method {
+            let method_name = format!("{method:?}");
+            let diagnostic_rpc_id = rpc_id.clone();
+            let session_id = params
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let started = Instant::now();
+            info!(
+                diagnostic = true,
+                event = "ipc.rpc.started",
+                rpc_id = %diagnostic_rpc_id,
+                method = %method_name,
+                session = session_id.as_deref().unwrap_or(""),
+                "diagnostic IPC RPC"
+            );
+            let body = match method {
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
@@ -261,7 +276,23 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     message: format!("method not implemented yet: {other:?}"),
                     data: None,
                 }),
-            }
+            };
+            let (outcome, error_code) = match &body {
+                ResponseBody::Ok(_) => ("ok", String::new()),
+                ResponseBody::Err(error) => ("error", format!("{:?}", error.code)),
+            };
+            info!(
+                diagnostic = true,
+                event = "ipc.rpc.completed",
+                rpc_id = %diagnostic_rpc_id,
+                method = %method_name,
+                session = session_id.as_deref().unwrap_or(""),
+                outcome,
+                error_code = %error_code,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "diagnostic IPC RPC"
+            );
+            body
         })
     })
 }
@@ -465,8 +496,14 @@ fn handle_cancel(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
     };
     let local = state.abort_registry.cancel(&params.rpc_id);
     let mut cancelled = local;
+    let mut surface = if local { "abort_registry" } else { "none" };
     if !local && let Some(snap) = state.tool_inflight.cancel(&params.rpc_id) {
         cancelled = true;
+        surface = if snap.ws_rpc_id.is_some() {
+            "tool_inflight_forwarded"
+        } else {
+            "tool_inflight_queued"
+        };
         // Forward the WS-side cancel only when the worker has
         // already promoted the entry to "forwarded"; queued entries
         // short-circuit on their own pre-flight without ever
@@ -484,6 +521,14 @@ fn handle_cancel(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
             );
         }
     }
+    info!(
+        diagnostic = true,
+        event = "ipc.cancel.resolved",
+        target_rpc_id = %params.rpc_id,
+        cancelled,
+        surface,
+        "diagnostic IPC cancellation"
+    );
     ResponseBody::Ok(serde_json::to_value(CancelResult { cancelled }).unwrap_or(Value::Null))
 }
 

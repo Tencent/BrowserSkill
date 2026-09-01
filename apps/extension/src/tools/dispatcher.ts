@@ -1,3 +1,4 @@
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
@@ -118,6 +119,7 @@ export interface DispatcherDeps {
   approveBorrow?: BorrowConfirmationApprover;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
+  diagnostics?: DiagnosticSink;
 }
 
 /**
@@ -145,6 +147,7 @@ export class ToolDispatcher {
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
+  private readonly diagnostics?: DiagnosticSink;
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
@@ -165,6 +168,7 @@ export class ToolDispatcher {
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
     this.approveBorrow = deps.approveBorrow;
     this.helpNotificationCopy = deps.helpNotificationCopy;
+    this.diagnostics = deps.diagnostics;
   }
 
   start(): void {
@@ -192,6 +196,16 @@ export class ToolDispatcher {
   private async dispatch(msg: ProtocolFrame): Promise<void> {
     if (!isRequestFrame(msg)) return;
     const req = msg as RequestFrame;
+    const requestSessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;
+    const startedAt = performance.now();
+    this.diagnostics?.("dispatcher.rpc.received", {
+      rpc_id: req.id,
+      method: req.method,
+      session_id: typeof requestSessionId === "string" ? requestSessionId : null,
+      transport_state: this.transport.state,
+      live_session_ids: this.sessions.list().map((ctx) => ctx.sessionId),
+      inflight_rpc_ids: Array.from(this.inflightAbortControllers.keys()),
+    });
 
     // Cancel frames take a fast path: trip the matching controller
     // (if any), reply with `{cancelled}` so the daemon can answer
@@ -200,6 +214,12 @@ export class ToolDispatcher {
       const params = (req.params as { rpc_id?: string } | undefined) ?? {};
       const target = typeof params.rpc_id === "string" ? params.rpc_id : "";
       const ac = target ? this.inflightAbortControllers.get(target) : undefined;
+      this.diagnostics?.("dispatcher.cancel.received", {
+        rpc_id: req.id,
+        target_rpc_id: target,
+        target_found: ac !== undefined,
+        inflight_rpc_ids: Array.from(this.inflightAbortControllers.keys()),
+      });
       if (ac) {
         try {
           ac.abort();
@@ -213,7 +233,17 @@ export class ToolDispatcher {
       };
       try {
         this.transport.send(reply);
+        this.diagnostics?.("dispatcher.cancel.ack_sent", {
+          rpc_id: req.id,
+          target_rpc_id: target,
+          cancelled: ac !== undefined,
+        });
       } catch (sendErr) {
+        this.diagnostics?.("dispatcher.cancel.ack_failed", {
+          rpc_id: req.id,
+          target_rpc_id: target,
+          error: sendErr,
+        });
         console.warn("[bsk dispatcher] failed to ack cancel", sendErr);
       }
       return;
@@ -238,6 +268,13 @@ export class ToolDispatcher {
         }
       }
     } catch (err) {
+      this.diagnostics?.("dispatcher.rpc.invoke_failed", {
+        rpc_id: req.id,
+        method: req.method,
+        session_id: typeof requestSessionId === "string" ? requestSessionId : null,
+        abort_signal: ac.signal.aborted,
+        error: err,
+      });
       if (isAbortLikeError(err)) {
         body = {
           id: req.id,
@@ -258,8 +295,27 @@ export class ToolDispatcher {
     let sent = true;
     try {
       this.transport.send(body);
+      this.diagnostics?.("dispatcher.rpc.response_sent", {
+        rpc_id: req.id,
+        method: req.method,
+        session_id: typeof requestSessionId === "string" ? requestSessionId : null,
+        response_kind: "error" in body ? "error" : "ok",
+        error_code: "error" in body ? body.error.code : null,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        transport_state: this.transport.state,
+        live_session_ids: this.sessions.list().map((ctx) => ctx.sessionId),
+      });
     } catch (sendErr) {
       sent = false;
+      this.diagnostics?.("dispatcher.rpc.response_send_failed", {
+        rpc_id: req.id,
+        method: req.method,
+        session_id: typeof requestSessionId === "string" ? requestSessionId : null,
+        started_session_id: startedSession,
+        elapsed_ms: Math.round(performance.now() - startedAt),
+        transport_state: this.transport.state,
+        error: sendErr,
+      });
       // Transport is dead by the time we want to reply. Drop the link
       // proactively so the alarm-driven keepalive reconnects sooner
       // and the daemon's pending RPC times out cleanly instead of
@@ -278,12 +334,23 @@ export class ToolDispatcher {
       try {
         const ctx = await this.sessions.stop(startedSession);
         if (ctx) {
+          this.diagnostics?.("dispatcher.session_start.rolled_back", {
+            rpc_id: req.id,
+            session_id: startedSession,
+            agent_window_id: ctx.agentWindowId,
+            reason: "response_send_failed",
+          });
           console.warn(
             "[bsk dispatcher] rolled back orphan session after send failure",
             startedSession,
           );
         }
       } catch (rollbackErr) {
+        this.diagnostics?.("dispatcher.session_start.rollback_failed", {
+          rpc_id: req.id,
+          session_id: startedSession,
+          error: rollbackErr,
+        });
         console.warn("[bsk dispatcher] session rollback after send failure failed", rollbackErr);
       }
     }

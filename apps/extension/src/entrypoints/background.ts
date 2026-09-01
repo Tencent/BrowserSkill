@@ -1,6 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ConnectionController } from "@/lib/connection-controller";
+import { DiagnosticLogger } from "@/lib/diagnostics";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
@@ -46,9 +47,20 @@ import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 
 export default defineBackground(() => {
-  const controller = new ConnectionController();
-  const transport = new WSTransport({ url: __BSK_DAEMON_WS_URL__ });
-  const sessions = new SessionManager();
+  const diagnostics = new DiagnosticLogger();
+  diagnostics.record("extension.worker.started", {
+    diagnostic_build: "lumi-session-loss-v1",
+    extension_version: __BSK_EXT_VERSION__,
+    extension_runtime_id: chrome.runtime.id,
+    daemon_ws_url: __BSK_DAEMON_WS_URL__,
+  });
+  const controller = new ConnectionController(diagnostics.sink);
+  const transport = new WSTransport({
+    url: __BSK_DAEMON_WS_URL__,
+    diagnostics: diagnostics.sink,
+  });
+  diagnostics.bindTransport((frame) => transport.send(frame));
+  const sessions = new SessionManager({ diagnostics: diagnostics.sink });
   const cdp = new ChromiumCdp();
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   let overlayGeneration = 0;
@@ -109,6 +121,9 @@ export default defineBackground(() => {
   }
 
   function onOverlaySessionStateChanged(): void {
+    diagnostics.record("background.sessions.changed", {
+      live_session_ids: sessions.list().map((ctx) => ctx.sessionId),
+    });
     void sessionsLive.syncFromManager();
     const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
     for (const sessionId of controlModes.keys()) {
@@ -146,6 +161,7 @@ export default defineBackground(() => {
     onSessionsChanged: () => {
       void sessionsLive.syncFromManager();
     },
+    diagnostics: diagnostics.sink,
   });
   const recordDeps = {
     tabsApi: chrome.tabs,
@@ -193,6 +209,7 @@ export default defineBackground(() => {
       title: i18n.t("helpRequest.notificationTitle", { ns: "extension" }),
       body: "",
     }),
+    diagnostics: diagnostics.sink,
   });
   dispatcher.start();
   if (typeof chrome.notifications?.onClicked?.addListener === "function") {
@@ -225,6 +242,7 @@ export default defineBackground(() => {
     transport,
     cdp,
     onSessionsChanged: onOverlaySessionStateChanged,
+    diagnostics: diagnostics.sink,
   });
 
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
@@ -236,6 +254,7 @@ export default defineBackground(() => {
   startKeepalive({
     transport,
     shouldConnect: () => controller.isConnectionEnabled,
+    diagnostics: diagnostics.sink,
   });
 
   // Application-level heartbeat (Chrome 116+): while the post-handshake
@@ -249,6 +268,19 @@ export default defineBackground(() => {
       controller.subscribe((snap) =>
         cb(snap.state === "connected" || snap.state === "version_skew"),
       ),
+    diagnostics: diagnostics.sink,
+  });
+
+  controller.subscribe((snapshot) => {
+    const ready = snapshot.state === "connected" || snapshot.state === "version_skew";
+    diagnostics.setTransportReady(ready);
+    diagnostics.record("background.controller.snapshot", {
+      state: snapshot.state,
+      connection_enabled: snapshot.connectionEnabled,
+      instance_id: snapshot.instanceId,
+      last_error: snapshot.lastError,
+      live_session_ids: sessions.list().map((ctx) => ctx.sessionId),
+    });
   });
 
   // Wake-driven reconnect (best effort). An MV3 service worker is killed
@@ -257,7 +289,12 @@ export default defineBackground(() => {
   // the worker and let us reconnect immediately instead of waiting for
   // the next 30s alarm tick. They only help when the daemon is actually
   // running; a cold daemon is (re)spawned by the next `bsk` command.
-  const reconnectIfNeeded = () => {
+  const reconnectIfNeeded = (source: string) => {
+    diagnostics.record("background.wake_reconnect.requested", {
+      source,
+      controller_enabled: controller.isConnectionEnabled,
+      transport_state: transport.state,
+    });
     if (!controller.isConnectionEnabled) return;
     if (transport.state === "connected") return;
     void transport.connect().catch((err) => {
@@ -265,13 +302,14 @@ export default defineBackground(() => {
     });
   };
   if (typeof chrome.runtime?.onStartup?.addListener === "function") {
-    chrome.runtime.onStartup.addListener(reconnectIfNeeded);
+    chrome.runtime.onStartup.addListener(() => reconnectIfNeeded("runtime.onStartup"));
   }
   if (typeof chrome.idle?.onStateChanged?.addListener === "function") {
     chrome.idle.onStateChanged.addListener((state) => {
+      diagnostics.record("chrome.idle.state_changed", { state });
       // "active" fires when the user returns from idle/locked — the most
       // reliable "machine just woke" signal we get.
-      if (state === "active") reconnectIfNeeded();
+      if (state === "active") reconnectIfNeeded("idle.active");
     });
     // Treat >60s of no input as idle so the active transition is timely.
     chrome.idle.setDetectionInterval?.(60);
@@ -279,14 +317,21 @@ export default defineBackground(() => {
 
   void (async () => {
     const connectionEnabled = await getConnectionEnabled();
+    diagnostics.record("background.controller.attach_started", { connectionEnabled });
     await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
       beforeDisconnect: async () => {
+        diagnostics.record("background.before_disconnect_cleanup", {
+          live_session_ids: sessions.list().map((ctx) => ctx.sessionId),
+        });
         const report = await cleanupAfterDisconnect();
         if (report.failures.length > 0) {
           console.warn("[browser-skill] session cleanup before disconnect was incomplete", report);
         }
       },
       onDisconnected: async () => {
+        diagnostics.record("background.after_disconnect_cleanup", {
+          live_session_ids: sessions.list().map((ctx) => ctx.sessionId),
+        });
         const report = await cleanupAfterDisconnect();
         if (report.failures.length > 0) {
           console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
@@ -294,6 +339,7 @@ export default defineBackground(() => {
       },
     });
   })().catch((err) => {
+    diagnostics.record("background.controller.attach_failed", { error: err });
     console.error("[browser-skill] controller failed to attach", err);
   });
 
@@ -372,6 +418,15 @@ export default defineBackground(() => {
     dbg.__bskController = controller;
     dbg.__bhSessions = sessions;
     dbg.__bhDispatcher = dispatcher;
+  }
+
+  if (typeof chrome.runtime?.onSuspend?.addListener === "function") {
+    chrome.runtime.onSuspend.addListener(() => {
+      diagnostics.record("extension.worker.suspending", {
+        live_session_ids: sessions.list().map((ctx) => ctx.sessionId),
+        transport_state: transport.state,
+      });
+    });
   }
 
   console.info("[browser-skill] background worker initialised");

@@ -21,6 +21,7 @@
  * after the handshake has landed.
  */
 
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import type { ProtocolFrame } from "@/transport/types";
 
 export const HEARTBEAT_EVENT = "system.heartbeat";
@@ -46,6 +47,7 @@ export interface HeartbeatOptions {
   intervalMs?: number;
   /** Inject fake timers (tests). */
   timers?: HeartbeatTimers;
+  diagnostics?: DiagnosticSink;
 }
 
 export interface HeartbeatHandle {
@@ -74,7 +76,9 @@ export function startHeartbeat(options: HeartbeatOptions): HeartbeatHandle {
   const beat = () => {
     try {
       options.send({ event: HEARTBEAT_EVENT, payload: {} });
+      options.diagnostics?.("heartbeat.sent");
     } catch (err) {
+      options.diagnostics?.("heartbeat.send_failed", { error: err });
       // The socket raced a close between the state change and this
       // tick. The transport's own reconnect path recovers; swallow so
       // the interval keeps running (it is cleared on the disconnect
@@ -87,12 +91,14 @@ export function startHeartbeat(options: HeartbeatOptions): HeartbeatHandle {
     if (timer !== null) {
       timers.clearInterval(timer);
       timer = null;
+      options.diagnostics?.("heartbeat.timer.stopped");
     }
   };
 
   const start = () => {
     if (timer !== null) return;
     timer = timers.setInterval(beat, intervalMs);
+    options.diagnostics?.("heartbeat.timer.started", { interval_ms: intervalMs });
   };
 
   const unsubscribe = options.onActiveChange((active) => {

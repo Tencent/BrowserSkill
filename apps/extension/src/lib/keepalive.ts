@@ -20,6 +20,7 @@
  * SW idle threshold.
  */
 
+import type { DiagnosticSink } from "@/lib/diagnostics";
 import type { Transport } from "@/transport/transport";
 
 export const KEEPALIVE_ALARM_NAME = "bh-keepalive";
@@ -59,6 +60,7 @@ export interface KeepaliveOptions {
   alarmName?: string;
   /** Override the alarm period (tests). */
   periodMin?: number;
+  diagnostics?: DiagnosticSink;
 }
 
 export interface KeepaliveHandle {
@@ -79,11 +81,24 @@ export function startKeepalive(options: KeepaliveOptions): KeepaliveHandle {
   const period = options.periodMin ?? KEEPALIVE_PERIOD_MIN;
 
   const tick = async () => {
-    if (options.shouldConnect && !options.shouldConnect()) return;
-    if (options.transport.state === "connected") return;
+    if (options.shouldConnect && !options.shouldConnect()) {
+      options.diagnostics?.("keepalive.tick.skipped", { reason: "connection_disabled" });
+      return;
+    }
+    if (options.transport.state === "connected") {
+      options.diagnostics?.("keepalive.tick.healthy", { transport_state: "connected" });
+      return;
+    }
+    options.diagnostics?.("keepalive.reconnect.started", {
+      transport_state: options.transport.state,
+    });
     try {
       await options.transport.connect();
+      options.diagnostics?.("keepalive.reconnect.completed", {
+        transport_state: options.transport.state,
+      });
     } catch (err) {
+      options.diagnostics?.("keepalive.reconnect.failed", { error: err });
       console.debug("[bsk keepalive] connect attempt failed", err);
     }
   };
