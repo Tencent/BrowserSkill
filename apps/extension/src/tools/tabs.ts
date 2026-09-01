@@ -431,7 +431,17 @@ export async function handleTabCreate(
   manager.markAgentTabPending(ctx.agentWindowId);
 
   const tab = await createTabAndCleanup(deps, buildCreateProps(ctx, params));
-  if (isRpcError(tab)) return tab;
+  if (isRpcError(tab)) {
+    // Release the pending slot when no tab was actually opened: with no
+    // `onCreated` event to consume it, the counter would leak and the next
+    // tab the user opens would be misclassified as agent-created. An abort
+    // (`cancelled`) is the exception — the tab did open (and was cleaned up),
+    // so its `onCreated` still consumes the slot.
+    if (tab.code !== "cancelled") {
+      manager.releaseAgentTabPending(ctx.agentWindowId);
+    }
+    return tab;
+  }
 
   // Track agent-created tabs so session_stop can clean them up (design §3.1).
   // The onCreated listener also adds this id; this is an idempotent fallback

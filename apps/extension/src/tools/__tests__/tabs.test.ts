@@ -256,6 +256,23 @@ describe("handleTabCreate", () => {
     const res = await handleTabCreate(sm, { session_id: "aa11", index: -1 }, { tabs: api });
     expect(res).toMatchObject({ code: "invalid_params" });
   });
+
+  it("releases the pending agent-tab slot when chrome.tabs.create fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const state: FakeTabState = { tabs: new Map(), nextTabId: 10, windowsClosed: new Set() };
+    const { api, spies } = makeTabMutationApi(state);
+    spies.create.mockRejectedValueOnce(new Error("chrome.tabs.create failed"));
+
+    const res = await handleTabCreate(sm, { session_id: "aa11" }, { tabs: api });
+    expect(res).toMatchObject({ code: "protocol_error" });
+
+    // No tab was opened, so no `onCreated` event will consume the pending
+    // slot. Without the release the counter leaks and the next tab the user
+    // opens is misclassified as agent-created — the exact confusion the
+    // counter exists to prevent.
+    expect(sm.classifyNewTab(42, 100)).toBe("user");
+  });
 });
 
 describe("handleTabClose", () => {

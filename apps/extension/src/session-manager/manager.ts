@@ -264,6 +264,18 @@ export class SessionManager {
   }
 
   /**
+   * Release a pending `tool.tab_create` slot when the create itself failed
+   * and no `chrome.tabs.onCreated` event will arrive to consume it. Without
+   * this the counter leaks and the *next* tab the user opens is misclassified
+   * as agent-created — the exact confusion this counter exists to prevent.
+   */
+  releaseAgentTabPending(windowId: number): void {
+    const ctx = this.findByWindowId(windowId);
+    if (!ctx || ctx.pendingAgentTabCount === 0) return;
+    ctx.pendingAgentTabCount -= 1;
+  }
+
+  /**
    * Called by the `onCreated` listener for each new tab in an Agent Window.
    * Returns `"agent"` when the tab corresponds to a pending `tool.tab_create`
    * (and registers it), `"user"` when the user opened it via Chrome UI, or
