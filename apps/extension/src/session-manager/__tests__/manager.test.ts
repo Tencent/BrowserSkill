@@ -152,19 +152,17 @@ describe("SessionManager", () => {
   });
 
   describe("classifyNewTab (user vs agent tab freedom)", () => {
-    it("classifies a tab born during window init as agent (home tab)", async () => {
-      const aw = fakeAgentWindow();
-      const sm = new SessionManager({ agentWindow: aw });
+    it("classifies the home tab as agent", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
       const ctx = await sm.start("aa11");
-      // Simulate the onCreated event for the home tab while still initializing.
-      // (start() already clears the flag, so re-add to emulate the race.)
-      (sm as unknown as { windowInitializing: Set<number> }).windowInitializing.add(
-        ctx.agentWindowId,
-      );
-      const kind = sm.classifyNewTab(0, ctx.agentWindowId);
-      expect(kind).toBe("initializing");
-      expect(ctx.agentCreatedTabs.has(0)).toBe(true);
-      expect(ctx.userTabs.has(0)).toBe(false);
+      // The home tab is agent-owned and matched by home tab id. The prior
+      // windowInitializing flag was cleared before the home tab's onCreated
+      // arrived, so matching it by boot timing was never reliable.
+      const homeTabId = ctx.homeTabId as number;
+      const kind = sm.classifyNewTab(homeTabId, ctx.agentWindowId);
+      expect(kind).toBe("agent");
+      expect(ctx.agentCreatedTabs.has(homeTabId)).toBe(true);
+      expect(ctx.userTabs.has(homeTabId)).toBe(false);
     });
 
     it("classifies a pending tab_create tab as agent", async () => {

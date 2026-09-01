@@ -175,10 +175,11 @@ export default defineBackground(() => {
     if (typeof tab.windowId !== "number") return;
     pushOverlayStateForAgentWindow(tab.windowId);
   });
-  // A new tab inside an Agent Window is either agent-created (via
-  // tool.tab_create, flagged by the pending count) or user-created (via
-  // Chrome UI). Classify it so user-opened tabs are kept free and can be
-  // pushed a hidden overlay immediately. See SessionManager.classifyNewTab.
+  // A new tab inside an Agent Window is agent-owned (the home tab, matched by
+  // homeTabId, or a tool.tab_create flagged by the pending count) or
+  // user-created (via Chrome UI). Classify it so user-opened tabs are kept
+  // free and can be pushed a hidden overlay immediately. See
+  // SessionManager.classifyNewTab.
   chrome.tabs.onCreated.addListener((tab) => {
     if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
     const kind = sessions.classifyNewTab(tab.id, tab.windowId);
@@ -190,7 +191,7 @@ export default defineBackground(() => {
         mode: "hidden",
         generation: overlayGeneration,
       });
-    } else if (kind === "agent" || kind === "initializing") {
+    } else if (kind === "agent") {
       // Agent tab (or home tab): make sure it reflects the session's
       // current control mode.
       void pushOverlayStateForAgentWindow(tab.windowId);
