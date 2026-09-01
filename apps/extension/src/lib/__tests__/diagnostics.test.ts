@@ -58,4 +58,28 @@ describe("DiagnosticLogger", () => {
       { event: "session.stop.requested", fields: { session_id: "abcd" } },
     ]);
   });
+
+  it("does not resend an acknowledged event when send records a new event", async () => {
+    const storage = new MemoryStorage();
+    const batches: Array<{ payload?: { entries?: Array<{ event: string }> } }> = [];
+    const logger = new DiagnosticLogger(storage);
+    logger.record("dispatcher.rpc.received", { rpc_id: "one" });
+    await logger.flush();
+    logger.bindTransport((frame) => {
+      batches.push(frame as { payload?: { entries?: Array<{ event: string }> } });
+      if (batches.length === 1) {
+        logger.record("dispatcher.rpc.response_sent", { rpc_id: "one" });
+      }
+    });
+
+    logger.setTransportReady(true);
+    await logger.flush();
+    await logger.flush();
+
+    expect(batches.map((batch) => batch.payload?.entries?.map((entry) => entry.event))).toEqual([
+      ["dispatcher.rpc.received"],
+      ["dispatcher.rpc.response_sent"],
+    ]);
+    expect(storage.value.bsk_diagnostic_events_v1).toEqual([]);
+  });
 });

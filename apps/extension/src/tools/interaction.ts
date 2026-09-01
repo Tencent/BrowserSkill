@@ -106,6 +106,14 @@ function isAbortLikeError(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
 }
 
+function isInvalidCssSelectorError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return (
+    message.includes("DOM Error while querying") ||
+    /invalid selector|not a valid selector|querySelector.*failed/i.test(message)
+  );
+}
+
 async function wait(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw new DOMException("aborted", "AbortError");
   await new Promise<void>((resolve, reject) => {
@@ -208,6 +216,14 @@ async function resolveBackendNode(
     }
     return { backendNodeId, cdpTarget: { tabId: target.tabId }, usedSelector: params.selector };
   } catch (err) {
+    if (isInvalidCssSelectorError(err)) {
+      return rpcError(
+        "invalid_params",
+        "invalid_selector",
+        `selector is not valid CSS: ${params.selector}`,
+        { selector: params.selector },
+      );
+    }
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),

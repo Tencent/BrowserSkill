@@ -497,4 +497,21 @@ mod tests {
                 .contains("CSS selector")
         );
     }
+
+    #[test]
+    fn invalid_selector_explains_css_contract_in_json() {
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "selector is not valid CSS: text=submit".into(),
+            data: Some(serde_json::json!({ "reason": "invalid_selector" })),
+        });
+        let exit = cli.exit_code();
+        let hint = hint_for(&cli, render_info_for(&cli).as_ref());
+        let json = json_error_string(&cli, exit, hint);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let hint = parsed.get("hint").and_then(|v| v.as_str()).unwrap();
+        assert!(hint.contains("CSS selector"));
+        assert!(hint.contains("text="));
+        assert!(hint.contains("@eN"));
+    }
 }

@@ -145,13 +145,24 @@ export class DiagnosticLogger {
         return;
       }
       const sentIds = new Set(entries.map((entry) => entry.id));
-      const current = await this.storage.get(STORAGE_KEY);
-      const currentEntries = Array.isArray(current[STORAGE_KEY])
-        ? (current[STORAGE_KEY] as DiagnosticEntry[])
-        : [];
-      await this.storage.set({
-        [STORAGE_KEY]: currentEntries.filter((entry) => !sentIds.has(entry.id)),
-      });
+      // Serialize acknowledgement behind every record write that may have
+      // started while send() was in progress. Without this, a concurrent
+      // record can read the pre-ack queue and write an already-sent entry
+      // back into storage, causing the next batch to duplicate it.
+      this.storageQueue = this.storageQueue
+        .then(async () => {
+          const current = await this.storage?.get(STORAGE_KEY);
+          const currentEntries = Array.isArray(current?.[STORAGE_KEY])
+            ? (current[STORAGE_KEY] as DiagnosticEntry[])
+            : [];
+          await this.storage?.set({
+            [STORAGE_KEY]: currentEntries.filter((entry) => !sentIds.has(entry.id)),
+          });
+        })
+        .catch((error) => {
+          console.warn("[bsk diagnostic] failed to acknowledge event batch", error);
+        });
+      await this.storageQueue;
     })().catch((error) => {
       console.warn("[bsk diagnostic] flush failed", error);
     });

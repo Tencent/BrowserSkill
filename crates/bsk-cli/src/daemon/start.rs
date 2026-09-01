@@ -40,7 +40,7 @@ pub(crate) const DAEMONIZED_ENV: &str = "BSK_DAEMONIZED";
 /// daemon lock, IPC socket, and WS port — before taking over.
 pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 
-const LUMI_DIAGNOSTIC_BUILD: &str = "lumi-session-loss-v1";
+const LUMI_DIAGNOSTIC_BUILD: &str = "lumi-session-loss-v2";
 
 /// Concrete daemon configuration resolved from CLI flags / defaults.
 #[derive(Debug, Clone)]

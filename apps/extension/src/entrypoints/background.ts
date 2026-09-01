@@ -49,7 +49,7 @@ import { WSTransport } from "@/transport/ws-transport";
 export default defineBackground(() => {
   const diagnostics = new DiagnosticLogger();
   diagnostics.record("extension.worker.started", {
-    diagnostic_build: "lumi-session-loss-v1",
+    diagnostic_build: "lumi-session-loss-v2",
     extension_version: __BSK_EXT_VERSION__,
     extension_runtime_id: chrome.runtime.id,
     daemon_ws_url: __BSK_DAEMON_WS_URL__,

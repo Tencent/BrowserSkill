@@ -41,6 +41,7 @@ pub mod reason {
     pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
     pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
     pub const REF_NOT_FOUND: &str = "ref_not_found";
+    pub const INVALID_SELECTOR: &str = "invalid_selector";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
     pub const TARGET_NOT_SELECT: &str = "target_not_select";
@@ -219,6 +220,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::NotFound, reason::SELECTOR_NOT_FOUND) => RenderInfo {
             summary: "selector did not match any element",
             hint: Some("verify the CSS selector or wait for the element to appear before retrying"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::INVALID_SELECTOR) => RenderInfo {
+            summary: "selector is not valid CSS",
+            hint: Some(
+                "use a standard CSS selector or a fresh @eN ref; Playwright text= selectors and XPath are not supported",
+            ),
             exit_code: base.exit_code,
         },
         (ErrorCode::InvalidParams, reason::TARGET_NOT_FILLABLE) => RenderInfo {

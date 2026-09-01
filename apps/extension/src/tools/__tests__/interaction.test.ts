@@ -456,6 +456,30 @@ describe("handleClick", () => {
     expect(res).toMatchObject({ code: "not_found", data: { reason: "selector_not_found" } });
   });
 
+  it("returns invalid_selector when Chrome rejects non-CSS selector syntax", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+      "DOM.querySelector": () => {
+        throw new Error('{"code":-32000,"message":"DOM Error while querying"}');
+      },
+    });
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", selector: "text=下午 12~18点" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      code: "invalid_params",
+      message: "selector is not valid CSS: text=下午 12~18点",
+      data: {
+        reason: "invalid_selector",
+        selector: "text=下午 12~18点",
+      },
+    });
+  });
+
   it("respects the AbortSignal", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

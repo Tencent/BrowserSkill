@@ -24,6 +24,7 @@ export type RpcErrorReason =
   | "agent_window_scope"
   | "element_not_visible"
   | "ref_not_found"
+  | "invalid_selector"
   | "selector_not_found"
   | "target_not_fillable"
   | "target_not_select"

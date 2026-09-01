@@ -23,7 +23,7 @@ export default defineConfig({
   modules: ["@wxt-dev/module-react"],
   manifest: {
     name: "BrowserSkill (Lumi Diagnostics)",
-    version_name: `${EXTENSION_VERSION}-lumi-session-loss-v1`,
+    version_name: `${EXTENSION_VERSION}-lumi-session-loss-v2`,
     description:
       "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
     // Flat debugger sessions are required to address out-of-process iframes.
