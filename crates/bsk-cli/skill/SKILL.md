@@ -78,18 +78,19 @@ bsk observe --session <id>             → again after navigation / DOM change
 
 Prefer `@eN` refs from the latest snapshot over raw CSS selectors. Use `--ref` / `--selector` when ambiguous (`bsk click --help`).
 
-When VOM renders `[hover first: …]` on an element, the listed items are not currently clickable refs. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action.
+When VOM marks a control `[has-submenu]` or `[expanded]`, its menu items are not in the observation yet. Run `bsk hover <that-ref> --session <id>`, then immediately run `bsk snapshot` or `bsk observe` again and click the newly visible menu item ref. Do not click the trigger itself unless the user explicitly wants the trigger action. `[hover first: …]` means the same thing and additionally lists what that trigger revealed.
 
-`bsk observe` does not hover the page on its own. When a menu bar, toolbar, or icon row looks like it must hide content behind hover and you cannot tell which element to hover, add `--probe-hover` for one observation: it moves the real cursor over a bounded set of likely triggers to discover hover-only menus and tooltips. It costs a few seconds and touches the live page, so prefer `bsk hover <ref>` once you know the trigger.
+`bsk observe` does not hover the page on its own. Reach for `--probe-hover` when a control you have good reason to expect is absent from the observation **and** no `[has-submenu]` marker points at a trigger — that combination is what a CSS-only hover menu looks like from here. Try it before falling back to `bsk get-html` or `bsk screenshot`. It hovers a bounded set of likely triggers to surface hover-only menus and tooltips; it costs a few seconds and touches the live page, so once you know which element hides the menu, `bsk hover <ref>` is cheaper and more precise.
 
 ## Observation priority
 
 Start with `bsk observe` to understand page structure, text, controls, and element refs. Use `bsk snapshot` only when you need the stricter static accessibility tree or VOM is insufficient. Only escalate to raw HTML or screenshots when the latest observation cannot answer the question:
 
-1. `bsk observe` — primary semantic VOM observation; add `--probe-hover` only when hover-only content is suspected
-2. `bsk snapshot` — strict static accessibility tree fallback
-3. `bsk get-html` — when hidden DOM, metadata, or markup details are required
-4. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
+1. `bsk observe` — primary semantic VOM observation
+2. `bsk observe --probe-hover` — re-run once when an expected control is missing and nothing marks a hover trigger
+3. `bsk snapshot` — strict static accessibility tree fallback
+4. `bsk get-html` — when hidden DOM, metadata, or markup details are required
+5. `bsk screenshot` — when visual layout, canvas/image content, or styling cannot be inferred from the observation. Use `--ref @eN` (from the latest snapshot/observe) to crop to one element; omit `--ref` for the full visible tab.
 
 Do **not** call `bsk get-html` or `bsk screenshot` first just to inspect a page.
 
