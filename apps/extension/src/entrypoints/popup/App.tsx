@@ -313,7 +313,7 @@ export function App() {
                     commitDaemonPort();
                   }
                 }}
-                className="mt-0 h-5 w-24 shrink-0 rounded-md px-2 py-0 text-center text-sm leading-none shadow-none"
+                className="mt-0 h-7.5 w-19 shrink-0 rounded-md px-2 py-0 text-center text-sm leading-none shadow-none"
                 aria-invalid={daemonPortInvalid || undefined}
                 data-slot="popup-daemon-port-input"
               />
