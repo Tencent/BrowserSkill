@@ -36,6 +36,9 @@ export type RpcErrorReason =
   | "file_input_probe_failed"
   | "file_input_not_activated"
   | "set_file_input_failed"
+  | "upload_mechanism_unsupported"
+  | "file_drop_target_unavailable"
+  | "file_drop_failed"
   | "download_capture_failed"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
@@ -523,12 +526,15 @@ export interface UploadFile {
   staged_path?: string;
 }
 
+export type UploadMode = "input" | "drop";
+
 export interface UploadParams {
   session_id: string;
   ref?: string;
   selector?: string;
   tab_id?: number;
   files: UploadFile[];
+  mode?: UploadMode;
   timeout_ms?: number;
 }
 

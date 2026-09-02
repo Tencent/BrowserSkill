@@ -116,156 +116,15 @@ navigate   navigate-back   navigate-forward   reload   wait-for-navigation   wai
 observe   snapshot   get-html   screenshot   console   network
 click   hover   fill   select   press   evaluate
 tab list|create|close|select|borrow|return   window resize   emulate
-request-help   record start|stop
+upload   download   request-help   record start|stop
 ```
 
 Required flags that are easy to get wrong:
 
-### Tabs (require `--session <id>`)
-
-| Command | Summary |
-|---------|---------|
-| `bsk tab list` | List tabs (`--scope user\|agent\|all`, default `all`) |
-| `bsk tab create` | New tab in Agent Window (`--url`, `--no-active`, `--index`) |
-| `bsk tab close <tab-id>` | Close an agent tab |
-| `bsk tab select <tab-id>` | Focus an agent tab |
-| `bsk tab borrow <tab-id>` | Move a user tab into the Agent Window |
-| `bsk tab return <tab-id>` | Return a borrowed tab to its original window |
-
-### Observation (require `--session` unless noted)
-
-| Command | Summary |
-|---------|---------|
-| `bsk snapshot` | First-choice static page understanding: accessibility tree with `@eN` element refs |
-| `bsk observe` | Semantic VOM observation with bounded perception probes for conditional surfaces |
-| `bsk get-html` | Raw HTML dump after snapshot is insufficient (high token cost) |
-| `bsk screenshot` | PNG capture after snapshot is insufficient: full visible tab, or `--ref @eN` to crop to one element (`--out` path optional) |
-
-### Console & network debugging (read-only; require `--session`)
-
-| Command | Summary |
-|---------|---------|
-| `bsk console` | Buffered page console messages, JS exceptions, and browser log entries (`--include-stack` for stack traces) |
-| `bsk network` | Buffered network responses (status, method, URL, MIME/resource type) and failures (`net::ERR_*` reason) |
-
-Both capture from the moment the tab is attached and read a bounded per-tab buffer: `--since <seq>` pages from a cursor (`next_since` in the result), `--limit` (default 50, max 200), `--max-text-chars` (default 1000, max 4096), `--tab-id` to target a non-active tab. Both are strictly read-only — they never intercept or modify traffic, and request/response headers, bodies, and timings are not captured.
-
-### Navigation
-
-| Command | Summary |
-|---------|---------|
-| `bsk navigate <url>` | Go to URL in agent tab (`--wait-until`, `--timeout`) |
-| `bsk navigate-back` | History back one step |
-| `bsk navigate-forward` | History forward one step |
-| `bsk reload` | Reload current tab (`--hard` bypass cache) |
-
-(`bsk navigate back` / `bsk navigate forward` are equivalent subcommands.)
-
-### Interaction
-
-| Command | Summary |
-|---------|---------|
-| `bsk click <ref-or-selector>` | Click element (`--button`, `--click-count`, `--modifiers`) |
-| `bsk hover <ref-or-selector>` | Move the mouse to an element and wait for hover UI to settle (`--settle`, `--modifiers`) |
-| `bsk fill <ref-or-selector> --value <text>` | Clear and type into input |
-| `bsk select <ref-or-selector> --value <v>` | Set `<select>` option(s) by `value` (repeat `--value` for multi-select) |
-| `bsk press <key>` | Key/combo (`Enter`, `Ctrl+A`, …; optional `--ref` to focus first) |
-
-### File transfer (require `--session`)
-
-| Command | Summary |
-|---------|---------|
-| `bsk upload <ref-or-selector> --file <path>` | Click one upload trigger and attach an agent-readable local file (`--file` is repeatable) |
-| `bsk download <ref-or-selector> --out <path>` | Click one download trigger and copy the single completed file to an exact local path (`--overwrite` is opt-in) |
-
-The agent/harness decides whether a file transfer is appropriate and which local path belongs to the task. Treat upload as disclosure of that file to the current website, and download as accepting website-controlled bytes onto the local filesystem. Use only paths that are necessary for the user's bounded goal.
-
-BrowserSkill enforces the mechanical boundary: files are staged under a session-scoped opaque transfer, only daemon-minted capabilities reach the extension, upload/download still obey Agent Window tab checks, and transfers are chunk/size bounded. Upload intercepts the native chooser for one transaction, locates the input activated in the resolved target's document, and assigns only the staged file paths. Download uniquely correlates one exact-target browser intent with one Chrome download in either event order, routes it through a daemon-minted relative directory, and lets the daemon validate and import it. Upload staging remains available for a later form submission and is removed when the session ends. Downloads cannot overwrite an existing destination unless `--overwrite` is explicit. BrowserSkill does not inspect file content or decide whether its meaning is sensitive.
-
-Do not use `request-help` merely because a native file chooser or browser download is involved; try these commands first. For transfer failures, use the structured error instead of retrying blindly:
-
-- `reason=file_input_not_activated` means the requested click did not activate exactly one `<input type="file">`; the page may use a non-input picker such as `window.showOpenFilePicker()`. Do not retry blindly. If human help is available, call `request-help` and tell the user the exact original local path to choose. The staged daemon path is internal and must not be shown to the user.
-- `reason=file_input_probe_failed` means BrowserSkill could not safely establish the browser-side upload transaction. Do not repeat the same action; use `request-help` when available.
-- `reason=set_file_input_failed` means BrowserSkill found the activated file input but Chrome rejected the staged path or assignment. Check the extension's file-URL access permission; otherwise use `request-help`.
-- `reason=download_capture_failed` means BrowserSkill could not attribute exactly one completed download to the requested target. Do not retry blindly or accept an unrelated browser download; use `request-help` when available.
-- `effect_state=none` means BrowserSkill confirmed that no file-transfer effect was committed. Follow the accompanying reason; a corrected target or explicit human fallback may be attempted.
-- `effect_state=unknown` means the browser may already have attached or created the file. Do not repeat the transfer. Observe the page if that can establish the result; otherwise stop and report the uncertainty.
-- `effect_state=committed` means the browser-side effect occurred even if later completion or cleanup failed. Do not repeat it; continue only after verifying the resulting page/download state.
-
-If `request-help` returns `outcome="disabled"`, do not retry it. Stop gracefully and report the transfer mechanism that requires human intervention.
-
-### Scripting & timing
-
-| Command | Summary |
-|---------|---------|
-| `bsk evaluate <expression>` | Run JS in agent tab (see red lines). JS throw → stderr, **exit 0** (RPC success); use `--json` and check `.ok` to detect JS errors |
-| `bsk wait-for-navigation` | Block until load/DOM idle/etc. (`--wait-until`, `--timeout`) |
-| `bsk wait-ms <duration>` | Sleep (`500ms`, `2s`, `1m`; **no** `--session`) |
-
-### Ask the human for help — `bsk request-help`
-
-When a step needs a human (captcha, login, OTP) or you want the user to
-confirm an important action, pause and ask:
-
-    bsk request-help --session <id> --prompt "Solve the captcha, then click Done only after the site accepts it" \
-      --title "Captcha required" --target @e7 --target "#submit" --timeout 5m
-
-- `--prompt` (required): what the user should do.
-- `--title` (optional): custom title for the overlay panel. When omitted,
-  the extension shows its default localized title.
-- `--target` (repeatable): a snapshot ref (`@e7`) or CSS selector
-  (`#submit`) to scroll to and flash-highlight. **Strongly recommended** —
-  whenever the prompt refers to a concrete element (a button to click, a
-  field to fill, a checkbox to toggle), pass its `@eN` ref / selector so the
-  user is guided straight to the right spot instead of hunting for it. For
-  interaction scenarios, always include the relevant target(s); reserve a
-  prompt with no `--target` for cases where there is genuinely no specific
-  element to point at (e.g. "wait for the page to finish loading").
-- `--timeout` (default `5m`): how long to wait.
-- `--completion-criteria` (optional): JSON success detector. Use it only
-  when there is a concrete post-help success signal, e.g.
-  `{"any":[{"url_contains":"/dashboard"},{"selector_exists":"[data-testid='account-menu']"}],"stable_for_ms":1000}`.
-
-The target tab is brought to the foreground; the page stays interactive
-while the agent control mask is hidden. The call blocks until the user
-explicitly acts, the timeout expires, cancellation arrives, or explicit
-completion criteria match. Page reloads, SPA route changes, and captcha
-refreshes do not return control by themselves. The result `outcome` is one of:
-
-- `continued` — the user finished and clicked Done / return control (treat as confirm).
-- `cancelled` — the user clicked Cancel (treat as reject/abort).
-- `timed_out` — nobody acted within the timeout.
-- `completed` — the explicit `--completion-criteria` matched while the user had control.
-- `navigated` — deprecated legacy outcome. Do not rely on navigation as a completion signal.
-
-`note` carries any text the user typed back. `resolved_targets` reports
-which refs/selectors matched a live element.
-
-`request-help` does not refresh the page model after the user returns
-control. After a `continued` or `completed` result, issue a separate
-observation tool call (usually `bsk snapshot --session <id>`) before using
-new refs or reasoning about the post-help page state.
-#### Disabling request-help (unattended mode)
-Set `BSK_REQUEST_HELP=off` on unattended servers: `bsk request-help` then
-returns immediately with `outcome="disabled"` (no overlay, no waiting,
-exit 0). Any other value keeps it enabled. If you get `disabled`, do not
-retry — complete the task autonomously or stop gracefully.
-
-### Recording — `bsk record`
-
-Capture the user's own actions in the Agent Window to a **trace bundle**, for later LLM-driven automation. New CLI builds request **trace v3** (page observations + action chain); older extensions may still return **trace v2** (actions only), which the CLI exports as a single `trace.json` without `states/`.
-
-```bash
-bsk record start --browser <instance-id-or-label> \
-  [--url https://…] [--purpose "publish a wiki doc"] \
-  [--max-page-tokens 3000] [--redact-values] \
-  [--output trace]
-# `--url` is optional; default https://example.com/ when omitted (must be http(s)).
-# Blocks until the user clicks Finish in the recording panel, then writes:
-#   trace/trace.json    — action chain (+ state index when v3)
-#   trace/states/       — v3 only: one `sN.txt` observe snapshot per settled page state
-
-bsk record stop [--output trace]   # terminal fallback if the browser panel is unavailable
+```text
+bsk fill <ref> --value <text>      bsk select <ref> --value <option-value>
+bsk screenshot --out <path>        bsk emulate --device <preset-id>
+bsk upload <ref> --file <path>     bsk download <ref> --out <path>
 ```
 
 `select` matches an option's `value` attribute, not its visible label. Device preset ids are
@@ -279,6 +138,34 @@ lowercase and hyphenated, such as `iphone-14`.
   succeeded. Never evaluate credential surfaces to read storage, cookies, or auth data.
 - `record` captures a user's actions for later replay. Read `bsk record start --help` before use,
   and never record banking, SSO, password-manager, or other sensitive pages.
+
+## File transfer
+
+`upload` and `download` stage files through the daemon; the agent never touches browser-internal
+paths. Treat upload as disclosure to the website, download as accepting website-controlled bytes.
+
+Upload has two independent mechanisms — choose explicitly, never rely on automatic fallback:
+
+- **Default (input mode):** for upload buttons, file-input labels, or "upload from computer"
+  actions. The command clicks the target and intercepts the native file chooser.
+- **`--mode drop`:** for reliably identified attachment-receiving areas — an explicit drop zone,
+  chat composer, email editor, or form attachment area. Do not target page whitespace, generic
+  containers, or areas whose attachment ownership is ambiguous.
+
+Decision sequence when uploading:
+
+1. Try input mode (the default).
+2. If it returns `reason=file_input_not_activated` with `effect_state=none`, re-observe. When a
+   reliable attachment target exists, try `--mode drop` once against that target.
+3. Otherwise fall back to `request-help`.
+4. **Never** switch mechanisms or repeat when `effect_state` is `unknown` or `committed` — the
+   browser may already have applied the file.
+
+A successful drop means Chrome dispatched the native file-drop event; it does not prove the site
+accepted the attachment. Observe the page once after the command.
+
+Download default-refuses to overwrite; pass `--overwrite` when replacing an existing file is
+intended. Read `bsk upload --help` and `bsk download --help` for all flags and error details.
 
 ## Recover without wandering
 

@@ -10,19 +10,35 @@ use base64::Engine;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     TransferBeginParams, TransferBeginResult, TransferChunkParams, TransferChunkResult,
-    TransferIdParams, TransferReadyResult, TransferReleaseResult, UploadFile, UploadParams,
-    UploadResult,
+    TransferIdParams, TransferReadyResult, TransferReleaseResult, UploadFile, UploadMode,
+    UploadParams, UploadResult,
 };
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UploadModeArg {
+    #[default]
+    Input,
+    Drop,
+}
+
+impl From<UploadModeArg> for UploadMode {
+    fn from(value: UploadModeArg) -> Self {
+        match value {
+            UploadModeArg::Input => Self::Input,
+            UploadModeArg::Drop => Self::Drop,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct UploadArgs {
-    /// Snapshot ref (`@e3`) or CSS selector for the file input / chooser trigger.
+    /// Snapshot ref (`@e3`) or CSS selector for the chooser trigger / drop target.
     pub target: Option<String>,
     #[arg(long = "ref")]
     pub ref_: Option<String>,
@@ -31,6 +47,9 @@ pub struct UploadArgs {
     /// Local file to upload. Repeat for a multiple-file input.
     #[arg(long = "file", required = true)]
     pub files: Vec<PathBuf>,
+    /// Browser mechanism used to deliver the staged files.
+    #[arg(long, value_enum, default_value_t)]
+    pub mode: UploadModeArg,
     #[arg(long)]
     pub session: String,
     #[arg(long = "tab-id")]
@@ -73,6 +92,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
                 staged_path: None,
             })
             .collect(),
+        mode: args.mode.into(),
         timeout_ms: Some(args.timeout),
     };
     let result = crate::cli::business_rpc::call::<_, UploadResult>(

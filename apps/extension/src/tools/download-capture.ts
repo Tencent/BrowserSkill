@@ -9,8 +9,6 @@ import { type CdpRunner, isRpcError } from "./shared";
 
 const CORRELATION_GRACE_MS = 750;
 const UNIQUE_SETTLE_MS = 50;
-const CLEANUP_RECONCILE_MS = 1_000;
-const CLEANUP_POLL_MS = 25;
 const SIZE_POLL_MS = 250;
 
 type DeterminingFilenameListener = (
@@ -112,35 +110,26 @@ function captureError(
 
 async function cleanupClaimedDownload(downloads: DownloadsApi, downloadId: number): Promise<void> {
   const lookup = async () => (await downloads.search({ id: downloadId }))[0];
-  let item = await lookup();
+  const item = await lookup();
   if (!item || item.state === "interrupted") return;
   if (item.state === "complete") {
     await downloads.removeFile(downloadId);
     return;
   }
 
-  let cancelError: unknown;
   try {
     await downloads.cancel(downloadId);
-  } catch (error) {
-    cancelError = error;
-  }
-
-  const deadline = Date.now() + CLEANUP_RECONCILE_MS;
-  while (true) {
-    item = await lookup();
-    if (!item || item.state === "interrupted") return;
-    if (item.state === "complete") {
+  } catch (cancelError) {
+    // Completion can win the race after the lookup but before cancellation.
+    // Reconcile against Chrome's authoritative state before declaring cleanup
+    // failed so every terminal state has one explicit cleanup path.
+    const reconciled = await lookup();
+    if (!reconciled || reconciled.state === "interrupted") return;
+    if (reconciled.state === "complete") {
       await downloads.removeFile(downloadId);
       return;
     }
-    if (Date.now() >= deadline) {
-      if (cancelError instanceof Error) throw cancelError;
-      throw new Error("download remained in progress after cancellation");
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, Math.min(CLEANUP_POLL_MS, Math.max(1, deadline - Date.now()))),
-    );
+    throw cancelError;
   }
 }
 
