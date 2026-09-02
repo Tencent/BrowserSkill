@@ -1,7 +1,14 @@
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { type BskRunResult, createBskRunner, isCommandNotFound, parseBskJson } from "../src/runner";
+import {
+  type BskRunResult,
+  createBskRunner,
+  isCommandNotFound,
+  isSessionBusyResult,
+  parseBskJson,
+  runWithSessionBusyRetry,
+} from "../src/runner";
 
 /** Minimal fake ChildProcess driven by the test. */
 class FakeChild extends EventEmitter {
@@ -63,7 +70,7 @@ describe("createBskRunner", () => {
     controller.abort();
     const result = await promise;
     expect(result.aborted).toBe(true);
-    expect(child.killedWith).toContain("SIGTERM");
+    expect(child.killedWith).toContain("SIGINT");
   });
 
   it("kills the child on timeout", async () => {
@@ -80,7 +87,7 @@ describe("createBskRunner", () => {
     const promise = runner.run(["session", "list"]);
     runner.killAll();
     const result = await promise;
-    expect(child.killedWith).toContain("SIGTERM");
+    expect(child.killedWith).toContain("SIGINT");
     expect(result.code).toBeNull();
   });
 });
@@ -138,5 +145,53 @@ describe("isCommandNotFound", () => {
       isCommandNotFound(Object.assign(new Error("spawn bsk ENOENT"), { code: "ENOENT" })),
     ).toBe(true);
     expect(isCommandNotFound(new Error("other"))).toBe(false);
+  });
+});
+
+describe("session busy reconciliation", () => {
+  const busy: BskRunResult = {
+    code: 4,
+    stdout: JSON.stringify({
+      code: "timeout",
+      message: "session already has an unfinished command",
+      data: { reason: "session_busy" },
+    }),
+    stderr: "",
+    timedOut: false,
+    aborted: false,
+  };
+  const ok: BskRunResult = {
+    code: 0,
+    stdout: "{}",
+    stderr: "",
+    timedOut: false,
+    aborted: false,
+  };
+
+  it("recognizes only the structured session_busy reason", () => {
+    expect(isSessionBusyResult(busy)).toBe(true);
+    expect(isSessionBusyResult({ ...busy, stdout: '{"code":"timeout"}' })).toBe(false);
+    expect(isSessionBusyResult(ok)).toBe(false);
+  });
+
+  it("retries one transient busy result and returns the settled response", async () => {
+    const replies = [busy, ok];
+    let calls = 0;
+    const result = await runWithSessionBusyRetry(async () => {
+      calls += 1;
+      return replies.shift() ?? ok;
+    });
+    expect(result).toBe(ok);
+    expect(calls).toBe(2);
+  });
+
+  it("does not loop on a persistent busy result", async () => {
+    let calls = 0;
+    const result = await runWithSessionBusyRetry(async () => {
+      calls += 1;
+      return busy;
+    });
+    expect(result).toBe(busy);
+    expect(calls).toBe(2);
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
-  "description": "DeepSeek Harness tool plugin that exposes BrowserSkill (bsk) browser automation to the model",
-  "version": "0.1.1",
+  "description": "DeepSeek Harness tool plugin that exposes BrowserSkill browser automation (browser_* tools) to the model",
+  "version": "0.1.2",
   "license": "MIT",
   "publishConfig": {
     "access": "public",
@@ -50,6 +50,10 @@
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-tool",
         "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "external": [
+        "@deepseek-ai/dsh-client-ui-attachment",
+        "@deepseek-ai/dsh-client-ui-primitives"
       ]
     }
   },
@@ -107,6 +111,8 @@
     "@deepseek-ai/dsh-client-ui-primitives": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-tool": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@tailwindcss/cli": "^4.3.3",

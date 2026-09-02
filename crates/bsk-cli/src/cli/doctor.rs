@@ -351,10 +351,10 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
     }
 }
 
-/// `bsk doctor` check: every connected browser should use the same
-/// protocol version as the daemon. Minor protocol drift is accepted by
-/// the daemon but flagged here so the user can see who needs updating
-/// (M10.4).
+/// `bsk doctor` check: connected browsers should speak a protocol the
+/// daemon accepts. A different protocol string is still a live
+/// connection — report Ok so agents keep working. The detail is an
+/// upgrade reminder, not a blocker.
 ///
 /// Review M2 (round-1 minor): when no browsers are connected, the
 /// check has nothing to compare against, so it now reports
@@ -396,13 +396,12 @@ fn check_browsers_protocol_compatible(status: Option<&StatusResult>) -> CheckRes
         })
         .collect::<Vec<_>>()
         .join(", ");
-    CheckResult::fail(
+    CheckResult::ok(
         name,
         format!(
-            "{} browser(s) have protocol minor drift from the daemon: {stale}",
+            "{} browser(s) report a different protocol version (still usable — continue, and upgrade soon): {stale}",
             status.version_skew_browsers.len()
         ),
-        "upgrade the browser-skill extension or bsk CLI so both sides use the same protocol version",
     )
 }
 
@@ -581,7 +580,7 @@ mod m2_tests {
     }
 
     #[test]
-    fn browsers_check_reports_fail_when_skew_present() {
+    fn browsers_check_reports_ok_when_skew_present() {
         let status = fake_status(
             vec![BrowserStatusEntry {
                 instance_id: "alpha".into(),
@@ -605,9 +604,17 @@ mod m2_tests {
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("alpha"));
-        assert!(check.hint.is_some());
+        assert!(
+            check
+                .detail
+                .contains("still usable — continue, and upgrade soon")
+        );
+        assert!(
+            check.hint.is_none(),
+            "a protocol-version note must not hint to stop"
+        );
     }
 
     #[test]
@@ -635,7 +642,7 @@ mod m2_tests {
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Ok);
         assert!(
             check
                 .detail

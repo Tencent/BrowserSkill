@@ -1656,7 +1656,7 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", cursor: "pointer" }),
+      expect.objectContaining({ id: 20, role: "button", name: "close", cursor: "pointer" }),
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
@@ -1732,7 +1732,7 @@ describe("buildVomScene", () => {
     };
 
     const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 20)).toBeUndefined();
     expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("link");
   });
 
@@ -1801,9 +1801,9 @@ describe("buildVomScene", () => {
 
     const scene = buildVomScene(axNodes, captured);
     expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "generic", attrs: { "aria-label": "收藏" } }),
+      expect.objectContaining({ id: 20, role: "button", attrs: { "aria-label": "收藏" } }),
     );
-    expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("generic");
+    expect(scene.nodes.find((n) => n.id === 30)).toBeUndefined();
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
     expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
@@ -1904,36 +1904,41 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "button",
-          attrs: {},
-          rect: { x: 20, y: 20, w: 120, h: 40 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildVomScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "button",
+            attrs: {},
+            rect: { x: 20, y: 20, w: 120, h: 40 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
       { triggerId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
@@ -1957,46 +1962,51 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildVomScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
+        ],
+      },
+    );
 
     expect(renderVom(scene).text).toContain('@e1 button "image" [hover first: My profile]');
   });
@@ -2017,48 +2027,53 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
-        { triggerBackendNodeId: 21, triggerAction: "hover", subItems: ["Settings"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildVomScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
+          { triggerBackendNodeId: 21, triggerAction: "hover", subItems: ["Settings"] },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
       { triggerId: 21, triggerAction: "hover", subItems: ["My profile"] },
@@ -2081,57 +2096,62 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        {
-          triggerBackendNodeId: 20,
-          triggerPoint: { x: 915, y: 25 },
-          triggerAction: "hover",
-          subItems: ["My profile", "Sign out"],
-        },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "pointer",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "pointer",
-        },
-      ],
-    });
+    const scene = buildVomScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "pointer",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "pointer",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 20,
+            triggerPoint: { x: 915, y: 25 },
+            triggerAction: "hover",
+            subItems: ["My profile", "Sign out"],
+          },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 21, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
+      { triggerId: 20, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
     ]);
     expect(renderVom(scene).text).toContain(
       '@e1 button "image" [hover first: My profile | Sign out]',
@@ -2154,41 +2174,46 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 42,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        {
-          triggerBackendNodeId: 999,
-          triggerPoint: { x: 900, y: 20 },
-          triggerAction: "hover",
-          subItems: ["My profile"],
-        },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 42,
-          parentBackendNodeId: 10,
-          tag: "a",
-          attrs: {},
-          rect: { x: 860, y: 120, w: 40, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildVomScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        iframeNodes: new Map(),
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 42,
+            parentBackendNodeId: 10,
+            tag: "a",
+            attrs: {},
+            rect: { x: 860, y: 120, w: 40, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 999,
+            triggerPoint: { x: 900, y: 20 },
+            triggerAction: "hover",
+            subItems: ["My profile"],
+          },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toBeUndefined();
     expect(renderVom(scene).text).not.toContain("[hover first:");
@@ -2606,7 +2631,106 @@ describe("handleSnapshot", () => {
     );
   });
 
-  it("enables conditional surface probing for semantic observe", async () => {
+  it("hovers the page only after the accessibility tree has been captured", async () => {
+    // Hovering can open menus and reflow the page. Probing between the DOM and
+    // AX captures would leave the two halves of one observation describing the
+    // page on either side of that change.
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "Example" },
+      backendDOMNodeId: 100,
+      childIds: ["2"],
+    };
+    const button: CdpAxNode = {
+      nodeId: "2",
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: "Products" },
+      backendDOMNodeId: 200,
+    };
+    const strings = ["body", "button", "position", "static", "pointer-events", "auto", "cursor"];
+    const i = (s: string) => strings.indexOf(s);
+    const methodOrder: string[] = [];
+    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      methodOrder.push(method);
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+      }
+      if (method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return {
+          strings,
+          documents: [
+            {
+              nodes: {
+                parentIndex: [-1, 0],
+                nodeName: [i("body"), i("button")],
+                backendNodeId: [100, 200],
+                attributes: [[], []],
+              },
+              layout: {
+                nodeIndex: [0, 1],
+                styles: [
+                  [i("static"), i("auto"), i("auto")],
+                  [i("static"), i("auto"), i("auto")],
+                ],
+                bounds: [
+                  [0, 0, 1000, 800],
+                  [20, 20, 120, 40],
+                ],
+                paintOrders: [0, 1],
+              },
+            },
+          ],
+        };
+      }
+      if (method === "Input.dispatchMouseEvent") return {};
+      if (method === "Runtime.evaluate") {
+        const expression = (params as { expression?: string } | undefined)?.expression ?? "";
+        // Report the button as a `:hover` rule target so a real hover fires.
+        if (expression.includes("document.styleSheets")) {
+          return { result: { value: [{ x: 80, y: 40 }] } };
+        }
+        return { result: { value: [] } };
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+
+    const res = await handleObserve(
+      sm,
+      { session_id: "aa11", probe_hover: true },
+      {
+        cdp: {
+          send: send as unknown as <T = unknown>(
+            tabId: number,
+            method: string,
+            params?: object,
+          ) => Promise<T>,
+          trackSessionTab: vi.fn(),
+        },
+        tabsApi: {
+          get: vi.fn(
+            async (tabId: number) =>
+              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+          ),
+          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+        },
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    const firstHover = methodOrder.indexOf("Input.dispatchMouseEvent");
+    expect(firstHover).toBeGreaterThan(-1);
+    expect(methodOrder.lastIndexOf("DOMSnapshot.captureSnapshot")).toBeLessThan(firstHover);
+    expect(methodOrder.lastIndexOf("Accessibility.getFullAXTree")).toBeLessThan(firstHover);
+  });
+
+  it("runs conditional surface probing only when observe opts in", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const root: CdpAxNode = {
@@ -2662,30 +2786,46 @@ describe("handleSnapshot", () => {
       if (method === "Runtime.evaluate") return { result: { value: [] } };
       throw new Error(`unexpected CDP method ${method}`);
     });
-    const res = await handleObserve(
+    const deps = {
+      cdp: {
+        send: send as unknown as <T = unknown>(
+          tabId: number,
+          method: string,
+          params?: object,
+        ) => Promise<T>,
+        trackSessionTab: vi.fn(),
+      },
+      tabsApi: {
+        get: vi.fn(
+          async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+        ),
+        query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+      },
+    };
+
+    const withoutProbe = await handleObserve(
       sm,
       { session_id: "aa11", debug_surfaces: true },
-      {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
-          trackSessionTab: vi.fn(),
-        },
-        tabsApi: {
-          get: vi.fn(
-            async (tabId: number) =>
-              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
-          ),
-          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
-        },
-      },
+      deps,
+    );
+    if ("code" in withoutProbe) {
+      throw new Error(`unexpected error: ${JSON.stringify(withoutProbe)}`);
+    }
+    expect(withoutProbe.hover_probe).toBeUndefined();
+    expect(send).not.toHaveBeenCalledWith(
+      4,
+      "Runtime.evaluate",
+      expect.objectContaining({ returnByValue: true }),
     );
 
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.debug).toEqual({ surface_probes: [] });
+    const withProbe = await handleObserve(
+      sm,
+      { session_id: "aa11", debug_surfaces: true, probe_hover: true },
+      deps,
+    );
+    if ("code" in withProbe) throw new Error(`unexpected error: ${JSON.stringify(withProbe)}`);
+    expect(withProbe.debug).toEqual({ surface_probes: [] });
+    expect(withProbe.hover_probe).toEqual({ performed: true, revealed_content: false });
     expect(send).toHaveBeenCalledWith(
       4,
       "Runtime.evaluate",
@@ -3153,6 +3293,98 @@ describe("handleSnapshot", () => {
       rect: { x: 400, y: 300, w: 200, h: 40 },
       localRect: { x: 400, y: 300, w: 200, h: 40 },
     });
+  });
+
+  it("decorates live observations with active controlled content", async () => {
+    const strings = [
+      "html",
+      "body",
+      "button",
+      "div",
+      "#text",
+      "role",
+      "tab",
+      "aria-selected",
+      "true",
+      "aria-controls",
+      "reviews-panel",
+      "id",
+      "static",
+      "auto",
+      "visible",
+      "1",
+      "A detailed review",
+    ];
+    const index = (value: string) => strings.indexOf(value);
+    const style = [index("static"), index("auto"), index("auto"), index("visible"), index("1")];
+    const snapshot = {
+      strings,
+      documents: [
+        {
+          nodes: {
+            parentIndex: [-1, 0, 1, 1, 3],
+            nodeName: [index("html"), index("body"), index("button"), index("div"), index("#text")],
+            backendNodeId: [10, 11, 12, 13, 14],
+            attributes: [
+              [],
+              [],
+              [
+                index("role"),
+                index("tab"),
+                index("aria-selected"),
+                index("true"),
+                index("aria-controls"),
+                index("reviews-panel"),
+              ],
+              [index("id"), index("reviews-panel")],
+              [],
+            ],
+            nodeValue: [-1, -1, -1, -1, index("A detailed review")],
+          },
+          layout: {
+            nodeIndex: [0, 1, 2, 3, 4],
+            styles: [style, style, style, style, style],
+            bounds: [
+              [0, 0, 1000, 800],
+              [0, 0, 1000, 800],
+              [20, 20, 120, 40],
+              [20, 80, 500, 200],
+              [20, 80, 200, 20],
+            ],
+            paintOrders: [0, 0, 1, 1, 1],
+          },
+        },
+      ],
+    };
+    const ax: CdpAxNode[] = [
+      {
+        nodeId: "root",
+        backendDOMNodeId: 11,
+        role: { type: "role", value: "RootWebArea" },
+        childIds: ["reviews"],
+      },
+      {
+        nodeId: "reviews",
+        parentId: "root",
+        backendDOMNodeId: 12,
+        role: { type: "role", value: "tab" },
+        name: { type: "computedString", value: "Reviews" },
+        properties: [
+          { name: "selected", value: { value: true } },
+          { name: "controls", value: { value: "reviews-panel" } },
+        ],
+      },
+    ];
+
+    const result = await captureVomObservation(
+      makeOverlayDeps(ax, snapshot, VP_METRICS).cdp,
+      4,
+      "https://example.com",
+    );
+
+    expect(result.text).toContain('@e1 tab "Reviews"');
+    expect(result.text).toContain("[§ active: Reviews]");
+    expect(result.text).toContain("A detailed review");
   });
 
   it("does not leak form secrets through the record-safe observation payload", async () => {

@@ -1,16 +1,17 @@
 // CDP capture adapter: DOMSnapshot.captureSnapshot + Page.getLayoutMetrics
 // → CapturedNode[] + Viewport. This is the ONLY VOM module that touches
 // raw CDP. The captureSnapshot reply is columnar (parallel arrays + a
-// shared string table); we request exactly three computed styles so the
-// `styles` columns are [position, pointer-events, cursor] in that order.
+// shared string table); requested computed styles are decoded through
+// STYLE_COL so capture and visibility policy share one explicit contract.
 
 import type { Rect, Viewport } from "@browser-skill/vom";
 import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
 import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
 import type { CdpRunner } from "../shared";
+import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 
-const REQUESTED_STYLES = ["position", "pointer-events", "cursor"] as const;
+const REQUESTED_STYLES = ["position", "pointer-events", "cursor", "visibility", "opacity"] as const;
 const STYLE_COL = Object.fromEntries(
   REQUESTED_STYLES.map((name, index) => [name, index]),
 ) as Record<(typeof REQUESTED_STYLES)[number], number>;
@@ -38,6 +39,12 @@ export interface CapturedNode {
    * `textContent`: the live parser always sets it, hand-built fixtures may not.
    */
   cursor?: string;
+  /**
+   * Whether the live DOM snapshot provides a painted, non-hidden box for this
+   * node. Semantic resolution uses this only for DOM fallback nodes; AX-backed
+   * nodes remain authoritative even when they are outside the viewport.
+   */
+  rendered?: boolean;
   textContent?: string;
   formState?: "empty" | "filled" | "default";
   formValue?: string;
@@ -64,14 +71,11 @@ export interface CapturedViewModel {
   /** Explicit DOMSnapshot frame ancestry; never inferred from backend node ids. */
   frameParentIds?: Map<string, string>;
   rootFrameId?: string;
-  surfaceProbes?: CapturedSurfaceProbe[];
   /** Backend node ids belonging to the agent overlay host + its shadow subtree. */
   excludedBackendNodeIds: Set<number>;
 }
 
 export interface CaptureViewModelOptions {
-  conditionalSurfaceProbe?: boolean;
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
 }
 
@@ -361,7 +365,16 @@ function collectBackendIdsFromDomNode(node: CdpDomNode | undefined, out: Set<num
   }
 }
 
-const MAX_HOVER_PROBE_MS = 2_000;
+/**
+ * Ceiling for the whole hover-surface phase.
+ *
+ * The previous 2000 was only a floor: the loop checked elapsed time at the top,
+ * so a candidate could start with 1ms left and still run its two settle
+ * windows, pushing real cost to ~2.6s. This is that true ceiling, now actually
+ * enforced by an up-front affordability check, so the same number of candidates
+ * get probed under a bound that no longer lies.
+ */
+const MAX_HOVER_PROBE_MS = 2_600;
 const MAX_HOVER_TRIGGERS = 6;
 const MAX_HOVER_SURFACES = 3;
 const HOVER_SETTLE_MS = 300;
@@ -458,36 +471,6 @@ function hoverStateExpression(): string {
     for (const el of Array.from(document.querySelectorAll(selectors))) push(el);
     return items.slice(0, 400);
   })()`;
-}
-
-async function wait(ms: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      reject(captureAbortError());
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-async function clearHover(cdp: CdpRunner, tabId: number): Promise<void> {
-  await cdp
-    .send(tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: -10,
-      y: -10,
-    })
-    .catch(() =>
-      cdp.send(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 }).catch(() => {
-        // best effort
-      }),
-    );
 }
 
 function capturedText(node: CapturedNode): string | undefined {
@@ -637,13 +620,35 @@ function confidenceForHover(
   return "low";
 }
 
-async function probeHoverSurfaces(
+/**
+ * One candidate costs two settle windows (baseline + post-hover) plus a few
+ * CDP round trips. Used to decide whether the next candidate still fits the
+ * budget before paying for it.
+ */
+const HOVER_CANDIDATE_COST_MS = HOVER_SETTLE_MS * 2;
+
+export interface HoverSurfaceProbeOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * Hovers a bounded set of likely menu triggers and reports the sub-items each
+ * one reveals.
+ *
+ * Runs after DOM *and* accessibility capture. Hovering can open menus and
+ * change layout, so probing between the two captures would leave the DOM half
+ * of an observation describing the page before the change and the AX half
+ * describing it after.
+ *
+ * The caller owns the overlay bypass span (see `withOverlayBypass`).
+ */
+export async function probeHoverSurfaces(
   cdp: CdpRunner,
   tabId: number,
   nodes: CapturedNode[],
-  options: CaptureViewModelOptions,
+  options: HoverSurfaceProbeOptions = {},
 ): Promise<CapturedSurfaceProbe[]> {
-  const started = Date.now();
+  const budget = new ProbeBudget(MAX_HOVER_PROBE_MS);
   try {
     throwIfAborted(options.signal);
     const cssScan = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
@@ -658,60 +663,54 @@ async function probeHoverSurfaces(
     const results: CapturedSurfaceProbe[] = [];
     const seen = new Set<number>();
     throwIfAborted(options.signal);
-    await options.hoverProbeBypassOverlay?.(tabId, true).catch(() => undefined);
-    try {
+    for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
       throwIfAborted(options.signal);
-      for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
+      if (!budget.canAfford(HOVER_CANDIDATE_COST_MS)) break;
+      if (results.length >= MAX_HOVER_SURFACES) break;
+      if (seen.has(candidate.backendNodeId)) continue;
+      try {
+        await clearHover(cdp, tabId);
         throwIfAborted(options.signal);
-        if (Date.now() - started > MAX_HOVER_PROBE_MS) break;
-        if (results.length >= MAX_HOVER_SURFACES) break;
-        if (seen.has(candidate.backendNodeId)) continue;
-        try {
-          await clearHover(cdp, tabId);
-          throwIfAborted(options.signal);
-          await wait(HOVER_SETTLE_MS, options.signal);
-          const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-            expression: hoverStateExpression(),
-            returnByValue: true,
-          });
-          throwIfAborted(options.signal);
-          const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
+        await waitForHover(HOVER_SETTLE_MS, options.signal);
+        const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+          expression: hoverStateExpression(),
+          returnByValue: true,
+        });
+        throwIfAborted(options.signal);
+        const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
 
-          throwIfAborted(options.signal);
-          await cdp.send(tabId, "Input.dispatchMouseEvent", {
-            type: "mouseMoved",
-            x: candidate.x,
-            y: candidate.y,
-          });
-          throwIfAborted(options.signal);
-          await wait(HOVER_SETTLE_MS, options.signal);
-          const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-            expression: hoverStateExpression(),
-            returnByValue: true,
-          });
-          throwIfAborted(options.signal);
-          const subItems = diffHoverItems(
-            baselineItems,
-            runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
-          );
-          if (subItems.length === 0) continue;
-          seen.add(candidate.backendNodeId);
-          results.push({
-            triggerBackendNodeId: candidate.backendNodeId,
-            triggerPoint: { x: candidate.x, y: candidate.y },
-            triggerAction: "hover",
-            subItems,
-            confidence: confidenceForHover(candidate, subItems),
-          });
-        } catch (error) {
-          if (isAbortError(error)) throw error;
-          continue;
-        } finally {
-          await clearHover(cdp, tabId);
-        }
+        throwIfAborted(options.signal);
+        await cdp.send(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: candidate.x,
+          y: candidate.y,
+        });
+        throwIfAborted(options.signal);
+        await waitForHover(HOVER_SETTLE_MS, options.signal);
+        const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+          expression: hoverStateExpression(),
+          returnByValue: true,
+        });
+        throwIfAborted(options.signal);
+        const subItems = diffHoverItems(
+          baselineItems,
+          runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
+        );
+        if (subItems.length === 0) continue;
+        seen.add(candidate.backendNodeId);
+        results.push({
+          triggerBackendNodeId: candidate.backendNodeId,
+          triggerPoint: { x: candidate.x, y: candidate.y },
+          triggerAction: "hover",
+          subItems,
+          confidence: confidenceForHover(candidate, subItems),
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        continue;
+      } finally {
+        await clearHover(cdp, tabId);
       }
-    } finally {
-      await options.hoverProbeBypassOverlay?.(tabId, false).catch(() => undefined);
     }
     return results;
   } catch (err) {
@@ -817,6 +816,8 @@ function parseDocumentNodes(
   const posCol = STYLE_COL.position;
   const peCol = STYLE_COL["pointer-events"];
   const cursorCol = STYLE_COL.cursor;
+  const visibilityCol = STYLE_COL.visibility;
+  const opacityCol = STYLE_COL.opacity;
   const inputValues = sparseIndexMap(dn.inputValue);
   const textValues = sparseIndexMap(dn.textValue);
   const checkedInputs = new Set(dn.inputChecked?.index ?? []);
@@ -861,6 +862,7 @@ function parseDocumentNodes(
     let position = "static";
     let pointerEvents = "auto";
     let cursor = "auto";
+    let rendered = false;
     const li = layoutByNode.get(n);
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
@@ -881,6 +883,13 @@ function parseDocumentNodes(
       position = str(strings, styleRow[posCol]) || "static";
       pointerEvents = str(strings, styleRow[peCol]) || "auto";
       cursor = str(strings, styleRow[cursorCol]) || "auto";
+      const visibility = str(strings, styleRow[visibilityCol]) || "visible";
+      const opacity = str(strings, styleRow[opacityCol]) || "1";
+      rendered =
+        localRect !== null &&
+        visibility !== "hidden" &&
+        visibility !== "collapse" &&
+        (Number.parseFloat(opacity) || 0) > 0;
     }
 
     // Skip non-element nodes (#text, #cdata-section, etc.) — they carry no
@@ -916,6 +925,7 @@ function parseDocumentNodes(
       position,
       pointerEvents,
       cursor,
+      rendered,
       textContent,
       ...(formValue !== undefined ? { formValue } : {}),
       ...(tag === "input" || tag === "textarea"
@@ -1020,7 +1030,13 @@ export async function captureViewModel(
   options: CaptureViewModelOptions = {},
 ): Promise<CapturedViewModel> {
   throwIfAborted(options.signal);
-  const metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  let metrics: LayoutMetricsReply = {};
+  try {
+    metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    console.debug("[bsk capture] layout metrics unavailable", error);
+  }
   throwIfAborted(options.signal);
   const dpr = devicePixelRatio(metrics);
   const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
@@ -1048,7 +1064,6 @@ export async function captureViewModel(
       nodes: [],
       viewport,
       iframeNodes: new Map(),
-      surfaceProbes: [],
       excludedBackendNodeIds: new Set(),
     };
   }
@@ -1077,11 +1092,6 @@ export async function captureViewModel(
   await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()], options.signal);
   throwIfAborted(options.signal);
 
-  const surfaceProbes = options.conditionalSurfaceProbe
-    ? await probeHoverSurfaces(cdp, tabId, nodes, options)
-    : [];
-  throwIfAborted(options.signal);
-
   const frameNodes = new Map<string, CapturedNode[]>();
   if (topContext.frameId) frameNodes.set(topContext.frameId, nodes);
   for (const iframeFrameNodes of iframeNodes.values()) {
@@ -1102,7 +1112,6 @@ export async function captureViewModel(
     frameOwnerBackendNodeIds: frameParsed.frameOwnerBackendNodeIds,
     frameParentIds: frameParsed.frameParentIds,
     ...(topContext.frameId ? { rootFrameId: topContext.frameId } : {}),
-    surfaceProbes,
     excludedBackendNodeIds,
   };
 }

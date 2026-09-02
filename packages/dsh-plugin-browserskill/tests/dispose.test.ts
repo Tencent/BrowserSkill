@@ -73,15 +73,15 @@ describe("dispose cleanup ownership", () => {
     };
     apply(ctx as never, { maxSessions: 5, lazyTools: false }, { runnerFactory: () => runner });
 
-    const start = tools.get("browser_session_start");
-    const snapshot = tools.get("browser_snapshot");
-    if (start === undefined || snapshot === undefined) throw new Error("tools not registered");
-    await start.execute({}, makeExec());
-    await start.execute({}, makeExec());
+    const session = tools.get("browser_session");
+    const inspect = tools.get("browser_inspect");
+    if (session === undefined || inspect === undefined) throw new Error("tools not registered");
+    await session.execute({ action: "start" }, makeExec());
+    await session.execute({ action: "start" }, makeExec());
     // A foreign session cannot even be referenced any more.
-    await expect(snapshot.execute({ session: "ext9" }, makeExec())).rejects.toThrow(
-      /does not belong to this plugin/,
-    );
+    await expect(
+      inspect.execute({ action: "snapshot", session: "ext9" }, makeExec()),
+    ).rejects.toThrow(/does not belong to this plugin/);
 
     await Promise.all(disposers.map((dispose) => dispose()));
 

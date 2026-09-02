@@ -296,6 +296,8 @@ describe("file transfer tools", () => {
     });
   });
 
+
+
   it("marks a timed-out file assignment unknown and detaches browser state", async () => {
     const fixture = uploadCdp();
     const originalSend = fixture.cdp.send;

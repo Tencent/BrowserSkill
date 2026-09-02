@@ -12,16 +12,18 @@
 
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
+import { armArchiveCleanup } from "./archive-cleanup";
+import { registerBrowserTools } from "./browser-tools";
 import { armLazyTools } from "./lazy-tools";
 import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
 import { type BskRunner, createBskRunner } from "./runner";
 import { SessionRegistry } from "./sessions";
-import { registerBskSkill } from "./skill";
-import { type PluginConfig, registerTools } from "./tools";
+import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
+import type { PluginConfig } from "./tools";
 
-export const name = "dsh-plugin-browserskill";
+export const name = "@wxg-prc-cpg/browser-skill-dsh-plugin";
 export const inject = ["tools"];
 
 /** Runtime configuration schema (validated and defaulted by Cordis). */
@@ -94,11 +96,14 @@ export function apply(
   // ONLY model-visible advertisement — the tool suite reveals itself on a
   // successful skill invocation (or a session whose history already has one).
   const unregisterSkill = registerBskSkill(ctx);
-  const removeSuite = resolved.lazyTools
-    ? armLazyTools(ctx, () =>
-        registerTools({ ctx, runner, registry, config: resolved, observation, queue }),
-      )
-    : registerTools({ ctx, runner, registry, config: resolved, observation, queue });
+  // A same-name CLI skill left in ~/.agents is discovered in the nearer preset
+  // layer and shadows the global registration above. Re-register through every
+  // exact agent context at startup so DSH always loads the browser_* protocol
+  // instructions; the shared CLI skill remains untouched for other agents.
+  const disarmAgentSkill = armAgentScopedBskSkill(ctx);
+  const registerSuite = () =>
+    registerBrowserTools({ ctx, runner, registry, config: resolved, observation, queue });
+  const removeSuite = resolved.lazyTools ? armLazyTools(ctx, registerSuite) : registerSuite();
   // Route registration rides ctx.inject: the webServer service may be provided
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
@@ -107,6 +112,10 @@ export function apply(
     removeRoutes = registerObservationRoutes(injected, observation);
     return () => removeRoutes();
   });
+  // Reap a conversation's browsers when the conversation itself is archived:
+  // archived sessions are hidden from every surface, so their Agent Windows
+  // would otherwise linger unreachable until idle timeout or unload.
+  const disarmArchiveCleanup = armArchiveCleanup(ctx, registry, observation);
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error. Uses --version on
@@ -123,27 +132,28 @@ export function apply(
   );
 
   // Unload cleanup: kill in-flight children, then stop every session this
-  // plugin OWNS (created via browser_session_start). Referenced or unknown
+  // plugin OWNS (created via browser_session action=start). Referenced or unknown
   // sessions belonging to other programs on the shared daemon are never
   // touched; per-stop failures (already stopped externally, daemon restart)
   // are swallowed so one stale handle cannot abort the rest.
   ctx.effect(() => {
     return () => {
       removeSuite();
+      disarmAgentSkill();
       unregisterSkill();
       removeRoutes();
-      observation.dispose();
+      disarmArchiveCleanup();
       runner.killAll();
       const stops = registry
         .ownedIds()
-        .map((sessionId) =>
-          runner.run(["session", "stop", sessionId], { timeoutMs: 15_000 }).catch(() => {}),
-        );
-      return Promise.all(stops).then(() => {});
+        .map((sessionId) => observation.stopSession(sessionId).catch(() => false));
+      return Promise.all(stops).then(() => observation.dispose());
     };
   });
 }
 
+export { armArchiveCleanup, ownerSessionIds } from "./archive-cleanup";
+export { registerBrowserTools } from "./browser-tools";
 export type { ObservationEvent, ObservationOptions, SessionObservation } from "./observation";
 export { ObservationService } from "./observation";
 export { registerObservationRoutes } from "./observation-http";
@@ -152,4 +162,3 @@ export type { BskRunner, BskRunResult, SpawnImpl } from "./runner";
 export { BskError, createBskRunner } from "./runner";
 export { SessionRegistry } from "./sessions";
 export type { PluginConfig, ToolDeps } from "./tools";
-export { registerTools } from "./tools";

@@ -79,6 +79,7 @@ export function App() {
   }, [copiedTick]);
 
   const isSkewed = statusState === "version_skew";
+  const connectionLive = statusState === "connected" || isSkewed;
   const daemonVersion = snapshot.handshake?.version ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
   const extensionVersion = snapshot.extensionVersion || "—";
@@ -90,7 +91,7 @@ export function App() {
     setCopiedInstanceId(true);
   };
 
-  const recordReady = statusState === "connected" && Boolean(snapshot.instanceId);
+  const recordReady = connectionLive && Boolean(snapshot.instanceId);
   const recordPurpose = purposeDraft.trim();
   const recordStartUrl = startUrlDraft.trim();
   const recordCommand = snapshot.instanceId
@@ -206,12 +207,12 @@ export function App() {
             </div>
             {isSkewed && (
               <p
-                className="mt-2 text-xs leading-snug text-amber-600 dark:text-amber-400"
+                className="mt-2 text-xs leading-snug text-muted-foreground"
                 data-slot="popup-version-skew-warning"
               >
                 {t("popup.versionSkewWarning", {
                   extensionProtocol: PROTOCOL_VERSION,
-                  daemonProtocol,
+                  cliProtocol: daemonProtocol,
                 })}
               </p>
             )}

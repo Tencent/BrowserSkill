@@ -1,9 +1,8 @@
 /**
- * Model-facing tool definitions. Each tool maps to one `bsk <cmd> --json`
- * invocation: spawn via the runner, parse the JSON envelope, and return a
- * canonical value whose `output.render` produces the model-facing text.
- * UI cards reuse the terminal style: the pending card is the command line,
- * the completed card carries the output.
+ * Internal browser operation definitions shared by the six model-facing tools.
+ * These definitions are never registered with `ctx.tools`: they provide the
+ * action-level validation, execution, rendering, and UI presentation reused by
+ * the domain tools without exposing one schema per operation to the model.
  */
 
 import { readFile, unlink } from "node:fs/promises";
@@ -17,11 +16,20 @@ import {
   type ToolResult,
   type ToolRunContext,
 } from "@deepseek-ai/dsh-tools";
+import { ownerSessionIds } from "./archive-cleanup";
 import { trySaveScreenshot } from "./image";
 import { actionForLabel, type ObservationService } from "./observation";
+import { registerPhaseOneTools } from "./phase-one-tools";
 import type { KeyedExecutor } from "./queue";
-import { type BskRunner, bskInstallMessage, isCommandNotFound, parseBskJson } from "./runner";
+import {
+  type BskRunner,
+  bskInstallMessage,
+  isCommandNotFound,
+  parseBskJson,
+  runWithSessionBusyRetry,
+} from "./runner";
 import type { SessionRegistry } from "./sessions";
+import { SESSION_PARAM } from "./tool-params";
 
 /** Plugin configuration resolved from the Schemastery schema in index.ts. */
 export interface PluginConfig {
@@ -61,13 +69,6 @@ const DEVICE_PRESETS = [
   "galaxy-tab-s8",
 ] as const;
 
-const SESSION_PARAM = {
-  type: "string",
-  description:
-    "bsk session id to act on; must be one created by this plugin's browser_session_start. " +
-    "Omit to use the current session (the one most recently started or used).",
-} as const;
-
 /**
  * Run one bsk command and return its parsed JSON payload, or throw.
  * `observeSession` marks the run as model-facing work on that session: it is
@@ -81,7 +82,10 @@ async function runBsk(
   args: string[],
   label: string,
   observeSession?: string,
+  runnerTimeoutMs?: number,
 ): Promise<unknown> {
+  const releaseForeground =
+    observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
   // beginAction must fire only when the task actually starts inside the
   // per-session queue — marking it while still queued would overwrite the
   // in-flight action's label (and flash it idle on a queued abort).
@@ -95,11 +99,15 @@ async function runBsk(
           began = true;
           deps.observation.beginAction(observeSession, actionForLabel(label));
         }
-        return deps.runner.run(args, {
-          signal: exec.signal,
-          timeoutMs: deps.config.defaultTimeoutMs,
-          ...(observeSession !== undefined ? { tag: observeSession } : {}),
-        });
+        return runWithSessionBusyRetry(
+          () =>
+            deps.runner.run(args, {
+              signal: exec.signal,
+              timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
+              ...(observeSession !== undefined ? { tag: observeSession } : {}),
+            }),
+          exec.signal,
+        );
       };
       result =
         observeSession !== undefined
@@ -124,6 +132,7 @@ async function runBsk(
     if (observeSession !== undefined && began) {
       deps.observation.endAction(observeSession, actionError);
     }
+    releaseForeground?.();
   }
 }
 
@@ -148,22 +157,15 @@ function abortError(): Error {
   return error;
 }
 
-/** Register the full browser tool suite; returns the combined unregister disposer. */
-export function registerTools(deps: ToolDeps): () => void {
-  const { ctx, registry } = deps;
-  // Track every registration without touching the cordis context itself
-  // (contexts are fiber-owned; the lazy path registers from a listener fiber).
-  const disposers: (() => void)[] = [];
-  const register = (definition: ToolDefinition): (() => void) => {
-    const dispose = ctx.tools.register(definition);
-    // Test doubles occasionally return the registry map instead of a disposer.
-    if (typeof dispose === "function") disposers.push(dispose);
-    return dispose;
-  };
+type DefinitionRegistrar = (definition: ToolDefinition) => void;
+
+/** Define the private action handlers through an injected collector. */
+function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar): void {
+  const { registry } = deps;
 
   register(
     defineTool({
-      name: "browser_session_start",
+      name: "session.start",
       description:
         "Start a new browser session: opens an Agent Window in the connected browser and returns " +
         "its session id. The new session becomes the current session for subsequent browser_* calls. " +
@@ -245,6 +247,9 @@ export function registerTools(deps: ToolDeps): () => void {
           browserInstanceId: reply.browser_instance_id,
           startedAtMs: Date.now(),
         });
+        // Ownership for archive cleanup: the calling conversation and its
+        // ancestors reap this session when any of them is archived.
+        registry.trackOwner(reply.session_id, ownerSessionIds(deps.ctx, exec.agent?.id));
         deps.observation.addSession(reply.session_id, args.url);
         try {
           if (args.device !== undefined) {
@@ -267,22 +272,15 @@ export function registerTools(deps: ToolDeps): () => void {
           }
         } catch (error) {
           // A half-initialized session must not leak: stop it before surfacing.
-          // The stop funnels through the session's queue (an in-flight command
-          // — e.g. an observation capture — would otherwise make the daemon
-          // refuse it), with one retry for good measure.
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              const stopped = await deps.queue.run(reply.session_id, () =>
-                deps.runner.run(["session", "stop", reply.session_id], { timeoutMs: 30_000 }),
-              );
-              if (stopped.code === 0) break;
-            } catch {
-              // retry once, then give up quietly (registry/observation are
-              // cleaned below either way; the daemon reaps orphans).
-            }
+          // Reuse the same capture-preempting, idempotent path as explicit and
+          // overlay stops; local ownership is dropped even when daemon cleanup
+          // itself fails, because this start never becomes usable to the model.
+          try {
+            await deps.observation.stopSession(reply.session_id);
+          } catch {
+            registry.remove(reply.session_id);
+            deps.observation.removeSession(reply.session_id);
           }
-          registry.remove(reply.session_id);
-          deps.observation.removeSession(reply.session_id);
           throw error;
         }
         return {
@@ -308,10 +306,10 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_session_stop",
+      name: "session.stop",
       description:
         "Stop a browser session and close its Agent Window. Stops the given session, or the " +
-        "current session when `session` is omitted. Only sessions created by browser_session_start " +
+        "current session when `session` is omitted. Only plugin-created sessions " +
         "can be stopped — sessions owned by other programs sharing the bsk daemon are refused.",
       parameters: { session: SESSION_PARAM },
       output: {
@@ -326,9 +324,15 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         const sessionId = registry.resolveForStop(args.session);
-        await runBsk(deps, exec, ["session", "stop", sessionId], "session stop", sessionId);
-        registry.remove(sessionId);
-        deps.observation.removeSession(sessionId);
+        try {
+          const stopped = await deps.observation.stopSession(sessionId, exec.signal);
+          if (!stopped) throw new Error(`browser session ${sessionId} is not owned by this plugin`);
+        } catch (error) {
+          if (isCommandNotFound(error)) {
+            throw new Error(bskInstallMessage(deps.config.bskPath));
+          }
+          throw error;
+        }
         return { stopped: sessionId };
       },
       presentCall: (args) => ({
@@ -342,7 +346,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_session_list",
+      name: "session.list",
       description:
         "List the browser sessions created by this plugin. Sessions owned by other programs on the " +
         "shared bsk daemon are not visible here. The session marked `current` is the one browser_* " +
@@ -407,7 +411,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_navigate",
+      name: "page.navigate",
       description:
         "Navigate the session's active tab to a URL and wait for a page lifecycle phase " +
         "(default: load). Returns the final URL after redirects.",
@@ -449,7 +453,7 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         if (args.url.trim().length === 0) throw new Error("url must be a non-empty string");
-        const sessionId = registry.resolve(args.session, "browser_navigate");
+        const sessionId = registry.resolve(args.session, "browser_page(action=navigate)");
         const cmdArgs = ["navigate", "--session", sessionId];
         if (args.waitUntil !== undefined) cmdArgs.push("--wait-until", args.waitUntil);
         if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
@@ -480,12 +484,12 @@ export function registerTools(deps: ToolDeps): () => void {
 
   const registerObservationTool = (kind: "snapshot" | "observe") => {
     const isSnapshot = kind === "snapshot";
-    const name = isSnapshot ? "browser_snapshot" : "browser_observe";
+    const name = isSnapshot ? "inspect.snapshot" : "inspect.observe";
     const description = isSnapshot
       ? "Capture an indented aria-tree snapshot of the session's active tab. Interactive elements " +
-        "carry @eN refs for browser_click / browser_fill. Prefer browser_observe for a richer semantic view."
+        "carry @eN refs for browser_interact actions. Prefer browser_inspect action=observe for a richer semantic view."
       : "Produce a semantic VOM observation of the session's active tab (roles, states, perception " +
-        "probes) with @eN refs for browser_click / browser_fill. Read-only: never submits input.";
+        "probes) with @eN refs for browser_interact actions. Read-only: never submits input.";
     register(
       defineTool({
         name,
@@ -554,10 +558,10 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_click",
+      name: "interact.click",
       description:
         "Click an element in the session's active tab. Target is a snapshot ref (@e3) from the " +
-        "last browser_snapshot/browser_observe, or a CSS selector.",
+        "last browser_inspect observation, or a CSS selector.",
       parameters: {
         target: {
           type: "string",
@@ -595,7 +599,7 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
-        const sessionId = registry.resolve(args.session, "browser_click");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=click)");
         const cmdArgs = ["click", "--session", sessionId];
         if (args.button !== undefined) cmdArgs.push("--button", args.button);
         if (args.clickCount !== undefined) cmdArgs.push("--click-count", String(args.clickCount));
@@ -618,7 +622,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_fill",
+      name: "interact.fill",
       description:
         "Fill an input / textarea / contenteditable element, clearing it first by default. " +
         "Target is a snapshot ref (@e3) or a CSS selector.",
@@ -654,7 +658,7 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
-        const sessionId = registry.resolve(args.session, "browser_fill");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=fill)");
         const cmdArgs = ["fill", "--session", sessionId, "--value", args.value];
         if (args.noClear === true) cmdArgs.push("--no-clear");
         cmdArgs.push(args.target);
@@ -675,7 +679,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_press",
+      name: "interact.press",
       description:
         "Dispatch a keyboard key or combo (Enter, Escape, ArrowDown, Ctrl+A, …) to the session's " +
         "active tab, optionally focusing a target element first.",
@@ -714,7 +718,7 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       async execute(args, exec) {
         if (args.key.trim().length === 0) throw new Error("key must be a non-empty string");
-        const sessionId = registry.resolve(args.session, "browser_press");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=press)");
         const cmdArgs = ["press", "--session", sessionId];
         if (args.target !== undefined) {
           if (args.target.trim().length === 0) throw new Error("target must be a non-empty string");
@@ -745,7 +749,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_screenshot",
+      name: "inspect.screenshot",
       description:
         "Capture a PNG screenshot of the session's active tab, or crop to a snapshot ref element. " +
         "Returns the image itself when the deployment supports image input, otherwise a file path.",
@@ -772,7 +776,11 @@ export function registerTools(deps: ToolDeps): () => void {
               additionalProperties: false,
               properties: {
                 attachmentId: { type: "string", required: true },
-                mediaType: { type: "string", required: true, const: "image/png" },
+                mediaType: {
+                  type: "string",
+                  required: true,
+                  enum: ["image/png", "image/jpeg", "image/webp", "image/gif"],
+                },
                 bytes: { type: "integer", required: true },
                 width: { type: "integer", required: true },
                 height: { type: "integer", required: true },
@@ -806,7 +814,7 @@ export function registerTools(deps: ToolDeps): () => void {
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_screenshot");
+        const sessionId = registry.resolve(args.session, "browser_inspect(action=screenshot)");
         const outPath = join(
           tmpdir(),
           `bsk-screenshot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.png`,
@@ -842,7 +850,7 @@ export function registerTools(deps: ToolDeps): () => void {
               ? {
                   image: {
                     attachmentId: String(ref.attachmentId),
-                    mediaType: "image/png" as const,
+                    mediaType: ref.mediaType,
                     bytes: ref.bytes,
                     width: ref.width,
                     height: ref.height,
@@ -871,7 +879,7 @@ export function registerTools(deps: ToolDeps): () => void {
 
   register(
     defineTool({
-      name: "browser_emulate",
+      name: "assist.emulate",
       description:
         "Apply (or clear) mobile device emulation on the session's active tab: viewport metrics, " +
         "user agent, and touch. Overrides are per-tab and not inherited by new tabs.",
@@ -912,7 +920,7 @@ export function registerTools(deps: ToolDeps): () => void {
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolve(args.session, "browser_emulate");
+        const sessionId = registry.resolve(args.session, "browser_assist(action=emulate)");
         if (args.off === true) {
           if (args.device !== undefined || args.width !== undefined || args.height !== undefined) {
             throw new Error("off is mutually exclusive with device/width/height");
@@ -955,7 +963,23 @@ export function registerTools(deps: ToolDeps): () => void {
       presentResult: presentTerminalResult,
     }),
   );
-  return () => {
-    for (const dispose of disposers.splice(0)) dispose();
-  };
+  registerPhaseOneTools(deps, register, {
+    run: (exec, args, label, observeSession, runnerTimeoutMs) =>
+      runBsk(deps, exec, args, label, observeSession, runnerTimeoutMs),
+    commandLine: (args) => cmdline(deps, args),
+    presentTerminalResult,
+  });
+}
+
+/**
+ * Build the private action handlers without publishing them to the model. The
+ * six browser tools dispatch through these handlers, preserving validation,
+ * rendering, cancellation, ownership, UI presentation, and attachments.
+ */
+export function createBrowserOperationDefinitions(deps: ToolDeps): ToolDefinition[] {
+  const definitions: ToolDefinition[] = [];
+  defineBrowserOperations(deps, (definition) => {
+    definitions.push(definition);
+  });
+  return definitions;
 }

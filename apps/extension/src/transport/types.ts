@@ -333,9 +333,14 @@ export interface SnapshotResult {
 
 export interface ObserveParams extends SnapshotParams {
   debug_surfaces?: boolean;
+  probe_hover?: boolean;
 }
 
 export interface ObserveResult extends SnapshotResult {
+  hover_probe?: {
+    performed: boolean;
+    revealed_content: boolean;
+  };
   debug?: {
     surface_probes?: Array<{
       trigger_backend_node_id: number;

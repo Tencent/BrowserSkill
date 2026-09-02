@@ -208,6 +208,7 @@ The repository is a Cargo + pnpm workspace:
 - `apps/extension` — browser extension
 - `packages/ui` and `packages/i18n` — shared extension UI support
 - `packages/dsh-plugin-browserskill` — DeepSeek Harness plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`)
+- [`evals/browser`](evals/browser/README.md) — deterministic local pages and agent-neutral browser capability evaluation
 
 ## License
 

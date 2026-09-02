@@ -5,44 +5,44 @@ npm: [`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wx
 A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) tool plugin that exposes
 [BrowserSkill](https://github.com/Tencent/BrowserSkill) (`bsk`) browser automation to the model.
 
-Each tool maps to one `bsk <cmd> --json` invocation: the plugin spawns the bsk CLI, parses its
+Each action maps to one `bsk <cmd> --json` invocation: the plugin spawns the bsk CLI, parses its
 structured JSON output, and returns a canonical typed value. The bsk daemon, browser, and browser
 extension keep owning the actual browser control — this package is a thin, well-typed bridge.
 
 ## Tools
 
-| Tool | bsk command | Purpose |
+| Tool | Actions | Purpose |
 | --- | --- | --- |
-| `browser_session_start` | `bsk session start` | Open an Agent Window session; optional initial URL, window size, and device emulation preset. Returns the session id and makes it the current session. |
-| `browser_session_stop` | `bsk session stop` | Stop a session (the current one by default) and close its Agent Window. Only plugin-created sessions can be stopped. |
-| `browser_session_list` | — (registry only) | List the sessions this plugin created, marking the current one. Foreign daemon sessions are never shown. |
-| `browser_navigate` | `bsk navigate` | Navigate the active tab, with `waitUntil` / timeout control. |
-| `browser_snapshot` | `bsk snapshot` | Indented aria-tree snapshot with `@eN` refs for interaction tools. |
-| `browser_observe` | `bsk observe` | Semantic VOM observation (read-only) with `@eN` refs. |
-| `browser_click` | `bsk click` | Click a snapshot ref or CSS selector (button / click-count options). |
-| `browser_fill` | `bsk fill` | Fill an input / textarea / contenteditable (clears first by default). |
-| `browser_press` | `bsk press` | Dispatch a key or combo, optionally focusing a target first. |
-| `browser_screenshot` | `bsk screenshot` | PNG capture of the tab or a ref-cropped element; inlines the image when the deployment supports image input, otherwise returns a file path. |
-| `browser_emulate` | `bsk emulate` | Apply or clear mobile device emulation on the active tab. |
+| `browser_session` | `start`, `stop`, `list` | Manage plugin-owned Agent Window sessions. |
+| `browser_page` | `navigate`, `back`, `forward`, `reload`, `wait` | Navigate the active tab and wait for page lifecycle events. |
+| `browser_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network` | Read semantic or diagnostic page state and capture screenshots. |
+| `browser_interact` | `click`, `hover`, `fill`, `select`, `press` | Interact with controls using fresh refs or selectors. |
+| `browser_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
+| `browser_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
+
+`bsk evaluate` and `bsk record` are intentionally not exposed by this plugin: arbitrary page
+evaluation is a higher-risk capability, while recording is long-running and needs a dedicated
+DeepSeek Harness lifecycle before it can be added safely.
 
 ## Agent skill (progressive disclosure)
 
 Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
 official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
 resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
-tool. The body is assembled at build time from two parts, so there is exactly one source of
-truth: a dsh-specific prelude (`skill/prelude.md` — tool↔CLI map, owned-session semantics,
-plugin-only overrides) followed verbatim by the canonical CLI skill (`skill/SKILL.md` at the
-repo root — the same file `crates/bsk-cli/build.rs` mirrors for the CLI package; workflows,
-stop-when-done rules, refs usage, sandbox rules). Registration and every pre-step catalog
-snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
+tool. Its single source is the DSH-specific `skill/SKILL.md`, which documents only structured
+`browser_*` calls and their plugin semantics. The repository-root CLI skill is intentionally not
+concatenated: its command examples belong to a different execution interface and would bypass
+the plugin's ownership, live observation UI, cancellation, and cleanup path if followed directly.
+The build rejects internal CLI-name leakage, command-line code blocks, unknown browser tools, and
+missing supported browser tools before embedding the Markdown. Registration and every pre-step
+catalog snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
 seam degrade silently.
 
 ## Multi-session model
 
 One agent conversation can drive several browser sessions at once:
 
-- `browser_session_start` returns the session id and makes it the **current session**.
+- `browser_session` with `action: start` returns the session id and makes it the **current session**.
 - Every operation tool accepts an optional `session` argument. When omitted, the call acts on the
   current session (the one most recently started or used); when given, that session becomes current.
 - Every tool result echoes the session it actually acted on, so the model never has to guess.
@@ -51,9 +51,9 @@ One agent conversation can drive several browser sessions at once:
 
 **Ownership boundary**: the bsk daemon may be shared with other agents, terminals, or dsh
 instances. The plugin therefore only ever sees and operates on sessions it created itself —
-an explicit `session` argument naming a foreign or unknown id is rejected, `browser_session_list`
-shows plugin-created sessions only (no daemon-wide view), and stop/unload cleanup can never touch
-a session owned by another program.
+an explicit `session` argument naming a foreign or unknown id is rejected, the `list` action on
+`browser_session` shows plugin-created sessions only (no daemon-wide view), and stop/unload cleanup
+can never touch a session owned by another program.
 
 ## Installation
 
@@ -88,7 +88,7 @@ All fields are optional and validated through the plugin's Schemastery `Config`:
         # lazyTools: true              # reveal browser_* tools only after the skill is invoked
 ```
 
-- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the eleven
+- **`lazyTools` (default `true`)** — the final progressive-disclosure stage: the six
   `browser_*` tool schemas stay OUT of the system prompt (zero schema tokens) until the
   `browser-skill` skill is actually invoked — the skill catalog entry is the only
   advertisement. One successful invocation (model tool call, or a `/browser-skill` user
@@ -110,7 +110,7 @@ like the BrowserSkill extension without leaking a single selector into the host 
 shell's theme cannot bleed back in.
 
 - **Lifecycle**: hidden while the plugin owns no sessions; appears on the first
-  `browser_session_start`; disappears when all sessions stop (or the plugin unloads).
+  `browser_session` start action; disappears when all sessions stop (or the plugin unloads).
 - **Focus view**: status row (green/idle/red dot + session + action + mm:ss), the latest page
   frame (refreshes every ~1.5s while active, ~8s when idle; the last good frame stays on
   stage while the next one loads, and is kept on errors so the card does not flash),
@@ -152,11 +152,11 @@ shell's theme cannot bleed back in.
   card). Screenshots additionally attach the image itself when the host mounts an attachment store
   and the active model route declares image input; otherwise the PNG path is returned.
 - **Web UI toolview (browser half)**: the package is dual-face. `dsh.client` (platform `web`) ships
-  `lib/client.js`, which registers a keyed `tool.call.toolview` view for `browser_screenshot`. The
-  custom view keeps the terminal block (command + output) and, when the settled result carries an
-  image block, resolves the durable attachment through the client session's authorized
+  `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `browser_inspect`. The
+  custom view keeps a terminal block for every inspect action and, when a screenshot result carries
+  an image block, resolves the durable attachment through the client session's authorized
   `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
-  Every other `browser_*` tool keeps the stock terminal card. The bundle follows the dsh client
+  The other five tools keep the stock terminal card. The bundle follows the dsh client
   contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, platform modules
   (`react`, `dsh-client-ui-*`) external, everything else inlined, CSS Modules compiled by
   lightningcss.
@@ -177,14 +177,15 @@ pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build    # tsdown -> lib/
 ## Publishing
 
 The GitHub Actions workflow **Release dsh plugin** publishes this package to npm
-as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id stays
-`dsh-plugin-browserskill`.
+as `@wxg-prc-cpg/browser-skill-dsh-plugin`. The Cordis plugin id, client
+bundle registration, and `cordis.patch.yml` name are the same specifier so
+dsh can import and materialize the plugin without a ModuleLoader id mismatch.
 
 Trigger it by pushing a tag that matches `package.json`'s `version`:
 
 ```sh
-git tag dsh-plugin-v0.1.0
-git push origin dsh-plugin-v0.1.0
+git tag dsh-plugin-v0.1.2
+git push origin dsh-plugin-v0.1.2
 ```
 
 Or run the workflow from the Actions tab (`workflow_dispatch`). The job reads the
