@@ -298,6 +298,33 @@ describe("ObservationOverlay", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a close button inside the PiP window that closes it", async () => {
+    const h = makeHarness([BUSY]);
+    const pipDoc = document.implementation.createHTMLDocument("pip");
+    const close = vi.fn();
+    const listeners = new Map<string, (() => void)[]>();
+    const requestWindow = vi.fn(async () => {
+      return {
+        document: pipDoc,
+        addEventListener: (name: string, fn: () => void) => {
+          listeners.set(name, [...(listeners.get(name) ?? []), fn]);
+        },
+        close,
+      } as unknown as Window;
+    });
+    (window as unknown as Record<string, unknown>).documentPictureInPicture = { requestWindow };
+    render(<ObservationOverlay store={h.store} />);
+    const popout = await screen.findByRole("button", { name: /Pop out/ });
+    fireEvent.click(popout);
+    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
+    const closeBtn = pipDoc.body.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close mini window"]',
+    );
+    expect(closeBtn).not.toBeNull();
+    closeBtn!.click();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("renders the strip for two sessions and pins focus on click", async () => {
     const older: SessionObservation = {
       sessionId: "s1",
