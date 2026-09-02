@@ -14,8 +14,8 @@ import { cn } from "@browser-skill/ui";
 import {
   RiArrowDownSLine,
   RiCheckLine,
-  RiCloseLine,
   RiCloseCircleLine,
+  RiCloseLine,
   RiErrorWarningLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
