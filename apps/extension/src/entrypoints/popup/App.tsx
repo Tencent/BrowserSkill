@@ -267,9 +267,9 @@ export function App() {
             data-slot="popup-meta"
           >
             <div className="flex shrink-0 items-center gap-1">
-              <span title={t("popup.extensionVersionHint")}>{extensionVersion}</span>
+              <span title={t("popup.daemonVersionHint")}>CLI {daemonVersion}</span>
               <span aria-hidden>/</span>
-              <span title={t("popup.daemonVersionHint")}>{daemonVersion}</span>
+              <span title={t("popup.extensionVersionHint")}>Ext {extensionVersion}</span>
             </div>
             <div className="flex min-w-0 items-center justify-end gap-1">
               <span className="shrink-0">{t("popup.instanceTitle")}</span>
