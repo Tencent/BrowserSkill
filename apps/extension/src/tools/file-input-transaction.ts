@@ -9,6 +9,7 @@ import type { ResolvedActionTarget } from "./interaction";
 import { type CdpRunner, isRpcError, sendToCdpTarget } from "./shared";
 
 const CLEANUP_TIMEOUT_MS = 1_000;
+const DETACH_TIMEOUT_MS = 500;
 const ACTIVATION_GRACE_MS = 1_000;
 const PROBE_INTERVAL_MS = 20;
 
@@ -59,7 +60,7 @@ function remainingMs(deadline: number): number {
 }
 
 async function waitBounded<T>(
-  promise: Promise<T>,
+  operation: () => Promise<T>,
   deadline: number,
   signal: AbortSignal | undefined,
   timeoutMessage: string,
@@ -78,7 +79,12 @@ async function waitBounded<T>(
     }
   });
   try {
-    return await Promise.race([promise, boundary]);
+    const work = Promise.resolve().then(() => {
+      if (signal?.aborted) throw new BoundedWaitError("aborted", "upload transaction aborted");
+      if (remainingMs(deadline) === 0) throw new BoundedWaitError("timeout", timeoutMessage);
+      return operation();
+    });
+    return await Promise.race([work, boundary]);
   } finally {
     if (timer) clearTimeout(timer);
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
@@ -122,11 +128,16 @@ function sameTarget(
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   await waitBounded(
-    new Promise((resolve) => setTimeout(resolve, ms)),
+    () => new Promise((resolve) => setTimeout(resolve, ms)),
     Date.now() + ms + 1,
     signal,
     "upload activation probe timed out",
   );
+}
+
+function waitErrorCode(error: unknown): RpcError["code"] {
+  if (!(error instanceof BoundedWaitError)) return "cdp_failed";
+  return error.kind === "aborted" ? "cancelled" : "timeout";
 }
 
 async function callOnTrigger<T = RuntimeReply>(
@@ -153,8 +164,8 @@ export async function uploadThroughActivatedFileInput(
   const objectGroup = `bsk-upload-${crypto.randomUUID()}`;
   const stateKey = `__bskUpload_${crypto.randomUUID().replaceAll("-", "")}`;
   const chooserEvents: ChooserEvent[] = [];
-  let interceptionArmed = false;
-  let probeArmed = false;
+  let interceptionState: "not_started" | "possibly_active" | "active" = "not_started";
+  let probeState: "not_started" | "possibly_active" | "active" = "not_started";
   let triggerObjectId: string | undefined;
   let outcome: FileInputTransactionResult | RpcError = transferFailure(
     "protocol_error",
@@ -172,18 +183,20 @@ export async function uploadThroughActivatedFileInput(
 
   try {
     try {
+      interceptionState = "possibly_active";
       await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
-          enabled: true,
-        }),
+        () =>
+          sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+            enabled: true,
+          }),
         deadline,
         options.signal,
         "arming native file chooser interception timed out",
       );
-      interceptionArmed = true;
+      interceptionState = "active";
     } catch (err) {
       outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+        waitErrorCode(err),
         "file_input_probe_failed",
         err instanceof Error ? err.message : String(err),
         "none",
@@ -194,15 +207,16 @@ export async function uploadThroughActivatedFileInput(
 
     try {
       const resolved = await waitBounded(
-        sendToCdpTarget<{ object?: { objectId?: string } }>(
-          options.cdp,
-          target,
-          "DOM.resolveNode",
-          {
-            backendNodeId: options.actionTarget.backendNodeId,
-            objectGroup,
-          },
-        ),
+        () =>
+          sendToCdpTarget<{ object?: { objectId?: string } }>(
+            options.cdp,
+            target,
+            "DOM.resolveNode",
+            {
+              backendNodeId: options.actionTarget.backendNodeId,
+              objectGroup,
+            },
+          ),
         deadline,
         options.signal,
         "resolving upload trigger timed out",
@@ -210,11 +224,13 @@ export async function uploadThroughActivatedFileInput(
       triggerObjectId = resolved.object?.objectId;
       if (!triggerObjectId) throw new Error("DOM.resolveNode returned no trigger objectId");
 
+      probeState = "possibly_active";
       const armed = await waitBounded(
-        callOnTrigger<RuntimeReply>(
-          options,
-          triggerObjectId,
-          `function(key) {
+        () =>
+          callOnTrigger<RuntimeReply>(
+            options,
+            triggerObjectId as string,
+            `function(key) {
             const doc = this.ownerDocument;
             const owner = doc.defaultView;
             if (!owner) return false;
@@ -232,9 +248,9 @@ export async function uploadThroughActivatedFileInput(
             doc.addEventListener("click", state.listener, true);
             return true;
           }`,
-          [stateKey],
-          true,
-        ),
+            [stateKey],
+            true,
+          ),
         deadline,
         options.signal,
         "arming frame-scoped file input probe timed out",
@@ -243,10 +259,10 @@ export async function uploadThroughActivatedFileInput(
       if (armError || armed.result?.value !== true) {
         throw armError ?? new Error("file input probe did not arm");
       }
-      probeArmed = true;
+      probeState = "active";
     } catch (err) {
       outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+        waitErrorCode(err),
         "file_input_probe_failed",
         err instanceof Error ? err.message : String(err),
         "none",
@@ -258,14 +274,14 @@ export async function uploadThroughActivatedFileInput(
     let click: ClickResult | RpcError;
     try {
       click = await waitBounded(
-        options.trigger(),
+        options.trigger,
         deadline,
         options.signal,
         "upload trigger timed out",
       );
     } catch (err) {
       outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+        waitErrorCode(err),
         "file_input_probe_failed",
         err instanceof Error ? err.message : String(err),
         "none",
@@ -283,17 +299,23 @@ export async function uploadThroughActivatedFileInput(
       let summary: { count: number; multiple: boolean } = { count: 0, multiple: false };
       while (Date.now() < activationDeadline) {
         if (chooserEvents.length > 0) break;
-        const reply = await callOnTrigger<RuntimeReply>(
-          options,
-          triggerObjectId,
-          `function(key) {
+        const reply = await waitBounded(
+          () =>
+            callOnTrigger<RuntimeReply>(
+              options,
+              triggerObjectId as string,
+              `function(key) {
             const state = this.ownerDocument.defaultView?.[key];
             return state
               ? { count: state.inputs.length, multiple: state.inputs[0]?.multiple === true }
               : { count: 0, multiple: false };
           }`,
-          [stateKey],
-          true,
+              [stateKey],
+              true,
+            ),
+          activationDeadline,
+          options.signal,
+          "inspecting activated file input timed out",
         );
         const summaryError = runtimeError(reply, "failed to inspect activated file input");
         if (summaryError) throw summaryError;
@@ -356,21 +378,33 @@ export async function uploadThroughActivatedFileInput(
           );
           return outcome;
         }
-        const input = await callOnTrigger<RuntimeReply>(
-          options,
-          triggerObjectId,
-          `function(key) { return this.ownerDocument.defaultView?.[key]?.inputs[0]; }`,
-          [stateKey],
-          false,
+        const input = await waitBounded(
+          () =>
+            callOnTrigger<RuntimeReply>(
+              options,
+              triggerObjectId as string,
+              `function(key) { return this.ownerDocument.defaultView?.[key]?.inputs[0]; }`,
+              [stateKey],
+              false,
+            ),
+          deadline,
+          options.signal,
+          "resolving activated file input timed out",
         );
         const inputError = runtimeError(input, "failed to resolve activated file input object");
         if (inputError) throw inputError;
         if (!input.result?.objectId) throw new Error("activated file input returned no objectId");
-        const described = await sendToCdpTarget<{ node?: { backendNodeId?: number } }>(
-          options.cdp,
-          target,
-          "DOM.describeNode",
-          { objectId: input.result.objectId },
+        const described = await waitBounded(
+          () =>
+            sendToCdpTarget<{ node?: { backendNodeId?: number } }>(
+              options.cdp,
+              target,
+              "DOM.describeNode",
+              { objectId: input.result?.objectId },
+            ),
+          deadline,
+          options.signal,
+          "describing activated file input timed out",
         );
         backendNodeId = described.node?.backendNodeId;
         if (typeof backendNodeId !== "number") {
@@ -389,17 +423,18 @@ export async function uploadThroughActivatedFileInput(
 
       try {
         await waitBounded(
-          sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
-            files: options.files,
-            backendNodeId,
-          }),
+          () =>
+            sendToCdpTarget(options.cdp, target, "DOM.setFileInputFiles", {
+              files: options.files,
+              backendNodeId,
+            }),
           deadline,
           options.signal,
           "setting file input files timed out",
         );
       } catch (err) {
         outcome = transferFailure(
-          err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+          waitErrorCode(err),
           "set_file_input_failed",
           err instanceof Error ? err.message : String(err),
           "unknown",
@@ -411,7 +446,7 @@ export async function uploadThroughActivatedFileInput(
       return outcome;
     } catch (err) {
       outcome = transferFailure(
-        err instanceof BoundedWaitError ? "timeout" : "cdp_failed",
+        waitErrorCode(err),
         "file_input_probe_failed",
         err instanceof Error ? err.message : String(err),
         "none",
@@ -421,61 +456,70 @@ export async function uploadThroughActivatedFileInput(
     }
   } finally {
     chooserSubscription?.dispose();
-    let cleanupFailed = false;
-    if (probeArmed && triggerObjectId) {
+    const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
+    const cleanupTasks: Promise<boolean>[] = [];
+    const cleanup = async (operation: () => Promise<unknown>, message: string) => {
       try {
-        await waitBounded(
-          callOnTrigger(
-            options,
-            triggerObjectId,
-            `function(key) {
+        await waitBounded(operation, cleanupDeadline, undefined, message);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (probeState !== "not_started" && triggerObjectId) {
+      cleanupTasks.push(
+        cleanup(
+          () =>
+            callOnTrigger(
+              options,
+              triggerObjectId as string,
+              `function(key) {
               const owner = this.ownerDocument.defaultView;
               const state = owner?.[key];
               if (state?.listener) this.ownerDocument.removeEventListener("click", state.listener, true);
               if (owner) delete owner[key];
             }`,
-            [stateKey],
-            true,
-          ),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
+              [stateKey],
+              true,
+            ),
           "cleaning file input probe timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    if (interceptionArmed) {
-      try {
-        await waitBounded(
-          sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
-            enabled: false,
-            cancel: true,
-          }),
-          Date.now() + CLEANUP_TIMEOUT_MS,
-          undefined,
-          "disabling file chooser interception timed out",
-        );
-      } catch {
-        cleanupFailed = true;
-      }
-    }
-    try {
-      await waitBounded(
-        sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
-        Date.now() + CLEANUP_TIMEOUT_MS,
-        undefined,
-        "releasing upload object group timed out",
+        ),
       );
-    } catch {
-      cleanupFailed = true;
+    }
+    if (interceptionState !== "not_started") {
+      cleanupTasks.push(
+        cleanup(
+          () =>
+            sendToCdpTarget(options.cdp, target, "Page.setInterceptFileChooserDialog", {
+              enabled: false,
+              cancel: true,
+            }),
+          "disabling file chooser interception timed out",
+        ),
+      );
+    }
+    let cleanupFailed = (await Promise.all(cleanupTasks)).some((completed) => !completed);
+    if (!cleanupFailed) {
+      cleanupFailed = !(await cleanup(
+        () => sendToCdpTarget(options.cdp, target, "Runtime.releaseObjectGroup", { objectGroup }),
+        "releasing upload object group timed out",
+      ));
     }
 
     const effect = isRpcError(outcome)
       ? (outcome.data?.effect_state as TransferEffectState | undefined)
       : "committed";
     if (effect === "unknown" || cleanupFailed) {
-      await options.cdp.detach?.(target.tabId);
+      try {
+        await waitBounded(
+          () => options.cdp.detach?.(target.tabId) ?? Promise.resolve(),
+          Date.now() + DETACH_TIMEOUT_MS,
+          undefined,
+          "detaching upload target timed out",
+        );
+      } catch {
+        cleanupFailed = true;
+      }
     }
     if (cleanupFailed && isRpcError(outcome)) {
       outcome.data = { ...outcome.data, cleanup_state: "failed" };

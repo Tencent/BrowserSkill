@@ -246,6 +246,104 @@ describe("file transfer tools", () => {
     });
   });
 
+  it("does not dispatch browser work when upload is already cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { cdp, calls } = uploadCdp();
+
+    const result = await uploadThroughActivatedFileInput({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/private/stage/one"],
+      timeoutMs: 100,
+      signal: controller.signal,
+      trigger: vi.fn(),
+    });
+
+    expect(result).toMatchObject({
+      code: "cancelled",
+      data: { effect_state: "none", phase: "arm_interception" },
+    });
+    expect(calls).not.toContainEqual({
+      method: "Page.setInterceptFileChooserDialog",
+      params: { enabled: true },
+    });
+    expect(calls.some((call) => call.method === "DOM.setFileInputFiles")).toBe(false);
+  });
+
+  it("stops before file assignment when cancellation interrupts input resolution", async () => {
+    const controller = new AbortController();
+    const fixture = uploadCdp();
+    const originalSend = fixture.cdp.send;
+    let markProbeStarted!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    fixture.cdp.send = vi.fn((tabId: number, method: string, params?: object) => {
+      const declaration = (params as { functionDeclaration?: string } | undefined)
+        ?.functionDeclaration;
+      if (
+        method === "Runtime.callFunctionOn" &&
+        declaration?.includes("count: state.inputs.length")
+      ) {
+        markProbeStarted();
+        return new Promise<never>(() => {});
+      }
+      return originalSend(tabId, method, params);
+    }) as CdpRunner["send"];
+
+    const transaction = uploadThroughActivatedFileInput({
+      cdp: fixture.cdp,
+      actionTarget: actionTarget(),
+      files: ["/private/stage/one"],
+      timeoutMs: 1_000,
+      signal: controller.signal,
+      trigger: async () => ({ tab_id: 4, x: 10, y: 10 }),
+    });
+    await probeStarted;
+    controller.abort();
+    const result = await transaction;
+
+    expect(result).toMatchObject({
+      code: "cancelled",
+      data: { effect_state: "none", phase: "resolve_input" },
+    });
+    expect(fixture.calls.some((call) => call.method === "DOM.setFileInputFiles")).toBe(false);
+  });
+
+  it("disarms chooser interception when its enable response times out", async () => {
+    const calls: Array<{ method: string; params?: object }> = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        calls.push({ method, params });
+        if (
+          method === "Page.setInterceptFileChooserDialog" &&
+          (params as { enabled?: boolean }).enabled
+        ) {
+          return new Promise<never>(() => {});
+        }
+        return {};
+      }) as CdpRunner["send"],
+    };
+
+    const result = await uploadThroughActivatedFileInput({
+      cdp,
+      actionTarget: actionTarget(),
+      files: ["/private/stage/one"],
+      timeoutMs: 5,
+      trigger: vi.fn(),
+    });
+
+    expect(result).toMatchObject({
+      code: "timeout",
+      data: { effect_state: "none", phase: "arm_interception" },
+    });
+    expect(calls).toContainEqual({
+      method: "Page.setInterceptFileChooserDialog",
+      params: { enabled: false, cancel: true },
+    });
+  });
+
   it("marks a timed-out file assignment unknown and detaches browser state", async () => {
     const fixture = uploadCdp();
     const originalSend = fixture.cdp.send;
@@ -567,7 +665,10 @@ describe("file transfer tools", () => {
     expect(downloads.cancel).not.toHaveBeenCalled();
   });
 
-  it("reconciles a download that completes while cancellation is being requested", async () => {
+  it.each([
+    ["cancel resolves", false],
+    ["cancel reports that completion won", true],
+  ])("reconciles a download that completes while %s", async (_label, cancelThrows) => {
     const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
     const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
     const onDeterminingFilename =
@@ -601,7 +702,7 @@ describe("file transfer tools", () => {
       onDeterminingFilename,
       search: vi.fn().mockResolvedValueOnce([initial]).mockResolvedValueOnce([complete]),
       cancel: vi.fn(async () => {
-        throw new Error("download already complete");
+        if (cancelThrows) throw new Error("download already complete");
       }),
       removeFile: vi.fn(async () => {}),
     };
