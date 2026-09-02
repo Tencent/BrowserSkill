@@ -47,7 +47,10 @@ describe("registerBskSkill", () => {
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
     expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
-    expect(content.length).toBeGreaterThan(6_000);
+    // Keep the lazily injected instructions inside a bounded prompt budget,
+    // while the lower bound catches accidental truncation of the guidance.
+    expect(content.length).toBeGreaterThan(3_000);
+    expect(content.length).toBeLessThan(6_000);
     expect(skill.source).toBe("bundled");
     // Source frontmatter is registration metadata and must not leak into the body.
     expect(content.startsWith("---")).toBe(false);

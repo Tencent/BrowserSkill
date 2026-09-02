@@ -37,6 +37,17 @@ export interface CaptureVomObservationResult {
   frames: CaptureVomFrame[];
   matchNodes: CaptureVomMatchNode[];
   surfaceProbes?: CapturedSurfaceProbe[];
+  /**
+   * Whether this observation actively hovered the page, and whether that
+   * revealed content the static tree does not contain. Lets callers judge how
+   * far the page may have drifted from the returned snapshot.
+   */
+  hoverProbe?: HoverProbeReport;
+}
+
+export interface HoverProbeReport {
+  performed: boolean;
+  revealedContent: boolean;
 }
 
 function projectFrames(documents: CapturedFrameDocument<FrameAxNode>[]): CaptureVomFrame[] {
@@ -75,6 +86,7 @@ export function projectRecordSafeObservation(input: {
   frameDocuments: CapturedFrameDocument<FrameAxNode>[];
   rendered: VomResult;
   surfaceProbes?: CapturedSurfaceProbe[];
+  hoverProbe?: HoverProbeReport;
 }): CaptureVomObservationResult {
   return {
     text: input.rendered.text,
@@ -84,5 +96,6 @@ export function projectRecordSafeObservation(input: {
     frames: projectFrames(input.frameDocuments),
     matchNodes: projectMatchNodes(input.frameDocuments),
     surfaceProbes: input.surfaceProbes,
+    ...(input.hoverProbe ? { hoverProbe: input.hoverProbe } : {}),
   };
 }

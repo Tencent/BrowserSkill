@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "ObserveParams",
-  "description": "Parameters for `tool.observe` — produce a semantic VOM observation for one tab plus a fresh `@e<N>` ref-store on the extension side.\n\nUnlike `tool.snapshot`, this path may run bounded perception probes such as hover-surface discovery. It must not submit input, click, navigate, or otherwise commit page state.",
+  "description": "Parameters for `tool.observe` — produce a semantic VOM observation for one tab plus a fresh `@e<N>` ref-store on the extension side.\n\nUnlike `tool.snapshot`, this path may run bounded perception probes such as hover-surface discovery, but only when `probe_hover` asks for them. It must not submit input, click, navigate, or otherwise commit page state.",
   "type": "object",
   "required": [
     "session_id"
@@ -29,6 +29,11 @@
       ],
       "format": "uint32",
       "minimum": 0.0
+    },
+    "probe_hover": {
+      "description": "Opt in to active hover probing: the extension moves the real cursor over a bounded set of controls to discover hover-only menus and tooltips.\n\nOff by default. Probing costs seconds of wall clock, mutates the live page, and pays off only on pages whose content is genuinely hidden behind hover. Request it when a static observation looks like it is missing hover-revealed structure.",
+      "default": false,
+      "type": "boolean"
     },
     "session_id": {
       "type": "string"

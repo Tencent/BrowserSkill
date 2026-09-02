@@ -24,6 +24,17 @@
         "$ref": "#/definitions/JavaScriptDialogInfo"
       }
     },
+    "hover_probe": {
+      "description": "Present only when `probe_hover` was requested and probing actually ran.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HoverProbeReport"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "ref_count": {
       "description": "Number of `@e<N>` refs registered for this session by this observation. Equivalent to the size of the new ref-store map.",
       "type": "integer",
@@ -46,6 +57,24 @@
     }
   },
   "definitions": {
+    "HoverProbeReport": {
+      "description": "Reports what active hover probing did during an observation, so the agent can judge how far the live page may have drifted from the returned text.",
+      "type": "object",
+      "required": [
+        "performed",
+        "revealed_content"
+      ],
+      "properties": {
+        "performed": {
+          "description": "The real cursor was moved over page content during this observation.",
+          "type": "boolean"
+        },
+        "revealed_content": {
+          "description": "Hovering surfaced content the static tree does not contain, so the page reacts to the cursor and may not have fully reverted.",
+          "type": "boolean"
+        }
+      }
+    },
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
       "type": "string",

@@ -15,6 +15,7 @@ import {
   RiArrowDownSLine,
   RiCheckLine,
   RiCloseCircleLine,
+  RiCloseLine,
   RiErrorWarningLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
@@ -28,6 +29,7 @@ const asIcon = (component: unknown): IconComponent => component as IconComponent
 const IconStop = asIcon(RiStopCircleLine);
 const IconPip = asIcon(RiPictureInPicture2Line);
 const IconDown = asIcon(RiArrowDownSLine);
+const IconClose = asIcon(RiCloseLine);
 const IconWarn = asIcon(RiErrorWarningLine);
 const IconPin = asIcon(RiPushpinFill);
 const IconCloseSession = asIcon(RiCloseCircleLine);
@@ -320,6 +322,7 @@ export function OverlayBody(props: {
   now: number;
   onPopOut?: (() => void) | undefined;
   onCollapse?: (() => void) | undefined;
+  onClosePip?: (() => void) | undefined;
   inPip: boolean;
   onHeaderPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -333,6 +336,7 @@ export function OverlayBody(props: {
     now,
     onPopOut,
     onCollapse,
+    onClosePip,
     inPip,
     onHeaderPointerDown,
   } = props;
@@ -387,6 +391,16 @@ export function OverlayBody(props: {
             onClick={onCollapse}
           >
             <IconDown size={14} />
+          </button>
+        ) : null}
+        {onClosePip !== undefined ? (
+          <button
+            type="button"
+            className={css["icon-button"]}
+            aria-label="Close mini window"
+            onClick={onClosePip}
+          >
+            <IconClose size={14} />
           </button>
         ) : null}
       </div>
@@ -572,6 +586,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
           : undefined
       }
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
+      onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
       onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
   );

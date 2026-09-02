@@ -17,6 +17,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
+import { sniffImageMediaType } from "./image";
 import type { KeyedExecutor } from "./queue";
 import { BskError, type BskRunner, parseBskJson, runWithSessionBusyRetry } from "./runner";
 import type { SessionRegistry } from "./sessions";
@@ -467,7 +468,7 @@ export class ObservationService {
     const seq = (this.seqs.get(sessionId) ?? 0) + 1;
     this.seqs.set(sessionId, seq);
     const id = `obs-${sessionId}-${seq}`;
-    this.frames.set(id, { data, mediaType: "image/png" });
+    this.frames.set(id, { data, mediaType: sniffImageMediaType(data) ?? "image/png" });
     this.hashes.set(sessionId, hash);
     const ring = this.rings.get(sessionId) ?? [];
     ring.push(id);

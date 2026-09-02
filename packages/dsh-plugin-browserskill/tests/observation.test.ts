@@ -335,6 +335,18 @@ describe("thumbnail cadence", () => {
     await waitFor(() => service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1");
     expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/png");
   });
+
+  it("detects JPEG thumbnail bytes instead of hardcoding image/png", async () => {
+    const scheduler = fakeScheduler();
+    const runner = fakeRunner({
+      screenshotBytes: () => new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 0x00, 0x01]),
+    });
+    const { service } = setup({ runner, scheduler });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId === "obs-s1-1");
+    expect((await service.readThumbnail("obs-s1-1"))?.mediaType).toBe("image/jpeg");
+  });
 });
 
 describe("observation traffic isolation", () => {
