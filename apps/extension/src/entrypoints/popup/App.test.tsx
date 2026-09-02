@@ -122,8 +122,8 @@ describe("App", () => {
 
     expect(screen.queryByText(/^扩展 v/)).toBeNull();
     expect(screen.queryByText(/^daemon v/)).toBeNull();
-    expect(screen.getByTitle("扩展版本").textContent).toBe(EXTENSION_VERSION);
-    expect(screen.getByTitle("bsk 版本").textContent).toBe(mockDaemonVersion);
+    expect(screen.getByTitle("扩展版本").textContent).toBe(`Ext ${EXTENSION_VERSION}`);
+    expect(screen.getByTitle("bsk 版本").textContent).toBe(`CLI ${mockDaemonVersion}`);
     expect(screen.getByText("03c3e47f")).toBeTruthy();
 
     const copyButton = screen.getByRole("button", { name: "复制实例 ID" });
