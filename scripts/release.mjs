@@ -51,7 +51,9 @@ const { values, positionals } = parseArgs({
 });
 
 if (values.help) {
-  console.log(readFileSync(new URL(import.meta.url), "utf8").match(/\/\*\*([\s\S]*?)\*\//)?.[1] ?? "");
+  console.log(
+    readFileSync(new URL(import.meta.url), "utf8").match(/\/\*\*([\s\S]*?)\*\//)?.[1] ?? "",
+  );
   process.exit(0);
 }
 
@@ -60,9 +62,7 @@ const pushAfter = values.push;
 const pushTagsOnly = values["push-tags"];
 const noCommit = values["no-commit"];
 const onlyRaw = values.only;
-const components = onlyRaw
-  ? onlyRaw.split(",").map((s) => s.trim().toLowerCase())
-  : ALL_COMPONENTS;
+const components = onlyRaw ? onlyRaw.split(",").map((s) => s.trim().toLowerCase()) : ALL_COMPONENTS;
 
 for (const c of components) {
   if (!ALL_COMPONENTS.includes(c)) {
@@ -95,7 +95,9 @@ if (pushTagsOnly) {
 
 const newVersion = positionals[0];
 if (!newVersion) {
-  console.error("Usage: node scripts/release.mjs <version> [--dry-run] [--push] [--only cli,ext,dsh]");
+  console.error(
+    "Usage: node scripts/release.mjs <version> [--dry-run] [--push] [--only cli,ext,dsh]",
+  );
   process.exit(1);
 }
 
@@ -110,8 +112,9 @@ if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(newVersion)) {
 
 function readCurrentVersions() {
   const cargo = readFileSync(VERSION_FILES.cargo, "utf8");
-  const cargoVer = cargo.match(/^\[workspace\.package\]\s*\nversion\s*=\s*"([^"]+)"/m)?.[1]
-    ?? cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+  const cargoVer =
+    cargo.match(/^\[workspace\.package\]\s*\nversion\s*=\s*"([^"]+)"/m)?.[1] ??
+    cargo.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
 
   const extPkg = JSON.parse(readFileSync(VERSION_FILES.extension, "utf8"));
   const dshPkg = JSON.parse(readFileSync(VERSION_FILES.dshPlugin, "utf8"));
@@ -173,20 +176,14 @@ function updateChangelog(version) {
   const escapedVer = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
   // First: fill in any date-placeholder line for this version (e.g. "## [0.2.0] - 2026-09-XX")
-  const versionPlaceholder = new RegExp(
-    `^## \\[${escapedVer}\\]\\s*-\\s*\\d{4}-\\d{2}-XX`,
-    "m",
-  );
+  const versionPlaceholder = new RegExp(`^## \\[${escapedVer}\\]\\s*-\\s*\\d{4}-\\d{2}-XX`, "m");
   if (versionPlaceholder.test(content)) {
     content = content.replace(versionPlaceholder, `## [${version}] - ${today}`);
   } else {
     // Otherwise: insert a new section after [Unreleased]
     const unreleased = /^## \[Unreleased\]/m;
     if (unreleased.test(content)) {
-      content = content.replace(
-        unreleased,
-        `## [Unreleased]\n\n## [${version}] - ${today}`,
-      );
+      content = content.replace(unreleased, `## [Unreleased]\n\n## [${version}] - ${today}`);
     }
   }
 
@@ -199,13 +196,25 @@ function updateChangelog(version) {
 
 const writes = [
   { path: VERSION_FILES.cargo, content: bumpCargo(newVersion), label: "Cargo.toml" },
-  { path: VERSION_FILES.extension, content: bumpPackageJson(VERSION_FILES.extension, newVersion), label: "Extension package.json" },
-  { path: VERSION_FILES.dshPlugin, content: bumpPackageJson(VERSION_FILES.dshPlugin, newVersion), label: "DSH Plugin package.json" },
+  {
+    path: VERSION_FILES.extension,
+    content: bumpPackageJson(VERSION_FILES.extension, newVersion),
+    label: "Extension package.json",
+  },
+  {
+    path: VERSION_FILES.dshPlugin,
+    content: bumpPackageJson(VERSION_FILES.dshPlugin, newVersion),
+    label: "DSH Plugin package.json",
+  },
 ];
 
 const changelogUpdate = updateChangelog(newVersion);
 if (changelogUpdate) {
-  writes.push({ path: changelogUpdate.path, content: changelogUpdate.content, label: "CHANGELOG.md" });
+  writes.push({
+    path: changelogUpdate.path,
+    content: changelogUpdate.content,
+    label: "CHANGELOG.md",
+  });
 }
 
 for (const w of writes) {
@@ -241,7 +250,9 @@ if (noCommit || dryRun) {
 }
 
 console.log("\nCommitting...");
-run("git add Cargo.toml Cargo.lock apps/extension/package.json packages/dsh-plugin-browserskill/package.json CHANGELOG.md 2>/dev/null || true");
+run(
+  "git add Cargo.toml Cargo.lock apps/extension/package.json packages/dsh-plugin-browserskill/package.json CHANGELOG.md 2>/dev/null || true",
+);
 run(`git commit -m "chore(release): ${newVersion}"`);
 
 console.log("Tagging...");
