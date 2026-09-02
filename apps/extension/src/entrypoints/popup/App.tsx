@@ -15,6 +15,7 @@ import { POPUP_FEATURES, type PopupView } from "./features";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
+import { useDaemonPort } from "./use-daemon-port";
 
 const STATE_LABEL_KEYS = {
   disconnected: "popup.stateLabel.disconnected",
@@ -41,6 +42,12 @@ export function App() {
   const { t } = useTranslation("extension");
   const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
+  const {
+    draft: daemonPortDraft,
+    setDraft: setDaemonPortDraft,
+    commit: commitDaemonPort,
+    invalid: daemonPortInvalid,
+  } = useDaemonPort();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
@@ -79,6 +86,7 @@ export function App() {
   }, [copiedTick]);
 
   const isSkewed = statusState === "version_skew";
+  const isDisconnected = statusState === "disconnected";
   const connectionLive = statusState === "connected" || isSkewed;
   const daemonVersion = snapshot.handshake?.version ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
@@ -198,13 +206,21 @@ export function App() {
                   {t(STATE_BADGE_KEYS[statusState])}
                 </Badge>
                 <Switch
-                  checked={snapshot.connectionEnabled}
+                  checked={snapshot.connectionEnabled && !isDisconnected}
                   onCheckedChange={setConnectionEnabled}
                   aria-label={t("popup.connectionToggleTitle")}
                   data-slot="popup-connection-toggle"
                 />
               </div>
             </div>
+            {isDisconnected && (
+              <p
+                className="mt-2 text-xs leading-snug text-muted-foreground"
+                data-slot="popup-daemon-unreachable"
+              >
+                {t("popup.daemonUnreachable")}
+              </p>
+            )}
             {isSkewed && (
               <p
                 className="mt-2 text-xs leading-snug text-muted-foreground"
@@ -253,7 +269,66 @@ export function App() {
             </div>
           </section>
 
-          {snapshot.lastError && (
+          <section
+            className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
+            data-slot="popup-daemon-port-card"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex min-w-0 items-center gap-1">
+                <Label
+                  htmlFor="bh-daemon-port"
+                  className="truncate text-sm font-medium leading-normal"
+                >
+                  {t("popup.daemonPortLabel")}
+                </Label>
+                <span className="group relative inline-flex shrink-0">
+                  <button
+                    type="button"
+                    aria-label={t("popup.daemonPortInfoLabel")}
+                    data-slot="popup-daemon-port-info"
+                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  >
+                    <RiInformationLine className="size-3.5" aria-hidden />
+                  </button>
+                  <span
+                    role="tooltip"
+                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
+                  >
+                    {t("popup.daemonPortHint")}
+                  </span>
+                </span>
+              </span>
+              <Input
+                id="bh-daemon-port"
+                type="text"
+                inputMode="numeric"
+                value={daemonPortDraft}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  setDaemonPortDraft(event.target.value)
+                }
+                onBlur={commitDaemonPort}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitDaemonPort();
+                  }
+                }}
+                className="mt-0 h-5 w-24 shrink-0 rounded-md px-2 py-0 text-center text-sm leading-none shadow-none"
+                aria-invalid={daemonPortInvalid || undefined}
+                data-slot="popup-daemon-port-input"
+              />
+            </div>
+            {daemonPortInvalid && (
+              <p
+                className="mt-1.5 text-[11px] leading-snug text-destructive"
+                data-slot="popup-daemon-port-error"
+              >
+                {t("popup.daemonPortInvalid")}
+              </p>
+            )}
+          </section>
+
+          {snapshot.lastError && !isDisconnected && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"

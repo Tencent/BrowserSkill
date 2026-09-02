@@ -26,6 +26,11 @@
     "controlHintsToggleTitle": "Control hints",
     "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "controlHintsInfoLabel": "About control hints",
+    "daemonPortLabel": "Connection port",
+    "daemonPortHint": "This port is used to connect to the local daemon. Do not change it unless necessary.",
+    "daemonPortInfoLabel": "About connection port",
+    "daemonPortInvalid": "Enter a port between 1 and 65535.",
+    "daemonUnreachable": "Can't connect. Check the daemon is running and the port matches.",
     "versionSkewWarning": "Extension protocol v{{extensionProtocol}}, CLI protocol v{{cliProtocol}}. Protocol versions differ — please upgrade.",
     "upgradeAvailable": "Upgradable",
     "launcher": {
