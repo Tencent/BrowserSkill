@@ -328,6 +328,7 @@ async fn handle_tool_dispatch(
         Ok(timeout) => timeout,
         Err(err) => return ResponseBody::Err(err),
     };
+    let dispatch_timeout = tool_queue_timeout(method, timeout);
     let inflight_guard = match state.tool_inflight.register(cli_rpc_id, session_id.clone()) {
         Ok(guard) => guard,
         Err(err) => {
@@ -344,12 +345,12 @@ async fn handle_tool_dispatch(
     let outcome = if method == Method::ToolRecordStop {
         state
             .tool_queues
-            .dispatch_unlocked(&session_id, method, params, timeout, Some(entry))
+            .dispatch_unlocked(&session_id, method, params, dispatch_timeout, Some(entry))
             .await
     } else {
         state
             .tool_queues
-            .dispatch(&session_id, method, params, timeout, Some(entry))
+            .dispatch(&session_id, method, params, dispatch_timeout, Some(entry))
             .await
     };
     drop(inflight_guard);
@@ -505,6 +506,18 @@ fn handle_cancel_with_registry_only(registry: &Arc<AbortRegistry>, params: Value
     };
     let cancelled = registry.cancel(&params.rpc_id);
     ResponseBody::Ok(serde_json::to_value(CancelResult { cancelled }).unwrap_or(Value::Null))
+}
+
+fn tool_queue_timeout(method: Method, timeout: Duration) -> Duration {
+    // request-help owns a user-visible timeout and must be allowed to return
+    // its structured `timed_out` result before the generic queue timeout fires.
+    // Keep the grace outside the extension-facing params so the user-visible
+    // deadline remains unchanged.
+    if method == Method::ToolRequestHelp {
+        timeout.saturating_add(Duration::from_secs(1))
+    } else {
+        timeout
+    }
 }
 
 fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
@@ -1327,6 +1340,19 @@ mod tests {
         });
         let got = tool_dispatch_timeout(&params).expect("timeout parses");
         assert_eq!(got, std::time::Duration::from_millis(300_000));
+    }
+
+    #[test]
+    fn request_help_queue_timeout_has_response_grace() {
+        let timeout = std::time::Duration::from_secs(5);
+        assert_eq!(
+            tool_queue_timeout(Method::ToolRequestHelp, timeout),
+            std::time::Duration::from_secs(6)
+        );
+        assert_eq!(
+            tool_queue_timeout(Method::ToolSnapshot, timeout),
+            timeout
+        );
     }
 
     #[test]
