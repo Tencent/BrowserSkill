@@ -170,19 +170,23 @@ function updateChangelog(version) {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const unreleased = /^## \[Unreleased\]/m;
-  if (unreleased.test(content)) {
-    content = content.replace(
-      unreleased,
-      `## [Unreleased]\n\n## [${version}] - ${today}`,
-    );
+  const escapedVer = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // First: fill in any date-placeholder line for this version (e.g. "## [0.2.0] - 2026-09-XX")
+  const versionPlaceholder = new RegExp(
+    `^## \\[${escapedVer}\\]\\s*-\\s*\\d{4}-\\d{2}-XX`,
+    "m",
+  );
+  if (versionPlaceholder.test(content)) {
+    content = content.replace(versionPlaceholder, `## [${version}] - ${today}`);
   } else {
-    const versionPlaceholder = new RegExp(
-      `^## \\[${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\]\\s*-\\s*\\d{4}-\\d{2}-XX`,
-      "m",
-    );
-    if (versionPlaceholder.test(content)) {
-      content = content.replace(versionPlaceholder, `## [${version}] - ${today}`);
+    // Otherwise: insert a new section after [Unreleased]
+    const unreleased = /^## \[Unreleased\]/m;
+    if (unreleased.test(content)) {
+      content = content.replace(
+        unreleased,
+        `## [Unreleased]\n\n## [${version}] - ${today}`,
+      );
     }
   }
 

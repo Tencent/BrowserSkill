@@ -7,7 +7,7 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-09-XX
+## [0.2.0] - 2026-09-02
 
 ### Added
 - File transfer: upload and download support across CLI, Extension, and DSH Plugin
