@@ -127,6 +127,38 @@ describe("requestBorrowConfirmation", () => {
     expect(message.requestId.length).toBeGreaterThan(0);
   });
 
+  it("proactively focuses the user window before sending the overlay message", async () => {
+    tabs.get.mockResolvedValueOnce({ id: 42, title: "Tab" });
+    windows.getLastFocused.mockResolvedValueOnce(
+      userWindowWithActiveTab({ windowId: 77, tabId: 7, url: "https://app.example/" }),
+    );
+    tabs.sendMessage.mockResolvedValueOnce({ type: "borrow-response", allowed: true });
+
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+    });
+    await vi.runAllTimersAsync();
+    await pending;
+
+    expect(windows.update).toHaveBeenCalledWith(77, { focused: true });
+  });
+
+  it("still proceeds when proactive window focus fails", async () => {
+    tabs.get.mockResolvedValueOnce({ id: 42, title: "Tab" });
+    windows.getLastFocused.mockResolvedValueOnce(
+      userWindowWithActiveTab({ windowId: 77, tabId: 7, url: "https://app.example/" }),
+    );
+    windows.update.mockRejectedValueOnce(new Error("window gone"));
+    tabs.sendMessage.mockResolvedValueOnce({ type: "borrow-response", allowed: true });
+
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+    });
+    await vi.runAllTimersAsync();
+
+    expect(await pending).toBe(true);
+  });
+
   it("sends confirmation to the borrow target when it is the active tab", async () => {
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Active Tab" });
     windows.getLastFocused.mockResolvedValueOnce(
