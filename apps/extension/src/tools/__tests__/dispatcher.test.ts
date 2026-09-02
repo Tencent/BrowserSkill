@@ -232,6 +232,107 @@ describe("ToolDispatcher", () => {
     });
   });
 
+  it("bypasses and restores the control overlay for an upload trigger click", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => ({ id: 7, windowId: 4242, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 4242, active: true }]),
+        sendMessage,
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => {}),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 123, { tabId: 7 });
+    const send = vi.fn(async <T>(_tabId: number, method: string, params?: object) => {
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } } as T;
+      }
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] } as T;
+      }
+      if (method === "DOM.resolveNode") {
+        return { object: { objectId: "trigger-object" } } as T;
+      }
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 456 } } as T;
+      if (method === "Runtime.callFunctionOn") {
+        const declaration = (params as { functionDeclaration?: string }).functionDeclaration ?? "";
+        if (declaration.includes("count: state.inputs.length")) {
+          return { result: { value: { count: 1, multiple: false } } } as T;
+        }
+        if (declaration.includes("inputs[0]")) {
+          return { result: { objectId: "input-object" } } as T;
+        }
+        return { result: { value: true } } as T;
+      }
+      if (method === "Runtime.evaluate") {
+        const expression = (params as { expression?: string }).expression ?? "";
+        if (expression.includes("overlayDetails")) {
+          return { result: { value: { hitIndex: 0 } } } as T;
+        }
+        if (expression.includes("overlayHostPresent")) {
+          return {
+            result: {
+              value: { overlayHostPresent: true, overlayHostConnected: true },
+            },
+          } as T;
+        }
+        if (expression.includes("count:")) {
+          return { result: { value: { count: 1, multiple: false } } } as T;
+        }
+        if (expression.includes("?.inputs[0]")) {
+          return { result: { objectId: "input-object" } } as T;
+        }
+        return { result: { value: true } } as T;
+      }
+      return {} as T;
+    });
+    const cdp = {
+      send,
+      detachSession: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    dispatcher.start();
+
+    deliver(
+      makeRequest("tool.upload", {
+        session_id: "aa11",
+        ref: "@e1",
+        files: [{ transfer_id: "tr_1", name: "test.png", staged_path: "/stage/test.png" }],
+      }),
+    );
+    await flushMicrotasks();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, file_names: ["test.png"] } });
+    expect(sendMessage).toHaveBeenNthCalledWith(1, 7, {
+      type: "bh-automation-bypass",
+      enabled: true,
+    });
+    expect(sendMessage).toHaveBeenNthCalledWith(2, 7, {
+      type: "bh-automation-bypass",
+      enabled: false,
+    });
+  });
+
   it("detaches CDP state before stopping a session", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({

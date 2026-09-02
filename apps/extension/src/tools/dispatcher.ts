@@ -4,6 +4,7 @@ import type { Transport } from "@/transport/transport";
 import type {
   ClickParams,
   ConsoleParams,
+  DownloadParams,
   EmulateParams,
   EvaluateParams,
   FillParams,
@@ -28,10 +29,12 @@ import type {
   ScreenshotParams,
   SelectParams,
   SnapshotParams,
+  UploadParams,
   WaitForNavigationParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
+import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
@@ -79,6 +82,7 @@ import {
   type TabReturnParams,
   type TabSelectParams,
 } from "./tabs";
+import { handleUpload } from "./upload";
 import { handleWaitForNavigation } from "./waits";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
@@ -517,6 +521,40 @@ export class ToolDispatcher {
             ),
           signal,
         );
+      case "tool.upload":
+        return this.withHoverReleaseForRequest(
+          req.params as UploadParams,
+          () =>
+            this.cdp
+              ? handleUpload(this.sessions, req.params as UploadParams, {
+                  cdp: this.cdp,
+                  tabsApi: chromeTabsApi,
+                  signal,
+                  bypassOverlay,
+                })
+              : Promise.resolve({
+                  code: "unsupported",
+                  message: "upload requires CDP",
+                } satisfies RpcError),
+          signal,
+        );
+      case "tool.download":
+        return this.withHoverReleaseForRequest(
+          req.params as DownloadParams,
+          () =>
+            this.cdp
+              ? handleDownload(this.sessions, req.params as DownloadParams, {
+                  cdp: this.cdp,
+                  tabsApi: chromeTabsApi,
+                  signal,
+                  bypassOverlay,
+                })
+              : Promise.resolve({
+                  code: "unsupported",
+                  message: "download requires CDP",
+                } satisfies RpcError),
+          signal,
+        );
       case "tool.evaluate":
         return handleEvaluate(
           this.sessions,
@@ -723,6 +761,8 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.fill":
     case "tool.press":
     case "tool.select":
+    case "tool.upload":
+    case "tool.download":
     case "tool.evaluate":
     case "tool.observe":
     case "tool.request_help":

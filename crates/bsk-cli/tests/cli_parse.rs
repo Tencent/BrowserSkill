@@ -214,6 +214,45 @@ fn rejects_zero_click_count() {
 }
 
 #[test]
+fn parses_upload_with_repeated_files() {
+    let cli = parse(&[
+        "bsk",
+        "upload",
+        "@e3",
+        "--file",
+        "one.png",
+        "--file",
+        "two.png",
+        "--session",
+        "s1",
+    ]);
+    let Command::Upload(args) = cli.command else {
+        panic!("expected upload command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e3"));
+    assert_eq!(args.files.len(), 2);
+}
+
+#[test]
+fn parses_download_with_exact_output_policy() {
+    let cli = parse(&[
+        "bsk",
+        "download",
+        "#export",
+        "--out",
+        "result.zip",
+        "--session",
+        "s1",
+        "--overwrite",
+    ]);
+    let Command::Download(args) = cli.command else {
+        panic!("expected download command");
+    };
+    assert_eq!(args.target.as_deref(), Some("#export"));
+    assert!(args.overwrite);
+}
+
+#[test]
 fn parses_record_start_with_browser_and_url() {
     let cli = parse(&[
         "bsk",

@@ -30,6 +30,7 @@ export default defineConfig({
     permissions: [
       "alarms",
       "debugger",
+      "downloads",
       "idle",
       "notifications",
       "tabs",
