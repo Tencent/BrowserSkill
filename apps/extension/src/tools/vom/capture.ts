@@ -9,7 +9,7 @@ import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
 import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
 import type { CdpRunner } from "../shared";
-import { clearHover, waitForHover } from "./hover-perception";
+import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 
 const REQUESTED_STYLES = ["position", "pointer-events", "cursor", "visibility", "opacity"] as const;
 const STYLE_COL = Object.fromEntries(
@@ -71,14 +71,11 @@ export interface CapturedViewModel {
   /** Explicit DOMSnapshot frame ancestry; never inferred from backend node ids. */
   frameParentIds?: Map<string, string>;
   rootFrameId?: string;
-  surfaceProbes?: CapturedSurfaceProbe[];
   /** Backend node ids belonging to the agent overlay host + its shadow subtree. */
   excludedBackendNodeIds: Set<number>;
 }
 
 export interface CaptureViewModelOptions {
-  conditionalSurfaceProbe?: boolean;
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
 }
 
@@ -368,7 +365,16 @@ function collectBackendIdsFromDomNode(node: CdpDomNode | undefined, out: Set<num
   }
 }
 
-const MAX_HOVER_PROBE_MS = 2_000;
+/**
+ * Ceiling for the whole hover-surface phase.
+ *
+ * The previous 2000 was only a floor: the loop checked elapsed time at the top,
+ * so a candidate could start with 1ms left and still run its two settle
+ * windows, pushing real cost to ~2.6s. This is that true ceiling, now actually
+ * enforced by an up-front affordability check, so the same number of candidates
+ * get probed under a bound that no longer lies.
+ */
+const MAX_HOVER_PROBE_MS = 2_600;
 const MAX_HOVER_TRIGGERS = 6;
 const MAX_HOVER_SURFACES = 3;
 const HOVER_SETTLE_MS = 300;
@@ -614,13 +620,35 @@ function confidenceForHover(
   return "low";
 }
 
-async function probeHoverSurfaces(
+/**
+ * One candidate costs two settle windows (baseline + post-hover) plus a few
+ * CDP round trips. Used to decide whether the next candidate still fits the
+ * budget before paying for it.
+ */
+const HOVER_CANDIDATE_COST_MS = HOVER_SETTLE_MS * 2;
+
+export interface HoverSurfaceProbeOptions {
+  signal?: AbortSignal;
+}
+
+/**
+ * Hovers a bounded set of likely menu triggers and reports the sub-items each
+ * one reveals.
+ *
+ * Runs after DOM *and* accessibility capture. Hovering can open menus and
+ * change layout, so probing between the two captures would leave the DOM half
+ * of an observation describing the page before the change and the AX half
+ * describing it after.
+ *
+ * The caller owns the overlay bypass span (see `withOverlayBypass`).
+ */
+export async function probeHoverSurfaces(
   cdp: CdpRunner,
   tabId: number,
   nodes: CapturedNode[],
-  options: CaptureViewModelOptions,
+  options: HoverSurfaceProbeOptions = {},
 ): Promise<CapturedSurfaceProbe[]> {
-  const started = Date.now();
+  const budget = new ProbeBudget(MAX_HOVER_PROBE_MS);
   try {
     throwIfAborted(options.signal);
     const cssScan = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
@@ -635,60 +663,54 @@ async function probeHoverSurfaces(
     const results: CapturedSurfaceProbe[] = [];
     const seen = new Set<number>();
     throwIfAborted(options.signal);
-    await options.hoverProbeBypassOverlay?.(tabId, true).catch(() => undefined);
-    try {
+    for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
       throwIfAborted(options.signal);
-      for (const candidate of candidates.slice(0, MAX_HOVER_TRIGGERS)) {
+      if (!budget.canAfford(HOVER_CANDIDATE_COST_MS)) break;
+      if (results.length >= MAX_HOVER_SURFACES) break;
+      if (seen.has(candidate.backendNodeId)) continue;
+      try {
+        await clearHover(cdp, tabId);
         throwIfAborted(options.signal);
-        if (Date.now() - started > MAX_HOVER_PROBE_MS) break;
-        if (results.length >= MAX_HOVER_SURFACES) break;
-        if (seen.has(candidate.backendNodeId)) continue;
-        try {
-          await clearHover(cdp, tabId);
-          throwIfAborted(options.signal);
-          await waitForHover(HOVER_SETTLE_MS, options.signal);
-          const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-            expression: hoverStateExpression(),
-            returnByValue: true,
-          });
-          throwIfAborted(options.signal);
-          const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
+        await waitForHover(HOVER_SETTLE_MS, options.signal);
+        const baselineReply = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+          expression: hoverStateExpression(),
+          returnByValue: true,
+        });
+        throwIfAborted(options.signal);
+        const baselineItems = runtimeValue<HoverRuntimeItem[]>(baselineReply) ?? [];
 
-          throwIfAborted(options.signal);
-          await cdp.send(tabId, "Input.dispatchMouseEvent", {
-            type: "mouseMoved",
-            x: candidate.x,
-            y: candidate.y,
-          });
-          throwIfAborted(options.signal);
-          await waitForHover(HOVER_SETTLE_MS, options.signal);
-          const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
-            expression: hoverStateExpression(),
-            returnByValue: true,
-          });
-          throwIfAborted(options.signal);
-          const subItems = diffHoverItems(
-            baselineItems,
-            runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
-          );
-          if (subItems.length === 0) continue;
-          seen.add(candidate.backendNodeId);
-          results.push({
-            triggerBackendNodeId: candidate.backendNodeId,
-            triggerPoint: { x: candidate.x, y: candidate.y },
-            triggerAction: "hover",
-            subItems,
-            confidence: confidenceForHover(candidate, subItems),
-          });
-        } catch (error) {
-          if (isAbortError(error)) throw error;
-          continue;
-        } finally {
-          await clearHover(cdp, tabId);
-        }
+        throwIfAborted(options.signal);
+        await cdp.send(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseMoved",
+          x: candidate.x,
+          y: candidate.y,
+        });
+        throwIfAborted(options.signal);
+        await waitForHover(HOVER_SETTLE_MS, options.signal);
+        const collected = await cdp.send<RuntimeEvaluateReply>(tabId, "Runtime.evaluate", {
+          expression: hoverStateExpression(),
+          returnByValue: true,
+        });
+        throwIfAborted(options.signal);
+        const subItems = diffHoverItems(
+          baselineItems,
+          runtimeValue<HoverRuntimeItem[]>(collected) ?? [],
+        );
+        if (subItems.length === 0) continue;
+        seen.add(candidate.backendNodeId);
+        results.push({
+          triggerBackendNodeId: candidate.backendNodeId,
+          triggerPoint: { x: candidate.x, y: candidate.y },
+          triggerAction: "hover",
+          subItems,
+          confidence: confidenceForHover(candidate, subItems),
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        continue;
+      } finally {
+        await clearHover(cdp, tabId);
       }
-    } finally {
-      await options.hoverProbeBypassOverlay?.(tabId, false).catch(() => undefined);
     }
     return results;
   } catch (err) {
@@ -1042,7 +1064,6 @@ export async function captureViewModel(
       nodes: [],
       viewport,
       iframeNodes: new Map(),
-      surfaceProbes: [],
       excludedBackendNodeIds: new Set(),
     };
   }
@@ -1071,11 +1092,6 @@ export async function captureViewModel(
   await enrichFormControlStates(cdp, tabId, [nodes, ...iframeNodes.values()], options.signal);
   throwIfAborted(options.signal);
 
-  const surfaceProbes = options.conditionalSurfaceProbe
-    ? await probeHoverSurfaces(cdp, tabId, nodes, options)
-    : [];
-  throwIfAborted(options.signal);
-
   const frameNodes = new Map<string, CapturedNode[]>();
   if (topContext.frameId) frameNodes.set(topContext.frameId, nodes);
   for (const iframeFrameNodes of iframeNodes.values()) {
@@ -1096,7 +1112,6 @@ export async function captureViewModel(
     frameOwnerBackendNodeIds: frameParsed.frameOwnerBackendNodeIds,
     frameParentIds: frameParsed.frameParentIds,
     ...(topContext.frameId ? { rootFrameId: topContext.frameId } : {}),
-    surfaceProbes,
     excludedBackendNodeIds,
   };
 }

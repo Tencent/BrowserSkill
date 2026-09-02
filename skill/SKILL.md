@@ -65,13 +65,22 @@ make them stale. Observe again before the next interaction.
 An observation marks a hover-only surface as `@e1 button "Products" [hover first: Shoes | Bags]`.
 The listed items are labels, not usable refs: hover the trigger, observe again, then act on the
 revealed item's own ref. Do not click the trigger itself unless the user wants the trigger's action.
+`[has-submenu]` and `[expanded]` mark the same kind of trigger without listing what it hides.
+
+`bsk observe` does not hover the page on its own. Reach for `--probe-hover` when a control you have
+good reason to expect is absent **and** no marker points at a trigger — that combination is what a
+CSS-only hover menu looks like from here. It hovers a bounded set of likely triggers, so it costs a
+few seconds and touches the live page; once you know which element hides the menu, `bsk hover <ref>`
+is cheaper and more precise.
 
 Escalate page reading only as needed:
 
 1. `bsk observe` for normal semantic understanding, text, controls, and refs.
-2. `bsk snapshot` when a stricter static accessibility tree is more useful.
-3. `bsk get-html` for exact markup or hidden metadata that semantic views cannot provide.
-4. `bsk screenshot` for layout, styling, canvas, images, or requested visual evidence.
+2. `bsk observe --probe-hover` once when an expected control is missing and no marker points at a
+   trigger.
+3. `bsk snapshot` when a stricter static accessibility tree is more useful.
+4. `bsk get-html` for exact markup or hidden metadata that semantic views cannot provide.
+5. `bsk screenshot` for layout, styling, canvas, images, or requested visual evidence.
 
 Do not start with raw HTML or screenshots merely to discover ordinary controls. When interaction is
 needed, obtain a fresh observation before acting on screenshot or HTML findings.
