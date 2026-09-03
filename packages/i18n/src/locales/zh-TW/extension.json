@@ -1,0 +1,94 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "未連線",
+      "connecting": "連線中…",
+      "connected": "已連線",
+      "version_skew": "已連線",
+      "disabled": "連線已關閉"
+    },
+    "stateDetail": {
+      "disconnected": "請先開啟 BrowserSkill。",
+      "connecting": "正在連線 BrowserSkill…",
+      "connected": "可接收自動化任務。",
+      "version_skew": "通訊協定版本不同，請及時升級。"
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "可升級",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "BrowserSkill 連線",
+    "controlHintsToggleTitle": "控制提示",
+    "controlHintsToggleHint": "Agent 控制頁面時顯示提示條與橘色光暈。",
+    "controlHintsInfoLabel": "控制提示說明",
+    "versionSkewWarning": "擴充功能通訊協定 v{{extensionProtocol}}，CLI 通訊協定 v{{cliProtocol}}。版本不同，請及時升級。",
+    "upgradeAvailable": "可升級",
+    "launcher": {
+      "title": "快捷功能"
+    },
+    "back": "返回",
+    "runtimeTitle": "執行環境版本",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "擴充功能 v{{version}}",
+    "extensionVersionHint": "擴充功能版本",
+    "daemonVersionHint": "bsk 版本",
+    "protocolVersion": "通訊協定 v{{version}}",
+    "extensionProtocol": "擴充功能通訊協定 v{{version}}",
+    "daemonProtocol": "daemon 通訊協定 v{{version}}",
+    "instanceTitle": "執行個體 ID",
+    "instanceDescription": "此瀏覽器的唯一連線識別碼",
+    "copy": "複製",
+    "copied": "已複製",
+    "copyInstanceId": "複製執行個體 ID",
+    "record": {
+      "sectionTitle": "操作錄製",
+      "cardDesc": "錄製你的操作，供 Agent 參考",
+      "sectionHint": "產生一段錄製指令，發送給 Agent 後即可啟動擴充功能錄製你的操作，之後 Agent 可參考產生的 trace 目錄包自動完成類似任務。",
+      "topicLabel": "操作主題（選填）",
+      "topicPlaceholder": "例如：發布一篇文章",
+      "startUrlLabel": "起始網址（選填）",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "複製錄製指令",
+      "copied": "已複製",
+      "hintDisconnected": "連線後可用",
+      "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 錄製我接下來的瀏覽器操作。\n\n步驟：\n1. 執行：{{command}}\n2. 你確認已開始後，我會在開啟的視窗中自行操作。\n3. 我點選「結束」後，讀取產生的 `./trace` 目錄包（`trace.json` + `states/`），摘要我做了什麼。"
+    }
+  },
+  "controlOverlay": {
+    "status": "Agent 正在控制",
+    "interrupt": "中斷",
+    "interrupting": "中斷中…"
+  },
+  "borrowConfirmation": {
+    "title": "允許借用分頁？",
+    "titleInactive": "Agent 請求借用分頁",
+    "body": "AI Agent 希望將此分頁移至其工作區。你可以拒絕或允許借用。",
+    "targetTab": "目標分頁：",
+    "autoDeny": "{{count}} 秒後自動拒絕",
+    "deny": "拒絕",
+    "allow": "允許",
+    "notificationTitle": "BrowserSkill：Agent 請求借用分頁",
+    "notificationBody": "請在瀏覽器中允許或拒絕對「{{tabTitle}}」的借用。"
+  },
+  "helpRequest": {
+    "title": "Agent 需要你的協助",
+    "compactStatus": "Agent 仍在等待你完成此步驟",
+    "noteLabel": "給 Agent 的備註（選填）",
+    "notePlaceholder": "給 Agent 留言（選填）",
+    "continue": "完成並交還控制權",
+    "cancel": "取消請求",
+    "collapse": "摺疊",
+    "expand": "展開",
+    "dragHandle": "拖曳以移動",
+    "notificationTitle": "BrowserSkill：Agent 需要你的協助"
+  },
+  "recordOverlay": {
+    "recording": "正在錄製你的操作",
+    "finish": "結束"
+  }
+}

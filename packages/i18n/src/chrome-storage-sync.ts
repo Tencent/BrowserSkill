@@ -38,34 +38,46 @@ function getChromeLocal(): ChromeStorageLocal | undefined {
 const TRADITIONAL_CHINESE_REGIONS = new Set(["tw", "hk", "mo"]);
 
 /**
+ * Language subtag → shipped resource key, for every locale we translate.
+ *
+ * Keys are bare language subtags so regional variants share one bundle:
+ * `fr-CA`, `fr-BE` and `fr` all resolve to `fr`. Chinese is handled separately
+ * in `normalizeLanguageCode`, because Simplified and Traditional differ by
+ * script rather than by region.
+ */
+const RESOURCE_BY_LANGUAGE: Record<string, string> = {
+  en: "en-US",
+  ja: "ja",
+  ko: "ko",
+  fr: "fr",
+  it: "it",
+  de: "de",
+  es: "es",
+};
+
+/**
  * Normalize a BCP 47 language tag to one of the shipped resource keys.
  *
- * | detected tag            | resource | rule                        |
- * | ----------------------- | -------- | --------------------------- |
- * | `en`, `en-GB`, `en-CN`  | `en-US`  | every English variant       |
- * | `zh-Hans`, `zh-Hans-CN` | `zh-CN`  | script subtag wins          |
- * | `zh-Hant`, `zh-Hant-TW` | `zh-TW`  | script subtag wins          |
- * | `zh-CN`, `zh-SG`        | `zh-CN`  | region subtag              |
- * | `zh-TW`, `zh-HK`, `zh-MO`| `zh-TW` | region subtag              |
- * | `zh` (bare)             | `zh-CN`  | default: Simplified         |
- * | `ja`, `fr`, `de`, …     | unchanged| no resource → `fallbackLng` |
+ * | detected tag             | resource | rule               |
+ * | ------------------------ | -------- | ------------------ |
+ * | `en`, `en-GB`, `en-CN`   | `en-US`  | language subtag    |
+ * | `zh-Hans*`               | `zh-CN`  | script subtag wins |
+ * | `zh-Hant*`               | `zh-TW`  | script subtag wins |
+ * | `zh-CN`, `zh-SG`, `zh`   | `zh-CN`  | region / default   |
+ * | `zh-TW`, `zh-HK`, `zh-MO`| `zh-TW`  | region subtag      |
+ * | `ja*`, `ko*`, `fr*`      | `ja`, `ko`, `fr` | language subtag |
+ * | `it*`, `de*`, `es*`      | `it`, `de`, `es` | language subtag |
+ * | anything else            | unchanged| → `fallbackLng`    |
  *
  * Simplified vs Traditional is decided by the script subtag (`Hans` / `Hant`)
  * when present, then by the region subtag — Chrome reports `zh-CN` / `zh-TW`
  * rather than script subtags in practice.
- *
- * The `zh-TW` branch is written now so adding a Traditional translation later
- * needs no code change; until that resource exists i18next falls back to `zh-CN`.
  */
 export function normalizeLanguageCode(code: string): string {
   const parts = code.split(/[-_]/).map((part) => part.toLowerCase());
   const primary = parts[0];
 
-  // English — every variant resolves to the single `en-US` resource.
-  if (primary === "en") {
-    return "en-US";
-  }
-
+  // Chinese needs script-level resolution; every other locale maps by subtag.
   if (primary === "zh") {
     // 1. Script subtag is the most accurate signal (zh-Hans / zh-Hant).
     if (parts.includes("hans")) {
@@ -85,7 +97,7 @@ export function normalizeLanguageCode(code: string): string {
   }
 
   // No translation shipped: leave untouched so i18next applies `fallbackLng`.
-  return code;
+  return RESOURCE_BY_LANGUAGE[primary] ?? code;
 }
 
 /**

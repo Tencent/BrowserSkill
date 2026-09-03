@@ -1,0 +1,94 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "Nicht verbunden",
+      "connecting": "Verbinden…",
+      "connected": "Verbunden",
+      "version_skew": "Verbunden",
+      "disabled": "Verbindung aus"
+    },
+    "stateDetail": {
+      "disconnected": "Öffne BrowserSkill, um eine Verbindung herzustellen.",
+      "connecting": "Verbindung mit BrowserSkill wird hergestellt…",
+      "connected": "Bereit für Automatisierungsaufgaben.",
+      "version_skew": "Protokollversionen weichen ab. Bitte aktualisieren."
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "Aktualisierbar",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "BrowserSkill-Verbindung",
+    "controlHintsToggleTitle": "Steuerungshinweise",
+    "controlHintsToggleHint": "Zeigt das Statusfeld und den orangen Schein, während der Agent eine Seite steuert.",
+    "controlHintsInfoLabel": "Über Steuerungshinweise",
+    "versionSkewWarning": "Erweiterungsprotokoll v{{extensionProtocol}}, CLI-Protokoll v{{cliProtocol}}. Die Versionen weichen ab – bitte aktualisieren.",
+    "upgradeAvailable": "Aktualisierbar",
+    "launcher": {
+      "title": "Schnellaktionen"
+    },
+    "back": "Zurück",
+    "runtimeTitle": "Laufzeit",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "Erweiterung v{{version}}",
+    "extensionVersionHint": "Erweiterungsversion",
+    "daemonVersionHint": "bsk-Version",
+    "protocolVersion": "Protokoll v{{version}}",
+    "extensionProtocol": "Erweiterungsprotokoll v{{version}}",
+    "daemonProtocol": "Daemon-Protokoll v{{version}}",
+    "instanceTitle": "Instanz-ID",
+    "instanceDescription": "Eindeutige Verbindungskennung dieses Browsers",
+    "copy": "Kopieren",
+    "copied": "Kopiert",
+    "copyInstanceId": "Instanz-ID kopieren",
+    "record": {
+      "sectionTitle": "Aktionsaufzeichnung",
+      "cardDesc": "Nimm deine Aktionen als Referenz für den Agenten auf",
+      "sectionHint": "Erzeugt eine Aufzeichnungsanweisung – sende sie an deinen Agenten, um die Aufzeichnung deiner Aktionen zu starten; der Agent kann das erzeugte trace-Bündel anschließend nutzen, um ähnliche Aufgaben zu automatisieren.",
+      "topicLabel": "Thema (optional)",
+      "topicPlaceholder": "z. B. Artikel veröffentlichen",
+      "startUrlLabel": "Start-URL (optional)",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "Aufzeichnungsanweisung kopieren",
+      "copied": "Kopiert",
+      "hintDisconnected": "Nach der Verbindung verfügbar",
+      "promptTemplate": "Verwende die `bsk`-CLI von BrowserSkill, um die Browseraktionen aufzuzeichnen, die ich gleich zeige.\n\nSchritte:\n1. Ausführen: {{command}}\n2. Sobald du den Start bestätigt hast, bediene ich das geöffnete Fenster selbst.\n3. Nachdem ich auf Fertig geklickt habe, lies das geschriebene `./trace`-Bündel (`trace.json` + `states/`) und fasse zusammen, was ich getan habe."
+    }
+  },
+  "controlOverlay": {
+    "status": "Agent steuert",
+    "interrupt": "Unterbrechen",
+    "interrupting": "Wird unterbrochen…"
+  },
+  "borrowConfirmation": {
+    "title": "Tab-Ausleihe erlauben?",
+    "titleInactive": "Agent möchte einen Tab ausleihen",
+    "body": "Ein KI-Agent möchte diesen Tab in seinen Arbeitsbereich verschieben. Du kannst die Ausleihe ablehnen oder erlauben.",
+    "targetTab": "Ziel-Tab:",
+    "autoDeny": "Anfrage läuft in {{count}} s ab",
+    "deny": "Ablehnen",
+    "allow": "Erlauben",
+    "notificationTitle": "BrowserSkill: Agent möchte einen Tab ausleihen",
+    "notificationBody": "Genehmige oder ablehne die Ausleihe von „{{tabTitle}}“ in deinem Browser."
+  },
+  "helpRequest": {
+    "title": "Agent benötigt deine Hilfe",
+    "compactStatus": "Der Agent wartet weiterhin darauf, dass du diesen Schritt abschließt",
+    "noteLabel": "Optionale Notiz an den Agenten",
+    "notePlaceholder": "Notiz für den Agenten hinzufügen (optional)",
+    "continue": "Fertig, Steuerung zurückgeben",
+    "cancel": "Anfrage abbrechen",
+    "collapse": "Einklappen",
+    "expand": "Ausklappen",
+    "dragHandle": "Zum Verschieben ziehen",
+    "notificationTitle": "BrowserSkill: Agent benötigt deine Hilfe"
+  },
+  "recordOverlay": {
+    "recording": "Deine Aktionen werden aufgezeichnet",
+    "finish": "Fertig"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "KI-Agenten über die bsk-CLI deinen angemeldeten Browser steuern lassen"
+  }
+}

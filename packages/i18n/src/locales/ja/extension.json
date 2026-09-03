@@ -1,0 +1,94 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "未接続",
+      "connecting": "接続中…",
+      "connected": "接続済み",
+      "version_skew": "接続済み",
+      "disabled": "接続オフ"
+    },
+    "stateDetail": {
+      "disconnected": "BrowserSkill を開いて接続してください。",
+      "connecting": "BrowserSkill に接続しています…",
+      "connected": "自動化タスクを受け付けられます。",
+      "version_skew": "プロトコルバージョンが異なります。アップグレードしてください。"
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "アップグレード可",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "BrowserSkill 接続",
+    "controlHintsToggleTitle": "操作ヒント",
+    "controlHintsToggleHint": "Agent がページを操作中、ステータスピルとオレンジの光を表示します。",
+    "controlHintsInfoLabel": "操作ヒントについて",
+    "versionSkewWarning": "拡張プロトコル v{{extensionProtocol}}、CLI プロトコル v{{cliProtocol}}。バージョンが異なるため、アップグレードしてください。",
+    "upgradeAvailable": "アップグレード可",
+    "launcher": {
+      "title": "クイックアクション"
+    },
+    "back": "戻る",
+    "runtimeTitle": "ランタイム",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "拡張 v{{version}}",
+    "extensionVersionHint": "拡張機能のバージョン",
+    "daemonVersionHint": "bsk バージョン",
+    "protocolVersion": "プロトコル v{{version}}",
+    "extensionProtocol": "拡張プロトコル v{{version}}",
+    "daemonProtocol": "daemon プロトコル v{{version}}",
+    "instanceTitle": "インスタンス ID",
+    "instanceDescription": "このブラウザの一意な接続識別子",
+    "copy": "コピー",
+    "copied": "コピーしました",
+    "copyInstanceId": "インスタンス ID をコピー",
+    "record": {
+      "sectionTitle": "操作の記録",
+      "cardDesc": "Agent の参考用に操作を記録します",
+      "sectionHint": "記録用の指示文を生成します。Agent に送信すると操作の記録を開始でき、Agent は書き出された trace バンドルを参照して同様のタスクを自動化できます。",
+      "topicLabel": "トピック（任意）",
+      "topicPlaceholder": "例：記事を公開する",
+      "startUrlLabel": "開始 URL（任意）",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "記録用の指示をコピー",
+      "copied": "コピーしました",
+      "hintDisconnected": "接続後に利用できます",
+      "promptTemplate": "BrowserSkill の `bsk` CLI を使って、これから実演するブラウザ操作を記録してください。\n\n手順：\n1. 実行：{{command}}\n2. 開始を確認したら、開いたウィンドウで私自身が操作します。\n3. 「完了」をクリックしたら、書き出された `./trace` バンドル（`trace.json` + `states/`）を読み取り、私が行った操作を要約してください。"
+    }
+  },
+  "controlOverlay": {
+    "status": "Agent が操作中",
+    "interrupt": "中断",
+    "interrupting": "中断中…"
+  },
+  "borrowConfirmation": {
+    "title": "タブの借用を許可しますか？",
+    "titleInactive": "Agent がタブの借用を求めています",
+    "body": "AI エージェントがこのタブを作業スペースに移動しようとしています。拒否または許可できます。",
+    "targetTab": "対象タブ：",
+    "autoDeny": "{{count}} 秒で自動的に拒否されます",
+    "deny": "拒否",
+    "allow": "許可",
+    "notificationTitle": "BrowserSkill：Agent がタブの借用を求めています",
+    "notificationBody": "ブラウザ上で「{{tabTitle}}」の借用を許可または拒否してください。"
+  },
+  "helpRequest": {
+    "title": "Agent があなたの操作を求めています",
+    "compactStatus": "Agent はこのステップの完了を待っています",
+    "noteLabel": "Agent へのメモ（任意）",
+    "notePlaceholder": "Agent へのメモを入力（任意）",
+    "continue": "完了して操作を戻す",
+    "cancel": "リクエストをキャンセル",
+    "collapse": "折りたたむ",
+    "expand": "展開する",
+    "dragHandle": "ドラッグして移動",
+    "notificationTitle": "BrowserSkill：Agent があなたの操作を求めています"
+  },
+  "recordOverlay": {
+    "recording": "操作を記録しています",
+    "finish": "完了"
+  }
+}

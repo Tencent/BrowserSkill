@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "bsk CLI 経由で AI エージェントにログイン済みブラウザを操作させる"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "Permettre aux agents IA de piloter votre navigateur connecté via la CLI bsk"
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "popup": {
+    "brandCategory": "Browser Automation",
+    "brandName": "BrowserSkill",
+    "stateLabel": {
+      "disconnected": "Desconectado",
+      "connecting": "Conectando…",
+      "connected": "Conectado",
+      "version_skew": "Conectado",
+      "disabled": "Conexión desactivada"
+    },
+    "stateDetail": {
+      "disconnected": "Abre BrowserSkill para conectarte.",
+      "connecting": "Conectando con BrowserSkill…",
+      "connected": "Listo para tareas de automatización.",
+      "version_skew": "Las versiones del protocolo difieren. Actualiza, por favor."
+    },
+    "stateBadge": {
+      "disconnected": "Standby",
+      "connecting": "Igniting",
+      "connected": "Ready",
+      "version_skew": "Actualizable",
+      "disabled": "Off"
+    },
+    "connectionToggleTitle": "Conexión de BrowserSkill",
+    "controlHintsToggleTitle": "Indicadores de control",
+    "controlHintsToggleHint": "Muestra la píldora de estado y el resplandor naranja mientras el agente controla una página.",
+    "controlHintsInfoLabel": "Acerca de los indicadores de control",
+    "versionSkewWarning": "Protocolo de la extensión v{{extensionProtocol}}, protocolo de la CLI v{{cliProtocol}}. Las versiones difieren: actualiza, por favor.",
+    "upgradeAvailable": "Actualizable",
+    "launcher": {
+      "title": "Acciones rápidas"
+    },
+    "back": "Atrás",
+    "runtimeTitle": "Tiempo de ejecución",
+    "daemonVersion": "daemon v{{version}}",
+    "extensionVersion": "extensión v{{version}}",
+    "extensionVersionHint": "Versión de la extensión",
+    "daemonVersionHint": "Versión de bsk",
+    "protocolVersion": "protocolo v{{version}}",
+    "extensionProtocol": "protocolo de la extensión v{{version}}",
+    "daemonProtocol": "protocolo del daemon v{{version}}",
+    "instanceTitle": "ID de instancia",
+    "instanceDescription": "Identificador de conexión único de este navegador",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "copyInstanceId": "Copiar ID de instancia",
+    "record": {
+      "sectionTitle": "Grabación de acciones",
+      "cardDesc": "Graba tus acciones como referencia para el agente",
+      "sectionHint": "Genera una instrucción de grabación: envíala a tu agente para que empiece a grabar tus acciones; después el agente podrá usar el paquete trace generado para automatizar tareas similares.",
+      "topicLabel": "Tema (opcional)",
+      "topicPlaceholder": "p. ej. Publicar un artículo",
+      "startUrlLabel": "URL inicial (opcional)",
+      "startUrlPlaceholder": "https://…",
+      "copyButton": "Copiar instrucciones de grabación",
+      "copied": "Copiado",
+      "hintDisconnected": "Disponible al conectarse",
+      "promptTemplate": "Usa la CLI `bsk` de BrowserSkill para grabar las acciones del navegador que voy a mostrar.\n\nPasos:\n1. Ejecuta: {{command}}\n2. Cuando confirmes que ha empezado, yo mismo operaré en la ventana abierta.\n3. Después de que pulse Finalizar, lee el paquete `./trace` escrito (`trace.json` + `states/`) y resume lo que hice."
+    }
+  },
+  "controlOverlay": {
+    "status": "Agente controlando",
+    "interrupt": "Interrumpir",
+    "interrupting": "Interrumpiendo…"
+  },
+  "borrowConfirmation": {
+    "title": "¿Permitir el préstamo de la pestaña?",
+    "titleInactive": "Un agente quiere tomar prestada una pestaña",
+    "body": "Un agente de IA quiere mover esta pestaña a su espacio de trabajo. Puedes denegar o permitir el préstamo.",
+    "targetTab": "Pestaña de destino:",
+    "autoDeny": "La solicitud caduca en {{count}} s",
+    "deny": "Denegar",
+    "allow": "Permitir",
+    "notificationTitle": "BrowserSkill: un agente quiere tomar prestada una pestaña",
+    "notificationBody": "Aprueba o deniega el préstamo de «{{tabTitle}}» en tu navegador."
+  },
+  "helpRequest": {
+    "title": "El agente necesita tu ayuda",
+    "compactStatus": "El agente sigue esperando a que termines este paso",
+    "noteLabel": "Nota opcional para el agente",
+    "notePlaceholder": "Añade una nota para el agente (opcional)",
+    "continue": "Listo, devolver el control",
+    "cancel": "Cancelar solicitud",
+    "collapse": "Contraer",
+    "expand": "Expandir",
+    "dragHandle": "Arrastrar para mover",
+    "notificationTitle": "BrowserSkill: el agente necesita tu ayuda"
+  },
+  "recordOverlay": {
+    "recording": "Grabando tus acciones",
+    "finish": "Finalizar"
+  }
+}
