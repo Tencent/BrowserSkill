@@ -47,6 +47,7 @@ pub mod reason {
     pub const OPTION_NOT_FOUND: &str = "option_not_found";
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
+    pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
     pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
@@ -206,6 +207,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::CdpFailed, reason::CDP_EXTENSION_ACCESS_DENIED) => RenderInfo {
+            summary: "Chrome blocked CDP access to another extension's content in this tab",
+            hint: Some(
+                "a web page can contain a restricted extension frame; disable the conflicting extension and reload, or use `bsk navigate <url>` to leave this page; reconnecting BrowserSkill alone does not remove the restriction",
+            ),
+            exit_code: base.exit_code,
+        },
         (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
             summary: "the file transfer outcome could not be confirmed",
             hint: Some(
@@ -452,6 +460,18 @@ mod tests {
             "expected geometry-specific hint"
         );
         assert!(!info.summary.contains("sandbox"));
+    }
+
+    #[test]
+    fn extension_access_denied_explains_the_frame_restriction_and_navigation_recovery() {
+        let data = serde_json::json!({ "reason": reason::CDP_EXTENSION_ACCESS_DENIED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert!(info.summary.contains("another extension"));
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("restricted extension frame"));
+        assert!(hint.contains("bsk navigate <url>"));
+        assert!(hint.contains("disable the conflicting extension"));
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]

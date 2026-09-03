@@ -31,6 +31,7 @@ export type RpcErrorReason =
   | "single_select_value_count"
   | "tab_not_active"
   | "restricted_tab_url"
+  | "cdp_extension_access_denied"
   | "borrow_conflict"
   | "screenshot_capture_failed"
   | "file_input_probe_failed"
