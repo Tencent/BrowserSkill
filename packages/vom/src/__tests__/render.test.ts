@@ -47,8 +47,9 @@ describe("renderVom single-layer page", () => {
     ];
     const out = renderVom(input);
 
+    expect(out.text).toContain("[visual surfaces]");
     expect(out.text).toContain(
-      '@e1 surface "Data grid" [rendering=canvas; layers=2; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
+      '@e1 surface "Data grid" [bounds=10,20,800,500; rendering=canvas; layers=2; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
     );
     expect(out.refs).toContainEqual(
       expect.objectContaining({
@@ -77,7 +78,7 @@ describe("renderVom single-layer page", () => {
     const out = renderVom(input);
 
     expect(out.text).toContain(
-      '@e1 surface "canvas visual surface" [rendering=canvas; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
+      '@e1 surface "canvas visual surface" [bounds=10,20,800,500; rendering=canvas; visual-only; requires=image-understanding; use: bsk screenshot --ref @e1]',
     );
     expect(out.refs).toContainEqual(
       expect.objectContaining({
@@ -87,6 +88,78 @@ describe("renderVom single-layer page", () => {
         capabilities: ["screenshot"],
       }),
     );
+  });
+
+  it("appends visual refs after DOM refs so canvas density cannot renumber controls", () => {
+    const input = scene([
+      node({ id: 1, role: "RootWebArea", frameId: "main" }),
+      node({ id: 2, parentId: 1, role: "button", name: "Submit", tag: "button" }),
+    ]);
+    input.visualSurfaces = [
+      {
+        parentId: 1,
+        backendNodeId: 99,
+        frameId: "main",
+        renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 80, h: 50 },
+        memberCount: 1,
+      },
+    ];
+
+    const withoutVisuals = renderVom({ ...input, visualSurfaces: [] });
+    const withVisuals = renderVom(input);
+
+    expect(withoutVisuals.refs[0]).toMatchObject({ ref: "e1", backendNodeId: 2, kind: "dom" });
+    expect(withVisuals.refs[0]).toMatchObject({ ref: "e1", backendNodeId: 2, kind: "dom" });
+    expect(withVisuals.refs[1]).toMatchObject({ ref: "e2", backendNodeId: 99, kind: "surface" });
+    expect(withVisuals.text.indexOf('@e1 button "Submit"')).toBeLessThan(
+      withVisuals.text.indexOf("[visual surfaces]"),
+    );
+  });
+
+  it("bounds visual output and prefers explicitly labeled surfaces", () => {
+    const input = scene([node({ id: 1, role: "RootWebArea", frameId: "main" })]);
+    input.visualSurfaces = Array.from({ length: 12 }, (_, index) => ({
+      parentId: 1,
+      backendNodeId: 100 + index,
+      frameId: "main",
+      renderingKind: "canvas" as const,
+      visibleRect: { x: index * 10, y: 20, w: 8, h: 8 },
+      ...(index === 11 ? { label: "Important status" } : {}),
+      memberCount: 1,
+    }));
+
+    const out = renderVom(input);
+    const surfaceRefs = out.refs.filter((ref) => ref.kind === "surface");
+
+    expect(surfaceRefs).toHaveLength(8);
+    expect(surfaceRefs[0]).toMatchObject({ backendNodeId: 111, name: "Important status" });
+    expect(out.text).toContain("… 4 additional visual surfaces omitted");
+    expect(out.truncated).toBe(true);
+  });
+
+  it("does not let a visual surface exhaust the budget before later DOM content", () => {
+    const input = scene([
+      node({ id: 1, role: "RootWebArea", name: "Doc", frameId: "main" }),
+      node({ id: 2, parentId: 1, role: "button", name: "First", tag: "button" }),
+      node({ id: 3, parentId: 1, role: "button", name: "Later", tag: "button" }),
+    ]);
+    input.visualSurfaces = [
+      {
+        parentId: 1,
+        backendNodeId: 99,
+        frameId: "main",
+        renderingKind: "canvas",
+        visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+        memberCount: 1,
+      },
+    ];
+
+    const out = renderVom(input, { maxTokens: 30 });
+
+    expect(out.text).toContain('@e2 button "Later"');
+    expect(out.refs.filter((ref) => ref.kind === "surface")).toHaveLength(0);
+    expect(out.truncated).toBe(true);
   });
 
   it("does not derive handle context across frame scopes", () => {
