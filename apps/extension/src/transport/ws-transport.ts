@@ -40,7 +40,7 @@ interface MessageLikeEvent {
  *    (1s, 2s, 4s, …, capped at 5s) until `disconnect()` is called.
  */
 export class WSTransport implements Transport {
-  private readonly url: string;
+  private url: string;
   private readonly factory: WebSocketFactory;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
@@ -67,6 +67,13 @@ export class WSTransport implements Transport {
 
   get state(): ConnectionState {
     return this.currentState;
+  }
+
+  /** Returns whether the URL changed. Does not reconnect. */
+  setUrl(url: string): boolean {
+    if (url === this.url) return false;
+    this.url = url;
+    return true;
   }
 
   connect(): Promise<void> {

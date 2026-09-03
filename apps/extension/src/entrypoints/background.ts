@@ -4,7 +4,9 @@ import { ConnectionController } from "@/lib/connection-controller";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
+  getDaemonPort,
   setConnectionEnabled as persistConnectionEnabled,
+  STORAGE_KEYS,
   setLabel,
 } from "@/lib/instance-id";
 import { startKeepalive } from "@/lib/keepalive";
@@ -41,6 +43,7 @@ import {
   attachRecordStepListener,
   type RecordRuntimeDeps,
 } from "@/tools/record";
+import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { detectBrowserMeta } from "@/transport/handshake";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
@@ -53,6 +56,27 @@ export default defineBackground(() => {
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
+
+  async function applyDaemonPort(port: number): Promise<void> {
+    const url = resolveDaemonWsUrl(port);
+    if (!transport.setUrl(url)) return;
+    await transport.disconnect();
+    if (!controller.isConnectionEnabled) return;
+    try {
+      await transport.connect();
+    } catch (err) {
+      console.debug("[browser-skill] reconnect after port change failed", err);
+    }
+  }
+
+  if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+    chrome.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== "local") return;
+      const change = changes[STORAGE_KEYS.DAEMON_PORT];
+      if (!change || typeof change.newValue !== "number") return;
+      void applyDaemonPort(change.newValue);
+    });
+  }
 
   function setControlMode(sessionId: string, mode: OverlayMode): void {
     if (controlModes.get(sessionId) === mode) return;
@@ -279,6 +303,8 @@ export default defineBackground(() => {
 
   void (async () => {
     const connectionEnabled = await getConnectionEnabled();
+    const port = await getDaemonPort();
+    transport.setUrl(resolveDaemonWsUrl(port));
     await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
       beforeDisconnect: async () => {
         const report = await cleanupAfterDisconnect();
@@ -345,11 +371,6 @@ export default defineBackground(() => {
       if (msg && typeof msg === "object" && "kind" in msg) {
         if (msg.kind === "set_label") {
           void setLabel(msg.value).then(() => controller.refreshLabel());
-        } else if (msg.kind === "set_port") {
-          // Placeholder for the future custom-port UI; warn loudly so
-          // any reintroduced popup control is caught instead of
-          // silently doing nothing (review M4/M5 C2).
-          console.warn("[browser-skill] set_port is not wired yet; ignoring", msg.value);
         } else if (msg.kind === "set_connection_enabled") {
           void controller
             .setConnectionEnabled(msg.value)

@@ -40,13 +40,8 @@ const FALLBACK_SNAPSHOT: SnapshotInfo = {
 /**
  * Live snapshot of the background's `ConnectionController` for popup UI.
  *
- * Posts `set_label` mutations back to the background; the incoming
- * snapshot stream reflects the canonical state. The `set_port` channel
- * is defined by the popup-bridge but is not currently routed to the
- * background — wiring it requires `ConnectionController` to swap its
- * Transport URL and persist the chosen port. Tracked for a follow-up
- * milestone; the popup intentionally does not expose a control until
- * the underlying support lands (review M4/M5 C2).
+ * Posts `set_label` and `set_connection_enabled` mutations back to the
+ * background; the incoming snapshot stream reflects the canonical state.
  */
 export function useConnectionState(): {
   snapshot: SnapshotInfo;

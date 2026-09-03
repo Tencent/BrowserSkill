@@ -26,6 +26,11 @@
     "controlHintsToggleTitle": "控制提示",
     "controlHintsToggleHint": "Agent 控制页面时显示提示条和橙色闪光。",
     "controlHintsInfoLabel": "控制提示说明",
+    "daemonPortLabel": "连接端口",
+    "daemonPortHint": "扩展通过此端口连接本机 daemon。非必要请勿修改。",
+    "daemonPortInfoLabel": "连接端口说明",
+    "daemonPortInvalid": "请输入 1 到 65535 之间的端口号。",
+    "daemonUnreachable": "无法连接，请确认 daemon 已启动且端口一致。",
     "versionSkewWarning": "扩展协议 v{{extensionProtocol}}，CLI 协议 v{{cliProtocol}}。协议版本不同，请及时升级。",
     "upgradeAvailable": "可升级",
     "launcher": {
