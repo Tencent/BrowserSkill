@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { padding: 12px; background: #fdfefe; }
+      canvas { display: block; width: 220px; height: 90px; background: #d5f5e3; border: 2px solid #1e8449; }
+      iframe { width: 280px; height: 150px; margin-top: 10px; border: 2px solid #85929e; }
+    </style>
+  </head>
+  <body>
+    <canvas id="frame-canvas" width="220" height="90"></canvas>
+    <script>
+      const params = new URLSearchParams(location.search);
+      const canvas = document.querySelector("#frame-canvas");
+      if (params.get("canvas") === "0") canvas.remove();
+      else canvas.setAttribute("aria-label", params.get("label") || "fixture-frame-default");
+      if (params.get("nested") === "1") {
+        const iframe = document.createElement("iframe");
+        iframe.title = "nested fixture frame";
+        iframe.src = "frame.html?label=fixture-nested-frame";
+        document.body.append(iframe);
+      }
+    </script>
+  </body>
+</html>

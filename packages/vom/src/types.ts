@@ -61,6 +61,8 @@ export interface VomScene {
   rootFrameId?: string;
   surfaces?: CondSurface[];
   activeScopeBlocks?: ActiveScopeBlock[];
+  /** Non-semantic rendered regions discovered alongside the AX/DOM tree. */
+  visualSurfaces?: VomVisualSurface[];
 }
 
 export interface VomOptions {
@@ -94,6 +96,22 @@ export interface VomRef {
   ref: string;
   backendNodeId: number;
   frameId?: string;
+  /** Observation-time top-viewport crop for screenshot-only surfaces. */
+  visibleRect?: Rect;
+  kind?: "dom" | "surface";
+  capabilities?: VomRefCapability[];
+}
+
+export type VomRefCapability = "interact" | "screenshot";
+
+export interface VomVisualSurface {
+  parentId: number | null;
+  backendNodeId: number;
+  frameId: string;
+  renderingKind: "canvas";
+  visibleRect: Rect;
+  label?: string;
+  memberCount: number;
 }
 
 export interface RenderedRef extends VomRef {

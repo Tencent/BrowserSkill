@@ -9,6 +9,7 @@ import type {
   VomOptions,
   VomResult,
   VomScene,
+  VomVisualSurface,
 } from "./types";
 
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
@@ -87,6 +88,7 @@ const MAX_CUSTOM_RECOVERY_AREA = 180_000;
 const MAX_RECOVERABLE_SINGLE_INTENT_AREA = 360_000;
 const MAX_HANDLE_CONTEXT_ITEMS = 3;
 const MAX_SURFACE_ITEMS = 12;
+const MAX_VISUAL_SURFACES = 8;
 const MAX_SCOPE_LINES = 40;
 const RECOVERY_HANDLER_ATTRS = ["onclick", "onmousedown", "onkeydown", "onkeyup", "onkeypress"];
 const NATIVE_TAGS = new Set(["button", "input", "select", "textarea"]);
@@ -793,6 +795,108 @@ interface RenderState {
   duplicateRefNames: Set<string>;
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
+  visualSurfaces: VomVisualSurface[];
+}
+
+function visualSurfaceArea(surface: VomVisualSurface): number {
+  return Math.max(0, surface.visibleRect.w) * Math.max(0, surface.visibleRect.h);
+}
+
+function compareVisualSurfaces(a: VomVisualSurface, b: VomVisualSurface): number {
+  const aLabeled = cleaned(a.label) !== undefined;
+  const bLabeled = cleaned(b.label) !== undefined;
+  return (
+    Number(bLabeled) - Number(aLabeled) ||
+    visualSurfaceArea(b) - visualSurfaceArea(a) ||
+    a.frameId.localeCompare(b.frameId) ||
+    a.visibleRect.y - b.visibleRect.y ||
+    a.visibleRect.x - b.visibleRect.x ||
+    a.backendNodeId - b.backendNodeId
+  );
+}
+
+function visualSurfaceLine(surface: VomVisualSurface, ref: string): string {
+  const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
+  const layers = surface.memberCount > 1 ? `; layers=${surface.memberCount}` : "";
+  const { x, y, w, h } = surface.visibleRect;
+  const bounds = [x, y, w, h].map(Math.round).join(",");
+  return `  @${ref} surface ${JSON.stringify(label)} [bounds=${bounds}; rendering=${surface.renderingKind}${layers}; visual-only; requires=image-understanding; use: bsk screenshot --ref @${ref}]`;
+}
+
+function selectVisualSurfaces(
+  surfaces: readonly VomVisualSurface[],
+  nodesById: ReadonlyMap<number, VomNode>,
+): { selected: VomVisualSurface[]; eligibleCount: number } {
+  const selected: VomVisualSurface[] = [];
+  let eligibleCount = 0;
+
+  for (const surface of surfaces) {
+    if (surface.parentId !== null && !nodesById.has(surface.parentId)) continue;
+    eligibleCount += 1;
+
+    const insertionIndex = selected.findIndex(
+      (candidate) => compareVisualSurfaces(surface, candidate) < 0,
+    );
+    if (insertionIndex < 0) {
+      if (selected.length < MAX_VISUAL_SURFACES) selected.push(surface);
+      continue;
+    }
+    selected.splice(insertionIndex, 0, surface);
+    if (selected.length > MAX_VISUAL_SURFACES) selected.pop();
+  }
+
+  return { selected, eligibleCount };
+}
+
+function emitVisualAppendix(state: RenderState): void {
+  if (state.stopped) return;
+  const { selected, eligibleCount } = selectVisualSurfaces(state.visualSurfaces, state.nodesById);
+  if (eligibleCount === 0) return;
+
+  const header = "[visual surfaces]";
+  let headerEmitted = false;
+  let emitted = 0;
+  for (const surface of selected) {
+    const ref = `e${state.nextRef}`;
+    const line = visualSurfaceLine(surface, ref);
+    const nextTokens =
+      state.tokens + estimateTokens(line) + (headerEmitted ? 0 : estimateTokens(header));
+    if (nextTokens > state.maxTokens) break;
+    if (!headerEmitted) {
+      state.lines.push(header);
+      state.tokens += estimateTokens(header);
+      headerEmitted = true;
+    }
+    state.lines.push(line);
+    state.tokens += estimateTokens(line);
+    const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
+    state.refs.push({
+      ref,
+      backendNodeId: surface.backendNodeId,
+      frameId: surface.frameId,
+      visibleRect: surface.visibleRect,
+      role: "surface",
+      name: label,
+      kind: "surface",
+      capabilities: ["screenshot"],
+      line: state.lines.length - 1,
+    });
+    state.nextRef += 1;
+    emitted += 1;
+  }
+
+  const omitted = eligibleCount - emitted;
+  if (omitted > 0) {
+    state.truncated = true;
+    if (headerEmitted) {
+      const summary = `  … ${omitted} additional visual surfaces omitted`;
+      const nextTokens = state.tokens + estimateTokens(summary);
+      if (nextTokens <= state.maxTokens) {
+        state.lines.push(summary);
+        state.tokens = nextTokens;
+      }
+    }
+  }
 }
 
 function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: RenderState): void {
@@ -873,6 +977,8 @@ function renderTree(children: Map<number | null, VomNode[]>, state: RenderState)
         ...(node.role ? { role: node.role } : {}),
         ...(name ? { name } : {}),
         ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+        kind: "dom",
+        capabilities: ["interact", "screenshot"],
         line: state.lines.length - 1,
       });
       state.nextRef += 1;
@@ -894,6 +1000,7 @@ function renderNodes(
   initialLines: string[],
   surfaces: CondSurface[] = [],
   activeScopeBlocks: ActiveScopeBlock[] = [],
+  visualSurfaces: VomVisualSurface[] = [],
 ): RenderState {
   const children = buildChildren(nodes);
   const state: RenderState = {
@@ -913,6 +1020,7 @@ function renderNodes(
     duplicateRefNames: duplicateReferenceNames(nodes),
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
+    visualSurfaces,
   };
 
   renderTree(children, state);
@@ -1124,8 +1232,20 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     "@layers 2 focus=L1",
     `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%`,
   ];
-  const state = renderNodes(visibleNodes, options, header, scene.surfaces, scene.activeScopeBlocks);
-  state.lines.push(renderPageOcclusionLine(hiddenCount));
+  const visibleSurface = (parentId: number | null): boolean =>
+    parentId === null || included.has(parentId);
+  const state = renderNodes(
+    visibleNodes,
+    options,
+    header,
+    scene.surfaces,
+    scene.activeScopeBlocks,
+    scene.visualSurfaces?.filter((surface) => visibleSurface(surface.parentId)),
+  );
+  const occlusionLine = renderPageOcclusionLine(hiddenCount);
+  state.lines.push(occlusionLine);
+  state.tokens += estimateTokens(occlusionLine);
+  emitVisualAppendix(state);
 
   return {
     text: state.lines.join("\n"),
@@ -1152,7 +1272,9 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     ],
     scene.surfaces,
     scene.activeScopeBlocks,
+    scene.visualSurfaces,
   );
+  emitVisualAppendix(state);
 
   return {
     text: state.lines.join("\n"),

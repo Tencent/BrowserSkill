@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Unlabeled Rendered Surface matrix</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; min-height: 100%; font: 14px/1.4 system-ui, sans-serif; }
+      body { padding: 16px; background: #f4f6f8; color: #17202a; }
+      h1 { margin: 0 0 12px; font-size: 20px; }
+      .matrix { display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 12px; }
+      .case { min-height: 150px; padding: 10px; overflow: hidden; border: 1px solid #aeb6bf; border-radius: 6px; background: white; }
+      .case h2 { margin: 0 0 8px; font-size: 13px; }
+      .case p { margin: 0 0 8px; }
+      canvas { display: block; background: #d6eaf8; border: 2px solid #2874a6; }
+      .stack { position: relative; width: 180px; height: 90px; }
+      .stack canvas { position: absolute; inset: 0; width: 180px; height: 90px; }
+      .stack canvas + canvas { background: rgb(244 208 63 / 45%); border-color: #b7950b; }
+      .contained { position: relative; width: 190px; height: 100px; }
+      .contained > canvas:first-child { width: 190px; height: 100px; }
+      .contained > canvas:last-child { position: absolute; left: 55px; top: 30px; width: 70px; height: 40px; background: #fadbd8; border-color: #c0392b; }
+    </style>
+  </head>
+  <body>
+    <h1>Unlabeled Rendered Surface matrix</h1>
+    <main class="matrix">
+      <section class="case">
+        <h2>Only engineering attributes</h2>
+        <canvas id="must-not-be-a-label" class="must-not-be-a-label" data-testid="must-not-be-a-label" width="200" height="90"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Blank explicit names</h2>
+        <canvas aria-label="   " title="   " width="180" height="80"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Nearby prose is not a Canvas name</h2>
+        <p>must-not-be-inferred-as-a-surface-label</p>
+        <canvas width="180" height="80"></canvas>
+      </section>
+
+      <section class="case">
+        <h2>Fallback AX content does not name or suppress the Canvas</h2>
+        <canvas width="180" height="80">
+          <button type="button">Fallback control remains separate</button>
+        </canvas>
+      </section>
+
+      <section class="case">
+        <h2>Unnamed rendering layers still cluster</h2>
+        <div class="stack">
+          <canvas width="180" height="90"></canvas>
+          <canvas width="180" height="90"></canvas>
+        </div>
+      </section>
+
+      <section class="case">
+        <h2>Unnamed contained canvases stay independent</h2>
+        <div class="contained">
+          <canvas width="190" height="100"></canvas>
+          <canvas width="70" height="40"></canvas>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

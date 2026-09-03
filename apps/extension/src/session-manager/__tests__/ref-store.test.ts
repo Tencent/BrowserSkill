@@ -13,6 +13,8 @@ describe("RefStore", () => {
       backendNodeId: 42,
       tabId: 7,
       generation: 0,
+      kind: "dom",
+      capabilities: ["interact", "screenshot"],
     });
     expect(s.size()).toBe(1);
     expect(s.isEmpty()).toBe(false);
@@ -47,5 +49,32 @@ describe("RefStore", () => {
       frameId: "child-frame",
       cdpSessionId: "child-session",
     });
+  });
+
+  it("preserves explicit capabilities for visual surface refs", () => {
+    const s = new RefStore();
+    s.set("e1", 42, {
+      tabId: 7,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+
+    expect(s.resolveEntry("e1")).toMatchObject({
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+  });
+
+  it("never grants ordinary interaction to a surface through defaults or caller input", () => {
+    const s = new RefStore();
+    s.set("e1", 42, { tabId: 7, kind: "surface" });
+    s.set("e2", 43, {
+      tabId: 7,
+      kind: "surface",
+      capabilities: ["interact", "screenshot"],
+    });
+
+    expect(s.resolveEntry("e1")?.capabilities).toEqual(["screenshot"]);
+    expect(s.resolveEntry("e2")?.capabilities).toEqual(["screenshot"]);
   });
 });

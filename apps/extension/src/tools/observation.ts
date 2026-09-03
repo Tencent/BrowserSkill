@@ -8,6 +8,7 @@ import {
   applyVomInteractionRecovery,
   type CondSurface,
   isVomReferenceNode,
+  type Rect,
   renderVom,
   type VomNode,
   type VomOptions,
@@ -63,6 +64,11 @@ import {
   projectRecordSafeObservation,
 } from "./vom/record-safe-observation";
 import {
+  clusterRenderedSurfaces,
+  discoverRenderedSurfaces,
+  projectRenderedSurfaces,
+} from "./vom/rendered-surfaces";
+import {
   buildSemanticGraph,
   buildSemanticVomScene,
   normalizeSemanticStructure,
@@ -93,6 +99,9 @@ export const normaliseRef = sharedNormaliseRef;
 // screenshot — `tool.screenshot`
 // ---------------------------------------------------------------------------
 
+const VISUAL_SURFACE_SCREENSHOT_MAX_EDGE = 2_048;
+const VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS = 4_000_000;
+
 /**
  * Strip the `data:image/...;base64,` prefix from a Chrome
  * `captureVisibleTab` dataURL and return the raw base64 payload.
@@ -107,8 +116,8 @@ export function stripDataUrlPrefix(dataUrl: string): string {
 
 /**
  * Parse a PNG's IHDR chunk and return `(width, height)`. Returns
- * `null` on any malformed input so callers fall back to `0/0` instead
- * of throwing.
+ * `null` on malformed input so callers can reject dimensions that are
+ * not authoritative instead of guessing from a CSS-space rectangle.
  *
  * PNG layout: 8-byte signature, then a 4-byte length, 4-byte type
  * ("IHDR"), then the chunk data — width is bytes 16-19 BE, height is
@@ -120,9 +129,9 @@ export function parsePngDimensions(base64: string): { width: number; height: num
     const head = base64.length > 64 ? base64.slice(0, 64) : base64;
     const bin = atob(head);
     if (bin.length < 24) return null;
-    if (bin.charCodeAt(0) !== 0x89 || bin.charCodeAt(1) !== 0x50 || bin.charCodeAt(2) !== 0x4e) {
-      return null;
-    }
+    const expectedSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (expectedSignature.some((byte, index) => bin.charCodeAt(index) !== byte)) return null;
+    if (bin.slice(12, 16) !== "IHDR") return null;
     const u32 = (off: number) =>
       (bin.charCodeAt(off) << 24) |
       (bin.charCodeAt(off + 1) << 16) |
@@ -185,6 +194,8 @@ async function captureElementScreenshot(
   target: CdpTarget,
   backendNodeId: number,
   frameId?: string,
+  visualSurface = false,
+  observedVisibleRect?: Rect,
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
@@ -192,11 +203,36 @@ async function captureElementScreenshot(
     cdp,
     tabId,
     { target, backendNodeId, ...(frameId ? { frameId } : {}) },
-    { scrollIntoView: true },
+    { scrollIntoView: !visualSurface },
   );
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
-  const rect = geometry.topBounds;
+  const liveRect = geometry.topBounds;
+  const rect =
+    visualSurface && observedVisibleRect
+      ? (() => {
+          const x = Math.max(liveRect.x, observedVisibleRect.x);
+          const y = Math.max(liveRect.y, observedVisibleRect.y);
+          const right = Math.min(
+            liveRect.x + liveRect.width,
+            observedVisibleRect.x + observedVisibleRect.w,
+          );
+          const bottom = Math.min(
+            liveRect.y + liveRect.height,
+            observedVisibleRect.y + observedVisibleRect.h,
+          );
+          return right > x && bottom > y ? { x, y, width: right - x, height: bottom - y } : null;
+        })()
+      : liveRect;
+  if (!rect) return { code: "permission_denied", message: "surface is no longer visible" };
+  const scale = visualSurface
+    ? Math.min(
+        1,
+        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.width,
+        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.height,
+        Math.sqrt(VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS / (rect.width * rect.height)),
+      )
+    : 1;
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
@@ -206,7 +242,7 @@ async function captureElementScreenshot(
         y: rect.y,
         width: rect.width,
         height: rect.height,
-        scale: 1,
+        scale,
       },
     });
     if (signal?.aborted) return cancelled("screenshot");
@@ -214,10 +250,10 @@ async function captureElementScreenshot(
     if (!image_base64) {
       return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
     }
-    const dims = parsePngDimensions(image_base64) ?? {
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
-    };
+    const dims = parsePngDimensions(image_base64);
+    if (!dims) {
+      return { code: "cdp_failed", message: "Page.captureScreenshot returned invalid PNG data" };
+    }
     return { image_base64, width: dims.width, height: dims.height };
   } catch (err) {
     return {
@@ -313,7 +349,7 @@ export async function handleScreenshot(
     if (!deps.cdp) {
       return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
     }
-    const node = resolveSnapshotRef(ctx, ref, target.tabId);
+    const node = resolveSnapshotRef(ctx, ref, target.tabId, "screenshot");
     if (isRpcError(node)) return node;
     if (signal?.aborted) return cancelled("screenshot");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -333,6 +369,8 @@ export async function handleScreenshot(
           nodeTarget,
           node.backendNodeId,
           node.frameId,
+          node.kind === "surface",
+          node.visibleRect,
           signal,
         ),
       deps.sendToTab,
@@ -364,7 +402,10 @@ export async function handleScreenshot(
   if (isRpcError(captured)) return captured;
   if (signal?.aborted) return cancelled("screenshot");
   const image_base64 = captured;
-  const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
+  const dims = parsePngDimensions(image_base64);
+  if (!dims) {
+    return { code: "cdp_failed", message: "screenshot capture returned invalid PNG data" };
+  }
   return withShotDialogs({
     image_base64,
     width: dims.width,
@@ -1083,6 +1124,7 @@ async function runHoverProbes(
 
 export interface CaptureVomObservationOptions extends VomOptions {
   conditionalSurfaceProbe?: boolean;
+  renderedSurfaceDiscovery?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
 }
@@ -1131,7 +1173,20 @@ export async function captureVomObservation(
     captured,
     hoverProbes.surfaceProbes,
   );
-  const rendered = renderVom(decoratedScene, {
+  const observedScene = options.renderedSurfaceDiscovery
+    ? projectRenderedSurfaces(
+        decoratedScene,
+        normalizedDocuments,
+        clusterRenderedSurfaces(
+          discoverRenderedSurfaces(
+            normalizedDocuments,
+            captured.viewport,
+            captured.excludedBackendNodeIds,
+          ),
+        ),
+      )
+    : decoratedScene;
+  const rendered = renderVom(observedScene, {
     maxDepth: options.maxDepth,
     maxTokens: options.maxTokens,
     redactValues: options.redactValues,
@@ -1186,6 +1241,7 @@ async function handleVomObservation(
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
       conditionalSurfaceProbe: effectiveConditionalSurfaceProbe,
+      renderedSurfaceDiscovery: toolName === "observe",
       hoverProbeBypassOverlay: deps.hoverProbeBypassOverlay,
       signal,
     });
@@ -1203,6 +1259,9 @@ async function handleVomObservation(
             tabId: target.tabId,
             ...(ref.frameId ? { frameId: ref.frameId } : {}),
             ...(refTarget?.sessionId ? { cdpSessionId: refTarget.sessionId } : {}),
+            ...(ref.visibleRect ? { visibleRect: ref.visibleRect } : {}),
+            ...(ref.kind ? { kind: ref.kind } : {}),
+            ...(ref.capabilities ? { capabilities: ref.capabilities } : {}),
           },
         ] as const;
       }),

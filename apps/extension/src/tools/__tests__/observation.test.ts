@@ -36,6 +36,14 @@ function fakeAgentWindow(ids: number[]) {
 const TINY_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABh6FO1AAAAABJRU5ErkJggg==";
 
+function pngWithIhdrDimensions(width: number, height: number): string {
+  const bytes = Uint8Array.from(atob(TINY_PNG), (character) => character.charCodeAt(0));
+  const view = new DataView(bytes.buffer);
+  view.setUint32(16, width);
+  view.setUint32(20, height);
+  return btoa(String.fromCharCode(...bytes));
+}
+
 function makeScreenshotDeps(
   opts: {
     cdp?: CdpRunner;
@@ -86,6 +94,7 @@ describe("stripDataUrlPrefix", () => {
 describe("parsePngDimensions", () => {
   it("parses width/height from the IHDR chunk", () => {
     expect(parsePngDimensions(TINY_PNG)).toEqual({ width: 1, height: 1 });
+    expect(parsePngDimensions(pngWithIhdrDimensions(100, 80))).toEqual({ width: 100, height: 80 });
   });
   it("returns null on non-PNG input", () => {
     expect(parsePngDimensions("not-a-png-payload-just-random-base64-text-zzzzzzzzz")).toBeNull();
@@ -118,6 +127,20 @@ describe("handleScreenshot", () => {
     expect(res.height).toBe(1);
     expect(capture).toHaveBeenCalledWith(100, { format: "png" });
     expect(get).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a full-tab capture is not a valid PNG", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11" },
+      makeScreenshotDeps({
+        captureVisibleTab: vi.fn(async () => "data:image/png;base64,bm90LWEtcG5n"),
+      }),
+    );
+
+    expect(res).toMatchObject({ code: "cdp_failed", message: /invalid PNG data/ });
   });
 
   it("returns not_found when Agent Window has no active tab", async () => {
@@ -298,6 +321,165 @@ describe("handleScreenshot", () => {
       }
     )?.clip;
     expect(clip).toMatchObject({ x: 10, y: 20, width: 100, height: 40 });
+  });
+
+  it("captures a bounded visible crop for a visual surface without scrolling it", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 4096, clientHeight: 4096 },
+      }),
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 4096, 0, 4096, 4096, 0, 4096]] }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(sent.some((call) => call.method === "DOM.scrollIntoViewIfNeeded")).toBe(false);
+    const clip = sent.find((call) => call.method === "Page.captureScreenshot")?.params as {
+      clip?: { width: number; height: number; scale: number };
+    };
+    expect(clip.clip).toMatchObject({ width: 4096, height: 4096 });
+    expect(clip.clip?.scale).toBeCloseTo(Math.sqrt(4_000_000 / (4096 * 4096)));
+  });
+
+  it("crops a visual surface screenshot to its observation-time visible region", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      visibleRect: { x: 25, y: 30, w: 50, h: 40 },
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 800, clientHeight: 600 },
+      }),
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 200, 0, 200, 100, 0, 100]] }),
+      "Page.captureScreenshot": () => ({ data: pngWithIhdrDimensions(100, 80) }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    const clip = sent.find((call) => call.method === "Page.captureScreenshot")?.params as {
+      clip?: { x: number; y: number; width: number; height: number };
+    };
+    expect(clip.clip).toMatchObject({ x: 25, y: 30, width: 50, height: 40 });
+    expect(res).toMatchObject({ width: 100, height: 80 });
+  });
+
+  it("routes OOPIF surface geometry through its child session and captures top coordinates", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      frameId: "child-frame",
+      cdpSessionId: "child-session",
+      kind: "surface",
+      visibleRect: { x: 224, y: 346, w: 200, h: 80 },
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "DOM.getBoxModel": () => ({
+        model: { content: [204, 306, 604, 306, 604, 506, 204, 506] },
+      }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
+      }),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    cdp.getFrameGraph = vi.fn(async () => ({
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 7 } },
+        {
+          frameId: "child-frame",
+          parentFrameId: "main",
+          ownerBackendNodeId: 99,
+          target: { tabId: 7, sessionId: "child-session" },
+        },
+      ],
+    }));
+    const targetCalls: Array<{ sessionId?: string; method: string }> = [];
+    cdp.sendToTarget = vi.fn(async (target, method) => {
+      targetCalls.push({ sessionId: target.sessionId, method });
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
+      }
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
+      }
+      throw new Error(`unexpected child CDP call ${method}`);
+    }) as CdpRunner["sendToTarget"];
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(targetCalls).toEqual([
+      { sessionId: "child-session", method: "DOM.getContentQuads" },
+      { sessionId: "child-session", method: "Page.getLayoutMetrics" },
+    ]);
+    const clip = sent.find((call) => call.method === "Page.captureScreenshot")?.params as {
+      clip?: { x: number; y: number; width: number; height: number };
+    };
+    expect(clip.clip).toMatchObject({ x: 224, y: 346, width: 200, height: 80 });
+  });
+
+  it("fails closed when a ref capture is not a valid PNG", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, { tabId: 7, kind: "surface" });
+    const { cdp } = makeFakeCdp({
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 50, 0, 50, 50, 0, 50]] }),
+      "Page.captureScreenshot": () => ({ data: "bm90LWEtcG5n" }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    expect(res).toMatchObject({ code: "cdp_failed", message: /invalid PNG data/ });
   });
 
   it("returns not_found for unknown ref", async () => {
@@ -2831,6 +3013,85 @@ describe("handleSnapshot", () => {
       "Runtime.evaluate",
       expect.objectContaining({ returnByValue: true }),
     );
+  });
+
+  it("discovers rendered canvases only in observe and stores a screenshot-only ref", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "Canvas app" },
+      backendDOMNodeId: 100,
+    };
+    const strings = ["body", "canvas", "static", "auto"];
+    const i = (value: string) => strings.indexOf(value);
+    const send = vi.fn(async (_tabId: number, method: string) => {
+      if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [root] };
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+      }
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return {
+          strings,
+          documents: [
+            {
+              nodes: {
+                parentIndex: [-1, 0],
+                nodeName: [i("body"), i("canvas")],
+                backendNodeId: [100, 200],
+                attributes: [[], []],
+              },
+              layout: {
+                nodeIndex: [0, 1],
+                styles: [
+                  [i("static"), i("auto"), i("auto")],
+                  [i("static"), i("auto"), i("auto")],
+                ],
+                bounds: [
+                  [0, 0, 1000, 800],
+                  [20, 30, 800, 500],
+                ],
+                paintOrders: [0, 1],
+              },
+            },
+          ],
+        };
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+    const deps = {
+      cdp: {
+        send: send as unknown as <T = unknown>(
+          tabId: number,
+          method: string,
+          params?: object,
+        ) => Promise<T>,
+        trackSessionTab: vi.fn(),
+      },
+      tabsApi: {
+        get: vi.fn(
+          async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+        ),
+        query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+      },
+      conditionalSurfaceProbe: false,
+    };
+
+    const observed = await handleObserve(sm, { session_id: "aa11" }, deps);
+    if ("code" in observed) throw new Error(`unexpected error: ${JSON.stringify(observed)}`);
+    expect(observed.text).toContain('@e1 surface "canvas visual surface"');
+    expect(ctx.refStore.resolveEntry("e1")).toMatchObject({
+      backendNodeId: 200,
+      kind: "surface",
+      capabilities: ["screenshot"],
+    });
+
+    const snapshot = await handleSnapshot(sm, { session_id: "aa11" }, deps);
+    if ("code" in snapshot) throw new Error(`unexpected error: ${JSON.stringify(snapshot)}`);
+    expect(snapshot.text).not.toContain("visual surface");
+    expect(snapshot.ref_count).toBe(0);
   });
 
   it("allows passive snapshots of explicit user-window tabs", async () => {
