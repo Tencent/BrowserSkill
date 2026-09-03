@@ -116,8 +116,8 @@ export function stripDataUrlPrefix(dataUrl: string): string {
 
 /**
  * Parse a PNG's IHDR chunk and return `(width, height)`. Returns
- * `null` on any malformed input so callers fall back to `0/0` instead
- * of throwing.
+ * `null` on malformed input so callers can reject dimensions that are
+ * not authoritative instead of guessing from a CSS-space rectangle.
  *
  * PNG layout: 8-byte signature, then a 4-byte length, 4-byte type
  * ("IHDR"), then the chunk data — width is bytes 16-19 BE, height is
@@ -129,9 +129,9 @@ export function parsePngDimensions(base64: string): { width: number; height: num
     const head = base64.length > 64 ? base64.slice(0, 64) : base64;
     const bin = atob(head);
     if (bin.length < 24) return null;
-    if (bin.charCodeAt(0) !== 0x89 || bin.charCodeAt(1) !== 0x50 || bin.charCodeAt(2) !== 0x4e) {
-      return null;
-    }
+    const expectedSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (expectedSignature.some((byte, index) => bin.charCodeAt(index) !== byte)) return null;
+    if (bin.slice(12, 16) !== "IHDR") return null;
     const u32 = (off: number) =>
       (bin.charCodeAt(off) << 24) |
       (bin.charCodeAt(off + 1) << 16) |
@@ -250,10 +250,10 @@ async function captureElementScreenshot(
     if (!image_base64) {
       return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
     }
-    const dims = parsePngDimensions(image_base64) ?? {
-      width: Math.round(rect.width),
-      height: Math.round(rect.height),
-    };
+    const dims = parsePngDimensions(image_base64);
+    if (!dims) {
+      return { code: "cdp_failed", message: "Page.captureScreenshot returned invalid PNG data" };
+    }
     return { image_base64, width: dims.width, height: dims.height };
   } catch (err) {
     return {
@@ -402,7 +402,10 @@ export async function handleScreenshot(
   if (isRpcError(captured)) return captured;
   if (signal?.aborted) return cancelled("screenshot");
   const image_base64 = captured;
-  const dims = parsePngDimensions(image_base64) ?? { width: 0, height: 0 };
+  const dims = parsePngDimensions(image_base64);
+  if (!dims) {
+    return { code: "cdp_failed", message: "screenshot capture returned invalid PNG data" };
+  }
   return withShotDialogs({
     image_base64,
     width: dims.width,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "../../../lib/overlay-bridge";
 import { captureViewModel, collectOverlayExcludedBackendIds, probeHoverSurfaces } from "../capture";
+import { discoverRenderedSurfaces } from "../rendered-surfaces";
 
 // Minimal but format-accurate captureSnapshot reply: a body with one
 // fixed full-screen overlay div carrying a password input.
@@ -1175,6 +1176,97 @@ describe("captureViewModel", () => {
     expect(input?.ownerFrameBackendNodeId).toBe(23);
     expect(input?.localRect).toEqual({ x: 1, y: 2, w: 40, h: 20 });
     expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
+  });
+
+  it("keeps same-origin iframe canvas discovery in top-level CSS coordinates at dpr 1 and 2", async () => {
+    const captureAtDpr = async (dpr: number) => {
+      const S = ["html", "body", "iframe", "canvas", "static", "auto"];
+      const i = (s: string) => S.indexOf(s);
+      const scale = (values: number[]) => values.map((value) => value * dpr);
+      const snapshot = {
+        strings: S,
+        documents: [
+          {
+            frameId: "main",
+            nodes: {
+              parentIndex: [-1, 0, 1],
+              nodeName: [i("html"), i("body"), i("iframe")],
+              backendNodeId: [10, 11, 13],
+              attributes: [[], [], []],
+              contentDocumentIndex: { index: [2], value: [1] },
+            },
+            layout: {
+              nodeIndex: [1, 2],
+              styles: [
+                [i("static"), i("auto")],
+                [i("static"), i("auto")],
+              ],
+              bounds: [scale([0, 0, 1000, 800]), scale([100, 150, 300, 200])],
+              paintOrders: [0, 1],
+            },
+          },
+          {
+            frameId: "child",
+            nodes: {
+              parentIndex: [-1, 0],
+              nodeName: [i("body"), i("canvas")],
+              backendNodeId: [20, 21],
+              attributes: [[], []],
+            },
+            layout: {
+              nodeIndex: [0, 1],
+              styles: [
+                [i("static"), i("auto")],
+                [i("static"), i("auto")],
+              ],
+              bounds: [scale([0, 0, 300, 200]), scale([20, 30, 120, 60])],
+              paintOrders: [0, 1],
+            },
+          },
+        ],
+      };
+      const cdp = {
+        send: vi.fn(async (_tabId: number, method: string) => {
+          if (method === "DOMSnapshot.enable") return {};
+          if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+          if (method === "Page.getLayoutMetrics") {
+            return {
+              cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+              layoutViewport: { clientWidth: 1000 * dpr, clientHeight: 800 * dpr },
+            };
+          }
+          throw new Error(method);
+        }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+      };
+      const captured = await captureViewModel(cdp, 4);
+      const childNodes = captured.frameNodes?.get("child") ?? [];
+      return discoverRenderedSurfaces(
+        [
+          {
+            frameId: "child",
+            contextScopeId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 13,
+            target: { tabId: 4 },
+            domNodes: childNodes,
+            axNodes: [],
+          },
+        ],
+        captured.viewport,
+      );
+    };
+
+    const atDpr1 = await captureAtDpr(1);
+    const atDpr2 = await captureAtDpr(2);
+
+    expect(atDpr1).toEqual([
+      expect.objectContaining({
+        backendNodeId: 21,
+        frameId: "child",
+        visibleRect: { x: 120, y: 180, w: 120, h: 60 },
+      }),
+    ]);
+    expect(atDpr2).toEqual(atDpr1);
   });
 
   it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {
