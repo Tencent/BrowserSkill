@@ -33,6 +33,7 @@ export function normalizeDaemonPort(raw: unknown): number {
 export function parseDaemonPortInput(text: string): number | null {
   const trimmed = text.trim();
   if (trimmed === "") return DEFAULT_DAEMON_PORT;
+  if (!/^\d+$/.test(trimmed)) return null;
   const parsed = Number.parseInt(trimmed, 10);
   if (!isValidPort(parsed)) return null;
   return parsed;
