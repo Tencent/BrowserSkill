@@ -4,7 +4,7 @@ import { parseDaemonPortInput } from "@/transport/daemon-endpoint";
 
 /**
  * Popup-side daemon port preference stored in `chrome.storage.local`.
- * Commits on blur, Enter (via blur), and pagehide.
+ * Commits on blur, Enter, and pagehide.
  */
 export function useDaemonPort(): {
   draft: string;
