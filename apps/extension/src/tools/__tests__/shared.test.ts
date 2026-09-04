@@ -12,7 +12,7 @@ function fakeAgentWindow() {
   return {
     create: vi.fn(async () => 100),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => {}),
+    ensureActiveTab: vi.fn(async () => 1),
   };
 }
 

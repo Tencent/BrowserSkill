@@ -23,7 +23,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => {}),
+    ensureActiveTab: vi.fn(async () => 1),
   };
 }
 
@@ -221,6 +221,7 @@ describe("handleTabCreate", () => {
       active: true,
     });
     expect(res).toMatchObject({ tab_id: 10, window_id: 100 });
+    expect(sm.get("aa11")?.agentCreatedTabs.has(10)).toBe(true);
   });
 
   it("forwards explicit url + index + active=false", async () => {
@@ -255,6 +256,41 @@ describe("handleTabCreate", () => {
     const { api } = makeTabMutationApi(state);
     const res = await handleTabCreate(sm, { session_id: "aa11", index: -1 }, { tabs: api });
     expect(res).toMatchObject({ code: "invalid_params" });
+  });
+
+  it("does not claim any tab when chrome.tabs.create fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const state: FakeTabState = { tabs: new Map(), nextTabId: 10, windowsClosed: new Set() };
+    const { api, spies } = makeTabMutationApi(state);
+    spies.create.mockRejectedValueOnce(new Error("chrome.tabs.create failed"));
+
+    const res = await handleTabCreate(sm, { session_id: "aa11" }, { tabs: api });
+    expect(res).toMatchObject({ code: "protocol_error" });
+
+    expect(sm.get("aa11")?.agentCreatedTabs).toEqual(new Set([1]));
+  });
+
+  it("claims the returned id even when a user tab appears during tab creation", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = { tabs: new Map(), nextTabId: 10, windowsClosed: new Set() };
+    const { api, spies } = makeTabMutationApi(state);
+    let resolveCreate!: (tab: chrome.tabs.Tab) => void;
+    const createResult = new Promise<chrome.tabs.Tab>((resolve) => {
+      resolveCreate = resolve;
+    });
+    spies.create.mockImplementationOnce(() => createResult);
+
+    const pending = handleTabCreate(sm, { session_id: "aa11" }, { tabs: api });
+    // A user can create an unrelated same-window tab while Chrome is still
+    // resolving the agent request. There is no pending slot for it to steal.
+    expect(ctx.agentCreatedTabs.has(99)).toBe(false);
+    resolveCreate({ id: 10, windowId: 100, active: true } as chrome.tabs.Tab);
+
+    await expect(pending).resolves.toMatchObject({ tab_id: 10 });
+    expect(ctx.agentCreatedTabs.has(10)).toBe(true);
+    expect(ctx.agentCreatedTabs.has(99)).toBe(false);
   });
 });
 

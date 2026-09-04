@@ -14,8 +14,11 @@ export interface AgentWindowApi {
    * Guarantee the Agent Window has an active, CDP-navigable tab.
    * `chrome://` pages (including the New Tab page) reject `Page.navigate`,
    * so sessions bootstrap with `about:blank` instead.
+   *
+   * Resolves with the id of the activated (or newly created) tab, so callers
+   * can track the session's home tab without re-querying Chrome.
    */
-  ensureActiveTab(windowId: number, url: string): Promise<void>;
+  ensureActiveTab(windowId: number, url: string): Promise<number>;
 }
 
 /** Creation hints for a new Agent Window. */
@@ -49,15 +52,19 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     // cancellation success while the Agent Window remains open.
     await chrome.windows.remove(windowId);
   },
-  async ensureActiveTab(windowId: number, url: string): Promise<void> {
+  async ensureActiveTab(windowId: number, url: string): Promise<number> {
     const tabs = await chrome.tabs.query({ windowId });
     const first = tabs.find((t) => typeof t.id === "number");
-    if (first?.id) {
+    if (first?.id !== undefined) {
       if (!first.active) {
         await chrome.tabs.update(first.id, { active: true });
       }
-      return;
+      return first.id;
     }
-    await chrome.tabs.create({ windowId, url, active: true });
+    const created = await chrome.tabs.create({ windowId, url, active: true });
+    if (typeof created?.id !== "number") {
+      throw new Error("[bh] chrome.tabs.create returned no tab id");
+    }
+    return created.id;
   },
 };
