@@ -13,7 +13,7 @@ function sessions() {
     agentWindow: {
       create: vi.fn(async () => 100),
       remove: vi.fn(async () => {}),
-      ensureActiveTab: vi.fn(async () => {}),
+      ensureActiveTab: vi.fn(async () => 1),
     },
   });
 }

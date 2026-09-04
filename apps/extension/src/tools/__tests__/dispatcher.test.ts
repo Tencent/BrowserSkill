@@ -287,7 +287,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const ctx = await sessions.start("aa11");
