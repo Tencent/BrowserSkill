@@ -26,6 +26,10 @@ const resources = {
 const languageDetector = new LanguageDetector();
 languageDetector.addDetector(chromeUiLanguageDetector);
 
+// Drive locale normalisation off the keys we actually ship, so registering a
+// translation is the only step needed to support a new language.
+const resourceKeys = Object.keys(resources);
+
 i18n
   .use(languageDetector)
   .use(initReactI18next)
@@ -41,7 +45,7 @@ i18n
       escapeValue: false,
     },
 
-    detection: getLanguageDetectionOptions(),
+    detection: getLanguageDetectionOptions(resourceKeys),
 
     react: {
       useSuspense: false,
