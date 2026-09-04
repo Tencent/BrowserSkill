@@ -196,9 +196,8 @@ describe("ToolDispatcher", () => {
       },
     });
     await sessions.start("aa11");
-    // Register tab 7 as agent-created (pending counter + onCreated classify).
-    sessions.markAgentTabPending(4242);
-    sessions.classifyNewTab(7, 4242);
+    // Register the exact tab id returned by the agent's creation path.
+    sessions.get("aa11")?.agentCreatedTabs.add(7);
 
     const dispatcher = new ToolDispatcher({ transport, sessions });
     dispatcher.start();

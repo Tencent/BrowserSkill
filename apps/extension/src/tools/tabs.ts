@@ -7,7 +7,11 @@ import {
   OVERLAY_AGENT_OVERLAY_RESET,
   type OverlayAgentOverlayResetMessage,
 } from "@/lib/overlay-bridge";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { isRpcError, lookupSession } from "./shared";
@@ -25,11 +29,9 @@ export interface TabInfo {
   window_id?: number;
   active?: boolean;
   /**
-   * Where the tab sits relative to the requesting session: tabs in any
-   * window other than an Agent Window are `user`; tabs in this
-   * session's own Agent Window are `agent`. Tabs in *other* sessions'
-   * Agent Windows are filtered out entirely (cross-session isolation,
-   * design §6).
+   * Ownership relative to the requesting session. Explicitly created or
+   * borrowed tabs in this session's Agent Window are `agent`; every other
+   * visible tab is `user`. Other sessions' Agent Windows are filtered out.
    */
   scope?: "user" | "agent";
 }
@@ -259,7 +261,8 @@ export async function handleTabList(
     if (typeof t.id !== "number") continue;
     const winId = typeof t.windowId === "number" ? t.windowId : -1;
     if (otherAgentWindowIds.has(winId)) continue;
-    const tabScope: "user" | "agent" = winId === myAgentWindowId ? "agent" : "user";
+    const tabScope: "user" | "agent" =
+      winId === myAgentWindowId && isAgentControlledTab(ctx, t.id) ? "agent" : "user";
     if (scope === "user" && tabScope !== "user") continue;
     if (scope === "agent" && tabScope !== "agent") continue;
     tabs.push({
@@ -369,6 +372,7 @@ function buildCreateProps(
  * Returns the created tab on success, or an `RpcError` on failure.
  */
 async function createTabAndCleanup(
+  ctx: SessionContext,
   deps: TabManagementDeps,
   createProps: chrome.tabs.CreateProperties,
 ): Promise<CreatedChromeTab | RpcError> {
@@ -381,24 +385,27 @@ async function createTabAndCleanup(
       message: err instanceof Error ? err.message : String(err),
     };
   }
-  if (aborted(deps.signal, "tab_create")) {
-    // We already opened the tab; close it on abort so we don't leak.
-    if (typeof tab.id === "number") {
-      try {
-        await getTabsApi(deps).remove(tab.id);
-      } catch (cleanupErr) {
-        return rpcError(
-          "protocol_error",
-          "cleanup_failed",
-          `tab_create aborted but cleanup of tab ${tab.id} failed: ${describeError(cleanupErr)}`,
-          { resource_type: "tab", resource_id: tab.id },
-        );
-      }
-    }
-    return { code: "cancelled", message: "tab_create aborted" };
-  }
   if (typeof tab.id !== "number") {
     return { code: "protocol_error", message: "chrome.tabs.create returned no tab id" };
+  }
+  // Claim the concrete id returned by Chrome. Ownership never depends on
+  // matching this request to an asynchronous onCreated event.
+  ctx.agentCreatedTabs.add(tab.id);
+  if (aborted(deps.signal, "tab_create")) {
+    try {
+      await getTabsApi(deps).remove(tab.id);
+      ctx.agentCreatedTabs.delete(tab.id);
+    } catch (cleanupErr) {
+      // Keep the claim when cleanup fails so session_stop can retry instead
+      // of releasing an agent-owned tab to the user.
+      return rpcError(
+        "protocol_error",
+        "cleanup_failed",
+        `tab_create aborted but cleanup of tab ${tab.id} failed: ${describeError(cleanupErr)}`,
+        { resource_type: "tab", resource_id: tab.id },
+      );
+    }
+    return { code: "cancelled", message: "tab_create aborted" };
   }
   return { ...tab, id: tab.id };
 }
@@ -426,27 +433,8 @@ export async function handleTabCreate(
   const paramErr = validateTabCreateParams(params);
   if (paramErr) return paramErr;
 
-  // Flag the pending agent tab *before* create so the chrome.tabs.onCreated
-  // listener (background.ts) can tell this tab apart from a user-opened tab.
-  manager.markAgentTabPending(ctx.agentWindowId);
-
-  const tab = await createTabAndCleanup(deps, buildCreateProps(ctx, params));
-  if (isRpcError(tab)) {
-    // Release the pending slot when no tab was actually opened: with no
-    // `onCreated` event to consume it, the counter would leak and the next
-    // tab the user opens would be misclassified as agent-created. An abort
-    // (`cancelled`) is the exception — the tab did open (and was cleaned up),
-    // so its `onCreated` still consumes the slot.
-    if (tab.code !== "cancelled") {
-      manager.releaseAgentTabPending(ctx.agentWindowId);
-    }
-    return tab;
-  }
-
-  // Track agent-created tabs so session_stop can clean them up (design §3.1).
-  // The onCreated listener also adds this id; this is an idempotent fallback
-  // in case the listener has not fired yet.
-  ctx.agentCreatedTabs.add(tab.id);
+  const tab = await createTabAndCleanup(ctx, deps, buildCreateProps(ctx, params));
+  if (isRpcError(tab)) return tab;
 
   return {
     tab_id: tab.id,
@@ -496,13 +484,13 @@ async function authoriseAgentTab(
       `${toolName}: tab ${tabId} is borrowed by session ${otherBorrower}`,
     );
   }
-  if (tab.windowId === ctx.agentWindowId) {
+  if (tab.windowId === ctx.agentWindowId && isAgentControlledTab(ctx, tab.id)) {
     return tab;
   }
   return rpcError(
     "permission_denied",
     "agent_window_scope",
-    `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
+    `${toolName}: tab ${tabId} is not claimed by this session in Agent Window ${ctx.agentWindowId}`,
   );
 }
 
@@ -775,13 +763,6 @@ async function executeBorrowCore(
   );
   if (moveErr) return moveErr;
 
-  // Best-effort activation — failure is non-fatal.
-  try {
-    await p.tabsApi.update(p.tabId, { active: true });
-  } catch (err) {
-    console.debug("[bsk tab_borrow] activate after move failed", err);
-  }
-
   return { originalWindowId, originalIndex };
 }
 
@@ -844,6 +825,12 @@ export async function handleTabBorrow(
         code: "protocol_error",
         message: err instanceof Error ? err.message : String(err),
       };
+    }
+    // Activate after commit so overlay/event observers see the tab as claimed.
+    try {
+      await tabsApi.update(params.tab_id, { active: true });
+    } catch (err) {
+      console.debug("[bsk tab_borrow] activate after move failed", err);
     }
     return {
       tab_id: params.tab_id,

@@ -20,7 +20,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => 1),
+    ensureActiveTab: vi.fn(async () => 7),
   };
 }
 
@@ -197,6 +197,7 @@ describe("handleEmulate", () => {
 
   it("targets an explicit tab_id", async () => {
     const sm = await makeManager();
+    sm.get("aa11")?.agentCreatedTabs.add(9);
     const deps = makeDeps();
     const result = await handleEmulate(
       sm,
@@ -276,6 +277,7 @@ describe("handleEmulate", () => {
 
   it("keeps emulation state per tab", async () => {
     const sm = await makeManager();
+    sm.get("aa11")?.agentCreatedTabs.add(9);
     const deps = makeDeps();
     await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
     await handleEmulate(

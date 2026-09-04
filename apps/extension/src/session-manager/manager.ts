@@ -7,38 +7,17 @@ export interface SessionContext {
   refStore: RefStore;
   borrowedTabs: Map<number, BorrowedTab>;
   /**
-   * Tabs created by the agent via `tool.tab_create` in this session's
-   * Agent Window. Tracked so `session_stop` can close them before
-   * releasing the window (design §3.1). User-created tabs (via Chrome UI)
-   * never enter this set.
+   * Tabs explicitly claimed by the agent because it created them. This
+   * includes the Agent Window's home tab and tabs created by `tool.tab_create`.
+   * Tabs opened through Chrome UI never enter this set.
    */
   agentCreatedTabs: Set<number>;
-  /**
-   * Tabs the user opened themselves inside the Agent Window via Chrome UI
-   * (new-tab button, Cmd+T, right-click → open in new tab, …). These must
-   * NOT be controlled by the agent overlay and must be left free for the
-   * user to operate. Distinguishing them from agent-created tabs is done
-   * by the `chrome.tabs.onCreated` listener in background.ts, which consults
-   * `pendingAgentTabCount` to tell "opened via tool.tab_create" apart from
-   * "opened by the user".
-   */
-  userTabs: Set<number>;
-  /**
-   * Number of agent tabs currently being created via `tool.tab_create` but
-   * whose `onCreated` event has not yet been observed. `handleTabCreate`
-   * increments this *before* calling `chrome.tabs.create`; the
-   * `onCreated` listener decrements it once per new tab in the Agent Window.
-   * This lets us tell agent-created tabs from user-created tabs even though
-   * both fire `onCreated` (design §3.1, user-tab freedom fix).
-   */
-  pendingAgentTabCount: number;
-  /**
-   * Id of the home tab created/activated when the session started
-   * (`ensureActiveTab`). Used to clean up the home tab precisely on
-   * stop instead of matching by URL (design §3.2).
-   */
-  homeTabId: number | null;
   createdAtMs: number;
+}
+
+/** Whether this session has explicitly claimed control of `tabId`. */
+export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolean {
+  return ctx.agentCreatedTabs.has(tabId) || ctx.borrowedTabs.has(tabId);
 }
 
 export interface BorrowedTab {
@@ -219,10 +198,10 @@ export class SessionManager {
         agentWindowId: windowId,
         refStore: new RefStore(),
         borrowedTabs: new Map(),
-        agentCreatedTabs: new Set(),
-        userTabs: new Set(),
-        pendingAgentTabCount: 0,
-        homeTabId,
+        // The home tab is the session's first explicit claim. Every other
+        // tab remains free until `tab_create` or `tab_borrow` identifies it
+        // by its concrete Chrome tab id.
+        agentCreatedTabs: new Set([homeTabId]),
         createdAtMs: this.now(),
       };
       this.sessions.set(sessionId, ctx);
@@ -238,50 +217,6 @@ export class SessionManager {
       }
       throw startupError;
     }
-  }
-
-  /**
-   * Record that a `tool.tab_create` is about to open a tab. Called *before*
-   * `chrome.tabs.create` so the pending count is visible to the
-   * `onCreated` listener that will fire for the new tab.
-   */
-  markAgentTabPending(windowId: number): void {
-    const ctx = this.findByWindowId(windowId);
-    if (!ctx) return;
-    ctx.pendingAgentTabCount += 1;
-  }
-
-  /**
-   * Release a pending `tool.tab_create` slot when the create itself failed
-   * and no `chrome.tabs.onCreated` event will arrive to consume it. Without
-   * this the counter leaks and the *next* tab the user opens is misclassified
-   * as agent-created — the exact confusion this counter exists to prevent.
-   */
-  releaseAgentTabPending(windowId: number): void {
-    const ctx = this.findByWindowId(windowId);
-    if (!ctx || ctx.pendingAgentTabCount === 0) return;
-    ctx.pendingAgentTabCount -= 1;
-  }
-
-  /**
-   * Called by the `onCreated` listener for each new tab in an Agent Window.
-   * Returns `"agent"` when the tab is the window's home tab or corresponds to
-   * a pending `tool.tab_create` (and registers it), `"user"` when the user
-   * opened it via Chrome UI.
-   */
-  classifyNewTab(tabId: number, windowId: number): "agent" | "user" | "unknown" {
-    const ctx = this.findByWindowId(windowId);
-    if (!ctx) return "unknown";
-    // The home tab is agent-owned. Its `onCreated` fires before any
-    // window-initialising flag would be observable, so we match it by home
-    // tab id rather than by boot timing (which left the branch unreachable).
-    if (tabId === ctx.homeTabId || ctx.pendingAgentTabCount > 0) {
-      if (ctx.pendingAgentTabCount > 0) ctx.pendingAgentTabCount -= 1;
-      ctx.agentCreatedTabs.add(tabId);
-      return "agent";
-    }
-    ctx.userTabs.add(tabId);
-    return "user";
   }
 
   /**

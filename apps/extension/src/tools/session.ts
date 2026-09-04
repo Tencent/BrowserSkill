@@ -269,7 +269,8 @@ export async function handleSessionStop(
     return { code: "cancelled", message: "session_stop aborted before window close" };
   }
 
-  // Step 4: close the agent-created tabs and the home tab. `tabsApi` is a
+  // Step 4: close every tab explicitly created by the agent, including the
+  // home tab. `tabsApi` is a
   // TabMutationApi (remove only); `queryApi` is a separate read-only
   // ChromeTabsApi. If neither is injected, we conservatively fall back to
   // closing the window (see Step 5).
@@ -277,7 +278,7 @@ export async function handleSessionStop(
   const queryApi = deps.tabsQuery;
 
   if (tabsApi) {
-    // 4a: close each agent-created tab that still exists.
+    // Close each agent-created tab that still exists.
     const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
     for (const tabId of agentCreatedTabIds) {
       try {
@@ -286,16 +287,6 @@ export async function handleSessionStop(
       } catch (err) {
         // Tab may already be gone (closed by the user). Non-fatal.
         console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
-      }
-    }
-
-    // 4b: close the home tab by id (not by URL — avoids deleting a user's
-    // `about:blank` tab). Non-fatal if it's already gone.
-    if (ctx.homeTabId != null) {
-      try {
-        await tabsApi.remove(ctx.homeTabId);
-      } catch (err) {
-        console.warn(`[bsk session_stop] failed to close home tab`, err);
       }
     }
   }
@@ -312,7 +303,6 @@ export async function handleSessionStop(
       // regression). Exclude any id still tracked in agentCreatedTabs.
       const userTabs = liveWindowTabs.filter((t) => {
         if (t.id === undefined) return false;
-        if (t.id === ctx.homeTabId) return false;
         return !ctx.agentCreatedTabs.has(t.id);
       });
       const leakedAgentTabs = liveWindowTabs.filter(

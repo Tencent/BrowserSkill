@@ -21,7 +21,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => 1),
+    ensureActiveTab: vi.fn(async () => 4),
   };
 }
 
@@ -113,6 +113,7 @@ describe("handleClick", () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e3", 1234, { tabId: 4 });
+    ctx.agentCreatedTabs.add(5);
     const fake = makeFakeCdp({});
     const res = await handleClick(
       sm,

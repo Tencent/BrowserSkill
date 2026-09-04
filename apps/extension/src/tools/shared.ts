@@ -8,7 +8,11 @@
 
 import type { CdpDebuggee, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
@@ -323,23 +327,22 @@ export async function resolveCdpAccessibleTargetTab(
 }
 
 /**
- * Sandbox guard: M7 write tools (click / fill / press / navigate*)
- * MUST refuse to touch a tab outside the session's Agent Window
- * (§6 — borrowing brings the tab into the Agent Window first).
+ * Sandbox guard: M7 write tools (click / fill / press / navigate*) must
+ * refuse tabs the session has not explicitly claimed. A controlled tab must
+ * also remain inside the session's Agent Window.
  *
- * Returns an `RpcError` when the resolved target sits in a user window;
- * `null` on success.
+ * Returns an `RpcError` for free tabs and tabs outside the Agent Window.
  */
 export function enforceAgentWindow(
   ctx: SessionContext,
   target: { tabId: number; windowId: number },
   toolName: string,
 ): RpcError | null {
-  if (target.windowId !== ctx.agentWindowId) {
+  if (target.windowId !== ctx.agentWindowId || !isAgentControlledTab(ctx, target.tabId)) {
     return rpcError(
       "permission_denied",
       "agent_window_scope",
-      `${toolName} can only act on tabs inside the Agent Window (tab ${target.tabId} is in window ${target.windowId}; borrow it first)`,
+      `${toolName} can only act on tabs claimed by this session inside the Agent Window (tab ${target.tabId} is free or outside window ${ctx.agentWindowId}; borrow it first)`,
     );
   }
   return null;

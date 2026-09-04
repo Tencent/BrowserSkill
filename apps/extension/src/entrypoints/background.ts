@@ -25,7 +25,7 @@ import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
-import { SessionManager } from "@/session-manager/manager";
+import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
 import {
   attachBorrowNotificationButtonHandler,
   attachBorrowNotificationClickHandler,
@@ -83,26 +83,21 @@ export default defineBackground(() => {
   }
 
   /**
-   * Authoritative overlay state for a *specific* tab. A user-created tab
-   * (`ctx.userTabs`) inside the Agent Window must never show the control
-   * mask — return hidden immediately. This is what lets a freshly-mounted
-   * content script receive the correct state on its first `overlay.ready`
-   * ping instead of flashing control and then hiding (design: decide before
-   * showing, never show then correct).
+   * Authoritative overlay state for a specific tab. Agent Window tabs are
+   * free by default; only tabs explicitly claimed through session startup,
+   * `tab_create`, or `tab_borrow` receive the control overlay.
    */
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
       const ctx = sessions.findByWindowId(windowId);
-      if (ctx && ctx.userTabs.has(tabId)) {
-        return {
-          type: OVERLAY_AGENT_STATE,
-          sessionId: null,
-          mode: "hidden",
-          generation: overlayGeneration,
-        };
-      }
+      if (ctx && isAgentControlledTab(ctx, tabId)) return overlayStateForWindow(windowId);
     }
-    return overlayStateForWindow(windowId);
+    return {
+      type: OVERLAY_AGENT_STATE,
+      sessionId: null,
+      mode: "hidden",
+      generation: overlayGeneration,
+    };
   }
 
   async function pushOverlayStateToTab(
@@ -122,20 +117,11 @@ export default defineBackground(() => {
   }
 
   async function pushOverlayStateForWindow(windowId: number): Promise<void> {
-    const ctx = sessions.findByWindowId(windowId);
-    const baseState = overlayStateForWindow(windowId);
     const tabs = await chrome.tabs.query({ windowId });
     await Promise.all(
       tabs.map((tab) => {
         if (typeof tab.id !== "number") return Promise.resolve();
-        // A user-created tab in the Agent Window must stay free for the user
-        // to operate — never show the control mask over it. Override the
-        // window-level control state with a hidden state for those tabs.
-        const isUserTab = ctx ? ctx.userTabs.has(tab.id) : false;
-        const state: OverlayAgentStateMessage = isUserTab
-          ? { ...baseState, sessionId: null, mode: "hidden" }
-          : baseState;
-        return pushOverlayStateToTab(tab.id, state);
+        return pushOverlayStateForTab(tab.id, windowId);
       }),
     );
   }
@@ -175,27 +161,13 @@ export default defineBackground(() => {
     if (typeof tab.windowId !== "number") return;
     pushOverlayStateForAgentWindow(tab.windowId);
   });
-  // A new tab inside an Agent Window is agent-owned (the home tab, matched by
-  // homeTabId, or a tool.tab_create flagged by the pending count) or
-  // user-created (via Chrome UI). Classify it so user-opened tabs are kept
-  // free and can be pushed a hidden overlay immediately. See
-  // SessionManager.classifyNewTab.
+  // Newly observed tabs are free unless the agent's own creation path has
+  // already claimed their concrete id. This listener only renders that
+  // state; it never infers or mutates ownership from event ordering.
   chrome.tabs.onCreated.addListener((tab) => {
     if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
-    const kind = sessions.classifyNewTab(tab.id, tab.windowId);
-    if (kind === "user") {
-      // User tab: explicitly free it from the agent control mask.
-      void pushOverlayStateToTab(tab.id, {
-        type: OVERLAY_AGENT_STATE,
-        sessionId: null,
-        mode: "hidden",
-        generation: overlayGeneration,
-      });
-    } else if (kind === "agent") {
-      // Agent tab (or home tab): make sure it reflects the session's
-      // current control mode.
-      void pushOverlayStateForAgentWindow(tab.windowId);
-    }
+    if (!sessions.findByWindowId(tab.windowId)) return;
+    void pushOverlayStateForTab(tab.id, tab.windowId);
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
@@ -369,15 +341,18 @@ export default defineBackground(() => {
     if (!msg || typeof msg !== "object" || !("kind" in msg)) return false;
 
     if (msg.kind === OVERLAY_MSG_WHO_AM_I) {
+      const tabId = sender.tab?.id;
       const windowId = sender.tab?.windowId;
       const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
-      sendResponse({ sessionId: ctx?.sessionId ?? null });
+      const sessionId =
+        ctx && typeof tabId === "number" && isAgentControlledTab(ctx, tabId) ? ctx.sessionId : null;
+      sendResponse({ sessionId });
       return false;
     }
 
     if (msg.kind === OVERLAY_MSG_READY) {
-      // Decide per-tab *before* sending: a user-created tab gets hidden
-      // immediately so the content script never flashes the control mask.
+      // Resolve from explicit tab ownership before sending so free tabs never
+      // flash the control mask.
       if (typeof sender.tab?.id === "number") {
         void pushOverlayStateForTab(sender.tab.id, sender.tab.windowId);
       }
