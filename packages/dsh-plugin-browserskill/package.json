@@ -1,7 +1,7 @@
 {
   "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
   "description": "DeepSeek Harness tool plugin that exposes BrowserSkill browser automation (browser_* tools) to the model",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "license": "MIT",
   "publishConfig": {
     "access": "public",

@@ -17,7 +17,7 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
-  withOverlaysHiddenForCapture,
+  withExtensionOverlayHidden,
 } from "@/lib/capture-suppress-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
@@ -49,11 +49,14 @@ import {
 import { resolveSnapshotRef } from "./snapshot-ref";
 import {
   type CapturedNode,
+  type CapturedSurfaceProbe,
   type CapturedViewModel,
   captureViewModel,
   collectOverlayExcludedBackendIds,
+  probeHoverSurfaces,
 } from "./vom/capture";
 import { type CapturedFrameDocument, captureFrameData } from "./vom/frame-capture";
+import { withOverlayBypass } from "./vom/hover-perception";
 import { probeTooltipNames } from "./vom/name-enrichment";
 import {
   type CaptureVomObservationResult,
@@ -321,7 +324,7 @@ export async function handleScreenshot(
       tabId: target.tabId,
       ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
     };
-    const captured = await withOverlaysHiddenForCapture(
+    const captured = await withExtensionOverlayHidden(
       target.tabId,
       () =>
         captureElementScreenshot(
@@ -353,7 +356,7 @@ export async function handleScreenshot(
     );
   }
 
-  const captured = await withOverlaysHiddenForCapture(
+  const captured = await withExtensionOverlayHidden(
     target.tabId,
     () => captureFullTabPng(deps, ctx, target, signal),
     deps.sendToTab,
@@ -525,8 +528,11 @@ function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): A
   return blocks;
 }
 
-function buildConditionalSurfaces(nodes: VomNode[], captured: CapturedViewModel): CondSurface[] {
-  const probes = captured.surfaceProbes ?? [];
+function buildConditionalSurfaces(
+  nodes: VomNode[],
+  captured: CapturedViewModel,
+  probes: CapturedSurfaceProbe[],
+): CondSurface[] {
   if (probes.length === 0) return [];
 
   const surfaces: CondSurface[] = [];
@@ -649,6 +655,7 @@ function findSurfaceNodeByPoint(
 export interface BuildVomSceneOptions {
   pageUrl?: string;
   supplementalNames?: ReadonlyMap<string, string>;
+  surfaceProbes?: CapturedSurfaceProbe[];
 }
 
 export type VomFrameDocument = CapturedFrameDocument<CdpAxNode>;
@@ -817,18 +824,19 @@ export function buildFrameVomScene(
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
     supplementalNames: options.supplementalNames,
   });
-  return attachCapturedSceneAnnotations(scene, documents, captured);
+  return attachCapturedSceneAnnotations(scene, documents, captured, options.surfaceProbes ?? []);
 }
 
 function attachCapturedSceneAnnotations(
   scene: VomScene,
   documents: VomFrameDocument[],
   captured: CapturedViewModel,
+  surfaceProbes: CapturedSurfaceProbe[],
 ): VomScene {
   const rootDocument = documents.find((document) => document.frameId === scene.rootFrameId);
   const signals = capturedOnlySignals(rootDocument?.domNodes ?? captured.nodes);
   const activeScopeBlocks = buildActiveScopeBlocks(scene.nodes, signals);
-  const surfaces = buildConditionalSurfaces(scene.nodes, captured);
+  const surfaces = buildConditionalSurfaces(scene.nodes, captured, surfaceProbes);
   return {
     ...scene,
     ...(surfaces.length > 0 ? { surfaces } : {}),
@@ -1010,15 +1018,67 @@ async function captureForVom(
   options: CaptureVomObservationOptions,
 ): Promise<CapturedViewModel> {
   try {
-    return await captureViewModel(cdp, tabId, {
-      conditionalSurfaceProbe: options.conditionalSurfaceProbe ?? false,
-      hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
-      signal: options.signal,
-    });
+    return await captureViewModel(cdp, tabId, { signal: options.signal });
   } catch (error) {
     if (isAbortError(error)) throw error;
     return fallbackCapturedViewModel(cdp, tabId, options.signal);
   }
+}
+
+export interface HoverProbeOutcome {
+  /** Whether any active hover was dispatched during this observation. */
+  performed: boolean;
+  /**
+   * Whether hovering surfaced content absent from the static snapshot. Cached
+   * tooltip names count, so this may over-report on repeat observations — it
+   * errs towards telling the caller the snapshot is less fresh than it looks.
+   */
+  revealedContent: boolean;
+  surfaceProbes: CapturedSurfaceProbe[];
+  tooltipNames: Map<string, string>;
+}
+
+const NO_HOVER_PROBES: HoverProbeOutcome = {
+  performed: false,
+  revealedContent: false,
+  surfaceProbes: [],
+  tooltipNames: new Map(),
+};
+
+/**
+ * Runs both active-hover chains back to back.
+ *
+ * Ordering matters: this happens after DOM *and* accessibility capture so a
+ * hover that opens a menu cannot leave one half of the observation describing
+ * the page before the change and the other half after it. Sharing one overlay
+ * bypass span also means the agent overlay toggles once per observation
+ * instead of once per chain.
+ */
+async function runHoverProbes(
+  cdp: CdpRunner,
+  tabId: number,
+  captured: CapturedViewModel,
+  documents: VomFrameDocument[],
+  staticSemantics: ReturnType<typeof resolveSemanticGraph>,
+  options: CaptureVomObservationOptions,
+): Promise<HoverProbeOutcome> {
+  if (!options.conditionalSurfaceProbe) return NO_HOVER_PROBES;
+
+  return withOverlayBypass(options.hoverProbeBypassOverlay, tabId, async () => {
+    const surfaceProbes = await probeHoverSurfaces(cdp, tabId, captured.nodes, {
+      signal: options.signal,
+    });
+    throwIfAborted(options.signal, "observation");
+    const tooltipNames = await probeTooltipNames(cdp, tabId, documents, staticSemantics, {
+      signal: options.signal,
+    });
+    return {
+      performed: true,
+      revealedContent: surfaceProbes.length > 0 || tooltipNames.size > 0,
+      surfaceProbes,
+      tooltipNames,
+    };
+  });
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
@@ -1051,19 +1111,26 @@ export async function captureVomObservation(
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
   });
   const staticSemantics = resolveSemanticGraph(semanticGraph, { identifierFallback: false });
-  const tooltipNames = options.conditionalSurfaceProbe
-    ? await probeTooltipNames(cdp, tabId, normalizedDocuments, staticSemantics, {
-        signal: options.signal,
-        hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
-      })
-    : new Map<string, string>();
+  const hoverProbes = await runHoverProbes(
+    cdp,
+    tabId,
+    captured,
+    normalizedDocuments,
+    staticSemantics,
+    options,
+  );
   throwIfAborted(options.signal, "observation");
   const scene = projectSemanticGraph(
     normalizeSemanticStructure(
-      resolveSemanticGraph(semanticGraph, { supplementalNames: tooltipNames }),
+      resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
     ),
   );
-  const decoratedScene = attachCapturedSceneAnnotations(scene, normalizedDocuments, captured);
+  const decoratedScene = attachCapturedSceneAnnotations(
+    scene,
+    normalizedDocuments,
+    captured,
+    hoverProbes.surfaceProbes,
+  );
   const rendered = renderVom(decoratedScene, {
     maxDepth: options.maxDepth,
     maxTokens: options.maxTokens,
@@ -1075,7 +1142,11 @@ export async function captureVomObservation(
     rootFrameId: captured.rootFrameId ?? normalizedDocuments[0]?.frameId ?? "root",
     frameDocuments: normalizedDocuments,
     rendered,
-    surfaceProbes: captured.surfaceProbes,
+    surfaceProbes: hoverProbes.surfaceProbes,
+    hoverProbe: {
+      performed: hoverProbes.performed,
+      revealedContent: hoverProbes.revealedContent,
+    },
   });
 }
 
@@ -1141,6 +1212,14 @@ async function handleVomObservation(
       ref_count: observation.refs.length,
       tab_id: target.tabId,
       truncated: observation.truncated,
+      ...(toolName === "observe" && observation.hoverProbe?.performed
+        ? {
+            hover_probe: {
+              performed: true,
+              revealed_content: observation.hoverProbe.revealedContent,
+            },
+          }
+        : {}),
       ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
         ? {
             debug: {
@@ -1179,5 +1258,13 @@ export async function handleObserve(
   deps: SnapshotDeps = getDefaultDeps(),
   signal?: AbortSignal,
 ): Promise<ObserveResult | RpcError> {
-  return handleVomObservation(manager, params, "observe", "transient_input", true, deps, signal);
+  return handleVomObservation(
+    manager,
+    params,
+    "observe",
+    "transient_input",
+    params.probe_hover === true,
+    deps,
+    signal,
+  );
 }

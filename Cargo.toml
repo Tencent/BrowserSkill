@@ -7,7 +7,7 @@ members = [
 default-members = ["crates/bsk-cli"]
 
 [workspace.package]
-version = "0.1.11"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -36,13 +36,14 @@ flate2 = "1.1.9"
 tar = "0.4.46"
 zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 sha2 = "0.11.0"
+base64 = "0.22"
 tempfile = "3"
 nix = { version = "0.29", features = ["signal", "process"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # Workspace crates (version required for `cargo publish` of dependents)
-bsk-protocol = { version = "0.1.9", path = "crates/bsk-protocol" }
+bsk-protocol = { version = "0.2.0", path = "crates/bsk-protocol" }
 
 [profile.release]
 strip = "symbols"

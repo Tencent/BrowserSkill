@@ -33,10 +33,25 @@ export type RpcErrorReason =
   | "restricted_tab_url"
   | "borrow_conflict"
   | "screenshot_capture_failed"
+  | "file_input_probe_failed"
+  | "file_input_not_activated"
+  | "set_file_input_failed"
+  | "upload_mechanism_unsupported"
+  | "file_drop_target_unavailable"
+  | "file_drop_failed"
+  | "download_capture_failed"
+  | "transfer_outcome_unknown"
+  | "transfer_timeout"
   | "cleanup_failed";
+
+export type TransferEffectState = "none" | "committed" | "unknown";
+export type TransferCleanupState = "complete" | "failed";
 
 export interface RpcErrorData {
   reason?: RpcErrorReason;
+  effect_state?: TransferEffectState;
+  phase?: string;
+  cleanup_state?: TransferCleanupState;
   [key: string]: unknown;
 }
 
@@ -318,9 +333,14 @@ export interface SnapshotResult {
 
 export interface ObserveParams extends SnapshotParams {
   debug_surfaces?: boolean;
+  probe_hover?: boolean;
 }
 
 export interface ObserveResult extends SnapshotResult {
+  hover_probe?: {
+    performed: boolean;
+    revealed_content: boolean;
+  };
   debug?: {
     surface_probes?: Array<{
       trigger_backend_node_id: number;
@@ -498,6 +518,53 @@ export interface SelectResult {
   selected_values: string[];
   selected_labels: string[];
   dialogs?: JavaScriptDialogInfo[];
+}
+
+export interface UploadFile {
+  transfer_id: string;
+  name: string;
+  staged_path?: string;
+}
+
+export type UploadMode = "input" | "drop";
+
+export interface UploadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  files: UploadFile[];
+  mode?: UploadMode;
+  timeout_ms?: number;
+}
+
+export interface UploadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  file_names: string[];
+}
+
+export interface DownloadParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  tab_id?: number;
+  timeout_ms?: number;
+  browser_relative_dir?: string;
+  max_byte_size?: number;
+}
+
+export interface DownloadResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  suggested_filename: string;
+  byte_size: number;
+  mime?: string;
+  danger?: string;
+  browser_path?: string;
+  transfer_id?: string;
 }
 
 // --------------------------------------------------------------------------

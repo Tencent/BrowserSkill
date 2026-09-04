@@ -42,7 +42,7 @@ interface LlmLike {
  * @param data - first bytes of the capture.
  * @returns the detected media type, or undefined when unrecognized.
  */
-function sniffImageMediaType(data: Uint8Array): string | undefined {
+export function sniffImageMediaType(data: Uint8Array): string | undefined {
   if (data.length >= 4) {
     // PNG signature: 89 50 4E 47 (0D 0A 1A 0A)
     if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {

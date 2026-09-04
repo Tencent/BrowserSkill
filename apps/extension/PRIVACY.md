@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** May 25, 2026
+**Last updated:** August 20, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -14,7 +14,7 @@ BrowserSkill is a local automation bridge that lets AI coding agents (such as Cu
 
 ## 2. Single Purpose
 
-The Extension's single purpose is to expose browser automation primitives (navigation, DOM observation, screenshots, clicks, form filling, tab management) to a locally running BrowserSkill daemon over a WebSocket connection on `127.0.0.1`, so that an AI agent invoked by the user can interact with web pages on the user's behalf.
+The Extension's single purpose is to expose browser automation primitives (navigation, DOM observation, screenshots, clicks, form filling, task-scoped file transfer, and tab management) to a locally running BrowserSkill daemon over a WebSocket connection on `127.0.0.1`, so that an AI agent invoked by the user can interact with web pages on the user's behalf.
 
 ## 3. Data the Extension Accesses
 
@@ -26,6 +26,7 @@ Depending on the commands the user (via their AI agent) sends to the local daemo
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Tab and window metadata** | Tab IDs, URLs, titles, window IDs of the Agent Window and any tabs the user explicitly authorizes. | Required to target automation commands at the correct tab/window. |
 | **Local extension storage** | A randomly generated 8-character instance ID and an optional user-supplied label. | Used so the local daemon can recognize this browser instance across reconnects. No personal data is stored. |
+| **File transfers requested by the agent** | Local files explicitly supplied to `bsk upload`, and the file created by a single `bsk download` action. | Required to attach a task file to a web page or return a browser-generated download to the invoking local agent. |
 | **OS notifications** | Permission to display a system notification when the agent requests to "borrow" one of the user's existing tabs. | Required to obtain explicit, per-tab user consent before the agent touches any pre-existing tab. |
 
 ## 4. Data the Extension Does **Not** Collect
@@ -34,7 +35,7 @@ BrowserSkill does **not**:
 
 - Send any data to remote servers, the Extension's authors, or any third party.
 - Call any LLM, AI, or cloud API. The Extension contains no API keys, model identifiers, or remote endpoints.
-- Read or transmit cookies, browsing history, bookmarks, downloads, saved passwords, or autofill data.
+- Read or transmit cookies, browsing history, bookmarks, saved passwords, or autofill data. It observes only the download initiated by an active `bsk download` call, not download history generally.
 - Use webcam, microphone, geolocation, or any device sensor.
 - Include analytics, telemetry, crash reporting, advertising SDKs, or fingerprinting code.
 - Track users across websites or across sessions.
@@ -50,6 +51,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`alarms`** — Periodically wake the service worker to keep the local WebSocket connection alive.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the local WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
+- **`downloads`** — Correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unclaimed downloads.
 - **`storage`** — Persist a random instance ID and optional label in `chrome.storage.local`.
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. The Extension does **not** read or transmit page content from sites the agent is not actively driving.
 
@@ -61,6 +63,7 @@ All Extension activity stays on the user's local device. The only network traffi
 
 - The instance ID and optional label persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
 - Page content, screenshots, DOM snapshots, and other observed data are returned to the local daemon in response to commands and are **not retained by the Extension**. They live only as long as the agent's tool call.
+- Upload and download bytes are staged by the local daemon in a private, session-scoped directory. Download staging is removed after it is copied to the requested destination. Upload staging is retained until the session ends so a later form submission can still read the attached file. Remaining staging is removed when the session ends or disconnects, or when the daemon next starts after a crash.
 
 ## 8. User Control
 

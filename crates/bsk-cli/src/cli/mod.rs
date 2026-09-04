@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+mod atomic_output;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
@@ -9,6 +10,7 @@ pub mod console;
 pub mod daemon;
 pub mod dialogs;
 pub mod doctor;
+pub mod download;
 pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
@@ -31,6 +33,7 @@ pub mod snapshot;
 pub mod status;
 pub mod tab;
 pub mod update;
+pub mod upload;
 pub mod waits;
 pub mod window;
 
@@ -38,6 +41,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::cli::console::ConsoleArgs;
 use crate::cli::daemon::DaemonCmd;
+use crate::cli::download::DownloadArgs;
 use crate::cli::emulate::EmulateArgs;
 use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
@@ -53,6 +57,7 @@ use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
+use crate::cli::upload::UploadArgs;
 use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
 use crate::cli::window::WindowCmd;
 
@@ -176,6 +181,12 @@ pub enum Command {
 
     /// Set `<select>` option values by `value` attribute.
     Select(SelectArgs),
+
+    /// Upload files through a page file input or explicit drop target.
+    Upload(UploadArgs),
+
+    /// Capture one browser download and write it to a local path.
+    Download(DownloadArgs),
 
     /// Evaluate a JavaScript expression inside the Agent Window.
     Evaluate(EvaluateArgs),

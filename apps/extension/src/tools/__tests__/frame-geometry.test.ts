@@ -169,6 +169,7 @@ describe("frame geometry projection", () => {
     expect(geometry).toMatchObject({
       topBounds: { x: 100, y: 100, width: 200, height: 100 },
       actionPoint: { x: 200, y: 150 },
+      targetActionPoint: { x: 100, y: 50 },
     });
   });
 
@@ -261,6 +262,7 @@ describe("frame geometry projection", () => {
     expect(geometry).toMatchObject({
       topBounds: { x: 100, y: 100, width: 200, height: 100 },
       actionPoint: { x: 200, y: 150 },
+      targetActionPoint: { x: 200, y: 150 },
     });
   });
 

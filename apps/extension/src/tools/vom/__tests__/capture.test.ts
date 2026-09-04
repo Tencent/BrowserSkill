@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "../../../lib/overlay-bridge";
-import { captureViewModel, collectOverlayExcludedBackendIds } from "../capture";
+import { captureViewModel, collectOverlayExcludedBackendIds, probeHoverSurfaces } from "../capture";
 
 // Minimal but format-accurate captureSnapshot reply: a body with one
 // fixed full-screen overlay div carrying a password input.
@@ -251,11 +251,10 @@ describe("captureViewModel", () => {
     expect(input?.attrs).toEqual({ type: "password" });
   });
 
-  it("does not run conditional surface probes by default", async () => {
+  it("never hovers the page while capturing", async () => {
     const cdp = makeCdp(fakeSnapshotReply());
-    const result = await captureViewModel(cdp, 4);
+    await captureViewModel(cdp, 4);
 
-    expect(result.surfaceProbes).toEqual([]);
     expect(cdp.send).not.toHaveBeenCalledWith(4, "Input.dispatchMouseEvent", expect.anything());
   });
 
@@ -319,9 +318,10 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = await captureViewModel(cdp, 4);
+    const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
 
-    expect(result.surfaceProbes).toEqual([
+    expect(surfaceProbes).toEqual([
       {
         triggerBackendNodeId: 12,
         triggerPoint: { x: 956, y: 32 },
@@ -378,9 +378,10 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = await captureViewModel(cdp, 4);
+    const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
 
-    expect(result.surfaceProbes).toEqual([
+    expect(surfaceProbes).toEqual([
       expect.objectContaining({
         triggerBackendNodeId: 12,
         subItems: ["My profile", "Sign out"],
@@ -422,7 +423,8 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = await captureViewModel(cdp, 4);
+    await probeHoverSurfaces(cdp, 4, captured.nodes);
 
     expect(hoverMoves).toBe(1);
   });

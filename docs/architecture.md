@@ -143,6 +143,15 @@ flowchart LR
 - No credential storage in bsk — cookies stay in the user's browser profile.
 - `evaluate` restricted to Agent Window tabs in sandbox mode.
 
+### File-transfer boundary
+
+- The invoking agent/harness decides whether a transfer is authorized and supplies the task-local source or destination path.
+- The CLI is the only component that reads an upload source or writes the final download destination. Before browser dispatch it owns rollback of partially staged uploads; after dispatch, ownership moves to the session because a transport timeout cannot prove that Chrome did not attach the file. Download output becomes visible through one atomic commit, and replacement is opt-in without a pre-delete window. The extension never receives either agent-facing path.
+- The daemon is the authority for storage capabilities and limits. It issues opaque session-scoped transfer IDs, stages bounded chunks in a private runtime directory, and injects only private staged upload paths. For download it mints one relative Chrome directory capability. Only after validating the reported path, file type, symlink boundary, and authoritative byte limit does it take ownership of browser-file cleanup and import the bytes.
+- The extension owns only the browser transaction. Every transfer resolves one `ResolvedActionTarget`. The default upload mechanism arms Chrome's chooser interception before clicking, then accepts either an exact `Page.fileChooserOpened` input node or an independent probe anchored in the trigger node's document; one verified input is committed with `DOM.setFileInputFiles`, while a non-input picker is rejected immediately. Explicit drop mode performs no click and never falls back to the chooser mechanism: after geometry resolution it temporarily excludes BrowserSkill's own overlay, verifies that the resolved drop zone still owns its local action point, and sends one native `dragEnter` / `dragOver` / `drop` transaction to that node's CDP target before restoring the overlay. OOPIF drops use target-local coordinates rather than top-level click coordinates. Download correlates exact-target CDP intent and `chrome.downloads` filename candidates in either arrival order, claims only one unique match, and never cancels an unclaimed candidate.
+- Browser-side operations report `effect_state` (`none`, `committed`, or `unknown`), `phase`, and `cleanup_state`. Confirmed success wins over a late cancel; an unknown effect is preserved across timeout or transport loss and must not be retried blindly. A transfer deadline sends cancellation to the extension and keeps the session queue occupied for bounded compensation rather than abandoning an in-flight browser effect.
+- Download staging is released after CLI commit. Upload staging remains until session teardown because the page may read an attached file only on a later form submission. Remaining staging is released on session stop/browser disconnect and on daemon startup after a crash. BrowserSkill does not inspect content or decide whether a transfer is appropriate.
+
 ## Repository layout
 
 ```

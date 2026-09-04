@@ -149,6 +149,7 @@ export function ObservationSidebarTab({
       now={now}
       inPip={pipWindow !== null}
       onPopOut={pipWindow === null && pipSupported ? () => popOut() : undefined}
+      onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
     />
   );
 

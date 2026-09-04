@@ -438,6 +438,7 @@ async fn dispatch_with_sender(
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
+    let effect_aware_transfer = is_effect_aware_transfer(&method);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
@@ -474,15 +475,21 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    let mut response_timeout = timeout.saturating_add(Duration::from_secs(1));
-    if lifecycle_cancellable {
-        // A lifecycle cancel can arrive at the original RPC deadline and
-        // intentionally keeps the worker alive while extension cleanup
-        // settles. Do not let this outer waiter abandon that reconciliation
-        // early, which could reopen a daemon session whose window is gone.
-        response_timeout = response_timeout.saturating_add(cancel_cleanup_timeout);
-    }
-    let waited = tokio::time::timeout(response_timeout, respond_rx).await;
+    // Lifecycle teardown and effect-aware transfers both keep the worker busy
+    // for bounded compensation after their original deadline. Keep the outer
+    // waiter alive for the same grace period so it cannot abandon reconciliation.
+    let response_grace = if lifecycle_cancellable || effect_aware_transfer {
+        cancel_cleanup_timeout
+    } else {
+        Duration::ZERO
+    };
+    let waited = tokio::time::timeout(
+        timeout
+            .saturating_add(response_grace)
+            .saturating_add(Duration::from_secs(1)),
+        respond_rx,
+    )
+    .await;
     match waited {
         Ok(Ok(Ok(v))) => Ok(v),
         Ok(Ok(Err(rpc))) => Err(DispatchError::Rpc(rpc)),
@@ -636,50 +643,94 @@ async fn forward_one(
         .lifecycle_cancel
         .as_ref()
         .map(|_| &forward_lifecycle_cancel as &(dyn Fn() + Sync));
+    let send_deadline_cancel = || {
+        client
+            .sink
+            .send(Frame::Request(RequestFrame {
+                id: format!("deadline-cancel-{rpc_id}"),
+                method: Method::Cancel,
+                params: Some(serde_json::json!({ "rpc_id": rpc_id })),
+            }))
+            .is_ok()
+    };
+    let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
+        is_effect_aware_transfer(&job.method).then_some(&send_deadline_cancel);
     let waited = await_with_optional_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
         waiter,
         cancel_token.as_ref(),
         on_abort,
+        deadline_cancel,
     )
     .await;
     let response = match waited {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => {
             if job.method == Method::ToolSessionStop
-                && let ResponseBody::Ok(value) = resp.body
+                && let ResponseBody::Ok(value) = &resp.body
             {
                 // Teardown crossed its final irreversible boundary before
                 // the cancel landed. Commit the real extension result so the
                 // daemon does not retain a session whose window is gone.
-                return Ok(value);
+                return Ok(value.clone());
             }
-            // Cancellation wins the external verdict, but only after the
-            // extension's original RPC has settled. Preserve any non-cancel
-            // error so compensation failures remain explicit instead of
-            // being hidden behind a generic cancelled result.
-            if let ResponseBody::Err(err) = resp.body
-                && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
-            {
-                return Err(err);
+            // File transfer commits are irreversible. A late cancel cannot
+            // overwrite a confirmed success, and an unknown transfer effect
+            // must remain explicit so callers do not retry or release upload
+            // staging as though nothing happened.
+            if is_effect_aware_transfer(&job.method) {
+                match &resp.body {
+                    ResponseBody::Ok(_) => resp,
+                    ResponseBody::Err(err)
+                        if transfer_effect(err) == Some("unknown")
+                            || transfer_effect(err) == Some("committed") =>
+                    {
+                        return Err(err.clone());
+                    }
+                    ResponseBody::Err(err)
+                        if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
+                    {
+                        return Err(err.clone());
+                    }
+                    ResponseBody::Err(_) => {
+                        return Err(cancelled_error(
+                            job.inflight.as_deref(),
+                            "tool dispatch cancelled after extension cleanup",
+                        ));
+                    }
+                }
+            } else {
+                // For ordinary tools cancellation keeps the existing verdict,
+                // while non-cancel errors still expose compensation failures.
+                if let ResponseBody::Err(err) = resp.body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err);
+                }
+                return Err(cancelled_error(
+                    job.inflight.as_deref(),
+                    "tool dispatch cancelled after extension cleanup",
+                ));
             }
-            return Err(cancelled_error(
-                job.inflight.as_deref(),
-                "tool dispatch cancelled after extension cleanup",
-            ));
         }
         WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
-            ResponseBody::Ok(value) if job.method == Method::ToolSessionStop => {
+            ResponseBody::Ok(value)
+                if job.method == Method::ToolSessionStop
+                    || is_effect_aware_transfer(&job.method) =>
+            {
                 // The close crossed its irreversible boundary during the
-                // timeout cleanup grace. Reconcile daemon state instead of
-                // reopening a session whose window is already gone.
+                // timeout cleanup grace, or the transfer committed before its
+                // deadline cancel settled. Preserve the irreversible result.
                 return Ok(value);
             }
             ResponseBody::Err(err)
                 if !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
             {
                 return Err(err);
+            }
+            ResponseBody::Err(err) if is_effect_aware_transfer(&job.method) => {
+                return Err(timed_out_transfer_error(&err));
             }
             _ => {
                 return Err(RpcError {
@@ -691,6 +742,14 @@ async fn forward_one(
         },
         WaitOutcome::CleanupTimeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::Timeout,
+                    "cancelled file transfer did not confirm its outcome before cleanup timed out",
+                    "cleanup",
+                    true,
+                ));
+            }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!(
@@ -700,8 +759,25 @@ async fn forward_one(
                 data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
             });
         }
+        WaitOutcome::TimeoutCleanupFailed => {
+            client.pending.lock().unwrap().cancel(&rpc_id);
+            return Err(unknown_transfer_error(
+                ErrorCode::Timeout,
+                "file transfer timed out and cleanup could not be confirmed",
+                "cleanup",
+                true,
+            ));
+        }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::ProtocolError,
+                    "file transfer transport closed after dispatch; outcome is unknown",
+                    "transport",
+                    false,
+                ));
+            }
             return Err(RpcError {
                 code: ErrorCode::ProtocolError,
                 message: "transport closed mid-call".into(),
@@ -710,6 +786,14 @@ async fn forward_one(
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if is_effect_aware_transfer(&job.method) {
+                return Err(unknown_transfer_error(
+                    ErrorCode::Timeout,
+                    "file transfer timed out after dispatch; outcome is unknown",
+                    "transport",
+                    false,
+                ));
+            }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!("tool RPC timed out after {:?}", job.timeout),
@@ -723,12 +807,65 @@ async fn forward_one(
     }
 }
 
+fn is_effect_aware_transfer(method: &Method) -> bool {
+    matches!(method, Method::ToolUpload | Method::ToolDownload)
+}
+
+fn transfer_effect(err: &RpcError) -> Option<&str> {
+    err.data.as_ref()?.get("effect_state")?.as_str()
+}
+
+fn unknown_transfer_error(
+    code: ErrorCode,
+    message: impl Into<String>,
+    phase: &str,
+    cleanup_failed: bool,
+) -> RpcError {
+    let mut data = serde_json::json!({
+        "reason": "transfer_outcome_unknown",
+        "effect_state": "unknown",
+        "phase": phase,
+    });
+    if cleanup_failed {
+        data["cleanup_state"] = serde_json::json!("failed");
+    }
+    RpcError {
+        code,
+        message: message.into(),
+        data: Some(data),
+    }
+}
+
+fn timed_out_transfer_error(err: &RpcError) -> RpcError {
+    let data = err.data.as_ref();
+    RpcError {
+        code: ErrorCode::Timeout,
+        message: "file transfer timed out after dispatch".into(),
+        data: Some(serde_json::json!({
+            "reason": "transfer_timeout",
+            "effect_state": data
+                .and_then(|value| value.get("effect_state"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            "phase": data
+                .and_then(|value| value.get("phase"))
+                .and_then(Value::as_str)
+                .unwrap_or("cleanup"),
+            "cleanup_state": data
+                .and_then(|value| value.get("cleanup_state"))
+                .and_then(Value::as_str)
+                .unwrap_or("complete"),
+        })),
+    }
+}
+
 #[derive(Debug)]
 enum WaitOutcome {
     Response(bsk_protocol::ResponseFrame),
     CancelledAfterResponse(bsk_protocol::ResponseFrame),
     TimedOutAfterResponse(bsk_protocol::ResponseFrame),
     CleanupTimeout,
+    TimeoutCleanupFailed,
     WaiterClosed,
     Timeout,
 }
@@ -739,6 +876,7 @@ async fn await_with_optional_cancel(
     mut waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
     cancel: Option<&super::abort::AbortToken>,
     on_abort: Option<&(dyn Fn() + Sync)>,
+    on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
 ) -> WaitOutcome {
     match cancel {
         Some(token) => {
@@ -764,6 +902,16 @@ async fn await_with_optional_cancel(
                     Err(_) => WaitOutcome::WaiterClosed,
                 },
                 _ = &mut deadline => {
+                    if let Some(send_cancel) = on_deadline {
+                        return if send_cancel() {
+                            match tokio::time::timeout(cleanup_timeout, &mut waiter).await {
+                                Ok(Ok(resp)) => WaitOutcome::TimedOutAfterResponse(resp),
+                                Ok(Err(_)) | Err(_) => WaitOutcome::TimeoutCleanupFailed,
+                            }
+                        } else {
+                            WaitOutcome::TimeoutCleanupFailed
+                        };
+                    }
                     let Some(on_abort) = on_abort else {
                         return WaitOutcome::Timeout;
                     };
@@ -779,7 +927,16 @@ async fn await_with_optional_cancel(
         None => match tokio::time::timeout(timeout, &mut waiter).await {
             Ok(Ok(resp)) => WaitOutcome::Response(resp),
             Ok(Err(_)) => WaitOutcome::WaiterClosed,
-            Err(_) => WaitOutcome::Timeout,
+            Err(_) => match on_deadline {
+                Some(send_cancel) if send_cancel() => {
+                    match tokio::time::timeout(cleanup_timeout, &mut waiter).await {
+                        Ok(Ok(resp)) => WaitOutcome::TimedOutAfterResponse(resp),
+                        Ok(Err(_)) | Err(_) => WaitOutcome::TimeoutCleanupFailed,
+                    }
+                }
+                Some(_) => WaitOutcome::TimeoutCleanupFailed,
+                None => WaitOutcome::Timeout,
+            },
         },
     }
 }
@@ -864,6 +1021,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         assert!(
@@ -887,6 +1045,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         match outcome {
@@ -907,6 +1066,7 @@ mod await_with_optional_cancel_tests {
             rx,
             None,
             None,
+            None,
         )
         .await;
         assert!(matches!(outcome, WaitOutcome::Response(_)));
@@ -923,6 +1083,7 @@ mod await_with_optional_cancel_tests {
                 Duration::from_secs(1),
                 rx,
                 Some(&token),
+                None,
                 None,
             )
             .await
@@ -948,6 +1109,7 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             None,
+            None,
         )
         .await;
         assert!(matches!(outcome, WaitOutcome::CleanupTimeout));
@@ -972,11 +1134,48 @@ mod await_with_optional_cancel_tests {
             rx,
             Some(&token),
             Some(&forward_abort),
+            None,
         )
         .await;
 
         assert!(abort_forwarded.load(Ordering::SeqCst));
         assert!(matches!(outcome, WaitOutcome::TimedOutAfterResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_deadline_sends_cancel_and_waits_for_cleanup_response() {
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            tx.send(dummy_response()).unwrap();
+        });
+        let send_cancel = || true;
+        let outcome = await_with_optional_cancel(
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            rx,
+            None,
+            None,
+            Some(&send_cancel),
+        )
+        .await;
+        assert!(matches!(outcome, WaitOutcome::TimedOutAfterResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn transfer_deadline_is_unknown_when_cancel_cannot_be_sent() {
+        let (_tx, rx) = oneshot::channel();
+        let send_cancel = || false;
+        let outcome = await_with_optional_cancel(
+            Duration::from_millis(1),
+            Duration::from_secs(1),
+            rx,
+            None,
+            None,
+            Some(&send_cancel),
+        )
+        .await;
+        assert!(matches!(outcome, WaitOutcome::TimeoutCleanupFailed));
     }
 }
 
