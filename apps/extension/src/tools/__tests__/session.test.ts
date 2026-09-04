@@ -301,8 +301,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11);
     ctx.agentCreatedTabs.add(12);
-    // home tab id from ensureActiveTab override
-    ctx.agentCreatedTabs.add(10); // home tab
     // user tab 99 (created via Chrome UI, NOT in agentCreatedTabs)
     const state: FakeState = {
       tabs: new Map([
@@ -340,7 +338,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11);
-    ctx.agentCreatedTabs.add(10); // home tab
     const state: FakeState = {
       tabs: new Map([
         [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
@@ -369,7 +366,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11); // no longer in state → remove throws
-    ctx.agentCreatedTabs.add(10); // home tab
     const state: FakeState = {
       tabs: new Map([[10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab]]),
       windowsClosed: new Set(),
@@ -399,7 +395,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11);
-    ctx.agentCreatedTabs.add(10); // home tab
     const state: FakeState = {
       tabs: new Map([
         [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],
@@ -427,7 +422,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11);
-    ctx.agentCreatedTabs.add(10); // home tab
     const state: FakeState = {
       tabs: new Map([[11, { id: 11, windowId: agentWindowId } as chrome.tabs.Tab]]),
       windowsClosed: new Set(),
@@ -473,7 +467,6 @@ describe("handleSessionStop window release (issue #57)", () => {
     const sm = new SessionManager({ agentWindow: aw });
     const ctx = await sm.start("aa11");
     ctx.agentCreatedTabs.add(11); // Step 4 remove() will throw for this tab
-    ctx.agentCreatedTabs.add(10); // home tab
     const state: FakeState = {
       tabs: new Map([
         [10, { id: 10, windowId: agentWindowId } as chrome.tabs.Tab],

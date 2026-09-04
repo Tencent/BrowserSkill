@@ -458,6 +458,16 @@ describe("ToolDispatcher", () => {
   });
 
   it("invokes onBrowserControlResumed for browser-control tools but not passive reads", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create: vi.fn(async (props: chrome.tabs.CreateProperties) => ({
+          id: 7,
+          windowId: props.windowId,
+          url: props.url,
+          active: props.active,
+        })),
+      },
+    });
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
@@ -467,7 +477,13 @@ describe("ToolDispatcher", () => {
       },
     });
     const onBrowserControlResumed = vi.fn();
-    const dispatcher = new ToolDispatcher({ transport, sessions, onBrowserControlResumed });
+    const onAgentTabClaimed = vi.fn();
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      onBrowserControlResumed,
+      onAgentTabClaimed,
+    });
     dispatcher.start();
 
     deliver(makeRequest("tool.session_start", { session_id: "aa11" }));
@@ -484,6 +500,7 @@ describe("ToolDispatcher", () => {
     });
     await flushMicrotasks();
     expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
+    expect(onAgentTabClaimed).toHaveBeenCalledWith(7, 1);
   });
 
   it("reasserts remembered hover before follow-up work and releases only after actions", async () => {

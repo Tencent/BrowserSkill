@@ -117,6 +117,13 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
+  /** Remove a closed tab from agent-created ownership tracking. */
+  forgetAgentCreatedTab(tabId: number): void {
+    for (const ctx of this.sessions.values()) {
+      ctx.agentCreatedTabs.delete(tabId);
+    }
+  }
+
   /**
    * Look up whether `tabId` is currently borrowed by some *other*
    * session than the one calling. Used by M8 `tab_borrow` to refuse

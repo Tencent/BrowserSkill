@@ -169,6 +169,9 @@ export default defineBackground(() => {
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    sessions.forgetAgentCreatedTab(tabId);
+  });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
   // first mutation (review M4/M5 round 3 m-R3-1).
@@ -215,6 +218,9 @@ export default defineBackground(() => {
     recording: recordDeps,
     onSessionsChanged: onOverlaySessionStateChanged,
     onBrowserControlResumed,
+    onAgentTabClaimed: (tabId, windowId) => {
+      void pushOverlayStateForTab(tabId, windowId);
+    },
     approveBorrow: (ctx) =>
       requestBorrowConfirmation(ctx.tabId, {
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
@@ -341,12 +347,9 @@ export default defineBackground(() => {
     if (!msg || typeof msg !== "object" || !("kind" in msg)) return false;
 
     if (msg.kind === OVERLAY_MSG_WHO_AM_I) {
-      const tabId = sender.tab?.id;
       const windowId = sender.tab?.windowId;
       const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
-      const sessionId =
-        ctx && typeof tabId === "number" && isAgentControlledTab(ctx, tabId) ? ctx.sessionId : null;
-      sendResponse({ sessionId });
+      sendResponse({ sessionId: ctx?.sessionId ?? null });
       return false;
     }
 

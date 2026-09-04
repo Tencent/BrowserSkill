@@ -7,11 +7,7 @@ import {
   OVERLAY_AGENT_OVERLAY_RESET,
   type OverlayAgentOverlayResetMessage,
 } from "@/lib/overlay-bridge";
-import {
-  isAgentControlledTab,
-  type SessionContext,
-  type SessionManager,
-} from "@/session-manager/manager";
+import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { isRpcError, lookupSession } from "./shared";
@@ -29,9 +25,11 @@ export interface TabInfo {
   window_id?: number;
   active?: boolean;
   /**
-   * Ownership relative to the requesting session. Explicitly created or
-   * borrowed tabs in this session's Agent Window are `agent`; every other
-   * visible tab is `user`. Other sessions' Agent Windows are filtered out.
+   * Where the tab sits relative to the requesting session: tabs in any
+   * window other than an Agent Window are `user`; tabs in this
+   * session's own Agent Window are `agent`. Tabs in *other* sessions'
+   * Agent Windows are filtered out entirely (cross-session isolation,
+   * design §6).
    */
   scope?: "user" | "agent";
 }
@@ -261,8 +259,7 @@ export async function handleTabList(
     if (typeof t.id !== "number") continue;
     const winId = typeof t.windowId === "number" ? t.windowId : -1;
     if (otherAgentWindowIds.has(winId)) continue;
-    const tabScope: "user" | "agent" =
-      winId === myAgentWindowId && isAgentControlledTab(ctx, t.id) ? "agent" : "user";
+    const tabScope: "user" | "agent" = winId === myAgentWindowId ? "agent" : "user";
     if (scope === "user" && tabScope !== "user") continue;
     if (scope === "agent" && tabScope !== "agent") continue;
     tabs.push({
@@ -484,13 +481,13 @@ async function authoriseAgentTab(
       `${toolName}: tab ${tabId} is borrowed by session ${otherBorrower}`,
     );
   }
-  if (tab.windowId === ctx.agentWindowId && isAgentControlledTab(ctx, tab.id)) {
+  if (tab.windowId === ctx.agentWindowId) {
     return tab;
   }
   return rpcError(
     "permission_denied",
     "agent_window_scope",
-    `${toolName}: tab ${tabId} is not claimed by this session in Agent Window ${ctx.agentWindowId}`,
+    `${toolName}: tab ${tabId} is not in Agent Window ${ctx.agentWindowId}`,
   );
 }
 

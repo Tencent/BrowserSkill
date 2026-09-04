@@ -175,6 +175,15 @@ describe("SessionManager", () => {
       reservation.commit({ tabId: 42, originalWindowId: 7, originalIndex: 3 });
       expect(isAgentControlledTab(ctx, 42)).toBe(true);
     });
+
+    it("forgets an agent-created tab after Chrome removes it", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      ctx.agentCreatedTabs.add(42);
+      sm.forgetAgentCreatedTab(42);
+      expect(ctx.agentCreatedTabs.has(42)).toBe(false);
+      expect(isAgentControlledTab(ctx, 0)).toBe(true);
+    });
   });
 
   describe("findBorrowingSession", () => {

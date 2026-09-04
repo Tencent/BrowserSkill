@@ -115,6 +115,8 @@ export interface DispatcherDeps {
   onSessionsChanged?: () => void;
   /** Invoked before a tool that dispatches page input or mutates browser state is forwarded. */
   onBrowserControlResumed?: (sessionId: string) => void;
+  /** Invoked after a tab is explicitly claimed so its overlay can be refreshed immediately. */
+  onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   /** User approval for `tool.tab_borrow` (overlay in content script). */
   approveBorrow?: BorrowConfirmationApprover;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
@@ -144,6 +146,7 @@ export class ToolDispatcher {
   private readonly recording?: RecordRuntimeDeps;
   private readonly onSessionsChanged?: () => void;
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
+  private readonly onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
@@ -164,6 +167,7 @@ export class ToolDispatcher {
     this.recording = deps.recording;
     this.onSessionsChanged = deps.onSessionsChanged;
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
+    this.onAgentTabClaimed = deps.onAgentTabClaimed;
     this.approveBorrow = deps.approveBorrow;
     this.helpNotificationCopy = deps.helpNotificationCopy;
   }
@@ -309,8 +313,15 @@ export class ToolDispatcher {
       }
       case "tool.tab_list":
         return handleTabList(this.sessions, req.params as TabListParams, chromeTabsApi, signal);
-      case "tool.tab_create":
-        return handleTabCreate(this.sessions, req.params as TabCreateParams, { signal });
+      case "tool.tab_create": {
+        const result = await handleTabCreate(this.sessions, req.params as TabCreateParams, {
+          signal,
+        });
+        if (!isRpcError(result)) {
+          this.onAgentTabClaimed?.(result.tab_id, result.window_id);
+        }
+        return result;
+      }
       case "tool.tab_close":
         return this.withHoverReleaseForRequest(
           req.params as TabCloseParams,
@@ -319,11 +330,16 @@ export class ToolDispatcher {
         );
       case "tool.tab_select":
         return handleTabSelect(this.sessions, req.params as TabSelectParams, { signal });
-      case "tool.tab_borrow":
-        return handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
+      case "tool.tab_borrow": {
+        const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
         });
+        if (!isRpcError(result)) {
+          this.onAgentTabClaimed?.(result.tab_id, result.agent_window_id);
+        }
+        return result;
+      }
       case "tool.tab_return":
         return handleTabReturn(this.sessions, req.params as TabReturnParams, { signal });
       case "tool.window_resize":

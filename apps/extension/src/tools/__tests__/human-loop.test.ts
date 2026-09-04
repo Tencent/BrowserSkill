@@ -52,16 +52,10 @@ function installHelpLifecycleChrome() {
 
 function fakeManager(sessionId: string, agentWindowId: number, tabId: number) {
   const refStore = new RefStore();
-  const session = {
-    sessionId,
-    agentWindowId,
-    refStore,
-    borrowedTabs: new Map(),
-    agentCreatedTabs: new Set([tabId]),
-  };
   const mgr = {
-    get: (id: string) => (id === sessionId ? session : null),
-    findByWindowId: (wid: number) => (wid === agentWindowId ? session : null),
+    get: (id: string) =>
+      id === sessionId ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map() } : null,
+    findByWindowId: (wid: number) => (wid === agentWindowId ? { sessionId } : null),
   } as unknown as SessionManager;
   return mgr;
 }
@@ -363,7 +357,6 @@ describe("handleRequestHelp", () => {
               agentWindowId: 99,
               refStore,
               borrowedTabs: new Map(),
-              agentCreatedTabs: new Set([5]),
             }
           : null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
@@ -420,7 +413,6 @@ describe("handleRequestHelp", () => {
                 }),
               },
               borrowedTabs: new Map(),
-              agentCreatedTabs: new Set([5]),
             }
           : null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
@@ -506,7 +498,6 @@ describe("handleRequestHelp", () => {
               agentWindowId: 99,
               refStore,
               borrowedTabs: new Map(),
-              agentCreatedTabs: new Set([5]),
             }
           : null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
