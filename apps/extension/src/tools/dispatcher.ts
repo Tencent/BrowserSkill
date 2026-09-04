@@ -36,6 +36,7 @@ import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
+import { classifyCdpError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
 import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
@@ -239,7 +240,7 @@ export class ToolDispatcher {
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
       const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
-        body = { id: req.id, error: result };
+        body = { id: req.id, error: classifyCdpError(result) };
       } else {
         body = { id: req.id, result };
         if (req.method === "tool.session_start") {
