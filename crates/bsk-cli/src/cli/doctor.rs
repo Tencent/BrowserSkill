@@ -281,6 +281,19 @@ fn check_skill_up_to_date() -> CheckResult {
         );
     }
 
+    if !report.preserved.is_empty() {
+        let names = report
+            .preserved
+            .iter()
+            .map(|h| h.cli_name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return CheckResult::na(
+            name,
+            format!("custom or edited skill preserved in: {names}"),
+        );
+    }
+
     CheckResult::na(name, "no agent skill installed")
 }
 
