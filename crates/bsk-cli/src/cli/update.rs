@@ -761,6 +761,7 @@ fn stage_windows_replacement(
     .with_context(|| format!("write {}", paths.script_path.display()))?;
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     let command = format!("\"{}\"", paths.script_path.display());
     if let Err(err) = Command::new("cmd.exe")
         .args(["/D", "/S", "/C"])
@@ -768,7 +769,7 @@ fn stage_windows_replacement(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .spawn()
     {
         let _ = std::fs::remove_file(&paths.binary_path);
@@ -806,7 +807,7 @@ fn windows_replacement_script(target: &Path, staged_binary: &Path, restart_daemo
          :retry\r\n\
          move /Y \"{staged_binary}\" \"{target}\" >nul 2>nul\r\n\
          if errorlevel 1 (\r\n\
-           timeout /t 1 /nobreak >nul\r\n\
+           ping -n 2 127.0.0.1 >nul\r\n\
            goto retry\r\n\
          )\r\n\
          {restart}\
@@ -1007,6 +1008,8 @@ mod tests {
 
         assert!(script.contains(":retry"));
         assert!(script.contains("move /Y"));
+        assert!(script.contains("ping -n 2 127.0.0.1"));
+        assert!(!script.contains("timeout"));
         assert!(script.contains(r#"start "" /B "C:\Program Files\bsk.exe" daemon start"#));
         assert!(script.contains(r#"del /F /Q "%~f0""#));
     }
