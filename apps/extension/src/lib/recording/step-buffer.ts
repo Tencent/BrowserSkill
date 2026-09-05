@@ -92,7 +92,12 @@ export function observeRecordedNavigation(
   transitionQualifiers?: string[],
 ): NavigationObserveResult {
   const navigation = buffer.navigation;
-  if (!url || url === navigation.currentUrl) return { kind: "noop" };
+  // A reload commits to the URL the tab is already on, so the same-URL guard that
+  // collapses the onCommitted / onCompleted pair of one navigation would drop it
+  // too (issue #139). Only the committed event carries the transition type, so the
+  // completion that follows still collapses onto the recorded reload.
+  const isReload = transitionType === "reload";
+  if (!url || (url === navigation.currentUrl && !isReload)) return { kind: "noop" };
   navigation.currentUrl = url;
 
   const pendingIsCurrent =
