@@ -67,6 +67,18 @@ export interface BskRunner {
 // Business RPCs translate SIGINT into the daemon's cancel(rpc_id) protocol.
 // Give that bounded reconciliation path time to settle before the hard kill.
 const KILL_GRACE_MS = 3000;
+// A killed child that never reports `exit` at all must still release the caller
+// once the forced kill has had its chance.
+const SETTLE_AFTER_KILL_MS = KILL_GRACE_MS + 1000;
+// `close` fires only once every stdio pipe has reached EOF, which needs every
+// process holding a copy of the pipe handles to be gone, not just `bsk`. When
+// `bsk` auto-spawns the daemon, the daemon can end up holding those handles
+// (Windows `CreateProcess` inherits every inheritable handle; issue #180), so
+// after `exit` we allow a short drain and then settle with the output already
+// captured rather than waiting for a `close` that may never come. `close`
+// normally follows `exit` within the same loop turn, so this grace is only ever
+// paid when something else is still holding the pipes.
+const EXIT_DRAIN_GRACE_MS = 250;
 const SESSION_BUSY_RETRY_DELAY_MS = 100;
 
 export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): BskRunner {
@@ -97,26 +109,56 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
         let stderr = "";
         let timedOut = false;
         let aborted = false;
-        child.stdout?.on("data", (chunk: Buffer | string) => {
+        const onStdout = (chunk: Buffer | string) => {
           stdout += chunk;
-        });
-        child.stderr?.on("data", (chunk: Buffer | string) => {
+        };
+        const onStderr = (chunk: Buffer | string) => {
           stderr += chunk;
-        });
+        };
+        child.stdout?.on("data", onStdout);
+        child.stderr?.on("data", onStderr);
+
+        let settled = false;
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        const finish = (code: number | null) => {
+          if (settled) return;
+          settled = true;
+          settle();
+          // Anything that arrives after this point comes from whatever still holds
+          // the pipes, not from the finished command: stop collecting it.
+          child.stdout?.off("data", onStdout);
+          child.stderr?.off("data", onStderr);
+          resolve({ code, stdout, stderr, timedOut, aborted });
+        };
+        // Kill on our own initiative, then guarantee the promise settles even if
+        // the child never reports back: `exit` normally arrives promptly, and the
+        // deadline covers a child that reports nothing at all after SIGKILL.
+        const requestKill = () => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            // The process is already gone; only pipes held by a grandchild remain.
+            finish(child.exitCode);
+            return;
+          }
+          killChild(child);
+          if (deadline === undefined) {
+            deadline = setTimeout(() => finish(child.exitCode), SETTLE_AFTER_KILL_MS);
+            deadline.unref();
+          }
+        };
 
         const timeoutMs = options.timeoutMs;
         const timer =
           timeoutMs !== undefined && timeoutMs > 0
             ? setTimeout(() => {
                 timedOut = true;
-                killChild(child);
+                requestKill();
               }, timeoutMs)
             : undefined;
         timer?.unref();
 
         const onAbort = () => {
           aborted = true;
-          killChild(child);
+          requestKill();
         };
         if (options.signal?.aborted) {
           onAbort();
@@ -126,17 +168,30 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const settle = () => {
           if (timer !== undefined) clearTimeout(timer);
+          if (deadline !== undefined) clearTimeout(deadline);
           options.signal?.removeEventListener("abort", onAbort);
           live.delete(child);
         };
 
         child.on("error", (error) => {
+          if (settled) return;
+          settled = true;
           settle();
           reject(error);
         });
-        child.on("close", (code) => {
-          settle();
-          resolve({ code, stdout, stderr, timedOut, aborted });
+        child.on("close", (code) => finish(code));
+        child.on("exit", (code, signal) => {
+          if (signal !== null || timedOut || aborted) {
+            // Killed on our initiative: nothing left worth draining.
+            finish(code);
+            return;
+          }
+          // Normal exit: give the pipes a moment to deliver any final bytes, then
+          // settle even if a grandchild is still holding them open.
+          if (deadline === undefined) {
+            deadline = setTimeout(() => finish(code), EXIT_DRAIN_GRACE_MS);
+            deadline.unref();
+          }
         });
       });
     },
