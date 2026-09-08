@@ -164,6 +164,7 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
   private readonly attachedTabs = new Set<number>();
+  private readonly attachmentIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
   private readonly tabOwners = new Map<number, Set<string>>();
@@ -198,6 +199,11 @@ export class ChromiumCdp {
     this.bindFrameTargetHandler();
   }
 
+  /** Identity of this actual debugger attachment, independent of frame topology. */
+  getAttachmentId(tabId: number): string | undefined {
+    return this.attachmentIds.get(tabId);
+  }
+
   /** Attach to `tabId` if we haven't already in this driver. */
   async ensureAttached(tabId: number): Promise<void> {
     // Returning a tab clears the cache before Chrome finishes detaching.
@@ -217,6 +223,7 @@ export class ChromiumCdp {
         await this.enableConsoleDomains(tabId);
         await this.enableNetworkDomainBestEffort(tabId);
         this.attachedTabs.add(tabId);
+        this.attachmentIds.set(tabId, crypto.randomUUID());
         await this.enableFrameDiscovery({ tabId }).catch((err) => {
           console.debug("[bsk cdp] frame discovery unavailable", { tabId, err });
         });
@@ -444,6 +451,7 @@ export class ChromiumCdp {
     this.attachInFlight.delete(tabId);
     if (!this.attachedTabs.has(tabId)) return;
     this.attachedTabs.delete(tabId);
+    this.attachmentIds.delete(tabId);
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
     this.clearNetworkState(tabId);
@@ -502,6 +510,7 @@ export class ChromiumCdp {
     this.attachInFlight.clear();
     this.tabOwners.clear();
     this.attachedTabs.clear();
+    this.attachmentIds.clear();
     this.dialogBuffers.clear();
     this.dialogSequences.clear();
     this.consoleBuffers.clear();
@@ -848,6 +857,7 @@ export class ChromiumCdp {
     const listener = (source: chrome.debugger.Debuggee, _reason: string) => {
       if (typeof source.tabId === "number") {
         this.attachedTabs.delete(source.tabId);
+        this.attachmentIds.delete(source.tabId);
         this.attachInFlight.delete(source.tabId);
         this.tabOwners.delete(source.tabId);
         this.clearDialogState(source.tabId);

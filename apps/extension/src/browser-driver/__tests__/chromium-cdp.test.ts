@@ -29,6 +29,24 @@ function fakeApi() {
 }
 
 describe("ChromiumCdp", () => {
+  it("changes attachment identity only across real debugger attachments", async () => {
+    const { api, onEvent, onDetach } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    expect(cdp.getAttachmentId(4)).toBeUndefined();
+    await cdp.ensureAttached(4);
+    const first = cdp.getAttachmentId(4);
+    expect(first).toBeTruthy();
+    await cdp.ensureAttached(4);
+    onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "child" });
+    expect(cdp.getAttachmentId(4)).toBe(first);
+    onDetach.fire({ tabId: 4 }, "target_closed");
+    expect(cdp.getAttachmentId(4)).toBeUndefined();
+    await cdp.ensureAttached(4);
+    expect(cdp.getAttachmentId(4)).not.toBe(first);
+    await cdp.detach(4);
+    expect(cdp.getAttachmentId(4)).toBeUndefined();
+  });
+
   it("discovers multiple iframe targets and recursively routes nested OOPIF commands", async () => {
     const { api, onEvent } = fakeApi();
     (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(

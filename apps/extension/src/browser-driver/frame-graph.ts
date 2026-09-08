@@ -8,6 +8,7 @@ export interface CdpFrame {
   parentFrameId?: string;
   ownerBackendNodeId?: number;
   url?: string;
+  loaderId?: string;
   target: CdpTarget;
 }
 
@@ -21,6 +22,7 @@ export interface CdpFrameTreeNode {
     id: string;
     parentId?: string;
     url?: string;
+    loaderId?: string;
   };
   childFrames?: CdpFrameTreeNode[];
 }
@@ -48,6 +50,7 @@ function mergeFrame(
     frameId: node.frame.id,
     ...(parentFrameId ? { parentFrameId } : {}),
     ...(url ? { url } : {}),
+    ...(node.frame.loaderId ? { loaderId: node.frame.loaderId } : {}),
     target,
   });
 }

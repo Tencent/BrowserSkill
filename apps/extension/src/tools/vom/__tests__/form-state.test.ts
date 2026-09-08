@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { type CdpRunner, cdpRunnerForTarget } from "../../shared";
-import { captureViewModel } from "../capture";
+import { captureObservationFacts } from "../capture-coordinator";
 
 interface Control {
   id: number;
@@ -106,17 +106,19 @@ describe("form state identity", () => {
           [11, state("alice@example.com")],
         ]),
     );
-    const captured = await captureViewModel(cdp, 7);
-    expect(captured.nodes.find((n) => n.backendNodeId === 10)).toMatchObject({
+    const captured = await captureObservationFacts(cdp, 7);
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 10)).toMatchObject({
       formValue: "",
       formState: "empty",
       formPlaceholder: "snapshot placeholder",
     });
-    expect(captured.nodes.find((n) => n.backendNodeId === 11)).toMatchObject({
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 11)).toMatchObject({
       formValue: "alice@example.com",
     });
-    expect(captured.nodes.find((n) => n.backendNodeId === 12)).toMatchObject({ formValue: "上海" });
-    expect(captured.nodes.some((n) => n.backendNodeId === 99)).toBe(false);
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 12)).toMatchObject({
+      formValue: "上海",
+    });
+    expect(captured.documents[0].domNodes.some((n) => n.backendNodeId === 99)).toBe(false);
   });
 
   it("does not shift state between frames when one frame is absent from the runtime batch", async () => {
@@ -133,8 +135,10 @@ describe("form state identity", () => {
           [21, state("second frame")],
         ]),
     );
-    const captured = await captureViewModel(cdp, 7);
-    const controls = [...captured.iframeNodes.values()].flat();
+    const captured = await captureObservationFacts(cdp, 7);
+    const controls = captured.documents
+      .filter((doc) => doc.frame.parentFrameId)
+      .flatMap((doc) => doc.domNodes);
     expect(controls.find((n) => n.backendNodeId === 11)?.formValue).toBe("inaccessible frame");
     expect(controls.find((n) => n.backendNodeId === 21)?.formValue).toBe("second frame");
     expect(controls.find((n) => n.backendNodeId === 31)?.formValue).toBe("third frame");
@@ -151,8 +155,13 @@ describe("form state identity", () => {
     });
     const cdp = { send, sendToTarget } as unknown as CdpRunner;
     for (const sessionId of ["left-frame", "right-frame"]) {
-      const captured = await captureViewModel(cdpRunnerForTarget(cdp, { tabId: 7, sessionId }), 7);
-      expect(captured.nodes.find((n) => n.backendNodeId === 11)?.formValue).toBe(sessionId);
+      const captured = await captureObservationFacts(
+        cdpRunnerForTarget(cdp, { tabId: 7, sessionId }),
+        7,
+      );
+      expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 11)?.formValue).toBe(
+        sessionId,
+      );
       expect(sendToTarget).toHaveBeenCalledWith(
         { tabId: 7, sessionId },
         "Runtime.releaseObjectGroup",
@@ -178,8 +187,8 @@ describe("form state identity", () => {
         result.result.deepSerializedValue.value[0].value[1].value = "not json";
       return result;
     });
-    const captured = await captureViewModel(cdp, 7);
-    expect(captured.nodes.find((n) => n.backendNodeId === 11)).toMatchObject({
+    const captured = await captureObservationFacts(cdp, 7);
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 11)).toMatchObject({
       formValue: "snapshot value",
       formPlaceholder: "snapshot placeholder",
     });
@@ -192,7 +201,7 @@ describe("form state identity", () => {
       controller.abort();
       return reply([[11, state("new")]]);
     });
-    await expect(captureViewModel(cdp, 7, { signal: controller.signal })).rejects.toMatchObject({
+    await expect(captureObservationFacts(cdp, 7, controller.signal)).rejects.toMatchObject({
       name: "AbortError",
     });
     expect(send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", expect.anything());
@@ -216,9 +225,13 @@ describe("form state identity", () => {
         return result;
       },
     );
-    const captured = await captureViewModel(cdp, 7);
-    expect(captured.nodes.find((n) => n.backendNodeId === 11)?.formValue).toBe("snapshot value");
-    expect(captured.nodes.find((n) => n.backendNodeId === 12)?.formValue).toBe("live value");
+    const captured = await captureObservationFacts(cdp, 7);
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 11)?.formValue).toBe(
+      "snapshot value",
+    );
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 12)?.formValue).toBe(
+      "live value",
+    );
   });
 
   it.each([
@@ -228,8 +241,8 @@ describe("form state identity", () => {
     const { cdp } = fakeCdp([[{ id: 11, value: "secret", type }]], () =>
       reply([[11, { ...state("secret"), sensitive: true }]]),
     );
-    const captured = await captureViewModel(cdp, 7);
-    const control = captured.nodes.find((n) => n.backendNodeId === 11);
+    const captured = await captureObservationFacts(cdp, 7);
+    const control = captured.documents[0].domNodes.find((n) => n.backendNodeId === 11);
     expect(control?.formState).toBe("filled");
     expect(control?.formValue).toBeUndefined();
     expect(control?.formDefaultValue).toBeUndefined();
@@ -257,9 +270,13 @@ describe("form state identity", () => {
       expect(entries).toHaveLength(250);
       return reply(entries.map(([element, json]) => [element.backendNodeId, JSON.parse(json)]));
     });
-    const captured = await captureViewModel(cdp, 7);
-    expect(captured.nodes.find((n) => n.backendNodeId === 250)?.formValue).toBe("live 250");
-    expect(captured.nodes.find((n) => n.backendNodeId === 251)?.formValue).toBe("old");
+    const captured = await captureObservationFacts(cdp, 7);
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 250)?.formValue).toBe(
+      "live 250",
+    );
+    expect(captured.documents[0].domNodes.find((n) => n.backendNodeId === 251)?.formValue).toBe(
+      "old",
+    );
     expect(send.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
     expect(
       send.mock.calls.filter(([, method]) => method === "Runtime.releaseObjectGroup"),

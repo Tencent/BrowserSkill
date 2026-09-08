@@ -2,6 +2,24 @@ import { describe, expect, it } from "vitest";
 import { buildFrameGraph, type CdpFrameTreeNode, type CdpFrameTreeSource } from "../frame-graph";
 
 describe("buildFrameGraph", () => {
+  it("preserves the owning target's loader identity", () => {
+    const graph = buildFrameGraph([
+      {
+        target: { tabId: 4 },
+        tree: {
+          frame: { id: "root", loaderId: "root-loader" },
+          childFrames: [{ frame: { id: "child", loaderId: "stale-placeholder" } }],
+        },
+      },
+      {
+        target: { tabId: 4, sessionId: "child-session" },
+        tree: { frame: { id: "child", loaderId: "child-loader" } },
+      },
+    ]);
+    expect(graph?.frames.find((frame) => frame.frameId === "root")?.loaderId).toBe("root-loader");
+    expect(graph?.frames.find((frame) => frame.frameId === "child")?.loaderId).toBe("child-loader");
+  });
+
   it("keeps sibling frames distinct and routes nested OOPIFs to their child sessions", () => {
     const graph = buildFrameGraph([
       {

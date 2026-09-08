@@ -2,7 +2,10 @@ import type { Rect, RenderedRef, VomResult } from "@browser-skill/vom";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { readRecordingDocumentIdentity } from "@/shared/recording-document-identity";
 import type { CapturedSurfaceProbe } from "./capture";
-import type { CapturedFrameDocument, FrameAxNode } from "./frame-capture";
+import type {
+  FrameDocument as CapturedFrameDocument,
+  FrameOwnedAxNode as FrameAxNode,
+} from "./frame-document";
 
 /** Frame identity needed to resolve an `@eN` that lives in an iframe. */
 export interface CaptureVomFrame {

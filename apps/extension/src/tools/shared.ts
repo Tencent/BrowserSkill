@@ -55,6 +55,7 @@ export interface CdpRunner {
   sendToTarget?<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T>;
   detach?(tabId: number): Promise<void>;
   getFrameGraph?(tabId: number): Promise<CdpFrameGraph>;
+  getAttachmentId?(tabId: number): string | undefined;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
   releaseSessionTab?(sessionId: string, tabId: number): Promise<void>;
