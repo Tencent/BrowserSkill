@@ -22,5 +22,6 @@ export type {
 } from "./types";
 export {
   compareVisualSurfacePriority,
+  selectHighestPriorityVisualSurfaces,
   type VisualSurfacePriorityInput,
 } from "./visual-surface-priority";

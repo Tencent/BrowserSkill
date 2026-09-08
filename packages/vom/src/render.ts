@@ -11,7 +11,7 @@ import type {
   VomScene,
   VomVisualSurface,
 } from "./types";
-import { compareVisualSurfacePriority } from "./visual-surface-priority";
+import { selectHighestPriorityVisualSurfaces } from "./visual-surface-priority";
 
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
 
@@ -822,17 +822,18 @@ function selectVisualSurfaces(
   surfaces: readonly VomVisualSurface[],
   nodesById: ReadonlyMap<number, VomNode>,
 ): { selected: VomVisualSurface[]; eligibleCount: number } {
-  const selected: VomVisualSurface[] = [];
   let eligibleCount = 0;
-
-  for (const surface of surfaces) {
-    if (surface.parentId !== null && !nodesById.has(surface.parentId)) continue;
-    eligibleCount += 1;
-
-    selected.push(surface);
+  function* eligibleSurfaces(): Generator<VomVisualSurface> {
+    for (const surface of surfaces) {
+      if (surface.parentId !== null && !nodesById.has(surface.parentId)) continue;
+      eligibleCount += 1;
+      yield surface;
+    }
   }
-  selected.sort(compareVisualSurfacePriority);
-  return { selected, eligibleCount };
+  return {
+    selected: selectHighestPriorityVisualSurfaces(eligibleSurfaces(), MAX_VISUAL_SURFACE_REFS),
+    eligibleCount,
+  };
 }
 
 function emitVisualAppendix(state: RenderState): void {

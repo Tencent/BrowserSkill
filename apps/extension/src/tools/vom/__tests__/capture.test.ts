@@ -793,8 +793,10 @@ describe("captureViewModel", () => {
     expect(div?.rect).toMatchObject({ y: 0, h: 600 });
   });
 
-  it("normalizes device-pixel bounds by devicePixelRatio", async () => {
-    const S = ["html", "body", "div", "position", "fixed", "static", "pointer-events", "auto"];
+  it.each([
+    1, 2,
+  ])("keeps CSS-space bounds stable at devicePixelRatio=%i", async (deviceScaleFactor) => {
+    const S = ["html", "body", "canvas", "position", "fixed", "static", "pointer-events", "auto"];
     const i = (s: string) => S.indexOf(s);
     const snapshot = {
       strings: S,
@@ -802,7 +804,7 @@ describe("captureViewModel", () => {
         {
           nodes: {
             parentIndex: [-1, 0, 1],
-            nodeName: [i("html"), i("body"), i("div")],
+            nodeName: [i("html"), i("body"), i("canvas")],
             backendNodeId: [10, 11, 12],
             attributes: [[], [], []],
           },
@@ -813,8 +815,8 @@ describe("captureViewModel", () => {
               [i("fixed"), i("auto")],
             ],
             bounds: [
-              [0, 0, 2000, 3200],
-              [0, 0, 2000, 1600],
+              [0, 0, 1000 * deviceScaleFactor, 1600 * deviceScaleFactor],
+              [0, 0, 1000 * deviceScaleFactor, 800 * deviceScaleFactor],
             ],
             paintOrders: [0, 50],
           },
@@ -828,14 +830,19 @@ describe("captureViewModel", () => {
         if (method === "Page.getLayoutMetrics") {
           return {
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
-            layoutViewport: { clientWidth: 2000, clientHeight: 1600 },
+            layoutViewport: {
+              clientWidth: 1000 * deviceScaleFactor,
+              clientHeight: 800 * deviceScaleFactor,
+            },
           };
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
     const { nodes } = await captureViewModel(cdp, 4);
-    expect(nodes.find((n) => n.backendNodeId === 12)?.rect).toEqual({
+    const canvas = nodes.find((node) => node.backendNodeId === 12);
+    expect(canvas?.tag).toBe("canvas");
+    expect(canvas?.rect).toEqual({
       x: 0,
       y: 0,
       w: 1000,

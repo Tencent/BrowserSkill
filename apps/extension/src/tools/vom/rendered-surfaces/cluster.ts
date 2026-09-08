@@ -1,4 +1,4 @@
-import { compareVisualSurfacePriority, type Rect } from "@browser-skill/vom";
+import { type Rect, selectHighestPriorityVisualSurfaces } from "@browser-skill/vom";
 import type { ClusteredRenderedSurfaces, RenderedSurface, RenderedSurfaceGroup } from "./types";
 
 const STACK_IOU_RATIO = 0.9;
@@ -97,51 +97,6 @@ function partitionKey(surface: RenderedSurface): string {
   return `${surface.frameId}\u0000${surface.parentBackendNodeId ?? "root"}`;
 }
 
-function siftWorstUp(heap: RenderedSurface[], start: number): void {
-  let index = start;
-  while (index > 0) {
-    const parent = Math.floor((index - 1) / 2);
-    if (compareVisualSurfacePriority(heap[index], heap[parent]) <= 0) break;
-    [heap[index], heap[parent]] = [heap[parent], heap[index]];
-    index = parent;
-  }
-}
-
-function siftWorstDown(heap: RenderedSurface[], start: number): void {
-  let index = start;
-  while (true) {
-    const left = index * 2 + 1;
-    if (left >= heap.length) return;
-    const right = left + 1;
-    let worst = left;
-    if (right < heap.length && compareVisualSurfacePriority(heap[right], heap[left]) > 0) {
-      worst = right;
-    }
-    if (compareVisualSurfacePriority(heap[worst], heap[index]) <= 0) return;
-    [heap[index], heap[worst]] = [heap[worst], heap[index]];
-    index = worst;
-  }
-}
-
-function highestPrioritySurfaces(
-  surfaces: readonly RenderedSurface[],
-  limit: number,
-): RenderedSurface[] {
-  if (limit <= 0) return [];
-  if (surfaces.length <= limit) return [...surfaces].sort(compareVisualSurfacePriority);
-  const heap: RenderedSurface[] = [];
-  for (const surface of surfaces) {
-    if (heap.length < limit) {
-      heap.push(surface);
-      siftWorstUp(heap, heap.length - 1);
-    } else if (compareVisualSurfacePriority(surface, heap[0]) < 0) {
-      heap[0] = surface;
-      siftWorstDown(heap, 0);
-    }
-  }
-  return heap.sort(compareVisualSurfacePriority);
-}
-
 function normalizedLimit(value: number | undefined, fallback: number): number {
   const resolved = value ?? fallback;
   return Number.isFinite(resolved) ? Math.max(0, Math.floor(resolved)) : fallback;
@@ -153,7 +108,7 @@ export function clusterRenderedSurfaces(
 ): ClusteredRenderedSurfaces {
   const maxComparisons = normalizedLimit(options.maxComparisons, MAX_CLUSTER_COMPARISONS);
   const maxSurfaces = normalizedLimit(options.maxSurfaces, MAX_CLUSTER_SURFACES);
-  const prioritized = highestPrioritySurfaces(surfaces, maxSurfaces);
+  const prioritized = selectHighestPriorityVisualSurfaces(surfaces, maxSurfaces);
   const partitions = new Map<string, Map<string, Set<IndexedGroup>>>();
   const groups: IndexedGroup[] = [];
   let comparisons = 0;
