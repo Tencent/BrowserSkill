@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Embedded Canvas table reproduction</title>
+  <style>
+    body { font: 16px sans-serif; }
+    iframe { display: block; width: 800px; height: 440px; border: 8px solid #ccc; }
+  </style>
+  <h1>Embedded table</h1>
+  <button type="button">Page action</button>
+  <iframe title="Table application"></iframe>
+  <script>
+    document.querySelector("iframe").src = `http://localhost:${location.port}/grid.html`;
+  </script>
+</html>

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Canvas grid</title>
+  <style>
+    body { margin: 0; font: 16px sans-serif; }
+    nav { height: 40px; }
+    canvas { display: block; width: 780px; height: 360px; }
+  </style>
+  <nav><button type="button">Insert record</button> <button type="button">Filter</button></nav>
+  <canvas width="1560" height="720"></canvas>
+  <script>
+    const context = document.querySelector("canvas").getContext("2d");
+    context.scale(2, 2);
+    context.fillStyle = "white";
+    context.fillRect(0, 0, 780, 360);
+    context.strokeStyle = "#777";
+    for (let x = 0; x <= 780; x += 260) { context.beginPath(); context.moveTo(x, 0); context.lineTo(x, 350); context.stroke(); }
+    for (let y = 0; y <= 350; y += 50) { context.beginPath(); context.moveTo(0, y); context.lineTo(780, y); context.stroke(); }
+    context.fillStyle = "#111";
+    context.font = "16px sans-serif";
+    ["Canvas column A", "Canvas column B", "Canvas column C"].forEach((label, i) => context.fillText(label, i * 260 + 12, 30));
+    for (let row = 1; row <= 6; row++) context.fillText(`Canvas row ${row}`, 12, row * 50 + 30);
+    window.fixtureReady = true;
+  </script>
+</html>

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Visual observation contract fixture</title>
+  <style>
+    body { margin: 0; min-height: 1800px; font: 14px sans-serif; }
+    #cases { display: grid; grid-template-columns: repeat(4, 180px); gap: 12px; padding: 20px; }
+    .case { width: 160px; height: 70px; }
+    canvas { width: 120px; height: 40px; }
+    .clip { width: 60px; height: 30px; overflow: hidden; }
+    .axis-clip { width: 60px; height: 20px; overflow-x: clip; overflow-y: visible; }
+    #same, #cross { position: absolute; top: 600px; width: 300px; height: 220px; border: 10px solid #555; }
+    #same { left: 40px; }
+    #cross { left: 400px; }
+  </style>
+  <h1>Canvas contract</h1>
+  <button type="button" id="control">Ordinary DOM control</button>
+  <div id="cases">
+    <div class="case"><canvas id="plain"></canvas></div>
+    <div class="case"><canvas id="named" aria-label="Named chart"></canvas></div>
+    <div class="case" aria-hidden="true"><canvas id="aria-hidden"></canvas></div>
+    <div class="case" inert><canvas id="inert"></canvas></div>
+    <div class="case"><canvas id="pointer-none" style="pointer-events:none"></canvas></div>
+    <div class="case" style="visibility:hidden"><canvas id="visibility-override" style="visibility:visible"></canvas></div>
+    <div class="case" style="opacity:0"><canvas id="opacity-parent"></canvas></div>
+    <div class="case"><canvas id="display-none" style="display:none"></canvas></div>
+    <div class="case"><canvas id="visibility-hidden" style="visibility:hidden"></canvas></div>
+    <div class="case"><canvas id="zero" style="width:0"></canvas></div>
+    <div class="case"><canvas id="hidden-overridden" hidden style="display:block"></canvas></div>
+    <div class="case"><div class="clip"><canvas id="partial-clip"></canvas></div></div>
+    <div class="case"><div class="clip"><canvas id="full-clip" style="margin-left:80px"></canvas></div></div>
+    <div class="case"><canvas id="fallback">Accessible fallback is not pixel content</canvas></div>
+    <div class="case"><div class="axis-clip"><canvas id="axis-clip"></canvas></div></div>
+    <div class="case"><div id="border-clip-owner" style="width:60px;height:30px;border:5px solid black;padding:4px;overflow:hidden"><canvas id="border-clip"></canvas></div></div>
+    <div class="case"><canvas id="border-canvas" style="border:5px solid black"></canvas></div>
+    <div class="case" style="position:relative"><canvas id="stack-a"></canvas><canvas id="stack-b" style="position:absolute;left:0;top:0"></canvas></div>
+  </div>
+  <iframe id="same" title="same target"></iframe>
+  <iframe id="cross" title="cross site"></iframe>
+  <script>
+    for (const canvas of document.querySelectorAll("canvas")) {
+      canvas.width = 120;
+      canvas.height = 40;
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#1d4ed8";
+      context.fillRect(0, 0, 120, 40);
+      context.fillStyle = "white";
+      context.fillText("PIXEL TABLE 42", 5, 24);
+    }
+    if (!new URLSearchParams(location.search).has("noFrames")) {
+      document.querySelector("#same").src = "/frame.html?nested=1";
+      document.querySelector("#cross").src = `${location.protocol}//localhost:${location.port}/frame.html`;
+    }
+    window.fixtureReady = true;
+  </script>
+</html>

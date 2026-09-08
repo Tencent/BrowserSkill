@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <title>Frame geometry contract</title>
+  <style>
+    body { margin: 0; width: 600px; height: 900px; }
+    canvas { position: absolute; left: 17px; top: 23px; width: 120px; height: 40px; }
+    iframe { position: absolute; left: 30px; top: 90px; width: 180px; height: 100px; border: 7px solid #555; }
+  </style>
+  <canvas id="frame-canvas" width="120" height="40"></canvas>
+  <script>
+    const context = document.querySelector("canvas").getContext("2d");
+    context.fillStyle = "#15803d";
+    context.fillRect(0, 0, 120, 40);
+    context.fillStyle = "white";
+    context.fillText("FRAME PIXELS", 4, 24);
+    if (new URLSearchParams(location.search).has("nested")) {
+      const child = document.createElement("iframe");
+      child.title = "nested same-target frame";
+      child.src = "/frame.html";
+      document.body.append(child);
+    }
+    window.fixtureReady = true;
+  </script>
+</html>
