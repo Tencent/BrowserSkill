@@ -88,7 +88,8 @@ const MAX_CUSTOM_RECOVERY_AREA = 180_000;
 const MAX_RECOVERABLE_SINGLE_INTENT_AREA = 360_000;
 const MAX_HANDLE_CONTEXT_ITEMS = 3;
 const MAX_SURFACE_ITEMS = 12;
-const MAX_VISUAL_SURFACES = 8;
+const DEFAULT_VISUAL_APPENDIX_TOKENS = 2_048;
+const MAX_VISUAL_SURFACE_REFS = 512;
 const MAX_SCOPE_LINES = 40;
 const RECOVERY_HANDLER_ATTRS = ["onclick", "onmousedown", "onkeydown", "onkeyup", "onkeypress"];
 const NATIVE_TAGS = new Set(["button", "input", "select", "textarea"]);
@@ -796,6 +797,16 @@ interface RenderState {
   surfaceMap: Map<number, CondSurface>;
   scopeMap: Map<number, ActiveScopeBlock>;
   visualSurfaces: VomVisualSurface[];
+  visualSurfacesTruncated: boolean;
+  omittedVisualSurfaceCount?: number;
+}
+
+function tryAppendLine(state: RenderState, line: string, tokenLimit = state.maxTokens): boolean {
+  const nextTokens = state.tokens + estimateTokens(line);
+  if (nextTokens > tokenLimit) return false;
+  state.lines.push(line);
+  state.tokens = nextTokens;
+  return true;
 }
 
 function visualSurfaceArea(surface: VomVisualSurface): number {
@@ -834,41 +845,35 @@ function selectVisualSurfaces(
     if (surface.parentId !== null && !nodesById.has(surface.parentId)) continue;
     eligibleCount += 1;
 
-    const insertionIndex = selected.findIndex(
-      (candidate) => compareVisualSurfaces(surface, candidate) < 0,
-    );
-    if (insertionIndex < 0) {
-      if (selected.length < MAX_VISUAL_SURFACES) selected.push(surface);
-      continue;
-    }
-    selected.splice(insertionIndex, 0, surface);
-    if (selected.length > MAX_VISUAL_SURFACES) selected.pop();
+    selected.push(surface);
   }
-
+  selected.sort(compareVisualSurfaces);
   return { selected, eligibleCount };
 }
 
 function emitVisualAppendix(state: RenderState): void {
   if (state.stopped) return;
   const { selected, eligibleCount } = selectVisualSurfaces(state.visualSurfaces, state.nodesById);
-  if (eligibleCount === 0) return;
+  if (eligibleCount === 0 && !state.visualSurfacesTruncated) return;
 
   const header = "[visual surfaces]";
+  const appendixStartTokens = state.tokens;
+  const appendixTokenLimit = Number.isFinite(state.maxTokens)
+    ? state.maxTokens
+    : appendixStartTokens + DEFAULT_VISUAL_APPENDIX_TOKENS;
   let headerEmitted = false;
   let emitted = 0;
   for (const surface of selected) {
+    if (emitted >= MAX_VISUAL_SURFACE_REFS) break;
     const ref = `e${state.nextRef}`;
     const line = visualSurfaceLine(surface, ref);
-    const nextTokens =
-      state.tokens + estimateTokens(line) + (headerEmitted ? 0 : estimateTokens(header));
-    if (nextTokens > state.maxTokens) break;
+    const requiredTokens = estimateTokens(line) + (headerEmitted ? 0 : estimateTokens(header));
+    if (state.tokens + requiredTokens > appendixTokenLimit) break;
     if (!headerEmitted) {
-      state.lines.push(header);
-      state.tokens += estimateTokens(header);
+      if (!tryAppendLine(state, header, appendixTokenLimit)) break;
       headerEmitted = true;
     }
-    state.lines.push(line);
-    state.tokens += estimateTokens(line);
+    if (!tryAppendLine(state, line, appendixTokenLimit)) break;
     const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
     state.refs.push({
       ref,
@@ -885,16 +890,15 @@ function emitVisualAppendix(state: RenderState): void {
     emitted += 1;
   }
 
-  const omitted = eligibleCount - emitted;
-  if (omitted > 0) {
+  const locallyOmitted = eligibleCount - emitted;
+  const upstreamOmitted = state.omittedVisualSurfaceCount ?? 0;
+  const omitted = locallyOmitted + upstreamOmitted;
+  if (omitted > 0 || state.visualSurfacesTruncated) {
     state.truncated = true;
     if (headerEmitted) {
-      const summary = `  … ${omitted} additional visual surfaces omitted`;
-      const nextTokens = state.tokens + estimateTokens(summary);
-      if (nextTokens <= state.maxTokens) {
-        state.lines.push(summary);
-        state.tokens = nextTokens;
-      }
+      const count =
+        omitted > 0 ? `${state.visualSurfacesTruncated ? "at least " : ""}${omitted}` : "some";
+      tryAppendLine(state, `  … ${count} additional visual surfaces omitted`, appendixTokenLimit);
     }
   }
 }
@@ -903,28 +907,22 @@ function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: Ren
   if (state.stopped || scope.lines.length === 0) return;
   const indent = "  ".repeat(depth);
   const header = `${indent}[§ active: ${scope.label}]`;
-  const headerTokens = estimateTokens(header);
-  if (state.tokens + headerTokens > state.maxTokens) {
+  if (!tryAppendLine(state, header)) {
     state.truncated = true;
     state.stopped = true;
     return;
   }
-  state.lines.push(header);
-  state.tokens += headerTokens;
 
   for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
     if (state.stopped) return;
     const clean = cleaned(text);
     if (!clean) continue;
     const line = `${indent}  ${clean}`;
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
+    if (!tryAppendLine(state, line)) {
       state.truncated = true;
       state.stopped = true;
       return;
     }
-    state.lines.push(line);
-    state.tokens = nextTokens;
   }
 }
 
@@ -959,15 +957,11 @@ function renderTree(children: Map<number | null, VomNode[]>, state: RenderState)
     const context = ref ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
     const line = renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
+    if (!tryAppendLine(state, line)) {
       state.truncated = true;
       state.stopped = true;
       break;
     }
-
-    state.lines.push(line);
-    state.tokens = nextTokens;
     if (ref) {
       const name = cleaned(node.name);
       state.refs.push({
@@ -1001,6 +995,8 @@ function renderNodes(
   surfaces: CondSurface[] = [],
   activeScopeBlocks: ActiveScopeBlock[] = [],
   visualSurfaces: VomVisualSurface[] = [],
+  visualSurfacesTruncated = false,
+  omittedVisualSurfaceCount?: number,
 ): RenderState {
   const children = buildChildren(nodes);
   const state: RenderState = {
@@ -1021,6 +1017,8 @@ function renderNodes(
     surfaceMap: new Map(surfaces.map((surface) => [surface.triggerId, surface])),
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
     visualSurfaces,
+    visualSurfacesTruncated,
+    omittedVisualSurfaceCount,
   };
 
   renderTree(children, state);
@@ -1241,10 +1239,11 @@ function renderDoubleLayer(scene: VomScene, layer: BlockingLayer, options: VomOp
     scene.surfaces,
     scene.activeScopeBlocks,
     scene.visualSurfaces?.filter((surface) => visibleSurface(surface.parentId)),
+    scene.visualSurfacesTruncated,
+    scene.omittedVisualSurfaceCount,
   );
   const occlusionLine = renderPageOcclusionLine(hiddenCount);
-  state.lines.push(occlusionLine);
-  state.tokens += estimateTokens(occlusionLine);
+  if (!tryAppendLine(state, occlusionLine)) state.truncated = true;
   emitVisualAppendix(state);
 
   return {
@@ -1273,6 +1272,8 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     scene.surfaces,
     scene.activeScopeBlocks,
     scene.visualSurfaces,
+    scene.visualSurfacesTruncated,
+    scene.omittedVisualSurfaceCount,
   );
   emitVisualAppendix(state);
 

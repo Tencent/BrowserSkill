@@ -1,6 +1,5 @@
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
-import { resolveFrameProjection } from "../frame-geometry";
-import { type GeometryProjection, projectRectToViewport } from "../geometry";
+import { createFrameGeometryContext } from "../frame-geometry";
 import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
 import { type CapturedNode, type CapturedViewModel, captureViewModel } from "./capture";
 import {
@@ -31,21 +30,6 @@ async function discoverFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFra
   }
 }
 
-function transformFrameNodes(
-  nodes: CapturedNode[],
-  projection: GeometryProjection | null,
-): CapturedNode[] {
-  return nodes.map((node) => ({
-    ...node,
-    rect: projection
-      ? (() => {
-          const bounds = projectRectToViewport(node.rect, projection);
-          return bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null;
-        })()
-      : null,
-  }));
-}
-
 async function captureMissingFrameDocuments(
   cdp: CdpRunner,
   tabId: number,
@@ -63,16 +47,6 @@ async function captureMissingFrameDocuments(
       const child = await captureViewModel(cdpRunnerForTarget(cdp, frame.target), tabId, {
         signal,
       });
-      let projection: GeometryProjection | null = null;
-      try {
-        projection = await resolveFrameProjection(cdp, graph, frame.frameId);
-      } catch (err) {
-        if (isAbortError(err)) throw err;
-        console.debug("[bsk observation] child frame geometry projection failed", {
-          frameId: frame.frameId,
-          err,
-        });
-      }
       const rootFrameId = child.rootFrameId ?? frame.frameId;
       const childFrames = child.frameNodes ?? new Map<string, CapturedNode[]>();
       if (!childFrames.has(rootFrameId)) childFrames.set(rootFrameId, child.nodes);
@@ -83,7 +57,7 @@ async function captureMissingFrameDocuments(
         );
       }
       for (const [childFrameId, nodes] of childFrames) {
-        captured.frameNodes.set(childFrameId, transformFrameNodes(nodes, projection));
+        captured.frameNodes.set(childFrameId, nodes);
       }
       if (frame.ownerBackendNodeId !== undefined) {
         captured.iframeNodes.set(
@@ -107,6 +81,56 @@ async function captureMissingFrameDocuments(
       });
     }
   }
+}
+
+async function normalizeFrameLocalRects(
+  cdp: CdpRunner,
+  graph: CdpFrameGraph,
+  captured: CapturedViewModel,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!captured.frameNodes) return;
+  const geometry = createFrameGeometryContext(cdp, graph);
+  const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
+  await Promise.all(
+    [...captured.frameNodes].map(async ([frameId, nodes]) => {
+      if (frameId === graph.rootFrameId || !frameById.has(frameId)) return;
+      try {
+        const normalized = await Promise.all(
+          nodes.map(async (node) => {
+            if (!node.localRect) return { ...node, rect: null };
+            const bounds = await geometry.projectFrameLocalRect(frameId, node.localRect);
+            return {
+              ...node,
+              rect: bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null,
+            };
+          }),
+        );
+        throwIfAborted(signal);
+        captured.frameNodes?.set(frameId, normalized);
+        const ownerBackendNodeId =
+          frameById.get(frameId)?.ownerBackendNodeId ??
+          captured.frameOwnerBackendNodeIds?.get(frameId);
+        if (ownerBackendNodeId !== undefined) {
+          captured.iframeNodes.set(ownerBackendNodeId, normalized);
+        }
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        console.debug("[bsk observation] frame-local geometry normalization failed", {
+          frameId,
+          err,
+        });
+        const unavailable = nodes.map((node) => ({ ...node, rect: null }));
+        captured.frameNodes?.set(frameId, unavailable);
+        const ownerBackendNodeId =
+          frameById.get(frameId)?.ownerBackendNodeId ??
+          captured.frameOwnerBackendNodeIds?.get(frameId);
+        if (ownerBackendNodeId !== undefined) {
+          captured.iframeNodes.set(ownerBackendNodeId, unavailable);
+        }
+      }
+    }),
+  );
 }
 
 async function captureAxTrees<T extends FrameAxNode>(
@@ -174,7 +198,10 @@ export async function captureFrameData<T extends FrameAxNode>(
 ): Promise<CapturedFrameDocument<T>[]> {
   const graph = await discoverFrameGraph(cdp, tabId);
   const frames = graph?.frames ?? [];
-  if (graph) await captureMissingFrameDocuments(cdp, tabId, graph, captured, signal);
+  if (graph) {
+    await captureMissingFrameDocuments(cdp, tabId, graph, captured, signal);
+    await normalizeFrameLocalRects(cdp, graph, captured, signal);
+  }
   throwIfAborted(signal);
   const batches = await captureAxTrees<T>(cdp, tabId, frames, captured, signal);
   return buildFrameDocuments(graph, batches, captured);

@@ -1011,7 +1011,7 @@ describe("captureViewModel", () => {
     expect(input?.attrs.type).toBe("text");
     expect(input?.ownerFrameBackendNodeId).toBe(13);
     expect(input?.localRect).toEqual({ x: 0, y: 0, w: 200, h: 40 });
-    expect(input?.rect).toEqual({ x: 100, y: 300, w: 200, h: 40 });
+    expect(input?.rect).toBeNull();
     expect(rootFrameId).toBe("main-frame");
     expect(frameNodes?.get("child-frame")).toBe(subNodes);
     expect(frameOwnerBackendNodeIds?.get("child-frame")).toBe(13);
@@ -1183,13 +1183,13 @@ describe("captureViewModel", () => {
     const input = iframeNodes.get(23)?.find((n) => n.backendNodeId === 31);
 
     expect(nestedIframe?.localRect).toEqual({ x: 5, y: 6, w: 100, h: 80 });
-    expect(nestedIframe?.rect).toEqual({ x: 15, y: 26, w: 100, h: 80 });
+    expect(nestedIframe?.rect).toBeNull();
     expect(input?.ownerFrameBackendNodeId).toBe(23);
     expect(input?.localRect).toEqual({ x: 1, y: 2, w: 40, h: 20 });
-    expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
+    expect(input?.rect).toBeNull();
   });
 
-  it("keeps same-origin iframe canvas discovery in top-level CSS coordinates at dpr 1 and 2", async () => {
+  it("keeps same-origin iframe canvas frame-local until frame geometry is resolved", async () => {
     const captureAtDpr = async (dpr: number) => {
       const S = ["html", "body", "iframe", "canvas", "static", "auto"];
       const i = (s: string) => S.indexOf(s);
@@ -1270,13 +1270,7 @@ describe("captureViewModel", () => {
     const atDpr1 = await captureAtDpr(1);
     const atDpr2 = await captureAtDpr(2);
 
-    expect(atDpr1).toEqual([
-      expect.objectContaining({
-        backendNodeId: 21,
-        frameId: "child",
-        visibleRect: { x: 120, y: 180, w: 120, h: 60 },
-      }),
-    ]);
+    expect(atDpr1).toEqual([]);
     expect(atDpr2).toEqual(atDpr1);
   });
 

@@ -48,6 +48,13 @@ import {
   type ToolEffect,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
+import { topLevelScreenshotRasterScale } from "./viewport-metrics";
+import {
+  correctedVisualScreenshotScale,
+  planVisualScreenshot,
+  type ScreenshotPixelBudget,
+  screenshotFitsPixelBudget,
+} from "./visual-screenshot-plan";
 import {
   type CapturedNode,
   type CapturedSurfaceProbe,
@@ -101,6 +108,10 @@ export const normaliseRef = sharedNormaliseRef;
 
 const VISUAL_SURFACE_SCREENSHOT_MAX_EDGE = 2_048;
 const VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS = 4_000_000;
+const VISUAL_SURFACE_SCREENSHOT_BUDGET: ScreenshotPixelBudget = {
+  maxEdge: VISUAL_SURFACE_SCREENSHOT_MAX_EDGE,
+  maxPixels: VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS,
+};
 
 /**
  * Strip the `data:image/...;base64,` prefix from a Chrome
@@ -225,36 +236,52 @@ async function captureElementScreenshot(
         })()
       : liveRect;
   if (!rect) return { code: "permission_denied", message: "surface is no longer visible" };
-  const scale = visualSurface
-    ? Math.min(
-        1,
-        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.width,
-        VISUAL_SURFACE_SCREENSHOT_MAX_EDGE / rect.height,
-        Math.sqrt(VISUAL_SURFACE_SCREENSHOT_MAX_PIXELS / (rect.width * rect.height)),
-      )
+  const rasterScaleEstimate = visualSurface ? await topLevelScreenshotRasterScale(cdp, tabId) : 1;
+  let scale = visualSurface
+    ? planVisualScreenshot({
+        cssRect: rect,
+        rasterScaleEstimate,
+        budget: VISUAL_SURFACE_SCREENSHOT_BUDGET,
+      }).clipScale
     : 1;
 
   try {
-    const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
-      format: "png",
-      clip: {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        scale,
-      },
-    });
-    if (signal?.aborted) return cancelled("screenshot");
-    const image_base64 = shot.data ?? "";
-    if (!image_base64) {
-      return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
+    for (let attempt = 0; attempt < (visualSurface ? 2 : 1); attempt += 1) {
+      const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
+        format: "png",
+        clip: {
+          x: rect.x,
+          y: rect.y,
+          width: rect.width,
+          height: rect.height,
+          scale,
+        },
+      });
+      if (signal?.aborted) return cancelled("screenshot");
+      const image_base64 = shot.data ?? "";
+      if (!image_base64) {
+        return { code: "cdp_failed", message: "Page.captureScreenshot returned no data" };
+      }
+      const dims = parsePngDimensions(image_base64);
+      if (!dims) {
+        return { code: "cdp_failed", message: "Page.captureScreenshot returned invalid PNG data" };
+      }
+      if (!visualSurface || screenshotFitsPixelBudget(dims, VISUAL_SURFACE_SCREENSHOT_BUDGET)) {
+        return { image_base64, width: dims.width, height: dims.height };
+      }
+      const corrected = correctedVisualScreenshotScale({
+        previousClipScale: scale,
+        actualWidth: dims.width,
+        actualHeight: dims.height,
+        budget: VISUAL_SURFACE_SCREENSHOT_BUDGET,
+      });
+      if (attempt === 1 || corrected === null) break;
+      scale = corrected;
     }
-    const dims = parsePngDimensions(image_base64);
-    if (!dims) {
-      return { code: "cdp_failed", message: "Page.captureScreenshot returned invalid PNG data" };
-    }
-    return { image_base64, width: dims.width, height: dims.height };
+    return {
+      code: "cdp_failed",
+      message: "Page.captureScreenshot exceeded the visual surface pixel budget",
+    };
   } catch (err) {
     return {
       code: "cdp_failed",
@@ -351,6 +378,12 @@ export async function handleScreenshot(
     }
     const node = resolveSnapshotRef(ctx, ref, target.tabId, "screenshot");
     if (isRpcError(node)) return node;
+    if (node.kind === "surface" && !node.visibleRect) {
+      return {
+        code: "permission_denied",
+        message: `surface ref ${ref} has no observation-time visible bounds`,
+      };
+    }
     if (signal?.aborted) return cancelled("screenshot");
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);

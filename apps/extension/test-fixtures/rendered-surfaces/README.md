@@ -95,6 +95,11 @@ Use the normal DOM buttons and re-observe after each action:
 - After **Restore size**: present with a fresh ref.
 - After **Remove canvas**: absent.
 
+### `sparklines.html`
+
+Expected Surface labels `fixture-sparkline-01` through `fixture-sparkline-20` must all be present.
+The adjacent, non-overlapping canvases remain twenty independent screenshot-only Surface refs.
+
 ## Invariants
 
 - `snapshot` must not emit any of these Surface markers.

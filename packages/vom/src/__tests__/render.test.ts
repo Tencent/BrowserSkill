@@ -117,7 +117,7 @@ describe("renderVom single-layer page", () => {
     );
   });
 
-  it("bounds visual output and prefers explicitly labeled surfaces", () => {
+  it("uses the appendix token budget and prefers explicitly labeled surfaces", () => {
     const input = scene([node({ id: 1, role: "RootWebArea", frameId: "main" })]);
     input.visualSurfaces = Array.from({ length: 12 }, (_, index) => ({
       parentId: 1,
@@ -132,10 +132,30 @@ describe("renderVom single-layer page", () => {
     const out = renderVom(input);
     const surfaceRefs = out.refs.filter((ref) => ref.kind === "surface");
 
-    expect(surfaceRefs).toHaveLength(8);
+    expect(surfaceRefs).toHaveLength(12);
     expect(surfaceRefs[0]).toMatchObject({ backendNodeId: 111, name: "Important status" });
-    expect(out.text).toContain("… 4 additional visual surfaces omitted");
-    expect(out.truncated).toBe(true);
+    expect(out.truncated).toBe(false);
+  });
+
+  it("renders twenty independent sparklines without changing DOM refs", () => {
+    const input = scene([
+      node({ id: 1, role: "RootWebArea", frameId: "main" }),
+      node({ id: 2, parentId: 1, role: "button", name: "Submit", tag: "button" }),
+    ]);
+    input.visualSurfaces = Array.from({ length: 20 }, (_, index) => ({
+      parentId: 1,
+      backendNodeId: 100 + index,
+      frameId: "main",
+      renderingKind: "canvas" as const,
+      visibleRect: { x: index * 12, y: 20, w: 10, h: 8 },
+      memberCount: 1,
+    }));
+
+    const out = renderVom(input);
+
+    expect(out.refs[0]).toMatchObject({ ref: "e1", backendNodeId: 2, kind: "dom" });
+    expect(out.refs.filter((ref) => ref.kind === "surface")).toHaveLength(20);
+    expect(out.truncated).toBe(false);
   });
 
   it("does not let a visual surface exhaust the budget before later DOM content", () => {

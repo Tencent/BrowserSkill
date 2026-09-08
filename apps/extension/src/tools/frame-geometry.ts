@@ -1,4 +1,9 @@
-import { type CdpFrame, type CdpFrameGraph, type CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type CdpFrame,
+  type CdpFrameGraph,
+  type CdpTarget,
+  cdpTargetKey,
+} from "@/browser-driver/frame-graph";
 import type { RpcError } from "@/transport/types";
 import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import {
@@ -10,6 +15,7 @@ import {
   parseCdpQuad,
   polygonArea,
   polygonCentroid,
+  projectRectToViewport,
   projectRegionToViewport,
   type Quad,
   type Region,
@@ -84,6 +90,41 @@ async function targetViewport(cdp: CdpRunner, target: CdpTarget): Promise<Size |
   return width > 0 && height > 0 ? { width, height } : null;
 }
 
+async function sameTargetFrameViewport(cdp: CdpRunner, frame: CdpFrame): Promise<Size | null> {
+  const world = await sendToCdpTarget<{ executionContextId?: number }>(
+    cdp,
+    frame.target,
+    "Page.createIsolatedWorld",
+    {
+      frameId: frame.frameId,
+      worldName: "bsk-frame-geometry",
+      grantUniveralAccess: false,
+    },
+  );
+  if (world.executionContextId === undefined) return null;
+  const result = await sendToCdpTarget<{ result?: { value?: unknown } }>(
+    cdp,
+    frame.target,
+    "Runtime.evaluate",
+    {
+      expression: "({width:window.innerWidth,height:window.innerHeight})",
+      contextId: world.executionContextId,
+      returnByValue: true,
+    },
+  );
+  const value = result.result?.value as { width?: unknown; height?: unknown } | undefined;
+  const width = value?.width;
+  const height = value?.height;
+  return typeof width === "number" &&
+    Number.isFinite(width) &&
+    width > 0 &&
+    typeof height === "number" &&
+    Number.isFinite(height) &&
+    height > 0
+    ? { width, height }
+    : null;
+}
+
 async function ownerContentQuad(
   cdp: CdpRunner,
   parent: CdpFrame,
@@ -98,26 +139,150 @@ async function ownerContentQuad(
   return parseCdpQuad(result.model?.content);
 }
 
-async function sameTargetFrameClips(
+export interface FrameGeometryContext {
+  resolveFrameProjection(frameId: string): Promise<GeometryProjection | null>;
+  projectFrameLocalRect(
+    frameId: string,
+    rect: { x: number; y: number; w: number; h: number },
+  ): Promise<ViewportRect | null>;
+}
+
+export function createFrameGeometryContext(
   cdp: CdpRunner,
-  byId: Map<string, CdpFrame>,
-  frame: CdpFrame,
-  targetRoot: CdpFrame,
-): Promise<Polygon[] | null> {
-  const clips: Polygon[] = [];
-  let current = frame;
-  const seen = new Set<string>();
-  while (current.frameId !== targetRoot.frameId) {
-    if (seen.has(current.frameId) || !current.parentFrameId) return null;
-    seen.add(current.frameId);
-    const parent = byId.get(current.parentFrameId);
-    if (!parent || current.ownerBackendNodeId === undefined) return null;
-    const clip = await ownerContentQuad(cdp, parent, current.ownerBackendNodeId);
-    if (!clip) return null;
-    clips.push(clip);
-    current = parent;
-  }
-  return clips;
+  graph: CdpFrameGraph,
+): FrameGeometryContext {
+  const byId = frameMap(graph);
+  const targetViewports = new Map<string, Promise<Size | null>>();
+  const frameViewports = new Map<string, Promise<Size | null>>();
+  const ownerQuads = new Map<string, Promise<Quad | null>>();
+  const projections = new Map<string, Promise<GeometryProjection | null>>();
+  const localProjections = new Map<string, Promise<GeometryProjection | null>>();
+
+  const cachedTargetViewport = (target: CdpTarget): Promise<Size | null> => {
+    const key = cdpTargetKey(target);
+    let value = targetViewports.get(key);
+    if (!value) {
+      value = targetViewport(cdp, target);
+      targetViewports.set(key, value);
+    }
+    return value;
+  };
+  const cachedFrameViewport = (frame: CdpFrame): Promise<Size | null> => {
+    let value = frameViewports.get(frame.frameId);
+    if (!value) {
+      const root = targetRootFrame(byId, frame);
+      value =
+        root?.frameId === frame.frameId
+          ? cachedTargetViewport(frame.target)
+          : sameTargetFrameViewport(cdp, frame);
+      frameViewports.set(frame.frameId, value);
+    }
+    return value;
+  };
+  const cachedOwnerQuad = (parent: CdpFrame, backendNodeId: number): Promise<Quad | null> => {
+    const key = `${cdpTargetKey(parent.target)}:${backendNodeId}`;
+    let value = ownerQuads.get(key);
+    if (!value) {
+      value = ownerContentQuad(cdp, parent, backendNodeId);
+      ownerQuads.set(key, value);
+    }
+    return value;
+  };
+  const cachedSameTargetClips = async (
+    frame: CdpFrame,
+    root: CdpFrame,
+  ): Promise<Polygon[] | null> => {
+    const clips: Polygon[] = [];
+    let current = frame;
+    const seen = new Set<string>();
+    while (current.frameId !== root.frameId) {
+      if (seen.has(current.frameId) || !current.parentFrameId) return null;
+      seen.add(current.frameId);
+      const parent = byId.get(current.parentFrameId);
+      if (!parent || current.ownerBackendNodeId === undefined) return null;
+      const clip = await cachedOwnerQuad(parent, current.ownerBackendNodeId);
+      if (!clip) return null;
+      clips.push(clip);
+      current = parent;
+    }
+    return clips;
+  };
+
+  const buildTargetProjection = async (frameId: string): Promise<GeometryProjection | null> => {
+    const frame = byId.get(frameId);
+    if (!frame) return null;
+    let root = targetRootFrame(byId, frame);
+    if (!root) return null;
+    const sourceViewport = await cachedTargetViewport(root.target);
+    if (!sourceViewport) return null;
+    const sourceClips = await cachedSameTargetClips(frame, root);
+    if (!sourceClips) return null;
+    const edges: ProjectiveEdge[] = [];
+    while (root.parentFrameId) {
+      const parent = byId.get(root.parentFrameId);
+      if (!parent || root.ownerBackendNodeId === undefined) return null;
+      const destinationQuad = await cachedOwnerQuad(parent, root.ownerBackendNodeId);
+      if (!destinationQuad) return null;
+      const source = await cachedTargetViewport(root.target);
+      if (!source) return null;
+      const parentRoot = targetRootFrame(byId, parent);
+      if (!parentRoot) return null;
+      const destinationClips = await cachedSameTargetClips(parent, parentRoot);
+      if (!destinationClips) return null;
+      edges.push({ sourceViewport: source, destinationQuad, destinationClips });
+      root = parentRoot;
+    }
+    const topViewport = await cachedTargetViewport(root.target);
+    return topViewport ? { sourceClips, edges, topViewport } : null;
+  };
+
+  const resolveFrameProjectionCached = (frameId: string): Promise<GeometryProjection | null> => {
+    let value = projections.get(frameId);
+    if (!value) {
+      value = buildTargetProjection(frameId);
+      projections.set(frameId, value);
+    }
+    return value;
+  };
+
+  const buildLocalProjection = async (frameId: string): Promise<GeometryProjection | null> => {
+    const frame = byId.get(frameId);
+    if (!frame) return null;
+    const root = targetRootFrame(byId, frame);
+    if (!root) return null;
+    const targetProjection = await resolveFrameProjectionCached(root.frameId);
+    if (!targetProjection) return null;
+    if (root.frameId === frame.frameId) return targetProjection;
+    if (!frame.parentFrameId || frame.ownerBackendNodeId === undefined) return null;
+    const parent = byId.get(frame.parentFrameId);
+    if (!parent) return null;
+    const sourceViewport = await cachedFrameViewport(frame);
+    const destinationQuad = await cachedOwnerQuad(parent, frame.ownerBackendNodeId);
+    const destinationClips = await cachedSameTargetClips(frame, root);
+    if (!sourceViewport || !destinationQuad || !destinationClips) return null;
+    return {
+      sourceClips: [],
+      edges: [{ sourceViewport, destinationQuad, destinationClips }, ...targetProjection.edges],
+      topViewport: targetProjection.topViewport,
+    };
+  };
+
+  const localProjection = (frameId: string): Promise<GeometryProjection | null> => {
+    let value = localProjections.get(frameId);
+    if (!value) {
+      value = buildLocalProjection(frameId);
+      localProjections.set(frameId, value);
+    }
+    return value;
+  };
+
+  return {
+    resolveFrameProjection: resolveFrameProjectionCached,
+    async projectFrameLocalRect(frameId, rect) {
+      const projection = await localProjection(frameId);
+      return projection ? projectRectToViewport(rect, projection) : null;
+    },
+  };
 }
 
 export async function resolveFrameProjection(
@@ -125,36 +290,7 @@ export async function resolveFrameProjection(
   graph: CdpFrameGraph,
   frameId: string,
 ): Promise<GeometryProjection | null> {
-  const byId = frameMap(graph);
-  const frame = byId.get(frameId);
-  if (!frame) return null;
-  let targetRoot = targetRootFrame(byId, frame);
-  if (!targetRoot) return null;
-  const sourceViewport = await targetViewport(cdp, targetRoot.target);
-  if (!sourceViewport) return null;
-  const sourceClips = await sameTargetFrameClips(cdp, byId, frame, targetRoot);
-  if (!sourceClips) return null;
-
-  const edges: ProjectiveEdge[] = [];
-  while (targetRoot.parentFrameId) {
-    const parent = byId.get(targetRoot.parentFrameId);
-    if (!parent || targetRoot.ownerBackendNodeId === undefined) return null;
-    const destinationQuad = await ownerContentQuad(cdp, parent, targetRoot.ownerBackendNodeId);
-    if (!destinationQuad) return null;
-    const source =
-      edges.length === 0 ? sourceViewport : await targetViewport(cdp, targetRoot.target);
-    if (!source) return null;
-    const parentTargetRoot = targetRootFrame(byId, parent);
-    if (!parentTargetRoot) return null;
-    const destinationClips = await sameTargetFrameClips(cdp, byId, parent, parentTargetRoot);
-    if (!destinationClips) return null;
-    edges.push({ sourceViewport: source, destinationQuad, destinationClips });
-    targetRoot = parentTargetRoot;
-  }
-
-  const topViewport =
-    edges.length === 0 ? sourceViewport : await targetViewport(cdp, targetRoot.target);
-  return topViewport ? { sourceClips, edges, topViewport } : null;
+  return createFrameGeometryContext(cdp, graph).resolveFrameProjection(frameId);
 }
 
 async function loadFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFrameGraph | null> {

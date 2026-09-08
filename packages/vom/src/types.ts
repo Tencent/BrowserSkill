@@ -63,6 +63,10 @@ export interface VomScene {
   activeScopeBlocks?: ActiveScopeBlock[];
   /** Non-semantic rendered regions discovered alongside the AX/DOM tree. */
   visualSurfaces?: VomVisualSurface[];
+  /** Upstream surface discovery/aggregation stopped at a resource guardrail. */
+  visualSurfacesTruncated?: boolean;
+  /** Exact omitted count when upstream could determine it. */
+  omittedVisualSurfaceCount?: number;
 }
 
 export interface VomOptions {

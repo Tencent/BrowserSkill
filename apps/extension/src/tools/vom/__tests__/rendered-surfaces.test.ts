@@ -183,7 +183,7 @@ describe("rendered surface clustering and projection", () => {
       ],
       { width: 1280, height: 720 },
     );
-    const groups = clusterRenderedSurfaces(surfaces);
+    const clustered = clusterRenderedSurfaces(surfaces);
     const scene: VomScene = {
       viewport: { width: 1280, height: 720 },
       nodes: [
@@ -202,14 +202,14 @@ describe("rendered surface clustering and projection", () => {
       ],
     };
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.members).toHaveLength(2);
-    expect(groups[0]?.label).toBeUndefined();
+    expect(clustered.groups).toHaveLength(1);
+    expect(clustered.groups[0]?.memberCount).toBe(2);
+    expect(clustered.groups[0]?.label).toBeUndefined();
     expect(
       projectRenderedSurfaces(
         scene,
         [document([body, ...surfaces.map((s) => domNode(s.backendNodeId))])],
-        groups,
+        clustered,
       ),
     ).toMatchObject({
       visualSurfaces: [expect.objectContaining({ parentId: 10, backendNodeId: 3, memberCount: 2 })],
@@ -217,7 +217,7 @@ describe("rendered surface clustering and projection", () => {
   });
 
   it("does not merge a contained canvas with a larger independent canvas", () => {
-    const groups = clusterRenderedSurfaces([
+    const clustered = clusterRenderedSurfaces([
       ...discoverRenderedSurfaces(
         [
           document([
@@ -233,11 +233,34 @@ describe("rendered surface clustering and projection", () => {
       ),
     ]);
 
-    expect(groups).toHaveLength(2);
+    expect(clustered.groups).toHaveLength(2);
+  });
+
+  it("keeps the existing inclusive 90 percent stack threshold", () => {
+    const clustered = clusterRenderedSurfaces([
+      {
+        renderingKind: "canvas",
+        frameId: "main",
+        backendNodeId: 2,
+        parentBackendNodeId: 1,
+        visibleRect: { x: 0, y: 0, w: 100, h: 100 },
+        paintOrder: 1,
+      },
+      {
+        renderingKind: "canvas",
+        frameId: "main",
+        backendNodeId: 3,
+        parentBackendNodeId: 1,
+        visibleRect: { x: 5, y: 0, w: 90, h: 100 },
+        paintOrder: 2,
+      },
+    ]);
+
+    expect(clustered.groups).toEqual([expect.objectContaining({ memberCount: 2 })]);
   });
 
   it("does not merge coincident canvases owned by different containers", () => {
-    const groups = clusterRenderedSurfaces(
+    const clustered = clusterRenderedSurfaces(
       discoverRenderedSurfaces(
         [
           document([
@@ -251,6 +274,43 @@ describe("rendered surface clustering and projection", () => {
       ),
     );
 
-    expect(groups).toHaveLength(2);
+    expect(clustered.groups).toHaveLength(2);
+  });
+
+  it("keeps adjacent map tiles and twenty sparklines as independent surfaces", () => {
+    const surfaces = Array.from({ length: 20 }, (_, index) =>
+      domNode(100 + index, {
+        parentBackendNodeId: 1,
+        rect: { x: index * 12, y: 20, w: 10, h: 8 },
+      }),
+    );
+    const clustered = clusterRenderedSurfaces(
+      discoverRenderedSurfaces(
+        [document([domNode(1, { tag: "main", rect: null, localRect: null }), ...surfaces])],
+        { width: 1280, height: 720 },
+      ),
+    );
+
+    expect(clustered.groups).toHaveLength(20);
+    expect(clustered.groups.every((group) => group.memberCount === 1)).toBe(true);
+    expect(clustered.truncated).toBe(false);
+  });
+
+  it("clusters a large coincident stack without retaining every member", () => {
+    const surfaces = Array.from({ length: 10_000 }, (_, index) => ({
+      renderingKind: "canvas" as const,
+      frameId: "main",
+      backendNodeId: index + 1,
+      parentBackendNodeId: 1,
+      visibleRect: { x: 10, y: 20, w: 800, h: 500 },
+      paintOrder: index,
+    }));
+
+    const clustered = clusterRenderedSurfaces(surfaces);
+
+    expect(clustered.groups).toEqual([
+      expect.objectContaining({ memberCount: 10_000, representative: surfaces[9_999] }),
+    ]);
+    expect(clustered.truncated).toBe(false);
   });
 });

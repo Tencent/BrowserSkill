@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rendered Surface sparkline matrix</title>
+    <style>
+      html, body { margin: 0; font: 14px system-ui, sans-serif; }
+      body { padding: 16px; }
+      main { display: grid; grid-template-columns: repeat(5, 120px); gap: 12px; }
+      canvas { display: block; width: 100px; height: 30px; background: #eaf2f8; }
+    </style>
+  </head>
+  <body>
+    <h1>Twenty independent sparklines</h1>
+    <main id="sparklines"></main>
+    <script>
+      const host = document.querySelector("#sparklines");
+      for (let index = 1; index <= 20; index += 1) {
+        const canvas = document.createElement("canvas");
+        canvas.width = 100;
+        canvas.height = 30;
+        canvas.setAttribute("aria-label", `fixture-sparkline-${String(index).padStart(2, "0")}`);
+        host.append(canvas);
+      }
+    </script>
+  </body>
+</html>

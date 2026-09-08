@@ -330,6 +330,7 @@ describe("handleScreenshot", () => {
       tabId: 7,
       kind: "surface",
       capabilities: ["screenshot"],
+      visibleRect: { x: 0, y: 0, w: 4096, h: 4096 },
     });
     const { cdp, sent } = makeFakeCdp({
       "Page.getLayoutMetrics": () => ({
@@ -357,6 +358,49 @@ describe("handleScreenshot", () => {
     };
     expect(clip.clip).toMatchObject({ width: 4096, height: 4096 });
     expect(clip.clip?.scale).toBeCloseTo(Math.sqrt(4_000_000 / (4096 * 4096)));
+  });
+
+  it("retries once when actual surface PNG dimensions exceed the pixel budget", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      visibleRect: { x: 0, y: 0, w: 1_000, h: 1_000 },
+    });
+    let captures = 0;
+    const { cdp, sent } = makeFakeCdp({
+      "Runtime.evaluate": () => ({ result: { value: 1 } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 1_000, clientHeight: 1_000 },
+      }),
+      "DOM.getContentQuads": () => ({
+        quads: [[0, 0, 1_000, 0, 1_000, 1_000, 0, 1_000]],
+      }),
+      "Page.captureScreenshot": () => ({
+        data:
+          ++captures === 1
+            ? pngWithIhdrDimensions(4_000, 4_000)
+            : pngWithIhdrDimensions(1_998, 1_998),
+      }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({ width: 1_998, height: 1_998 });
+    const calls = sent.filter((call) => call.method === "Page.captureScreenshot");
+    expect(calls).toHaveLength(2);
+    expect((calls[1]?.params as { clip?: { scale?: number } }).clip?.scale).toBeLessThan(0.5);
   });
 
   it("crops a visual surface screenshot to its observation-time visible region", async () => {
@@ -462,7 +506,11 @@ describe("handleScreenshot", () => {
   it("fails closed when a ref capture is not a valid PNG", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
-    ctx.refStore.set("e5", 999, { tabId: 7, kind: "surface" });
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      visibleRect: { x: 0, y: 0, w: 50, h: 50 },
+    });
     const { cdp } = makeFakeCdp({
       "DOM.getContentQuads": () => ({ quads: [[0, 0, 50, 0, 50, 50, 0, 50]] }),
       "Page.captureScreenshot": () => ({ data: "bm90LWEtcG5n" }),

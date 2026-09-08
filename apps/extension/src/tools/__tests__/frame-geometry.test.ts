@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveFrameProjection, resolveNodeGeometry } from "../frame-geometry";
+import {
+  createFrameGeometryContext,
+  resolveFrameProjection,
+  resolveNodeGeometry,
+} from "../frame-geometry";
 import {
   clipPolygon,
   polygonArea,
@@ -35,6 +39,53 @@ describe("frame geometry projection", () => {
       { width: 1000, height: 800 },
     );
     expect(polygonBounds(projected.flat())).toEqual({ x: 224, y: 346, width: 200, height: 80 });
+  });
+
+  it("projects nested same-target frame-local bounds through authoritative content quads", async () => {
+    const boxCalls: number[] = [];
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method, params) => {
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1_000, clientHeight: 800 } };
+        }
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 91 };
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { width: 100, height: 80 } } };
+        }
+        if (method === "DOM.getBoxModel") {
+          const backendNodeId = (params as { backendNodeId?: number }).backendNodeId ?? 0;
+          boxCalls.push(backendNodeId);
+          return backendNodeId === 10
+            ? { model: { content: [30, 100.5, 330, 100.5, 330, 300.5, 30, 300.5] } }
+            : { model: { content: [45, 120.5, 145, 120.5, 145, 200.5, 45, 200.5] } };
+        }
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+    };
+    const geometry = createFrameGeometryContext(cdp, {
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "child",
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+          target: { tabId: 4 },
+        },
+        {
+          frameId: "nested",
+          parentFrameId: "child",
+          ownerBackendNodeId: 20,
+          target: { tabId: 4 },
+        },
+      ],
+    });
+
+    await expect(
+      geometry.projectFrameLocalRect("nested", { x: 12, y: 12, w: 40, h: 20 }),
+    ).resolves.toEqual({ x: 57, y: 132.5, width: 40, height: 20 });
+    await geometry.projectFrameLocalRect("nested", { x: 1, y: 1, w: 2, h: 2 });
+    expect(boxCalls.sort()).toEqual([10, 20]);
   });
 
   it("uses a projective mapping for perspective-transformed iframe quads", () => {

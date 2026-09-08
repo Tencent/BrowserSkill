@@ -1,7 +1,7 @@
 import type { VomScene, VomVisualSurface } from "@browser-skill/vom";
 import type { CapturedFrameDocument } from "../frame-capture";
 import type { SemanticAxNode } from "../semantic-graph";
-import type { RenderedSurfaceGroup } from "./types";
+import type { ClusteredRenderedSurfaces, RenderedSurfaceGroup } from "./types";
 
 function frameBackendKey(frameId: string, backendNodeId: number): string {
   return `${frameId}\u0000${backendNodeId}`;
@@ -75,12 +75,12 @@ function buildProjectionIndex(
 export function projectRenderedSurfaces(
   scene: VomScene,
   documents: CapturedFrameDocument<SemanticAxNode>[],
-  groups: RenderedSurfaceGroup[],
+  clustered: ClusteredRenderedSurfaces,
 ): VomScene {
   const index = buildProjectionIndex(scene, documents);
   const visualSurfaces: VomVisualSurface[] = [];
 
-  for (const group of groups) {
+  for (const group of clustered.groups) {
     const parentId = nearestSceneParent(index, group);
     visualSurfaces.push({
       parentId,
@@ -89,12 +89,20 @@ export function projectRenderedSurfaces(
       renderingKind: "canvas",
       visibleRect: group.representative.visibleRect,
       ...(group.label ? { label: group.label } : {}),
-      memberCount: group.members.length,
+      memberCount: group.memberCount,
     });
   }
 
   return {
     ...scene,
     ...(visualSurfaces.length > 0 ? { visualSurfaces } : {}),
+    ...(clustered.truncated
+      ? {
+          visualSurfacesTruncated: true,
+          ...(clustered.omittedCount !== undefined
+            ? { omittedVisualSurfaceCount: clustered.omittedCount }
+            : {}),
+        }
+      : {}),
   };
 }

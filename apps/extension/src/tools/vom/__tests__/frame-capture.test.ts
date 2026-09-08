@@ -50,6 +50,75 @@ function childSnapshot(frameId: string, backendNodeId: number) {
 }
 
 describe("captureFrameData", () => {
+  it("projects same-origin frame-local rects through the iframe content box", async () => {
+    const owner = ownerNode(10, 50);
+    const canvas: CapturedNode = {
+      backendNodeId: 101,
+      parentBackendNodeId: 100,
+      frameId: "child",
+      ownerFrameBackendNodeId: 10,
+      tag: "canvas",
+      attrs: {},
+      rect: null,
+      localRect: { x: 12, y: 12, w: 224, h: 94 },
+      paintOrder: 1,
+      position: "static",
+      pointerEvents: "auto",
+    };
+    const captured: CapturedViewModel = {
+      nodes: [owner],
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map([[10, [canvas]]]),
+      frameNodes: new Map([
+        ["main", [owner]],
+        ["child", [canvas]],
+      ]),
+      frameOwnerBackendNodeIds: new Map([["child", 10]]),
+      frameParentIds: new Map([["child", "main"]]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method) => {
+        if (method === "Accessibility.enable") return {};
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        }
+        if (method === "DOM.getBoxModel") {
+          return { model: { content: [52, 102, 352, 102, 352, 302, 52, 302] } };
+        }
+        if (method === "Page.createIsolatedWorld") return { executionContextId: 91 };
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { width: 300, height: 200 } } };
+        }
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          {
+            frameId: "child",
+            parentFrameId: "main",
+            ownerBackendNodeId: 10,
+            target: { tabId: 4 },
+          },
+        ],
+      })),
+    };
+
+    await captureFrameData(cdp, 4, captured);
+
+    expect(captured.frameNodes?.get("child")?.[0]?.rect).toEqual({
+      x: 64,
+      y: 114,
+      w: 224,
+      h: 94,
+    });
+    expect(captured.iframeNodes.get(10)?.[0]?.rect).toEqual({ x: 64, y: 114, w: 224, h: 94 });
+  });
+
   it("captures and positions multiple OOPIF documents missing from the root snapshot", async () => {
     const leftOwner = ownerNode(10, 50);
     const rightOwner = ownerNode(20, 500);

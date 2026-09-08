@@ -45,7 +45,7 @@ function capabilitiesFor(
   capabilities: RefCapability[] | undefined,
 ): RefCapability[] {
   if (kind === "surface") return ["screenshot"];
-  return capabilities ?? ["interact", "screenshot"];
+  return capabilities ? [...capabilities] : ["interact", "screenshot"];
 }
 
 export class RefStore {

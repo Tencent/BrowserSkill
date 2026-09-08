@@ -77,4 +77,14 @@ describe("RefStore", () => {
     expect(s.resolveEntry("e1")?.capabilities).toEqual(["screenshot"]);
     expect(s.resolveEntry("e2")?.capabilities).toEqual(["screenshot"]);
   });
+
+  it("copies caller-owned capability arrays", () => {
+    const s = new RefStore();
+    const capabilities: Array<"interact" | "screenshot"> = ["screenshot"];
+    s.set("e1", 42, { tabId: 7, capabilities });
+
+    capabilities.push("interact");
+
+    expect(s.resolveEntry("e1")?.capabilities).toEqual(["screenshot"]);
+  });
 });

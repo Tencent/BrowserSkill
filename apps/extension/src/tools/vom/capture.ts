@@ -7,7 +7,7 @@
 import type { Rect, Viewport } from "@browser-skill/vom";
 import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
-import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
+import { type GeometryProjection, projectRectToViewport } from "../geometry";
 import type { CdpRunner } from "../shared";
 import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 
@@ -1014,7 +1014,6 @@ function parseChildFrameDocuments(
   strings: string[],
   dpr: number,
   parentDocIndex: number,
-  parentNodes: CapturedNode[],
   parentContext: FrameContext,
   visited = new Set<number>(),
 ): ParseFrameDocumentsResult {
@@ -1029,19 +1028,17 @@ function parseChildFrameDocuments(
   }
 
   const parentBackendIds = parentDoc?.nodes?.backendNodeId ?? [];
-  const parentNodeByBackendId = new Map(parentNodes.map((node) => [node.backendNodeId, node]));
-
   for (const [nodeArrayIdx, childDocIndex] of cdi) {
     if (visited.has(childDocIndex)) continue;
     const childDoc = documents[childDocIndex];
     if (!childDoc) continue;
     const iframeBackendId = parentBackendIds[nodeArrayIdx];
     if (iframeBackendId === undefined) continue;
-    const iframeNode = parentNodeByBackendId.get(iframeBackendId);
-    const projection =
-      parentContext.projection && iframeNode?.localRect
-        ? childFrameProjection(parentContext.projection, iframeNode.localRect)
-        : null;
+    // DOMSnapshot reports the iframe owner's border-box bounds, but child
+    // document coordinates start at the content-box origin. Preserve the
+    // frame-local rectangles here and let frame-capture normalize them with
+    // authoritative content quads once the frame graph is available.
+    const projection = null;
 
     const childContext: FrameContext = {
       frameId: snapshotFrameId(childDoc, strings),
@@ -1065,7 +1062,6 @@ function parseChildFrameDocuments(
       strings,
       dpr,
       childDocIndex,
-      parsed.nodes,
       childContext,
       nextVisited,
     );
@@ -1143,7 +1139,7 @@ export async function captureViewModel(
   const nodes = mainParsed.nodes;
   const excludedBackendNodeIds = new Set(mainParsed.excludedBackendNodeIds);
 
-  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, nodes, topContext);
+  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, topContext);
   const iframeNodes = frameParsed.iframeNodes;
   for (const id of frameParsed.excludedBackendNodeIds) {
     excludedBackendNodeIds.add(id);

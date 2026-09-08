@@ -12,7 +12,14 @@ export interface RenderedSurface {
 
 export interface RenderedSurfaceGroup {
   frameId: string;
-  members: RenderedSurface[];
+  parentBackendNodeId: number | null;
   representative: RenderedSurface;
   label?: string;
+  memberCount: number;
+}
+
+export interface ClusteredRenderedSurfaces {
+  groups: RenderedSurfaceGroup[];
+  truncated: boolean;
+  omittedCount?: number;
 }
