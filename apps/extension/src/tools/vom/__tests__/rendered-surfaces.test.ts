@@ -313,4 +313,74 @@ describe("rendered surface clustering and projection", () => {
     ]);
     expect(clustered.truncated).toBe(false);
   });
+
+  it("keeps large non-overlapping surface sets linear and independent", () => {
+    const surfaces = Array.from({ length: 10_000 }, (_, index) => ({
+      renderingKind: "canvas" as const,
+      frameId: "main",
+      backendNodeId: index + 1,
+      parentBackendNodeId: 1,
+      visibleRect: { x: index * 20, y: 0, w: 10, h: 10 },
+      paintOrder: index,
+    }));
+
+    const clustered = clusterRenderedSurfaces(surfaces);
+
+    expect(clustered.groups).toHaveLength(10_000);
+    expect(clustered.groups.every((group) => group.memberCount === 1)).toBe(true);
+    expect(clustered.truncated).toBe(false);
+  });
+
+  it("keeps the highest-priority surfaces when the computation guard truncates input", () => {
+    const surfaces = [
+      {
+        renderingKind: "canvas" as const,
+        frameId: "main",
+        backendNodeId: 1,
+        parentBackendNodeId: 10,
+        visibleRect: { x: 0, y: 0, w: 10, h: 10 },
+        paintOrder: 1,
+      },
+      {
+        renderingKind: "canvas" as const,
+        frameId: "main",
+        backendNodeId: 2,
+        parentBackendNodeId: 10,
+        visibleRect: { x: 20, y: 0, w: 100, h: 100 },
+        paintOrder: 1,
+      },
+      {
+        renderingKind: "canvas" as const,
+        frameId: "main",
+        backendNodeId: 3,
+        parentBackendNodeId: 10,
+        visibleRect: { x: 140, y: 0, w: 8, h: 8 },
+        paintOrder: 1,
+        label: "Important status",
+      },
+    ];
+
+    const clustered = clusterRenderedSurfaces(surfaces, { maxSurfaces: 2 });
+
+    expect(clustered.groups.map((group) => group.representative.backendNodeId).sort()).toEqual([
+      2, 3,
+    ]);
+    expect(clustered).toMatchObject({ truncated: true, omittedCount: 1 });
+  });
+
+  it("stops at the comparison budget without dropping already completed groups", () => {
+    const surfaces = Array.from({ length: 3 }, (_, index) => ({
+      renderingKind: "canvas" as const,
+      frameId: "main",
+      backendNodeId: index + 1,
+      parentBackendNodeId: 10,
+      visibleRect: { x: 0, y: 0, w: 100, h: 100 },
+      paintOrder: index + 1,
+    }));
+
+    const clustered = clusterRenderedSurfaces(surfaces, { maxComparisons: 1 });
+
+    expect(clustered.groups).toEqual([expect.objectContaining({ memberCount: 2 })]);
+    expect(clustered).toMatchObject({ truncated: true, omittedCount: 1 });
+  });
 });

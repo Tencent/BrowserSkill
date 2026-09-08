@@ -1,4 +1,4 @@
-import type { Rect } from "@browser-skill/vom";
+import { compareVisualSurfacePriority, type Rect } from "@browser-skill/vom";
 import type { ClusteredRenderedSurfaces, RenderedSurface, RenderedSurfaceGroup } from "./types";
 
 const STACK_IOU_RATIO = 0.9;
@@ -7,6 +7,11 @@ const SIZE_BAND_BASE = 1 / STACK_SIZE_RATIO;
 const POSITION_CELL_RATIO = 0.1;
 const MAX_CLUSTER_COMPARISONS = 1_000_000;
 const MAX_CLUSTER_SURFACES = 50_000;
+
+export interface ClusterRenderedSurfaceOptions {
+  maxComparisons?: number;
+  maxSurfaces?: number;
+}
 
 interface IndexedGroup extends RenderedSurfaceGroup {
   creationIndex: number;
@@ -92,15 +97,72 @@ function partitionKey(surface: RenderedSurface): string {
   return `${surface.frameId}\u0000${surface.parentBackendNodeId ?? "root"}`;
 }
 
-export function clusterRenderedSurfaces(surfaces: RenderedSurface[]): ClusteredRenderedSurfaces {
+function siftWorstUp(heap: RenderedSurface[], start: number): void {
+  let index = start;
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (compareVisualSurfacePriority(heap[index], heap[parent]) <= 0) break;
+    [heap[index], heap[parent]] = [heap[parent], heap[index]];
+    index = parent;
+  }
+}
+
+function siftWorstDown(heap: RenderedSurface[], start: number): void {
+  let index = start;
+  while (true) {
+    const left = index * 2 + 1;
+    if (left >= heap.length) return;
+    const right = left + 1;
+    let worst = left;
+    if (right < heap.length && compareVisualSurfacePriority(heap[right], heap[left]) > 0) {
+      worst = right;
+    }
+    if (compareVisualSurfacePriority(heap[worst], heap[index]) <= 0) return;
+    [heap[index], heap[worst]] = [heap[worst], heap[index]];
+    index = worst;
+  }
+}
+
+function highestPrioritySurfaces(
+  surfaces: readonly RenderedSurface[],
+  limit: number,
+): RenderedSurface[] {
+  if (limit <= 0) return [];
+  if (surfaces.length <= limit) return [...surfaces].sort(compareVisualSurfacePriority);
+  const heap: RenderedSurface[] = [];
+  for (const surface of surfaces) {
+    if (heap.length < limit) {
+      heap.push(surface);
+      siftWorstUp(heap, heap.length - 1);
+    } else if (compareVisualSurfacePriority(surface, heap[0]) < 0) {
+      heap[0] = surface;
+      siftWorstDown(heap, 0);
+    }
+  }
+  return heap.sort(compareVisualSurfacePriority);
+}
+
+function normalizedLimit(value: number | undefined, fallback: number): number {
+  const resolved = value ?? fallback;
+  return Number.isFinite(resolved) ? Math.max(0, Math.floor(resolved)) : fallback;
+}
+
+export function clusterRenderedSurfaces(
+  surfaces: RenderedSurface[],
+  options: ClusterRenderedSurfaceOptions = {},
+): ClusteredRenderedSurfaces {
+  const maxComparisons = normalizedLimit(options.maxComparisons, MAX_CLUSTER_COMPARISONS);
+  const maxSurfaces = normalizedLimit(options.maxSurfaces, MAX_CLUSTER_SURFACES);
+  const prioritized = highestPrioritySurfaces(surfaces, maxSurfaces);
   const partitions = new Map<string, Map<string, Set<IndexedGroup>>>();
   const groups: IndexedGroup[] = [];
   let comparisons = 0;
   let processed = 0;
-  let truncated = false;
+  let truncated = prioritized.length < surfaces.length;
+  let comparisonLimitReached = false;
 
-  for (const surface of surfaces) {
-    if (processed >= MAX_CLUSTER_SURFACES || comparisons >= MAX_CLUSTER_COMPARISONS) {
+  for (const surface of prioritized) {
+    if (comparisons >= maxComparisons) {
       truncated = true;
       break;
     }
@@ -117,11 +179,12 @@ export function clusterRenderedSurfaces(surfaces: RenderedSurface[]): ClusteredR
 
     let best: { group: IndexedGroup; score: number; areaDelta: number } | null = null;
     for (const group of candidates) {
-      comparisons += 1;
-      if (comparisons > MAX_CLUSTER_COMPARISONS) {
+      if (comparisons >= maxComparisons) {
         truncated = true;
+        comparisonLimitReached = true;
         break;
       }
+      comparisons += 1;
       const score = stackScore(group.representative, surface);
       if (score === null) continue;
       const areaDelta = Math.abs(
@@ -138,7 +201,7 @@ export function clusterRenderedSurfaces(surfaces: RenderedSurface[]): ClusteredR
         best = { group, score, areaDelta };
       }
     }
-    if (truncated) break;
+    if (comparisonLimitReached) break;
 
     if (best) {
       const group = best.group;

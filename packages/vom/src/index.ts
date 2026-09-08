@@ -20,3 +20,7 @@ export type {
   VomScene,
   VomVisualSurface,
 } from "./types";
+export {
+  compareVisualSurfacePriority,
+  type VisualSurfacePriorityInput,
+} from "./visual-surface-priority";

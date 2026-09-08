@@ -1,4 +1,4 @@
-export { clusterRenderedSurfaces } from "./cluster";
+export { type ClusterRenderedSurfaceOptions, clusterRenderedSurfaces } from "./cluster";
 export { discoverRenderedSurfaces } from "./discovery";
 export { projectRenderedSurfaces } from "./project";
 export type {

@@ -11,6 +11,7 @@ import type {
   VomScene,
   VomVisualSurface,
 } from "./types";
+import { compareVisualSurfacePriority } from "./visual-surface-priority";
 
 const SKIP_ROLES = new Set(["generic", "none", "presentation", "inlinetextbox"]);
 
@@ -809,29 +810,12 @@ function tryAppendLine(state: RenderState, line: string, tokenLimit = state.maxT
   return true;
 }
 
-function visualSurfaceArea(surface: VomVisualSurface): number {
-  return Math.max(0, surface.visibleRect.w) * Math.max(0, surface.visibleRect.h);
-}
-
-function compareVisualSurfaces(a: VomVisualSurface, b: VomVisualSurface): number {
-  const aLabeled = cleaned(a.label) !== undefined;
-  const bLabeled = cleaned(b.label) !== undefined;
-  return (
-    Number(bLabeled) - Number(aLabeled) ||
-    visualSurfaceArea(b) - visualSurfaceArea(a) ||
-    a.frameId.localeCompare(b.frameId) ||
-    a.visibleRect.y - b.visibleRect.y ||
-    a.visibleRect.x - b.visibleRect.x ||
-    a.backendNodeId - b.backendNodeId
-  );
-}
-
 function visualSurfaceLine(surface: VomVisualSurface, ref: string): string {
   const label = cleaned(surface.label) ?? `${surface.renderingKind} visual surface`;
   const layers = surface.memberCount > 1 ? `; layers=${surface.memberCount}` : "";
   const { x, y, w, h } = surface.visibleRect;
   const bounds = [x, y, w, h].map(Math.round).join(",");
-  return `  @${ref} surface ${JSON.stringify(label)} [bounds=${bounds}; rendering=${surface.renderingKind}${layers}; visual-only; requires=image-understanding; use: bsk screenshot --ref @${ref}]`;
+  return `  @${ref} surface ${JSON.stringify(label)} [bounds=${bounds}; rendering=${surface.renderingKind}${layers}; visual-only; screenshot-only; requires=image-understanding]`;
 }
 
 function selectVisualSurfaces(
@@ -847,7 +831,7 @@ function selectVisualSurfaces(
 
     selected.push(surface);
   }
-  selected.sort(compareVisualSurfaces);
+  selected.sort(compareVisualSurfacePriority);
   return { selected, eligibleCount };
 }
 

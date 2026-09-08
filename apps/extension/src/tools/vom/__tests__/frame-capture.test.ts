@@ -50,6 +50,36 @@ function childSnapshot(frameId: string, backendNodeId: number) {
 }
 
 describe("captureFrameData", () => {
+  it("does not request frame geometry for a root-only page", async () => {
+    const root = { ...ownerNode(1, 0), tag: "body" };
+    const captured: CapturedViewModel = {
+      nodes: [root],
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(),
+      frameNodes: new Map([["main", [root]]]),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+    const send = vi.fn(async (_tabId, method) => {
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+      throw new Error(`unexpected ${method}`);
+    });
+    const cdp: CdpRunner = {
+      send: send as CdpRunner["send"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [{ frameId: "main", target: { tabId: 4 } }],
+      })),
+    };
+
+    await captureFrameData(cdp, 4, captured);
+
+    expect(send.mock.calls.some(([, method]) => method === "Page.createIsolatedWorld")).toBe(false);
+    expect(send.mock.calls.some(([, method]) => method === "DOM.getBoxModel")).toBe(false);
+    expect(send.mock.calls.some(([, method]) => method === "Page.getLayoutMetrics")).toBe(false);
+  });
+
   it("projects same-origin frame-local rects through the iframe content box", async () => {
     const owner = ownerNode(10, 50);
     const canvas: CapturedNode = {
@@ -199,6 +229,87 @@ describe("captureFrameData", () => {
         ["left", "main"],
         ["right", "main"],
       ]),
+    );
+  });
+
+  it("bounds concurrent same-target frame geometry resolution", async () => {
+    const owners = Array.from({ length: 8 }, (_, index) => ownerNode(10 + index, index * 40));
+    const childFrames = owners.map((owner, index) => {
+      const frameId = `child-${index}`;
+      const node: CapturedNode = {
+        backendNodeId: 100 + index,
+        parentBackendNodeId: null,
+        frameId,
+        ownerFrameBackendNodeId: owner.backendNodeId,
+        tag: "canvas",
+        attrs: {},
+        rect: null,
+        localRect: { x: 1, y: 2, w: 20, h: 10 },
+        paintOrder: 1,
+        position: "static",
+        pointerEvents: "auto",
+      };
+      return { frameId, owner, node };
+    });
+    const captured: CapturedViewModel = {
+      nodes: owners,
+      viewport: { width: 1000, height: 800 },
+      iframeNodes: new Map(childFrames.map(({ owner, node }) => [owner.backendNodeId, [node]])),
+      frameNodes: new Map([
+        ["main", owners],
+        ...childFrames.map(({ frameId, node }): [string, CapturedNode[]] => [frameId, [node]]),
+      ]),
+      frameOwnerBackendNodeIds: new Map(
+        childFrames.map(({ frameId, owner }) => [frameId, owner.backendNodeId]),
+      ),
+      rootFrameId: "main",
+      excludedBackendNodeIds: new Set(),
+    };
+    let activeWorlds = 0;
+    let maxActiveWorlds = 0;
+    const cdp: CdpRunner = {
+      send: vi.fn(async (_tabId, method, params) => {
+        if (method === "Page.getLayoutMetrics") {
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        }
+        if (method === "DOM.getBoxModel") {
+          const backendNodeId = (params as { backendNodeId?: number }).backendNodeId ?? 10;
+          const x = (backendNodeId - 10) * 40;
+          return { model: { content: [x, 100, x + 30, 100, x + 30, 120, x, 120] } };
+        }
+        if (method === "Page.createIsolatedWorld") {
+          activeWorlds += 1;
+          maxActiveWorlds = Math.max(maxActiveWorlds, activeWorlds);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          activeWorlds -= 1;
+          return { executionContextId: 90 };
+        }
+        if (method === "Runtime.evaluate") {
+          return { result: { value: { width: 30, height: 20 } } };
+        }
+        if (method === "Accessibility.enable") return {};
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        throw new Error(`unexpected ${method}`);
+      }) as CdpRunner["send"],
+      getFrameGraph: vi.fn(async () => ({
+        rootFrameId: "main",
+        frames: [
+          { frameId: "main", target: { tabId: 4 } },
+          ...childFrames.map(({ frameId, owner }) => ({
+            frameId,
+            parentFrameId: "main",
+            ownerBackendNodeId: owner.backendNodeId,
+            target: { tabId: 4 },
+          })),
+        ],
+      })),
+    };
+
+    await captureFrameData(cdp, 4, captured);
+
+    expect(maxActiveWorlds).toBe(4);
+    expect(childFrames.every(({ frameId }) => captured.frameNodes?.get(frameId)?.[0]?.rect)).toBe(
+      true,
     );
   });
 

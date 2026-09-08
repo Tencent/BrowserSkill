@@ -403,6 +403,43 @@ describe("handleScreenshot", () => {
     expect((calls[1]?.params as { clip?: { scale?: number } }).clip?.scale).toBeLessThan(0.5);
   });
 
+  it("fails closed when the retried surface PNG still exceeds the pixel budget", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e5", 999, {
+      tabId: 7,
+      kind: "surface",
+      visibleRect: { x: 0, y: 0, w: 1_000, h: 1_000 },
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Runtime.evaluate": () => ({ result: { value: 1 } }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 1_000, clientHeight: 1_000 },
+      }),
+      "DOM.getContentQuads": () => ({
+        quads: [[0, 0, 1_000, 0, 1_000, 1_000, 0, 1_000]],
+      }),
+      "Page.captureScreenshot": () => ({ data: pngWithIhdrDimensions(4_000, 4_000) }),
+    });
+
+    const res = await handleScreenshot(
+      sm,
+      { session_id: "aa11", ref: "@e5", tab_id: 7 },
+      makeScreenshotDeps({
+        cdp,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: false }) as chrome.tabs.Tab),
+        query: vi.fn(),
+        captureVisibleTab: vi.fn(),
+      }),
+    );
+
+    expect(res).toEqual({
+      code: "cdp_failed",
+      message: "Page.captureScreenshot exceeded the visual surface pixel budget",
+    });
+    expect(sent.filter((call) => call.method === "Page.captureScreenshot")).toHaveLength(2);
+  });
+
   it("crops a visual surface screenshot to its observation-time visible region", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

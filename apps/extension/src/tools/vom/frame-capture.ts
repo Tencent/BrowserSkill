@@ -12,12 +12,30 @@ import {
 export type FrameAxNode = FrameOwnedAxNode;
 export type CapturedFrameDocument<T extends FrameAxNode> = FrameDocument<T>;
 
+const FRAME_GEOMETRY_CONCURRENCY = 4;
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new DOMException("observation aborted", "AbortError");
 }
 
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
+}
+
+async function forEachWithConcurrency<T>(
+  items: readonly T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const run = async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await worker(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, run));
 }
 
 async function discoverFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFrameGraph | null> {
@@ -92,20 +110,24 @@ async function normalizeFrameLocalRects(
   if (!captured.frameNodes) return;
   const geometry = createFrameGeometryContext(cdp, graph);
   const frameById = new Map(graph.frames.map((frame) => [frame.frameId, frame]));
-  await Promise.all(
-    [...captured.frameNodes].map(async ([frameId, nodes]) => {
+  await forEachWithConcurrency(
+    [...captured.frameNodes],
+    FRAME_GEOMETRY_CONCURRENCY,
+    async ([frameId, nodes]) => {
       if (frameId === graph.rootFrameId || !frameById.has(frameId)) return;
       try {
-        const normalized = await Promise.all(
-          nodes.map(async (node) => {
-            if (!node.localRect) return { ...node, rect: null };
+        const normalized: CapturedNode[] = [];
+        for (const node of nodes) {
+          if (!node.localRect) {
+            normalized.push({ ...node, rect: null });
+          } else {
             const bounds = await geometry.projectFrameLocalRect(frameId, node.localRect);
-            return {
+            normalized.push({
               ...node,
               rect: bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null,
-            };
-          }),
-        );
+            });
+          }
+        }
         throwIfAborted(signal);
         captured.frameNodes?.set(frameId, normalized);
         const ownerBackendNodeId =
@@ -129,7 +151,7 @@ async function normalizeFrameLocalRects(
           captured.iframeNodes.set(ownerBackendNodeId, unavailable);
         }
       }
-    }),
+    },
   );
 }
 
