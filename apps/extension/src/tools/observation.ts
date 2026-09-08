@@ -34,6 +34,8 @@ import type {
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
+import { screenshotPageRect } from "./geometry/coordinate-types";
+import { cssViewport, GeometryContext } from "./geometry/frame-context";
 import {
   type ChromeTabsApi,
   enforceToolTargetScope,
@@ -197,15 +199,14 @@ async function captureElementScreenshot(
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
   const rect = geometry.topBounds;
+  const clip = screenshotPageRect(rect, geometry.topViewport);
+  if (!clip) return { code: "cdp_failed", message: "invalid screenshot coordinate space" };
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
       format: "png",
       clip: {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
+        ...clip.rect,
         scale: 1,
       },
     });
@@ -984,26 +985,19 @@ function emptyCapturedViewModel(viewport = { width: 0, height: 0 }): CapturedVie
   return { viewport, nodes: [], iframeNodes: new Map(), excludedBackendNodeIds: new Set() };
 }
 
-interface LayoutMetricsViewportReply {
-  cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
-  layoutViewport?: { clientWidth?: number; clientHeight?: number };
-}
-
 async function fallbackCapturedViewModel(
   cdp: CdpRunner,
   tabId: number,
+  geometry: GeometryContext,
   signal?: AbortSignal,
 ): Promise<CapturedViewModel> {
   throwIfAborted(signal, "observation");
   let viewport = { width: 0, height: 0 };
   try {
-    const metrics = await cdp.send<LayoutMetricsViewportReply>(tabId, "Page.getLayoutMetrics", {});
+    const metrics = await geometry.layoutMetrics({ tabId });
     throwIfAborted(signal, "observation");
-    const source = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
-    viewport = {
-      width: source.clientWidth ?? 0,
-      height: source.clientHeight ?? 0,
-    };
+    const source = cssViewport(metrics);
+    viewport = { width: source.width, height: source.height };
   } catch (error) {
     if (isAbortError(error)) throw error;
   }
@@ -1016,12 +1010,13 @@ async function captureForVom(
   cdp: CdpRunner,
   tabId: number,
   options: CaptureVomObservationOptions,
+  geometry: GeometryContext,
 ): Promise<CapturedViewModel> {
   try {
-    return await captureViewModel(cdp, tabId, { signal: options.signal });
+    return await captureViewModel(cdp, tabId, { signal: options.signal, geometry });
   } catch (error) {
     if (isAbortError(error)) throw error;
-    return fallbackCapturedViewModel(cdp, tabId, options.signal);
+    return fallbackCapturedViewModel(cdp, tabId, geometry, options.signal);
   }
 }
 
@@ -1096,9 +1091,16 @@ export async function captureVomObservation(
   throwIfAborted(options.signal, "observation");
   await cdp.ensureAttachedToUrl?.(tabId, url);
   throwIfAborted(options.signal, "observation");
-  const captured = await captureForVom(cdp, tabId, options);
+  const geometry = new GeometryContext(cdp, tabId, undefined, options.signal);
+  const captured = await captureForVom(cdp, tabId, options, geometry);
   throwIfAborted(options.signal, "observation");
-  const documents = await captureFrameData<CdpAxNode>(cdp, tabId, captured, options.signal);
+  const documents = await captureFrameData<CdpAxNode>(
+    cdp,
+    tabId,
+    captured,
+    options.signal,
+    geometry,
+  );
   throwIfAborted(options.signal, "observation");
   const normalizedDocuments =
     documents.length === 1 && captured.iframeNodes.size > 0

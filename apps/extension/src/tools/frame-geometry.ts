@@ -1,24 +1,21 @@
-import { type CdpFrame, type CdpFrameGraph, type CdpTarget } from "@/browser-driver/frame-graph";
+import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import type { RpcError } from "@/transport/types";
 import { nodeContentRegion, scrollNodeIntoView } from "./element-geometry";
 import {
   clipPolygon,
-  type GeometryProjection,
   type Point,
   type Polygon,
-  type ProjectiveEdge,
-  parseCdpQuad,
   polygonArea,
   polygonCentroid,
   projectRegionToViewport,
-  type Quad,
   type Region,
   rectPolygon,
   regionBounds,
-  type Size,
   type ViewportRect,
 } from "./geometry";
-import { type CdpRunner, cdpRunnerForTarget, isRpcError, sendToCdpTarget } from "./shared";
+import type { CssViewport } from "./geometry/coordinate-types";
+import { cssViewport, GeometryContext } from "./geometry/frame-context";
+import { type CdpRunner, cdpRunnerForTarget, isRpcError } from "./shared";
 
 export interface NodeAddress {
   target: CdpTarget;
@@ -27,6 +24,8 @@ export interface NodeAddress {
 }
 
 export interface ResolvedNodeGeometry {
+  /** The same top-level measurement used by projection, for screenshot coordinate adaptation. */
+  topViewport: CssViewport;
   topVisibleRegions: Region;
   topBounds: ViewportRect;
   /** Point in the top-level tab viewport, used by root-target input events. */
@@ -39,145 +38,16 @@ function geometryError(message: string): RpcError {
   return { code: "cdp_failed", message };
 }
 
-function frameMap(graph: CdpFrameGraph): Map<string, CdpFrame> {
-  return new Map(graph.frames.map((frame) => [frame.frameId, frame]));
-}
-
-function targetRootFrame(byId: Map<string, CdpFrame>, frame: CdpFrame): CdpFrame | null {
-  const seen = new Set<string>();
-  let current = frame;
-  while (current.parentFrameId) {
-    if (seen.has(current.frameId)) return null;
-    seen.add(current.frameId);
-    const parent = byId.get(current.parentFrameId);
-    if (!parent || parent.target.sessionId !== current.target.sessionId) break;
-    current = parent;
-  }
-  return current;
-}
-
-function frameAncestry(graph: CdpFrameGraph, frameId: string): CdpFrame[] | null {
-  const byId = frameMap(graph);
-  const path: CdpFrame[] = [];
-  const seen = new Set<string>();
-  let current = byId.get(frameId);
-  if (!current) return null;
-  while (current.parentFrameId) {
-    if (seen.has(current.frameId)) return null;
-    seen.add(current.frameId);
-    path.push(current);
-    const parent = byId.get(current.parentFrameId);
-    if (!parent) return null;
-    current = parent;
-  }
-  return path;
-}
-
-async function targetViewport(cdp: CdpRunner, target: CdpTarget): Promise<Size | null> {
-  const metrics = await sendToCdpTarget<{
-    cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
-    layoutViewport?: { clientWidth?: number; clientHeight?: number };
-  }>(cdp, target, "Page.getLayoutMetrics", {});
-  const viewport = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
-  const width = viewport.clientWidth ?? 0;
-  const height = viewport.clientHeight ?? 0;
-  return width > 0 && height > 0 ? { width, height } : null;
-}
-
-async function ownerContentQuad(
-  cdp: CdpRunner,
-  parent: CdpFrame,
-  ownerBackendNodeId: number,
-): Promise<Quad | null> {
-  const result = await sendToCdpTarget<{ model?: { content?: number[] } }>(
-    cdp,
-    parent.target,
-    "DOM.getBoxModel",
-    { backendNodeId: ownerBackendNodeId },
-  );
-  return parseCdpQuad(result.model?.content);
-}
-
-async function sameTargetFrameClips(
-  cdp: CdpRunner,
-  byId: Map<string, CdpFrame>,
-  frame: CdpFrame,
-  targetRoot: CdpFrame,
-): Promise<Polygon[] | null> {
-  const clips: Polygon[] = [];
-  let current = frame;
-  const seen = new Set<string>();
-  while (current.frameId !== targetRoot.frameId) {
-    if (seen.has(current.frameId) || !current.parentFrameId) return null;
-    seen.add(current.frameId);
-    const parent = byId.get(current.parentFrameId);
-    if (!parent || current.ownerBackendNodeId === undefined) return null;
-    const clip = await ownerContentQuad(cdp, parent, current.ownerBackendNodeId);
-    if (!clip) return null;
-    clips.push(clip);
-    current = parent;
-  }
-  return clips;
-}
-
-export async function resolveFrameProjection(
-  cdp: CdpRunner,
-  graph: CdpFrameGraph,
-  frameId: string,
-): Promise<GeometryProjection | null> {
-  const byId = frameMap(graph);
-  const frame = byId.get(frameId);
-  if (!frame) return null;
-  let targetRoot = targetRootFrame(byId, frame);
-  if (!targetRoot) return null;
-  const sourceViewport = await targetViewport(cdp, targetRoot.target);
-  if (!sourceViewport) return null;
-  const sourceClips = await sameTargetFrameClips(cdp, byId, frame, targetRoot);
-  if (!sourceClips) return null;
-
-  const edges: ProjectiveEdge[] = [];
-  while (targetRoot.parentFrameId) {
-    const parent = byId.get(targetRoot.parentFrameId);
-    if (!parent || targetRoot.ownerBackendNodeId === undefined) return null;
-    const destinationQuad = await ownerContentQuad(cdp, parent, targetRoot.ownerBackendNodeId);
-    if (!destinationQuad) return null;
-    const source =
-      edges.length === 0 ? sourceViewport : await targetViewport(cdp, targetRoot.target);
-    if (!source) return null;
-    const parentTargetRoot = targetRootFrame(byId, parent);
-    if (!parentTargetRoot) return null;
-    const destinationClips = await sameTargetFrameClips(cdp, byId, parent, parentTargetRoot);
-    if (!destinationClips) return null;
-    edges.push({ sourceViewport: source, destinationQuad, destinationClips });
-    targetRoot = parentTargetRoot;
-  }
-
-  const topViewport =
-    edges.length === 0 ? sourceViewport : await targetViewport(cdp, targetRoot.target);
-  return topViewport ? { sourceClips, edges, topViewport } : null;
-}
-
-async function loadFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFrameGraph | null> {
-  if (!cdp.getFrameGraph) return null;
-  try {
-    return await cdp.getFrameGraph(tabId);
-  } catch (error) {
-    console.debug("[bsk frame-geometry] frame graph resolution failed", error);
-    return null;
-  }
-}
-
 async function scrollFrameOwners(
   cdp: CdpRunner,
   tabId: number,
-  graph: CdpFrameGraph,
+  context: GeometryContext,
   frameId: string,
 ): Promise<RpcError | null> {
-  const byId = frameMap(graph);
-  const ancestry = frameAncestry(graph, frameId);
+  const ancestry = await context.ancestry(frameId);
   if (!ancestry) return geometryError(`could not resolve frame ancestry for ${frameId}`);
   for (const child of [...ancestry].reverse()) {
-    const parent = child.parentFrameId ? byId.get(child.parentFrameId) : undefined;
+    const parent = child.parentFrameId ? await context.frame(child.parentFrameId) : undefined;
     if (!parent || child.ownerBackendNodeId === undefined) {
       return geometryError(`could not resolve frame owner for ${child.frameId}`);
     }
@@ -191,17 +61,20 @@ async function scrollFrameOwners(
   return null;
 }
 
-async function scrollElementWithFrameGraph(
+async function scrollElementWithContext(
   cdp: CdpRunner,
   tabId: number,
   target: CdpTarget,
   backendNodeId: number,
   frameId: string | undefined,
-  graph: CdpFrameGraph | null,
+  context: GeometryContext,
 ): Promise<RpcError | null> {
   if (frameId) {
-    if (!graph) return geometryError(`could not resolve frame graph for ${frameId}`);
-    const error = await scrollFrameOwners(cdp, tabId, graph, frameId);
+    const frame = await context.frame(frameId);
+    if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(target)) {
+      return geometryError("node frame does not belong to its target");
+    }
+    const error = await scrollFrameOwners(cdp, tabId, context, frameId);
     if (error) return error;
   } else if (target.sessionId) {
     return geometryError("an OOPIF node address requires frameId");
@@ -216,8 +89,15 @@ export async function scrollElementAndFramesIntoView(
   backendNodeId: number,
   frameId?: string,
 ): Promise<RpcError | null> {
-  const graph = frameId ? await loadFrameGraph(cdp, tabId) : null;
-  return scrollElementWithFrameGraph(cdp, tabId, target, backendNodeId, frameId, graph);
+  if (target.tabId !== tabId) return geometryError("node target belongs to another tab");
+  return scrollElementWithContext(
+    cdp,
+    tabId,
+    target,
+    backendNodeId,
+    frameId,
+    new GeometryContext(cdp, tabId),
+  );
 }
 
 function largestRegion(regions: Region): Polygon | null {
@@ -240,23 +120,32 @@ export async function resolveNodeGeometry(
     if (address.target.sessionId && !address.frameId) {
       return geometryError("an OOPIF node address requires frameId");
     }
-    const graph = address.frameId ? await loadFrameGraph(cdp, tabId) : null;
+    if (address.target.tabId !== tabId) return geometryError("node target belongs to another tab");
+    const context = new GeometryContext(cdp, tabId);
+    const graph = address.frameId ? await context.graph() : null;
+    if (address.frameId && graph) {
+      const frame = await context.frame(address.frameId);
+      if (!frame || cdpTargetKey(frame.target) !== cdpTargetKey(address.target)) {
+        return geometryError("node frame does not belong to its target");
+      }
+    }
     if (address.frameId && !graph) {
       return geometryError(`could not resolve frame graph for ${address.frameId}`);
     }
 
     if (options.scrollIntoView) {
-      const scrollError = await scrollElementWithFrameGraph(
+      const scrollError = await scrollElementWithContext(
         cdp,
         tabId,
         address.target,
         address.backendNodeId,
         address.frameId,
-        graph,
+        context,
       );
       if (scrollError) return scrollError;
     }
 
+    // Only topology was read above. Begin live measurements after scrolling.
     const localRegion = await nodeContentRegion(
       cdpRunnerForTarget(cdp, address.target),
       tabId,
@@ -267,7 +156,7 @@ export async function resolveNodeGeometry(
     let topVisibleRegions: Region;
     let targetActionPoint: Point | null = null;
     if (address.frameId && graph) {
-      const projection = await resolveFrameProjection(cdp, graph, address.frameId);
+      const projection = await context.targetProjection(address.frameId);
       if (!projection)
         return geometryError(`could not resolve frame geometry for ${address.frameId}`);
       topVisibleRegions = projectRegionToViewport(localRegion, projection);
@@ -290,7 +179,7 @@ export async function resolveNodeGeometry(
         targetActionPoint = localActionRegion ? polygonCentroid(localActionRegion) : null;
       }
     } else {
-      const viewport = await targetViewport(cdp, address.target);
+      const viewport = await context.viewport(address.target);
       if (!viewport) return geometryError("could not resolve top viewport geometry");
       topVisibleRegions = localRegion
         .map((polygon) =>
@@ -309,7 +198,13 @@ export async function resolveNodeGeometry(
       return { code: "permission_denied", message: "element not visible in its target" };
     }
     targetActionPoint ??= actionPoint;
-    return { topVisibleRegions, topBounds, actionPoint, targetActionPoint };
+    return {
+      topVisibleRegions,
+      topBounds,
+      actionPoint,
+      targetActionPoint,
+      topViewport: cssViewport(await context.layoutMetrics({ tabId })),
+    };
   } catch (error) {
     return geometryError(error instanceof Error ? error.message : String(error));
   }

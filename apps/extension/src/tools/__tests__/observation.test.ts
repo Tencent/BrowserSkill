@@ -266,7 +266,15 @@ describe("handleScreenshot", () => {
     expect(sent.find((c) => c.method === "Page.captureScreenshot")).toBeUndefined();
   });
 
-  it("captures a clipped PNG when ref is given", async () => {
+  it.each([
+    { zoom: 1, scroll: 0, expected: { x: 10, y: 20, width: 100, height: 40 } },
+    { zoom: 0.9, scroll: 100, expected: { x: 9, y: 108, width: 90, height: 36 } },
+    { zoom: 1.25, scroll: 100, expected: { x: 12.5, y: 150, width: 125, height: 50 } },
+  ])("captures a ref in page DIP at zoom $zoom and scroll $scroll", async ({
+    zoom,
+    scroll,
+    expected,
+  }) => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e5", 999, { tabId: 7 });
@@ -274,6 +282,10 @@ describe("handleScreenshot", () => {
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
       "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: scroll },
+        cssVisualViewport: { zoom },
+      }),
     });
     const captureVisibleTab = vi.fn();
     const res = await handleScreenshot(
@@ -297,7 +309,8 @@ describe("handleScreenshot", () => {
         clip?: { x: number; y: number; width: number; height: number };
       }
     )?.clip;
-    expect(clip).toMatchObject({ x: 10, y: 20, width: 100, height: 40 });
+    expect(clip).toMatchObject(expected);
+    expect(sent.filter((c) => c.method === "Page.getLayoutMetrics")).toHaveLength(1);
   });
 
   it("returns not_found for unknown ref", async () => {

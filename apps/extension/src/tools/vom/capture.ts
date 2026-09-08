@@ -5,9 +5,15 @@
 // STYLE_COL so capture and visibility policy share one explicit contract.
 
 import type { Rect, Viewport } from "@browser-skill/vom";
+import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { evaluateHoverTrigger } from "@/lib/hover-trigger-policy";
 import { isOverlayHostNode, OVERLAY_HOST_SELECTOR } from "../../lib/overlay-bridge";
-import { childFrameProjection, type GeometryProjection, projectRectToViewport } from "../geometry";
+import {
+  projectSnapshotRect,
+  type SnapshotProjection,
+  snapshotViewportRect,
+} from "../geometry/coordinate-types";
+import { cssViewport, GeometryContext, type LayoutMetrics } from "../geometry/frame-context";
 import type { CdpRunner } from "../shared";
 import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 
@@ -77,6 +83,8 @@ export interface CapturedViewModel {
 
 export interface CaptureViewModelOptions {
   signal?: AbortSignal;
+  geometry?: GeometryContext;
+  target?: CdpTarget;
 }
 
 function captureAbortError(): Error {
@@ -145,16 +153,6 @@ function snapshotFrameId(document: SnapshotDocument, strings: string[]): string 
 interface SnapshotReply {
   strings?: string[];
   documents?: SnapshotDocument[];
-}
-
-interface LayoutMetricsReply {
-  cssLayoutViewport?: {
-    clientWidth?: number;
-    clientHeight?: number;
-    pageX?: number;
-    pageY?: number;
-  };
-  layoutViewport?: { clientWidth?: number; clientHeight?: number; pageX?: number; pageY?: number };
 }
 
 function isFormControlTag(tag: string): boolean {
@@ -353,7 +351,8 @@ interface ParseDocumentResult {
 interface FrameContext {
   frameId?: string;
   ownerFrameBackendNodeId: number | null;
-  projection: GeometryProjection | null;
+  projection: SnapshotProjection | null;
+  target: CdpTarget;
   scrollX: number;
   scrollY: number;
 }
@@ -361,15 +360,6 @@ interface FrameContext {
 function str(strings: string[], idx: number | undefined): string {
   if (idx === undefined || idx < 0) return "";
   return strings[idx] ?? "";
-}
-
-function devicePixelRatio(metrics: LayoutMetricsReply): number {
-  const layoutW = metrics.layoutViewport?.clientWidth ?? 0;
-  const cssW = metrics.cssLayoutViewport?.clientWidth ?? 0;
-  if (!layoutW || !cssW) return 1;
-  const dpr = layoutW / cssW;
-  if (!Number.isFinite(dpr) || dpr <= 0) return 1;
-  return dpr >= 1 ? dpr : 1;
 }
 
 function sparseIndexMap(sparse: SparseArray | undefined): Map<number, number> {
@@ -797,13 +787,11 @@ export async function collectOverlayExcludedBackendIds(
  *
  * @param doc   - the raw DOMSnapshot document object
  * @param strings - the shared string table for the whole snapshot
- * @param dpr   - device-pixel-ratio from Page.getLayoutMetrics
  * @param context - frame coordinate context; output rects are top viewport-relative
  */
 function parseDocumentNodes(
   doc: SnapshotDocument,
   strings: string[],
-  dpr: number,
   context: FrameContext,
 ): ParseDocumentResult {
   const dn = doc.nodes;
@@ -898,15 +886,17 @@ function parseDocumentNodes(
     if (li !== undefined) {
       const b = dl?.bounds?.[li];
       if (b && b.length >= 4 && b[2] > 0 && b[3] > 0) {
-        localRect = {
-          x: b[0] / dpr - context.scrollX,
-          y: b[1] / dpr - context.scrollY,
-          w: b[2] / dpr,
-          h: b[3] / dpr,
-        };
-        const bounds = context.projection
-          ? projectRectToViewport(localRect, context.projection)
-          : null;
+        const input = snapshotViewportRect(
+          b,
+          { target: context.target, frameId: context.frameId },
+          { x: context.scrollX, y: context.scrollY },
+        );
+        if (input) {
+          const { x, y, width: w, height: h } = input.rect;
+          localRect = { x, y, w, h };
+        }
+        const bounds =
+          input && context.projection ? projectSnapshotRect(input, context.projection) : null;
         rect = bounds ? { x: bounds.x, y: bounds.y, w: bounds.width, h: bounds.height } : null;
       }
       paintOrder = dl?.paintOrders?.[li] ?? 0;
@@ -980,15 +970,14 @@ interface ParseFrameDocumentsResult {
   excludedBackendNodeIds: Set<number>;
 }
 
-function parseChildFrameDocuments(
+async function parseChildFrameDocuments(
   documents: SnapshotDocument[],
   strings: string[],
-  dpr: number,
   parentDocIndex: number,
-  parentNodes: CapturedNode[],
   parentContext: FrameContext,
+  geometry: GeometryContext,
   visited = new Set<number>(),
-): ParseFrameDocumentsResult {
+): Promise<ParseFrameDocumentsResult> {
   const iframeNodes: CapturedIframeNodes = new Map();
   const frameOwnerBackendNodeIds = new Map<string, number>();
   const frameParentIds = new Map<string, string>();
@@ -1000,7 +989,6 @@ function parseChildFrameDocuments(
   }
 
   const parentBackendIds = parentDoc?.nodes?.backendNodeId ?? [];
-  const parentNodeByBackendId = new Map(parentNodes.map((node) => [node.backendNodeId, node]));
 
   for (const [nodeArrayIdx, childDocIndex] of cdi) {
     if (visited.has(childDocIndex)) continue;
@@ -1008,14 +996,31 @@ function parseChildFrameDocuments(
     if (!childDoc) continue;
     const iframeBackendId = parentBackendIds[nodeArrayIdx];
     if (iframeBackendId === undefined) continue;
-    const iframeNode = parentNodeByBackendId.get(iframeBackendId);
-    const projection =
-      parentContext.projection && iframeNode?.localRect
-        ? childFrameProjection(parentContext.projection, iframeNode.localRect)
-        : null;
+    let projection: SnapshotProjection | null = null;
+    const source = { target: parentContext.target, frameId: snapshotFrameId(childDoc, strings) };
+    const parentProjection = parentContext.projection?.geometry;
+    if (parentProjection) {
+      // Each owner quad is target-relative; do not apply the parent's transform twice.
+      const edge = parentProjection.edges[0];
+      const clips = edge
+        ? [edge.destinationQuad, ...(edge.destinationClips ?? [])]
+        : parentProjection.sourceClips;
+      try {
+        projection = await geometry.snapshotProjection(
+          source,
+          iframeBackendId,
+          clips,
+          parentProjection.topViewport,
+        );
+      } catch (error) {
+        if (isAbortError(error)) throw error;
+        console.debug("[bsk capture] frame owner geometry unavailable", error);
+      }
+    }
 
     const childContext: FrameContext = {
-      frameId: snapshotFrameId(childDoc, strings),
+      frameId: source.frameId,
+      target: source.target,
       ownerFrameBackendNodeId: iframeBackendId,
       projection,
       scrollX: childDoc.scrollOffsetX ?? 0,
@@ -1023,7 +1028,7 @@ function parseChildFrameDocuments(
     };
     const nextVisited = new Set(visited);
     nextVisited.add(childDocIndex);
-    const parsed = parseDocumentNodes(childDoc, strings, dpr, childContext);
+    const parsed = parseDocumentNodes(childDoc, strings, childContext);
     iframeNodes.set(iframeBackendId, parsed.nodes);
     if (childContext.frameId) {
       frameOwnerBackendNodeIds.set(childContext.frameId, iframeBackendId);
@@ -1031,13 +1036,12 @@ function parseChildFrameDocuments(
     }
     for (const id of parsed.excludedBackendNodeIds) excludedBackendNodeIds.add(id);
 
-    const nested = parseChildFrameDocuments(
+    const nested = await parseChildFrameDocuments(
       documents,
       strings,
-      dpr,
       childDocIndex,
-      parsed.nodes,
       childContext,
+      geometry,
       nextVisited,
     );
     for (const [nestedFrameId, nestedNodes] of nested.iframeNodes) {
@@ -1061,22 +1065,20 @@ export async function captureViewModel(
   options: CaptureViewModelOptions = {},
 ): Promise<CapturedViewModel> {
   throwIfAborted(options.signal);
-  let metrics: LayoutMetricsReply = {};
+  const target = options.target ?? { tabId };
+  const geometry = options.geometry ?? new GeometryContext(cdp, tabId, undefined, options.signal);
+  let metrics: LayoutMetrics = {};
   try {
-    metrics = await cdp.send<LayoutMetricsReply>(tabId, "Page.getLayoutMetrics", {});
+    metrics = await geometry.layoutMetrics(target);
   } catch (error) {
     if (isAbortError(error)) throw error;
     console.debug("[bsk capture] layout metrics unavailable", error);
   }
   throwIfAborted(options.signal);
-  const dpr = devicePixelRatio(metrics);
-  const vpSrc = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
-  const viewport: Viewport = {
-    width: vpSrc.clientWidth ?? 0,
-    height: vpSrc.clientHeight ?? 0,
-  };
-  const scrollX = vpSrc.pageX ?? 0;
-  const scrollY = vpSrc.pageY ?? 0;
+  const measured = cssViewport(metrics);
+  const viewport: Viewport = { width: measured.width, height: measured.height };
+  const scrollX = measured.scrollX;
+  const scrollY = measured.scrollY;
 
   await cdp.send(tabId, "DOMSnapshot.enable", {});
   throwIfAborted(options.signal);
@@ -1102,19 +1104,19 @@ export async function captureViewModel(
   const topContext: FrameContext = {
     frameId: snapshotFrameId(doc0, strings),
     ownerFrameBackendNodeId: null,
+    target,
     projection: {
-      sourceClips: [],
-      edges: [],
-      topViewport: viewport,
+      source: { target, frameId: snapshotFrameId(doc0, strings) },
+      geometry: { sourceClips: [], edges: [], topViewport: viewport },
     },
     scrollX,
     scrollY,
   };
-  const mainParsed = parseDocumentNodes(doc0, strings, dpr, topContext);
+  const mainParsed = parseDocumentNodes(doc0, strings, topContext);
   const nodes = mainParsed.nodes;
   const excludedBackendNodeIds = new Set(mainParsed.excludedBackendNodeIds);
 
-  const frameParsed = parseChildFrameDocuments(documents, strings, dpr, 0, nodes, topContext);
+  const frameParsed = await parseChildFrameDocuments(documents, strings, 0, topContext, geometry);
   const iframeNodes = frameParsed.iframeNodes;
   for (const id of frameParsed.excludedBackendNodeIds) {
     excludedBackendNodeIds.add(id);

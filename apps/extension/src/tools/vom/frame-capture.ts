@@ -1,6 +1,6 @@
 import type { CdpFrame, CdpFrameGraph } from "@/browser-driver/frame-graph";
-import { resolveFrameProjection } from "../frame-geometry";
 import { type GeometryProjection, projectRectToViewport } from "../geometry";
+import { GeometryContext } from "../geometry/frame-context";
 import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
 import { type CapturedNode, type CapturedViewModel, captureViewModel } from "./capture";
 import {
@@ -19,16 +19,6 @@ function throwIfAborted(signal?: AbortSignal): void {
 
 function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
-}
-
-async function discoverFrameGraph(cdp: CdpRunner, tabId: number): Promise<CdpFrameGraph | null> {
-  if (!cdp.getFrameGraph) return null;
-  try {
-    return await cdp.getFrameGraph(tabId);
-  } catch (err) {
-    console.debug("[bsk observation] frame graph capture failed", err);
-    return null;
-  }
 }
 
 function transformFrameNodes(
@@ -51,6 +41,7 @@ async function captureMissingFrameDocuments(
   tabId: number,
   graph: CdpFrameGraph,
   captured: CapturedViewModel,
+  geometry: GeometryContext,
   signal?: AbortSignal,
 ): Promise<void> {
   if (!captured.frameNodes) captured.frameNodes = new Map();
@@ -62,10 +53,12 @@ async function captureMissingFrameDocuments(
     try {
       const child = await captureViewModel(cdpRunnerForTarget(cdp, frame.target), tabId, {
         signal,
+        geometry,
+        target: frame.target,
       });
       let projection: GeometryProjection | null = null;
       try {
-        projection = await resolveFrameProjection(cdp, graph, frame.frameId);
+        projection = await geometry.targetProjection(frame.frameId);
       } catch (err) {
         if (isAbortError(err)) throw err;
         console.debug("[bsk observation] child frame geometry projection failed", {
@@ -171,10 +164,11 @@ export async function captureFrameData<T extends FrameAxNode>(
   tabId: number,
   captured: CapturedViewModel,
   signal?: AbortSignal,
+  geometry = new GeometryContext(cdp, tabId, undefined, signal),
 ): Promise<CapturedFrameDocument<T>[]> {
-  const graph = await discoverFrameGraph(cdp, tabId);
+  const graph = await geometry.graph();
   const frames = graph?.frames ?? [];
-  if (graph) await captureMissingFrameDocuments(cdp, tabId, graph, captured, signal);
+  if (graph) await captureMissingFrameDocuments(cdp, tabId, graph, captured, geometry, signal);
   throwIfAborted(signal);
   const batches = await captureAxTrees<T>(cdp, tabId, frames, captured, signal);
   return buildFrameDocuments(graph, batches, captured);

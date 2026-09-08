@@ -754,7 +754,7 @@ describe("captureViewModel", () => {
     expect(div?.rect).toMatchObject({ y: 0, h: 600 });
   });
 
-  it("normalizes device-pixel bounds by devicePixelRatio", async () => {
+  it("keeps CSS snapshot bounds independent of legacy metrics ratio", async () => {
     const S = ["html", "body", "div", "position", "fixed", "static", "pointer-events", "auto"];
     const i = (s: string) => S.indexOf(s);
     const snapshot = {
@@ -801,6 +801,12 @@ describe("captureViewModel", () => {
       y: 0,
       w: 1000,
       h: 800,
+    });
+    expect(nodes.find((n) => n.backendNodeId === 12)?.localRect).toEqual({
+      x: 0,
+      y: 0,
+      w: 2000,
+      h: 1600,
     });
   });
 
@@ -950,6 +956,12 @@ describe("captureViewModel", () => {
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [100, 300, 900, 300, 900, 700, 100, 700] } };
+        if (method === "DOM.resolveNode") return { object: { objectId: "owner" } };
+        if (method === "Runtime.callFunctionOn")
+          return { result: { value: { width: 800, height: 400 } } };
+        if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
@@ -979,7 +991,7 @@ describe("captureViewModel", () => {
     expect(frameParentIds?.get("child-frame")).toBe("main-frame");
   });
 
-  it("captures iframe documents without requiring owner-frame geometry", async () => {
+  it("projects iframe documents independently of owner snapshot geometry", async () => {
     const S = [
       "html",
       "body",
@@ -1040,6 +1052,12 @@ describe("captureViewModel", () => {
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [100, 300, 900, 300, 900, 700, 100, 700] } };
+        if (method === "DOM.resolveNode") return { object: { objectId: "owner" } };
+        if (method === "Runtime.callFunctionOn")
+          return { result: { value: { width: 800, height: 400 } } };
+        if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
@@ -1048,7 +1066,7 @@ describe("captureViewModel", () => {
     const input = iframeNodes.get(13)?.find((n) => n.backendNodeId === 101);
 
     expect(input?.localRect).toEqual({ x: 20, y: 20, w: 120, h: 60 });
-    expect(input?.rect).toBeNull();
+    expect(input?.rect).toEqual({ x: 120, y: 320, w: 120, h: 60 });
   });
 
   it("recursively normalizes nested iframe sub-documents", async () => {
@@ -1127,16 +1145,43 @@ describe("captureViewModel", () => {
       ],
     };
     const cdp = {
-      send: vi.fn(async (_t: number, method: string) => {
-        if (method === "DOMSnapshot.enable") return {};
-        if (method === "DOMSnapshot.captureSnapshot") return snapshot;
-        if (method === "Page.getLayoutMetrics") {
-          return {
-            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
-          };
-        }
-        throw new Error(method);
-      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+      send: vi.fn(
+        async (
+          _t: number,
+          method: string,
+          params?: { backendNodeId?: number; objectId?: string },
+        ) => {
+          if (method === "DOMSnapshot.enable") return {};
+          if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+          if (method === "Page.getLayoutMetrics") {
+            return {
+              cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+            };
+          }
+          if (method === "DOM.getBoxModel")
+            return {
+              model: {
+                content:
+                  params?.backendNodeId === 13
+                    ? [10, 20, 310, 20, 310, 220, 10, 220]
+                    : [15, 26, 115, 26, 115, 106, 15, 106],
+              },
+            };
+          if (method === "DOM.resolveNode")
+            return { object: { objectId: String(params?.backendNodeId) } };
+          if (method === "Runtime.callFunctionOn")
+            return {
+              result: {
+                value:
+                  params?.objectId === "13"
+                    ? { width: 300, height: 200 }
+                    : { width: 100, height: 80 },
+              },
+            };
+          if (method === "Runtime.releaseObject") return {};
+          throw new Error(method);
+        },
+      ) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
     const { iframeNodes } = await captureViewModel(cdp, 4);
@@ -1150,7 +1195,7 @@ describe("captureViewModel", () => {
     expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
   });
 
-  it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {
+  it("subtracts CSS scroll once without dividing snapshot bounds by a metrics ratio", async () => {
     const S = ["html", "body", "div", "position", "fixed", "static", "pointer-events", "auto"];
     const i = (s: string) => S.indexOf(s);
     const snapshot = {
@@ -1192,7 +1237,7 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
     const { nodes } = await captureViewModel(cdp, 4);
-    expect(nodes.find((n) => n.backendNodeId === 12)?.rect?.y).toBe(400 / 2 - 100);
+    expect(nodes.find((n) => n.backendNodeId === 12)?.rect?.y).toBe(400 - 100);
   });
 
   it("collectOverlayExcludedBackendIds walks the pierced overlay host subtree", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveFrameProjection, resolveNodeGeometry } from "../frame-geometry";
+import { resolveNodeGeometry } from "../frame-geometry";
 import {
   clipPolygon,
   polygonArea,
@@ -10,6 +10,7 @@ import {
   rectPolygon,
   regionBounds,
 } from "../geometry";
+import { GeometryContext } from "../geometry/frame-context";
 import type { CdpRunner } from "../shared";
 
 describe("frame geometry projection", () => {
@@ -82,28 +83,24 @@ describe("frame geometry projection", () => {
         throw new Error(`unexpected child command ${method}`);
       }) as CdpRunner["sendToTarget"],
     };
-    const projection = await resolveFrameProjection(
-      cdp,
-      {
-        rootFrameId: "main",
-        frames: [
-          { frameId: "main", target: { tabId: 4 } },
-          {
-            frameId: "same-process-parent",
-            parentFrameId: "main",
-            ownerBackendNodeId: 10,
-            target: { tabId: 4 },
-          },
-          {
-            frameId: "oopif",
-            parentFrameId: "same-process-parent",
-            ownerBackendNodeId: 20,
-            target: { tabId: 4, sessionId: "oopif-session" },
-          },
-        ],
-      },
-      "oopif",
-    );
+    const projection = await new GeometryContext(cdp, 4, {
+      rootFrameId: "main",
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "same-process-parent",
+          parentFrameId: "main",
+          ownerBackendNodeId: 10,
+          target: { tabId: 4 },
+        },
+        {
+          frameId: "oopif",
+          parentFrameId: "same-process-parent",
+          ownerBackendNodeId: 20,
+          target: { tabId: 4, sessionId: "oopif-session" },
+        },
+      ],
+    }).targetProjection("oopif");
 
     expect(projection?.edges).toEqual([
       {

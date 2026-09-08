@@ -245,22 +245,3 @@ export function projectRectToViewport(
   if (!rect) return null;
   return regionBounds(projectRegionToViewport([rectPolygon(rect)], projection));
 }
-
-export function childFrameProjection(
-  parent: GeometryProjection,
-  ownerRectInParent: { x: number; y: number; w: number; h: number },
-): GeometryProjection {
-  const destinationQuad = rectPolygon(ownerRectInParent);
-  return {
-    sourceClips: [],
-    edges: [
-      {
-        sourceViewport: { width: ownerRectInParent.w, height: ownerRectInParent.h },
-        destinationQuad,
-        destinationClips: parent.sourceClips,
-      },
-      ...parent.edges,
-    ],
-    topViewport: parent.topViewport,
-  };
-}
