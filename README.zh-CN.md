@@ -36,12 +36,14 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 
 ## 快速开始
 
+### 1. 安装 CLI 和 skill
+
 <details open>
 <summary><b>让 Agent 帮你安装（推荐）</b></summary>
 
 <br>
 
-已经在用 Cursor、Claude Code、Codex 或其他支持 Shell 的 Agent？只需复制下面这句话发给 Agent，它会帮你安装 CLI 和 skill，并引导你加载浏览器扩展：
+已经在用 Cursor、Claude Code、Codex、WorkBuddy 或其他支持 Shell 的 Agent？只需复制下面这句话发给 Agent，它会帮你安装 CLI 和 skill。浏览器扩展仍需你按下方第 2 步自行安装。
 
 ```text
 按照 https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md 的说明，在本机安装并配置 browser-skill
@@ -54,10 +56,9 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 
 <br>
 
-先安装 CLI，再从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
-或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装浏览器扩展。
+按以下命令安装 CLI 和 skill。
 
-#### 1. 安装 `bsk` CLI
+#### 安装 `bsk` CLI
 
 **macOS / Linux**（推荐，安装到 `~/.local/bin`）：
 
@@ -77,18 +78,7 @@ irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | ie
 bsk --version
 ```
 
-#### 2. 安装浏览器扩展
-
-在对应浏览器的商店安装 BrowserSkill：
-
-| 浏览器 | 商店页面 |
-| --- | --- |
-| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
-| Microsoft Edge | [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
-
-其他基于 Chromium 的浏览器，安装 Chrome Web Store 版本即可。
-
-#### 3. 安装 skill
+#### 安装 skill
 
 BrowserSkill 自带 skill，用于教 Agent harness 如何使用 `bsk`。以下 harness 可一键安装：
 
@@ -116,6 +106,20 @@ bsk install-skill
 其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。DeepSeek Harness 走独立插件，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
 
 </details>
+
+### 2. 安装浏览器扩展
+
+目前由于浏览器的安全策略，您还需要手动安装对应的浏览器扩展。
+点击对应浏览器的商店链接，并在浏览器中确认安装扩展：
+
+| 浏览器 | 商店页面 |
+| --- | --- |
+| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/browserskill/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
+| Microsoft Edge | [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+
+其他基于 Chromium 的浏览器，安装 Chrome Web Store 版本即可。
+
+### 3. 开始使用 BrowserSkill
 
 启动一个新的 Agent 会话，写一条需要使用浏览器的 prompt，例如：
 

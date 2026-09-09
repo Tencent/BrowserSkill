@@ -47,14 +47,17 @@ extension.
 
 ## Quick Start
 
+### 1. Install the CLI and skill
+
 <details open>
 <summary><b>Install with your Agent (recommended)</b></summary>
 
 <br>
 
-Already using Cursor, Claude Code, Codex, or another shell-capable agent? Just
-copy this one line and send it to your agent — it will install the CLI and skill
-for you, then walk you through loading the extension:
+Already using Cursor, Claude Code, Codex, WorkBuddy, or another shell-capable
+agent? Just copy this one line and send it to your agent — it will install the
+CLI and skill for you. You will install the browser extension yourself in step 2
+below.
 
 ```text
 Set up browser-skill on this machine by following https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md
@@ -67,10 +70,9 @@ Set up browser-skill on this machine by following https://raw.githubusercontent.
 
 <br>
 
-Install the CLI, then install the extension from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
-or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg).
+Install the CLI and skill with the commands below.
 
-#### 1. Install the `bsk` CLI
+#### Install the `bsk` CLI
 
 **macOS / Linux** (recommended — installs to `~/.local/bin`):
 
@@ -90,18 +92,7 @@ Verify the binary:
 bsk --version
 ```
 
-#### 2. Install the browser extension
-
-Install BrowserSkill from your browser's store:
-
-| Browser | Store listing |
-| --- | --- |
-| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
-| Microsoft Edge | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
-
-On other Chromium-based browsers, install the Chrome Web Store build.
-
-#### 3. Install the skill
+#### Install the skill
 
 BrowserSkill ships a skill that teaches your agent harness how to use `bsk`. For
 these harnesses, install it in one step:
@@ -135,6 +126,21 @@ Other shell-capable agent harnesses are supported too. Copy
 dedicated plugin instead — see [DeepSeek Harness plugin](#deepseek-harness-plugin).
 
 </details>
+
+### 2. Install the browser extension
+
+Due to current browser security policies, you still need to manually install
+the extension for your browser.
+Open the store link for your browser and confirm the extension installation:
+
+| Browser | Store listing |
+| --- | --- |
+| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/browserskill/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
+| Microsoft Edge | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+
+On other Chromium-based browsers, install the Chrome Web Store build.
+
+### 3. Start using BrowserSkill
 
 Start a new Agent session and write a prompt that needs the browser, for example:
 
