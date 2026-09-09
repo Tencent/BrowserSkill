@@ -349,12 +349,14 @@ describe("session.start", () => {
     // it auto-spawned kept the stdio pipes open, so the child's `close` never
     // fired and the tool call hung past its own timeout. Drive the real runner
     // with a child that emits `exit` and never `close`.
+    const pipe = () => Object.assign(new EventEmitter(), { destroy: () => {} });
     const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
+      stdout: pipe(),
+      stderr: pipe(),
       exitCode: null as number | null,
       signalCode: null as string | null,
       kill: () => false,
+      unref: () => {},
     });
     let spawned!: () => void;
     const spawnedPromise = new Promise<void>((resolve) => {
