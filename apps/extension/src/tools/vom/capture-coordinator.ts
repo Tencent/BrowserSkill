@@ -375,6 +375,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
     facts.push({
       frame,
       identity: identities.get(document.frameId),
+      ...(doc?.geometry ? { geometry: doc.geometry } : {}),
       index: fallback?.size ? { ...index, excludedBackendNodeIds: fallback } : index,
       domNodes,
       axNodes,

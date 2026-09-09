@@ -20,8 +20,13 @@ import type { CoordinateOwner, CssViewport, SnapshotProjectionResult } from "./c
 import { readSnapshotOwnerSizes } from "./snapshot-owner-sizes";
 
 export interface LayoutMetrics {
-  cssVisualViewport?: { zoom?: number; clientWidth?: number; clientHeight?: number };
-  visualViewport?: { zoom?: number; clientWidth?: number; clientHeight?: number };
+  cssVisualViewport?: {
+    zoom?: number;
+    scale?: number;
+    clientWidth?: number;
+    clientHeight?: number;
+  };
+  visualViewport?: { zoom?: number; scale?: number; clientWidth?: number; clientHeight?: number };
   cssLayoutViewport?: {
     clientWidth?: number;
     clientHeight?: number;

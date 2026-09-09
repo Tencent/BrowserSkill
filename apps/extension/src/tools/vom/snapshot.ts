@@ -8,6 +8,19 @@ export const REQUESTED_STYLES = [
   "cursor",
   "visibility",
   "opacity",
+  "display",
+  "overflow-x",
+  "overflow-y",
+  "transform",
+  "zoom",
+  "clip-path",
+  "mask-image",
+  "rotate",
+  "scale",
+  "perspective",
+  "clip",
+  "contain",
+  "overflow-clip-margin",
 ] as const;
 const STYLE_COL = Object.fromEntries(
   REQUESTED_STYLES.map((name, index) => [name, index]),
@@ -49,6 +62,7 @@ export interface SnapshotDocument {
     nodeIndex?: number[];
     styles?: number[][];
     bounds?: number[][];
+    clientRects?: number[][];
     paintOrders?: number[];
   };
 }
@@ -177,6 +191,7 @@ export async function decodeDocument(
         : {
             boundsSpace: "snapshot-document-layout" as const,
             bounds: dl?.bounds?.[li],
+            ...(dl?.clientRects?.[li] ? { clientRect: dl.clientRects[li] } : {}),
             styles,
           };
 
@@ -200,6 +215,9 @@ export async function decodeDocument(
       backendNodeId,
       nodeType: dn.nodeType?.[n],
       parentBackendNodeId,
+      ...(dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null)
+        ? { parentMissing: true }
+        : {}),
 
       tag,
       attrs,

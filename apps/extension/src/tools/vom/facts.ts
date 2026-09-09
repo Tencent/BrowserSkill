@@ -1,7 +1,8 @@
 import type { Viewport } from "@browser-skill/vom";
 import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
 import { isOverlayHostNode } from "@/lib/overlay-bridge";
-import type { FrameProjectionIssue } from "../geometry/coordinate-types";
+import type { GeometryProjection } from "../geometry";
+import type { FrameProjectionIssue, SnapshotCoordinates } from "../geometry/coordinate-types";
 import { createCaptureCheckpoint } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 import type { FrameOwnedAxNode } from "./frame-document";
@@ -10,21 +11,26 @@ import type { FrameOwnedAxNode } from "./frame-document";
 export interface SnapshotLayout {
   readonly boundsSpace: "snapshot-document-layout";
   bounds?: number[];
+  /** [clientLeft, clientTop, clientWidth, clientHeight], untransformed local CSS units. */
+  clientRect?: number[];
   styles: Readonly<Record<string, string>>;
 }
 
 export interface DecodedNode extends Omit<CapturedNode, "rect" | "localRect" | "rendered"> {
   nodeType?: number;
+  parentMissing?: boolean;
   layout?: SnapshotLayout;
 }
 
 export interface NodeFacts extends CapturedNode {
   nodeType?: number;
+  parentMissing?: boolean;
   layout?: SnapshotLayout;
 }
 
 export interface DocumentIndex<T extends DecodedNode = NodeFacts> {
   readonly nodes: ReadonlyMap<number, T>;
+  readonly ancestryComplete: ReadonlyMap<number, boolean>;
   readonly excludedBackendNodeIds: ReadonlySet<number>;
 }
 
@@ -41,6 +47,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
   const checkpoint = createCaptureCheckpoint(signal);
   const nodes = new Map<number, T>();
   const overlayByNode = new Map<number, boolean>();
+  const ancestryComplete = new Map<number, boolean>();
   const excludedBackendNodeIds = new Set<number>();
   for (let i = 0; i < input.length; i++) {
     if (i % 256 === 0) {
@@ -61,6 +68,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
     const visiting = new Set<number>();
     let current: DecodedNode | undefined = node;
     let overlay = false;
+    let complete = false;
     while (current && !overlayByNode.has(current.backendNodeId)) {
       if (work++ % 256 === 0) {
         const pending = checkpoint();
@@ -76,13 +84,16 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       visiting.add(current.backendNodeId);
       path.push(current);
       if (current.parentBackendNodeId === null) {
+        complete = !current.parentMissing && current.nodeType === 9;
         current = undefined;
         break;
       }
       current = nodes.get(current.parentBackendNodeId);
     }
-    if (current && overlayByNode.has(current.backendNodeId))
+    if (current && overlayByNode.has(current.backendNodeId)) {
       overlay = overlayByNode.get(current.backendNodeId)!;
+      complete = ancestryComplete.get(current.backendNodeId) === true;
+    }
     for (let i = path.length - 1; i >= 0; i--) {
       if (work++ % 256 === 0) {
         const pending = checkpoint();
@@ -91,10 +102,12 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       const item = path[i];
       overlay = overlay || isOverlayHostNode(item.tag, Object.keys(item.attrs));
       overlayByNode.set(item.backendNodeId, overlay);
+      complete = complete && !item.parentMissing;
+      ancestryComplete.set(item.backendNodeId, complete);
       if (overlay) excludedBackendNodeIds.add(item.backendNodeId);
     }
   }
-  return { nodes, excludedBackendNodeIds };
+  return { nodes, ancestryComplete, excludedBackendNodeIds };
 }
 
 export interface DocumentIdentity {
@@ -127,7 +140,16 @@ export interface CaptureIssue {
     | "geometry-unavailable";
 }
 
+/** Shared per document; never retain the live GeometryContext in published facts. */
+export interface DocumentGeometry {
+  readonly projections: readonly GeometryProjection[];
+  readonly coordinates: SnapshotCoordinates;
+  /** Visual viewport scale (pinch), distinct from browser UI zoom. */
+  readonly pageScale?: number;
+}
+
 export interface DocumentFacts<T extends FrameOwnedAxNode> {
+  readonly geometry?: DocumentGeometry;
   readonly frame: CdpFrame;
   readonly identity?: DocumentIdentity;
   readonly index: DocumentIndex;

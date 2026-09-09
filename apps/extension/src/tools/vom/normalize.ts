@@ -18,7 +18,13 @@ import {
   isAbortError as isCaptureAbort,
   throwIfAborted as throwCaptureAborted,
 } from "./capture-abort";
-import { buildDocumentIndex, type CaptureIssue, type DocumentIndex, type NodeFacts } from "./facts";
+import {
+  buildDocumentIndex,
+  type CaptureIssue,
+  type DocumentGeometry,
+  type DocumentIndex,
+  type NodeFacts,
+} from "./facts";
 import {
   decodeDocument,
   type SnapshotDocument,
@@ -33,9 +39,11 @@ export interface FrameContext {
   targetProjection?: GeometryProjection | null;
   target: CdpTarget;
   coordinates: SnapshotCoordinates | null;
+  pageScale?: number;
 }
 
 export interface NormalizedDocument {
+  geometry?: DocumentGeometry;
   nodes: NodeFacts[];
   index: DocumentIndex;
   documentElementBackendNodeId?: number;
@@ -99,6 +107,20 @@ export async function normalizeDocument(
       (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),
     ),
     index,
+    ...(context.coordinates &&
+    context.projection?.status === "available" &&
+    context.targetProjection !== null
+      ? {
+          geometry: {
+            projections: [
+              context.projection.projection.geometry,
+              ...(context.targetProjection ? [context.targetProjection] : []),
+            ],
+            coordinates: context.coordinates,
+            pageScale: context.pageScale,
+          },
+        }
+      : {}),
     documentElementBackendNodeId: nodes.find(
       (node) =>
         node.nodeType === 1 &&
@@ -313,6 +335,7 @@ export async function normalizeSnapshot(
         frameId: frame.frameId,
         ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
         projection: state,
+        pageScale: metrics.cssVisualViewport?.scale ?? metrics.visualViewport?.scale,
         target,
         ...(target.sessionId ? { targetProjection } : {}),
         coordinates,
