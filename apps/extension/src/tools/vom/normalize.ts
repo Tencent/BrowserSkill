@@ -26,8 +26,10 @@ import {
   type NodeFacts,
 } from "./facts";
 import {
+  BASIC_SNAPSHOT,
   decodeDocument,
   type SnapshotDocument,
+  type SnapshotProfile,
   type SnapshotReply,
   snapshotFrameId,
 } from "./snapshot";
@@ -55,8 +57,9 @@ export async function normalizeDocument(
   strings: string[],
   context: FrameContext,
   signal?: AbortSignal,
+  profile: SnapshotProfile = BASIC_SNAPSHOT,
 ): Promise<NormalizedDocument> {
-  const decoded = await decodeDocument(doc, strings, signal);
+  const decoded = await decodeDocument(doc, strings, signal, profile);
   const checkpoint = createCaptureCheckpoint(signal);
   const nodes: NodeFacts[] = [];
   for (let i = 0; i < decoded.nodes.length; i++) {
@@ -101,13 +104,14 @@ export async function normalizeDocument(
         (Number.parseFloat(opacity) || 0) > 0,
     });
   }
-  const index = await buildDocumentIndex(nodes, signal);
+  const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
   return {
     nodes: nodes.filter(
       (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),
     ),
     index,
-    ...(context.coordinates &&
+    ...(profile.includeVisualFacts &&
+    context.coordinates &&
     context.projection?.status === "available" &&
     context.targetProjection !== null
       ? {
@@ -144,6 +148,7 @@ export async function normalizeSnapshot(
   issues: CaptureIssue[],
   signal?: AbortSignal,
   rootFrameId?: string,
+  profile: SnapshotProfile = BASIC_SNAPSHOT,
 ): Promise<NormalizedFrameDocument[]> {
   const strings = snapshot.strings ?? [];
   const raw = snapshot.documents ?? [];
@@ -335,12 +340,15 @@ export async function normalizeSnapshot(
         frameId: frame.frameId,
         ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
         projection: state,
-        pageScale: metrics.cssVisualViewport?.scale ?? metrics.visualViewport?.scale,
+        ...(profile.includeVisualFacts
+          ? { pageScale: metrics.cssVisualViewport?.scale ?? metrics.visualViewport?.scale }
+          : {}),
         target,
         ...(target.sessionId ? { targetProjection } : {}),
         coordinates,
       },
       signal,
+      profile,
     );
     result.push({ ...normalized, frame });
   }

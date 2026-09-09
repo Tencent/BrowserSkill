@@ -39,6 +39,64 @@ const ancestor: VisualAncestor = {
 const box = { x: 0, y: 0, width: 120, height: 40 };
 
 describe("shared visual region rules", () => {
+  it.each([
+    "visible",
+    "hidden",
+    "auto",
+    "scroll",
+    "clip",
+  ])("keeps %s screenshot bounds independent of rounded styling", (overflow) => {
+    for (const clipContents of [true, false]) {
+      const node = {
+        ...ancestor,
+        styles: { ...styles, "overflow-x": overflow, "overflow-y": overflow },
+      };
+      const baseline = extendVisualContext(EMPTY_VISUAL_CONTEXT, node, clipContents);
+      for (const radius of ["0px", "8px", "50%", "4px 8px"]) {
+        const rounded = extendVisualContext(
+          EMPTY_VISUAL_CONTEXT,
+          {
+            ...node,
+            styles: {
+              ...node.styles,
+              "border-top-left-radius": radius,
+              "border-top-right-radius": radius,
+              "border-bottom-left-radius": radius,
+              "border-bottom-right-radius": radius,
+            },
+          },
+          clipContents,
+        );
+        expect(rounded).toEqual(baseline);
+        expect(
+          resolveVisualRegion({
+            borderBox: box,
+            frameVisibleBox: box,
+            visibility: "visible",
+            context: rounded,
+          }),
+        ).toMatchObject({ status: "available" });
+        expect(
+          resolveVisualRegion({
+            borderBox: box,
+            frameVisibleBox: box,
+            visibility: "hidden",
+            context: rounded,
+          }),
+        ).toEqual({ status: "empty" });
+        if (clipContents && overflow !== "visible")
+          expect(
+            resolveVisualRegion({
+              borderBox: box,
+              frameVisibleBox: { x: 80, y: 0, width: 20, height: 20 },
+              visibility: "visible",
+              context: rounded,
+            }),
+          ).toEqual({ status: "empty" });
+      }
+    }
+  });
+
   it("accepts independently supplied normalized facts and preserves clipping policy", () => {
     const context = extendVisualContext(EMPTY_VISUAL_CONTEXT, {
       ...ancestor,

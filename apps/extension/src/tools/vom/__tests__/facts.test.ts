@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { createCaptureCheckpoint } from "../capture-abort";
 import { buildDocumentIndex, type DecodedNode } from "../facts";
-import { decodeDocument, REQUESTED_STYLES } from "../snapshot";
+import { decodeDocument, REQUESTED_STYLES, VISUAL_SNAPSHOT } from "../snapshot";
 
 function node(id: number, parent: number | null): DecodedNode {
   return {
@@ -80,19 +80,6 @@ describe("document facts", () => {
       boundsSpace: "snapshot-document-layout",
       bounds: [10, 20, 120, 40],
       styles: {
-        rotate: "auto",
-        scale: "auto",
-        perspective: "auto",
-        clip: "auto",
-        contain: "auto",
-        "overflow-clip-margin": "auto",
-        display: "auto",
-        "overflow-x": "auto",
-        "overflow-y": "auto",
-        transform: "auto",
-        zoom: "auto",
-        "clip-path": "auto",
-        "mask-image": "auto",
         position: "static",
         "pointer-events": "auto",
         cursor: "auto",
@@ -153,9 +140,9 @@ describe("visual ancestry facts", () => {
       { ...node(8, null), nodeType: 1 },
       { ...node(9, null), nodeType: 9, parentMissing: true },
     ];
-    const index = await buildDocumentIndex(input.reverse());
-    for (const id of [0, 1, 2, 3]) expect(index.ancestryComplete.get(id)).toBe(true);
-    for (const id of [4, 5, 6, 7, 8, 9]) expect(index.ancestryComplete.get(id)).toBe(false);
+    const index = await buildDocumentIndex(input.reverse(), undefined, true);
+    for (const id of [0, 1, 2, 3]) expect(index.ancestryComplete!.get(id)).toBe(true);
+    for (const id of [4, 5, 6, 7, 8, 9]) expect(index.ancestryComplete!.get(id)).toBe(false);
   });
 
   it("retains client offsets in their source units and does not disguise missing parent indices", async () => {
@@ -169,11 +156,13 @@ describe("visual ancestry facts", () => {
         },
       },
       ["div"],
+      undefined,
+      VISUAL_SNAPSHOT,
     );
     expect(decoded.nodes[0].layout?.clientRect).toEqual([5, 5, 68, 38]);
     expect(decoded.nodes[0].layout?.bounds).toEqual([745, 455.625, 97, 59.5]);
     expect(decoded.nodes.every((node) => node.parentMissing)).toBe(true);
-    const index = await buildDocumentIndex(decoded.nodes);
-    expect([...index.ancestryComplete.values()]).toEqual([false, false]);
+    const index = await buildDocumentIndex(decoded.nodes, undefined, true);
+    expect([...index.ancestryComplete!.values()]).toEqual([false, false]);
   });
 });

@@ -260,6 +260,8 @@ export function extendVisualContext(
   };
 }
 
+/** A page screenshot rectangle, not an exact mask of visible Canvas pixels.
+ * Rounded corners are rendered by the browser and do not invalidate this range. */
 export type VisualRegionResult =
   | { status: "available"; borderBox: ViewportRect; crop: ViewportRect; clips?: VisualClipSource }
   | { status: "empty" }

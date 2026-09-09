@@ -22,7 +22,12 @@ import {
   type FrameOwnedAxNode,
 } from "./frame-document";
 import { type NormalizedFrameDocument, normalizeSnapshot } from "./normalize";
-import { describeSnapshotFrames, REQUESTED_STYLES, type SnapshotReply } from "./snapshot";
+import {
+  BASIC_SNAPSHOT,
+  describeSnapshotFrames,
+  type SnapshotReply,
+  VISUAL_SNAPSHOT,
+} from "./snapshot";
 
 interface TargetBatch<T extends FrameOwnedAxNode> {
   target: CdpTarget;
@@ -69,7 +74,9 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   tabId: number,
   signal?: AbortSignal,
   pageUrl?: string,
+  options: { includeVisualFacts?: boolean } = {},
 ): Promise<ObservationFacts<T>> {
+  const profile = options.includeVisualFacts ? VISUAL_SNAPSHOT : BASIC_SNAPSHOT;
   const startedAt = Date.now();
   throwCaptureAborted(signal);
   let graph: CdpFrameGraph | undefined;
@@ -125,7 +132,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         throwCaptureAborted(signal);
         batch.snapshotAttachmentId = cdp.getAttachmentId?.(tabId);
         const snapshot = await scoped.send<SnapshotReply>(tabId, "DOMSnapshot.captureSnapshot", {
-          computedStyles: REQUESTED_STYLES,
+          computedStyles: profile.computedStyles,
           includePaintOrder: true,
           includeDOMRects: true,
         });
@@ -146,6 +153,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
           issues,
           signal,
           observed.rootFrameId,
+          profile,
         );
         const formsAvailable = await enrichFormControlStates(
           scoped,
@@ -384,7 +392,15 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   throwCaptureAborted(signal);
   if (firstFailure && facts.every((doc) => !doc.domNodes.length && !doc.axNodes.length))
     throw firstFailure;
-  return { rootFrameId, viewport, documents: facts, issues, startedAt, finishedAt: Date.now() };
+  return {
+    visualFactsCollected: profile.includeVisualFacts,
+    rootFrameId,
+    viewport,
+    documents: facts,
+    issues,
+    startedAt,
+    finishedAt: Date.now(),
+  };
 }
 
 /** Existing semantic consumers get a narrow view; no raw snapshot

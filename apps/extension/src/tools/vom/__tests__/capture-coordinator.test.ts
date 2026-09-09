@@ -5,8 +5,8 @@ import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { captureVomObservation } from "../../observation";
 import type { CdpRunner } from "../../shared";
 import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
-import { buildSemanticGraph } from "../semantic-graph/build";
-import { REQUESTED_STYLES, type SnapshotReply } from "../snapshot";
+import { buildSemanticGraph, buildSemanticVomScene } from "../semantic-graph";
+import { REQUESTED_STYLES, type SnapshotReply, VISUAL_STYLES } from "../snapshot";
 import { discoverVisualCandidates } from "../visual-discovery";
 
 function fixture(
@@ -85,7 +85,8 @@ function fixture(
         };
       if (method === "DOMSnapshot.captureSnapshot") {
         snapshots++;
-        expect((params as { computedStyles: unknown }).computedStyles).toEqual(REQUESTED_STYLES);
+        const requested = (params as { computedStyles: readonly string[] }).computedStyles;
+        expect([REQUESTED_STYLES, VISUAL_STYLES]).toContainEqual(requested);
         result = {
           strings: [
             "#document",
@@ -153,10 +154,14 @@ function fixture(
                     [0, 0, 1000, 800],
                     [0, 0, 100, 40],
                   ],
-                  styles: [
-                    [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 11],
-                    [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 11],
-                  ],
+                  styles: Array.from({ length: 2 }, () =>
+                    requested.map(
+                      (name) =>
+                        [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 11][
+                          VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])
+                        ],
+                    ),
+                  ),
                 },
               };
             }),
@@ -1374,12 +1379,76 @@ describe("AX frame scheduling", () => {
 });
 
 describe("visual facts integration", () => {
+  it("defaults to base facts across targets and shares semantic behavior with visual capture", async () => {
+    const base = fixture({ canvas: true });
+    const visual = fixture({ canvas: true });
+    const baseFacts = await captureObservationFacts(base.cdp, 4);
+    const visualFacts = await captureObservationFacts(visual.cdp, 4, undefined, undefined, {
+      includeVisualFacts: true,
+    });
+    expect(baseFacts.visualFactsCollected).toBe(false);
+    expect(visualFacts.visualFactsCollected).toBe(true);
+    expect(baseFacts.documents).toHaveLength(4);
+    expect(visualFacts.documents).toHaveLength(4);
+    for (const doc of baseFacts.documents) {
+      expect(doc.geometry).toBeUndefined();
+      expect(doc.index.ancestryComplete).toBeUndefined();
+      for (const node of doc.index.nodes.values()) {
+        expect(node.parentMissing).toBeUndefined();
+        expect(node.layout?.clientRect).toBeUndefined();
+        if (node.layout) expect(Object.keys(node.layout.styles)).toEqual([...REQUESTED_STYLES]);
+      }
+    }
+    // This fixture has no child frame projection measurements. Enabling visual
+    // collection must preserve that missing evidence, not invent geometry.
+    expect(
+      visualFacts.documents.find((doc) => doc.frame.frameId === "main")?.geometry,
+    ).toBeDefined();
+    expect(visualFacts.documents.filter((doc) => doc.geometry)).toHaveLength(1);
+    for (const doc of visualFacts.documents) {
+      expect(doc.index.ancestryComplete).toBeDefined();
+      for (const node of doc.index.nodes.values())
+        if (node.layout) {
+          expect(Object.keys(node.layout.styles)).toEqual([...VISUAL_STYLES]);
+          expect(Object.keys(node.layout.styles).some((key) => key.includes("radius"))).toBe(false);
+        }
+    }
+    for (const [capture, expected] of [
+      [base, REQUESTED_STYLES],
+      [visual, VISUAL_STYLES],
+    ] as const) {
+      const calls = capture.logs.filter((c) => c.method === "DOMSnapshot.captureSnapshot");
+      expect(calls).toHaveLength(2);
+      for (const call of calls) expect(call.params.computedStyles).toEqual(expected);
+    }
+    expect(base.logs.map((c) => [c.target, c.method])).toEqual(
+      visual.logs.map((c) => [c.target, c.method]),
+    );
+    const scene = (input: typeof baseFacts) =>
+      buildSemanticVomScene({
+        documents: semanticCapture(input).documents,
+        viewport: input.viewport,
+        rootFrameId: input.rootFrameId,
+        excludedBackendNodeIds: semanticCapture(input).captured.excludedBackendNodeIds,
+      });
+    expect(scene(baseFacts)).toEqual(scene(visualFacts));
+    const before = base.logs.length;
+    expect(await discoverVisualCandidates(baseFacts)).toMatchObject({
+      complete: false,
+      candidates: [],
+      issues: [{ reason: "visual-facts-not-collected" }],
+    });
+    expect(base.logs).toHaveLength(before);
+  });
+
   it("passes actual snapshot styles, client units, projection and identity to pure discovery without additional CDP", async () => {
     const { cdp, logs } = fixture({
       canvas: true,
       frames: [{ frameId: "main", target: { tabId: 4 } }],
     });
-    const facts = await captureObservationFacts(cdp, 4);
+    const facts = await captureObservationFacts(cdp, 4, undefined, undefined, {
+      includeVisualFacts: true,
+    });
     const before = logs.length;
     const result = await discoverVisualCandidates(facts);
     expect(logs).toHaveLength(before);

@@ -5,7 +5,7 @@ import type { GeometryProjection } from "../../geometry";
 import { buildDocumentIndex, type DocumentFacts, type ObservationFacts } from "../facts";
 import type { FrameOwnedAxNode } from "../frame-document";
 import { normalizeDocument } from "../normalize";
-import { REQUESTED_STYLES } from "../snapshot";
+import { VISUAL_SNAPSHOT, VISUAL_STYLES } from "../snapshot";
 import { discoverVisualCandidates } from "../visual-discovery";
 
 const defaults: Record<string, string> = {
@@ -86,7 +86,7 @@ async function document(
         bounds: layouts.map((n) => n.bounds ?? [10, 20, 120, 40]),
         clientRects: layouts.map((n) => n.client ?? [0, 0, 1000, 800]),
         styles: layouts.map((n) =>
-          REQUESTED_STYLES.map((key) => str({ ...defaults, ...n.styles }[key])),
+          VISUAL_STYLES.map((key) => str({ ...defaults, ...n.styles }[key])),
         ),
       },
     },
@@ -108,6 +108,8 @@ async function document(
       },
       pageScale: options.pageScale ?? 1,
     },
+    undefined,
+    VISUAL_SNAPSHOT,
   );
   return {
     frame,
@@ -128,6 +130,7 @@ function facts(
   issues: ObservationFacts<FrameOwnedAxNode>["issues"] = [],
 ): ObservationFacts<FrameOwnedAxNode> {
   return {
+    visualFactsCollected: true,
     rootFrameId: "main",
     documents,
     viewport: { width: 1000, height: 800 },
@@ -138,6 +141,46 @@ function facts(
 }
 
 describe("Canvas discovery", () => {
+  it("distinguishes visual facts not collected from complete empty discovery and honors cancellation", async () => {
+    const empty = facts([]);
+    expect(await discoverVisualCandidates(empty)).toMatchObject({
+      complete: true,
+      candidates: [],
+      issues: [],
+    });
+    expect(await discoverVisualCandidates({ ...empty, visualFactsCollected: false })).toMatchObject(
+      { complete: false, candidates: [], issues: [{ reason: "visual-facts-not-collected" }] },
+    );
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      discoverVisualCandidates({ ...empty, visualFactsCollected: false }, controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("discovers Canvas and frame contents without corner radius facts", async () => {
+    const own = await document([{ id: 2, parent: 1, styles: {} }]);
+    expect(await discoverVisualCandidates(facts([own]))).toMatchObject({
+      candidates: [{ backendNodeId: 2 }],
+      complete: true,
+      issues: [],
+    });
+    const parent = await document([{ id: 2, parent: 1, tag: "iframe", styles: {} }]);
+    const child = await document([{ id: 3, parent: 1 }], {
+      frame: {
+        frameId: "child",
+        parentFrameId: "main",
+        ownerBackendNodeId: 2,
+        target: { tabId: 1 },
+      },
+    });
+    expect(await discoverVisualCandidates(facts([parent, child]))).toMatchObject({
+      candidates: [{ backendNodeId: 3 }],
+      complete: true,
+      issues: [],
+    });
+  });
+
   it.each([
     0.8, 1, 1.25, 2,
   ])("combines layout-unit bounds with CSS client clips at scale %s", async (scale) => {
@@ -383,7 +426,7 @@ describe("Canvas discovery", () => {
     ]);
     for (const parent of [99, 3]) {
       doc.index.nodes.get(2)!.parentBackendNodeId = parent;
-      const index = await buildDocumentIndex([...doc.index.nodes.values()]);
+      const index = await buildDocumentIndex([...doc.index.nodes.values()], undefined, true);
       const result = await discoverVisualCandidates(facts([{ ...doc, index }]));
       expect(result.candidates).toHaveLength(0);
       expect(result.issues[0].reason).toBe("ancestry-incomplete");
@@ -445,7 +488,7 @@ describe("Canvas discovery", () => {
       });
       input.push(node);
     }
-    const index = await buildDocumentIndex(input);
+    const index = await buildDocumentIndex(input, undefined, true);
     reads = 0;
     const result = await discoverVisualCandidates(facts([{ ...doc, index }]));
     expect(result.candidates).toHaveLength(count / 2 + 2);

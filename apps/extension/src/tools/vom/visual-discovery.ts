@@ -28,12 +28,19 @@ export interface VisualCandidate {
   readonly region: Extract<VisualRegionResult, { status: "available" }>;
 }
 
-export interface VisualDiscoveryIssue {
-  readonly target: CdpTarget;
-  readonly frameId: string;
-  readonly backendNodeId?: number;
-  readonly reason: VisualIssueReason;
-}
+export type VisualDiscoveryIssue =
+  | {
+      readonly reason: "visual-facts-not-collected";
+      readonly target?: never;
+      readonly frameId?: never;
+      readonly backendNodeId?: never;
+    }
+  | {
+      readonly target: CdpTarget;
+      readonly frameId: string;
+      readonly backendNodeId?: number;
+      readonly reason: VisualIssueReason;
+    };
 
 export interface VisualDiscoveryResult {
   readonly candidates: readonly VisualCandidate[];
@@ -95,6 +102,13 @@ export async function discoverVisualCandidates(
   signal?: AbortSignal,
 ): Promise<VisualDiscoveryResult> {
   const checkpoint = createCaptureCheckpoint(signal);
+  if (!facts.visualFactsCollected)
+    return {
+      candidates: [],
+      complete: false,
+      captureIssues: facts.issues,
+      issues: [{ reason: "visual-facts-not-collected" }],
+    };
   let work = 0;
   const candidates: VisualCandidate[] = [];
   const issues: VisualDiscoveryIssue[] = [];
@@ -112,7 +126,7 @@ export async function discoverVisualCandidates(
         if (pending) await pending;
       }
       if (
-        !document.index.ancestryComplete.get(node.backendNodeId) ||
+        !document.index.ancestryComplete?.get(node.backendNodeId) ||
         path.length >= document.index.nodes.size
       ) {
         const incomplete = {

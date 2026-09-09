@@ -30,7 +30,7 @@ export interface NodeFacts extends CapturedNode {
 
 export interface DocumentIndex<T extends DecodedNode = NodeFacts> {
   readonly nodes: ReadonlyMap<number, T>;
-  readonly ancestryComplete: ReadonlyMap<number, boolean>;
+  readonly ancestryComplete?: ReadonlyMap<number, boolean>;
   readonly excludedBackendNodeIds: ReadonlySet<number>;
 }
 
@@ -43,11 +43,12 @@ export interface DecodedDocument {
 export async function buildDocumentIndex<T extends DecodedNode>(
   input: readonly T[],
   signal?: AbortSignal,
+  includeVisualFacts = false,
 ): Promise<DocumentIndex<T>> {
   const checkpoint = createCaptureCheckpoint(signal);
   const nodes = new Map<number, T>();
   const overlayByNode = new Map<number, boolean>();
-  const ancestryComplete = new Map<number, boolean>();
+  const ancestryComplete = includeVisualFacts ? new Map<number, boolean>() : undefined;
   const excludedBackendNodeIds = new Set<number>();
   for (let i = 0; i < input.length; i++) {
     if (i % 256 === 0) {
@@ -84,7 +85,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       visiting.add(current.backendNodeId);
       path.push(current);
       if (current.parentBackendNodeId === null) {
-        complete = !current.parentMissing && current.nodeType === 9;
+        if (ancestryComplete) complete = !current.parentMissing && current.nodeType === 9;
         current = undefined;
         break;
       }
@@ -92,7 +93,7 @@ export async function buildDocumentIndex<T extends DecodedNode>(
     }
     if (current && overlayByNode.has(current.backendNodeId)) {
       overlay = overlayByNode.get(current.backendNodeId)!;
-      complete = ancestryComplete.get(current.backendNodeId) === true;
+      if (ancestryComplete) complete = ancestryComplete.get(current.backendNodeId) === true;
     }
     for (let i = path.length - 1; i >= 0; i--) {
       if (work++ % 256 === 0) {
@@ -102,12 +103,14 @@ export async function buildDocumentIndex<T extends DecodedNode>(
       const item = path[i];
       overlay = overlay || isOverlayHostNode(item.tag, Object.keys(item.attrs));
       overlayByNode.set(item.backendNodeId, overlay);
-      complete = complete && !item.parentMissing;
-      ancestryComplete.set(item.backendNodeId, complete);
+      if (ancestryComplete) {
+        complete = complete && !item.parentMissing;
+        ancestryComplete.set(item.backendNodeId, complete);
+      }
       if (overlay) excludedBackendNodeIds.add(item.backendNodeId);
     }
   }
-  return { nodes, ancestryComplete, excludedBackendNodeIds };
+  return { nodes, ...(ancestryComplete ? { ancestryComplete } : {}), excludedBackendNodeIds };
 }
 
 export interface DocumentIdentity {
@@ -158,6 +161,8 @@ export interface DocumentFacts<T extends FrameOwnedAxNode> {
 }
 
 export interface ObservationFacts<T extends FrameOwnedAxNode> {
+  /** Whether visual collection was enabled; partial capture failures remain in issues. */
+  readonly visualFactsCollected: boolean;
   readonly rootFrameId: string;
   readonly viewport: Viewport;
   readonly documents: readonly DocumentFacts<T>[];
