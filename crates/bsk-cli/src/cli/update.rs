@@ -6,9 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use std::process::{Command, Stdio};
+mod windows;
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -363,7 +361,8 @@ fn install_candidate_with_client(
         crate::daemon::start::run_stop().context("stop bsk daemon before update")?;
     }
 
-    let action = replace_binary_for_update(&target, &binary, daemon_was_running)?;
+    let restart_args = daemon_was_running.then(StartArgs::default);
+    let action = replace_binary_for_update(&target, &binary, restart_args.as_ref())?;
 
     if daemon_was_running && matches!(action, InstallAction::Replaced) {
         crate::daemon::start::run_start(StartArgs::default())
@@ -394,8 +393,8 @@ pub(crate) fn download_candidate_binary(
 
 /// Daemon-side install: download, verify, and replace the executable at
 /// `target` (on Windows: stage the replacement next to it). Unlike the
-/// CLI path this never stops or starts the daemon — the daemon drives
-/// its own restart once the binary is replaced.
+/// CLI path this never stops the daemon. On Windows the helper starts
+/// its replacement after exit; elsewhere the daemon drives its own restart.
 ///
 /// `target` must be captured *before* any replacement happens: on Linux
 /// `std::env::current_exe` starts returning a ` (deleted)`-suffixed
@@ -403,10 +402,11 @@ pub(crate) fn download_candidate_binary(
 pub(crate) fn self_install_candidate(
     candidate: &UpdateCandidate,
     target: &Path,
+    restart_args: &StartArgs,
 ) -> Result<InstallAction> {
     let client = update_http_client(ARCHIVE_FETCH_TIMEOUT)?;
     let binary = download_candidate_binary(candidate, &client)?;
-    replace_binary_at_path(target, &binary)
+    replace_binary_for_update(target, &binary, Some(restart_args))
 }
 
 /// Outcome of one daemon auto-update step (see [`auto_update_step`]).
@@ -423,8 +423,8 @@ pub(crate) enum AutoUpdateOutcome {
     /// The new binary replaced the old one; the daemon should now
     /// restart into it.
     Replaced { latest: String },
-    /// Windows staged the replacement next to the running binary; a
-    /// daemon/terminal restart finishes it.
+    /// Windows started a helper that will replace the executable and
+    /// restart the daemon once the current process exits.
     Staged { latest: String },
 }
 
@@ -668,6 +668,7 @@ fn render_report(format: Format, report: &UpdateReport) -> Result<()> {
             }
             if matches!(report.install_action, Some("staged")) {
                 println!("the detached update helper will apply the replacement after exit");
+                println!("if it fails, see the *.update-*.log file next to the executable");
             }
         }
         Format::Json => {
@@ -688,22 +689,22 @@ pub fn extract_bsk_binary(archive_bytes: &[u8], kind: ArchiveKind) -> Result<Vec
 }
 
 pub fn replace_binary_at_path(target: &Path, binary: &[u8]) -> Result<InstallAction> {
-    replace_binary_for_update(target, binary, false)
+    replace_binary_for_update(target, binary, None)
 }
 
 fn replace_binary_for_update(
     target: &Path,
     binary: &[u8],
-    restart_daemon: bool,
+    restart_args: Option<&StartArgs>,
 ) -> Result<InstallAction> {
     #[cfg(windows)]
     {
-        stage_windows_replacement(target, binary, restart_daemon)
+        stage_windows_replacement(target, binary, restart_args)
     }
 
     #[cfg(not(windows))]
     {
-        let _ = restart_daemon;
+        let _ = restart_args;
         replace_binary_atomically(target, binary)
     }
 }
@@ -749,34 +750,69 @@ fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<InstallActi
 fn stage_windows_replacement(
     target: &Path,
     binary: &[u8],
-    restart_daemon: bool,
+    restart_args: Option<&StartArgs>,
 ) -> Result<InstallAction> {
-    let paths = staged_replacement_paths(target, std::process::id())?;
-    std::fs::write(&paths.binary_path, binary)
-        .with_context(|| format!("write {}", paths.binary_path.display()))?;
-    std::fs::write(
-        &paths.script_path,
-        windows_replacement_script(target, &paths.binary_path, restart_daemon),
-    )
-    .with_context(|| format!("write {}", paths.script_path.display()))?;
+    // The helper owns replacement/restart after this process exits. Do not
+    // report Staged until it has actually begun executing the script.
+    let _child = spawn_windows_replacement(target, binary, restart_args, 120)?;
+    Ok(InstallAction::Staged)
+}
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    let command = format!("\"{}\"", paths.script_path.display());
-    if let Err(err) = Command::new("cmd.exe")
-        .args(["/D", "/S", "/C"])
-        .arg(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
-        .spawn()
-    {
+#[cfg(windows)]
+fn spawn_windows_replacement(
+    target: &Path,
+    binary: &[u8],
+    restart_args: Option<&StartArgs>,
+    attempts: u32,
+) -> Result<windows::Helper> {
+    let paths = staged_replacement_paths(target, std::process::id())?;
+    let ready_path = paths.script_path.with_extension("ready");
+    let log_path = paths.script_path.with_extension("log");
+    let result = (|| {
+        // A previous failed attempt by this process must not acknowledge a
+        // new helper. All paths are private to this target and process id.
+        match std::fs::remove_file(&ready_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+        std::fs::write(&paths.binary_path, binary)
+            .with_context(|| format!("write {}", paths.binary_path.display()))?;
+        std::fs::write(
+            &paths.script_path,
+            windows_replacement_script(restart_args, attempts),
+        )
+        .with_context(|| format!("write {}", paths.script_path.display()))?;
+        let mut child = windows::spawn(
+            &paths.script_path,
+            &paths.binary_path,
+            target,
+            &ready_path,
+            &log_path,
+        )
+        .context("launch detached Windows update helper")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if std::fs::remove_file(&ready_path).is_ok() {
+                return Ok(child);
+            }
+            if let Some(status) = child.try_wait()? {
+                bail!("Windows update helper exited before becoming ready: {status}");
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Windows update helper did not become ready within 5 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    })();
+    if result.is_err() {
         let _ = std::fs::remove_file(&paths.binary_path);
         let _ = std::fs::remove_file(&paths.script_path);
-        return Err(err).context("launch detached Windows update helper");
+        let _ = std::fs::remove_file(&ready_path);
     }
-    Ok(InstallAction::Staged)
+    result.with_context(|| format!("Windows update helper failed; see {}", log_path.display()))
 }
 
 pub fn staged_replacement_paths(target: &Path, pid: u32) -> Result<StagedReplacementPaths> {
@@ -793,25 +829,43 @@ pub fn staged_replacement_paths(target: &Path, pid: u32) -> Result<StagedReplace
 }
 
 #[cfg(any(windows, test))]
-fn windows_replacement_script(target: &Path, staged_binary: &Path, restart_daemon: bool) -> String {
-    let target = target.display().to_string().replace('%', "%%");
-    let staged_binary = staged_binary.display().to_string().replace('%', "%%");
-    let restart = if restart_daemon {
-        format!("start \"\" /B \"{target}\" daemon start >nul 2>nul\r\n")
-    } else {
-        String::new()
-    };
+fn windows_replacement_script(restart_args: Option<&StartArgs>, attempts: u32) -> String {
+    // Only fixed switches and numeric values go into the ASCII script. Paths
+    // stay in Unicode environment variables, including %, ! and shell symbols.
+    let restart = restart_args.map_or_else(String::new, |args| {
+        format!(
+            "\"%BSK_UPDATE_TARGET%\" daemon start --port {} --session-idle {}ms --daemon-idle {}ms\r\nif errorlevel 1 goto failed_restart\r\n",
+            args.resolved_port(),
+            args.resolved_session_idle().as_millis(),
+            args.resolved_daemon_idle().as_millis(),
+        )
+    });
     format!(
         "@echo off\r\n\
-         setlocal\r\n\
+         setlocal DisableDelayedExpansion\r\n\
+         > \"%BSK_UPDATE_READY%\" echo ready\r\n\
+         if errorlevel 1 exit /b 1\r\n\
+         set /a attempts=0\r\n\
          :retry\r\n\
-         move /Y \"{staged_binary}\" \"{target}\" >nul 2>nul\r\n\
-         if errorlevel 1 (\r\n\
-           ping -n 2 127.0.0.1 >nul\r\n\
-           goto retry\r\n\
-         )\r\n\
+         move /Y \"%BSK_UPDATE_SOURCE%\" \"%BSK_UPDATE_TARGET%\" >nul\r\n\
+         if not errorlevel 1 goto replaced\r\n\
+         set /a attempts+=1\r\n\
+         if %attempts% geq {attempts} goto failed_replace\r\n\
+         if not exist \"%BSK_UPDATE_SOURCE%\" goto failed_replace\r\n\
+         ping -n 2 127.0.0.1 >nul\r\n\
+         goto retry\r\n\
+         :failed_replace\r\n\
+         echo Failed to replace the executable after %attempts% attempts.\r\n\
+         goto failed\r\n\
+         :replaced\r\n\
          {restart}\
-         del /F /Q \"%~f0\" >nul 2>nul\r\n"
+         del /F /Q \"%BSK_UPDATE_LOG%\" >nul 2>nul\r\n\
+         (del /F /Q \"%BSK_UPDATE_SCRIPT%\" >nul 2>nul & exit 0)\r\n\
+         :failed_restart\r\n\
+         echo Replaced the executable but failed to restart the daemon.\r\n\
+         :failed\r\n\
+         del /F /Q \"%BSK_UPDATE_SOURCE%\" >nul 2>nul\r\n\
+         (del /F /Q \"%BSK_UPDATE_SCRIPT%\" >nul 2>nul & exit 1)\r\n"
     )
 }
 
@@ -965,6 +1019,7 @@ mod tests {
         assert_eq!(extracted, b"windows binary");
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn replaces_binary_at_path() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -999,31 +1054,139 @@ mod tests {
     }
 
     #[test]
-    fn windows_replacement_script_retries_restarts_and_cleans_itself() {
-        let script = windows_replacement_script(
-            Path::new(r"C:\Program Files\bsk.exe"),
-            Path::new(r"C:\Program Files\bsk.exe.update-42"),
-            true,
+    fn windows_replacement_script_preserves_restart_config() {
+        let args = StartArgs {
+            port: Some(54321),
+            session_idle: Some(Duration::from_millis(1234)),
+            daemon_idle: Some(Duration::from_secs(75)),
+            ..Default::default()
+        };
+        let script = windows_replacement_script(Some(&args), 120);
+        assert!(script.is_ascii());
+        assert!(
+            script
+                .contains("daemon start --port 54321 --session-idle 1234ms --daemon-idle 75000ms")
         );
-
-        assert!(script.contains(":retry"));
-        assert!(script.contains("move /Y"));
-        assert!(script.contains("ping -n 2 127.0.0.1"));
-        assert!(!script.contains("timeout"));
-        assert!(script.contains(r#"start "" /B "C:\Program Files\bsk.exe" daemon start"#));
-        assert!(script.contains(r#"del /F /Q "%~f0""#));
+        assert!(!windows_replacement_script(None, 120).contains("daemon start"));
     }
 
-    #[test]
-    fn windows_replacement_script_omits_restart_when_daemon_was_not_running() {
-        let script = windows_replacement_script(
-            Path::new(r"C:\bsk.exe"),
-            Path::new(r"C:\bsk.exe.update-42"),
-            false,
-        );
+    #[cfg(windows)]
+    fn wait_for_helper(mut child: windows::Helper) -> std::process::ExitStatus {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("Windows update helper did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
-        assert!(!script.contains("daemon start"));
-        assert!(script.contains(r#"del /F /Q "%~f0""#));
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_replaces_in_unicode_spaces_and_shell_symbol_paths() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        for name in [
+            "ascii",
+            "with space",
+            "中文目录",
+            "literal %PATH% ! & (folder)",
+        ] {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            let target = dir.join("bsk.exe");
+            std::fs::write(&target, b"old binary").unwrap();
+            let child = spawn_windows_replacement(&target, b"new binary", None, 5).unwrap();
+            let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
+            let status = wait_for_helper(child);
+            assert!(
+                status.success(),
+                "{name}: {:?}",
+                std::fs::read_to_string(paths.script_path.with_extension("log"))
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"new binary", "{name}");
+            // Successful updates leave no helper, staged binary, ready file or log.
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "{name}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_waits_for_unlock_then_replaces() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("bsk.exe");
+        std::fs::write(&target, b"old binary").unwrap();
+        // Deny delete sharing, like a running Windows executable.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&target)
+            .unwrap();
+        let mut child = spawn_windows_replacement(&target, b"new binary", None, 5).unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(child.try_wait().unwrap().is_none());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+        drop(lock);
+        assert!(wait_for_helper(child).success());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new binary");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_bounds_retries_and_preserves_old_binary_on_failure() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("bsk.exe");
+        std::fs::write(&target, b"old binary").unwrap();
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&target)
+            .unwrap();
+        let child = spawn_windows_replacement(&target, b"new binary", None, 2).unwrap();
+        assert!(!wait_for_helper(child).success());
+        let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+        assert!(!paths.binary_path.exists());
+        assert!(!paths.script_path.exists());
+        let log_bytes = std::fs::read(paths.script_path.with_extension("log")).unwrap();
+        let log = String::from_utf8_lossy(&log_bytes);
+        assert!(
+            log.contains("Failed to replace the executable after 2 attempts."),
+            "{log}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_helper_reports_restart_failure_without_losing_replacement() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let target = tmp.path().join("bsk.exe");
+        std::fs::write(&target, b"old binary").unwrap();
+        // Not a valid PE executable: replacement succeeds but restart fails.
+        let child = spawn_windows_replacement(
+            &target,
+            b"invalid executable",
+            Some(&StartArgs::default()),
+            2,
+        )
+        .unwrap();
+        assert!(!wait_for_helper(child).success());
+        let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
+        let bytes = std::fs::read(paths.script_path.with_extension("log")).unwrap();
+        let log = String::from_utf8_lossy(&bytes);
+        assert!(
+            log.contains("Replaced the executable but failed to restart the daemon."),
+            "{log}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"invalid executable");
+        assert!(!paths.script_path.exists());
+        assert!(!paths.binary_path.exists());
     }
 
     #[test]
@@ -1282,10 +1445,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_update_step_staged_outcome_requests_no_restart() {
-        // The Windows shape: the replacement is staged next to the
-        // running binary, so the outcome must not ask for the immediate
-        // self-restart that `Replaced` triggers.
+    fn auto_update_step_reports_staged_handoff() {
+        // The helper, rather than this process, starts the new executable.
+        // The daemon must exit to let that staged handoff finish.
         let candidate = test_candidate();
         let outcome =
             auto_update_step(Some(&candidate), true, 0, |_| Ok(InstallAction::Staged)).unwrap();

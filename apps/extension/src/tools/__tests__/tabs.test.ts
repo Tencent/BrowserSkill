@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
+import { handleHover } from "../interaction";
 import {
   type AgentOverlayResetApi,
   type ChromeWindowsApi,
@@ -547,6 +549,148 @@ describe("handleTabBorrow", () => {
 });
 
 describe("handleTabReturn", () => {
+  it.each([
+    "not_found",
+    "cdp_failed",
+  ])("detaches after selector resolution fails with %s", async (code) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api } = makeTabMutationApi(state);
+    const { api: windows } = makeWindowsApi(state);
+    const debuggerApi = {
+      attach: vi.fn(async () => {}),
+      detach: vi.fn(async () => {}),
+      sendCommand: vi.fn(async (_target: unknown, method: string) => {
+        if (method === "DOM.getDocument") return { root: { nodeId: 1 } };
+        if (method === "DOM.querySelector") {
+          if (code === "cdp_failed") throw new Error("selector query failed");
+          return { nodeId: 0 };
+        }
+        return {};
+      }),
+      onEvent: { addListener: vi.fn(), removeListener: vi.fn() },
+      onDetach: { addListener: vi.fn(), removeListener: vi.fn() },
+    };
+    const cdp = new ChromiumCdp(debuggerApi as unknown as CdpDebuggerApi);
+
+    const hover = await handleHover(
+      sm,
+      { session_id: "aa11", tab_id: 7, selector: "#missing" },
+      {
+        cdp,
+        tabsApi: { get: api.get, query: vi.fn(async () => []) },
+      },
+    );
+    expect(hover).toMatchObject({ code });
+    expect(cdp.isAttached(7)).toBe(true);
+
+    const returned = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      {
+        tabs: api,
+        windows,
+        cdp,
+        agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+      },
+    );
+    expect(returned).toMatchObject({ returned_to_window_id: 200 });
+    expect(ctx.borrowedTabs.has(7)).toBe(false);
+    expect(cdp.isAttached(7)).toBe(false);
+    expect(debuggerApi.detach).toHaveBeenCalledExactlyOnceWith({ tabId: 7 });
+    cdp.dispose();
+  });
+
+  it("honours cancellation while preparing a validated return", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windows } = makeWindowsApi(state);
+    const controller = new AbortController();
+    const beforeReturn = vi.fn(async () => {
+      controller.abort();
+    });
+    const result = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      {
+        tabs: api,
+        windows,
+        signal: controller.signal,
+        beforeReturn,
+      },
+    );
+
+    expect(result).toMatchObject({ code: "cancelled" });
+    expect(beforeReturn).toHaveBeenCalledExactlyOnceWith("aa11", 7);
+    expect(spies.move).not.toHaveBeenCalled();
+    expect(ctx.borrowedTabs.has(7)).toBe(true);
+  });
+
+  it.each([
+    "original",
+    "fallback",
+    "cleanup_failed",
+    "failed",
+    "cancelled",
+  ])("releases CDP only after a successful return (%s)", async (mode) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    const { api: windowsApi } = makeWindowsApi(state, { lastFocused: 500 });
+    const success = mode !== "failed" && mode !== "cancelled";
+    if (mode === "fallback") spies.move.mockRejectedValueOnce(new Error("original move failed"));
+    if (mode === "failed") spies.move.mockRejectedValue(new Error("move failed"));
+    let windowAtRelease: number | undefined;
+    const cdp = {
+      releaseSessionTab: vi.fn(async () => {
+        windowAtRelease = state.tabs.get(7)?.windowId;
+        if (mode === "cleanup_failed") throw new Error("debugger release failed");
+      }),
+    };
+    const controller = new AbortController();
+    if (mode === "cancelled") controller.abort();
+
+    const result = await handleTabReturn(
+      sm,
+      { session_id: "aa11", tab_id: 7 },
+      {
+        tabs: api,
+        windows: windowsApi,
+        cdp,
+        signal: controller.signal,
+        agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+      },
+    );
+
+    expect("code" in result).toBe(!success);
+    expect(ctx.borrowedTabs.has(7)).toBe(!success);
+    expect(cdp.releaseSessionTab).toHaveBeenCalledTimes(success ? 1 : 0);
+    if (success) {
+      expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 7);
+      expect(windowAtRelease).toBe(mode === "fallback" ? 500 : 200);
+      expect(spies.move).toHaveBeenCalledTimes(mode === "fallback" ? 2 : 1);
+    }
+  });
+
   it("returns the tab to its original window/index and clears borrowedTabs", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");

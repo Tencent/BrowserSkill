@@ -125,16 +125,22 @@ bsk install-skill
 
 ## DeepSeek Harness 插件
 
-在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它会注入原生 `browser_*` 工具（无需再通过 Shell 调用 `bsk`），并在 Web UI 中实时观察每个 Agent Window。
+在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它为 Agent 提供原生 `browser_*` 工具，由插件代为调用 `bsk`，并在 Web UI 中实时展示浏览器会话。
 
-把它装进某个 dsh profile，然后启动该 profile：
+先安装 `bsk` CLI 并连接浏览器扩展，再将插件装进 dsh profile 并启动（将 `web` 替换为你的 profile 名称）：
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-插件自带 skill，所以在 dsh 下无需执行 `bsk install-skill`；但 `bsk` CLI 和浏览器扩展仍是前置条件。工具清单、配置项与观察浮层见[插件 README](packages/dsh-plugin-browserskill/README.md)。
+插件自带 `browser-skill` skill，所以在 dsh 下无需执行 `bsk install-skill`。已安装的插件不会自动更新；升级此插件请运行：
+
+```sh
+dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+```
+
+升级后重启该 profile。用法与配置见[插件 README](packages/dsh-plugin-browserskill/README.md)。
 
 ## 工作原理
 

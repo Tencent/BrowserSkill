@@ -257,11 +257,15 @@ describe("handleSessionStop with auto-return", () => {
       moves: [],
     };
     const { tabs, windows } = makeApis(state, { moveThrowsFor: new Set([1]) });
+    const cdp = {
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
 
     const res = await handleSessionStop(
       sm,
       { session_id: "aa11" },
-      { tabManagement: { tabs, windows } },
+      { cdp, tabManagement: { tabs, windows } },
     );
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     expect(res.return_failures?.map((f) => f.tab_id)).toEqual([1]);
@@ -269,6 +273,8 @@ describe("handleSessionStop with auto-return", () => {
     expect(sm.has("aa11")).toBe(true);
     expect(ctx.borrowedTabs.has(1)).toBe(true);
     expect(ctx.borrowedTabs.has(2)).toBe(false);
+    expect(cdp.releaseSessionTab).toHaveBeenCalledExactlyOnceWith("aa11", 2);
+    expect(cdp.detachSession).not.toHaveBeenCalled();
     expect(aw.remove).not.toHaveBeenCalled();
   });
 
@@ -286,6 +292,71 @@ describe("handleSessionStop with auto-return", () => {
     const { tabs, windows } = makeApis(state);
     await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
     expect(ctx.refStore.isEmpty()).toBe(true);
+  });
+
+  it.each([
+    "before teardown",
+    "during its return",
+    "after its return failed",
+    "before its turn in the return loop",
+  ])("finishes stopping when a borrowed tab closes %s", async (timing) => {
+    const aw = fakeAgentWindow([100]);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(1, { tabId: 1, originalWindowId: 200, originalIndex: 0 });
+    ctx.borrowedTabs.set(2, { tabId: 2, originalWindowId: 200, originalIndex: 1 });
+    const state: FakeState = {
+      tabs: new Map([
+        [1, { id: 1, windowId: 100 } as chrome.tabs.Tab],
+        [2, { id: 2, windowId: 100 } as chrome.tabs.Tab],
+      ]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const cdp = { detachSession: vi.fn(async () => {}) };
+    const closeTab = (tabId: number) => {
+      state.tabs.delete(tabId);
+      sm.forgetClosedTab(tabId);
+    };
+    const baseMove = tabs.move;
+    tabs.move = vi.fn(async (tabId, props) => {
+      if (tabId === 1 && timing === "during its return") closeTab(1);
+      if (tabId === 1 && timing === "after its return failed") {
+        throw new Error("simulated move failure");
+      }
+      if (tabId === 2 && timing === "after its return failed") closeTab(1);
+      if (tabId === 1 && timing === "before its turn in the return loop") closeTab(2);
+      if (!state.tabs.has(tabId)) throw new Error(`tab ${tabId} not found`);
+      return baseMove(tabId, props);
+    });
+    if (timing === "before teardown") closeTab(1);
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      {
+        cdp,
+        tabManagement: {
+          tabs,
+          windows,
+          agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+        },
+        tabsQuery: makeQuery(state),
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    const closedTabId = timing === "before its turn in the return loop" ? 2 : 1;
+    expect(res.returned_tab_ids).toEqual([closedTabId === 1 ? 2 : 1]);
+    expect(res.return_failures).toBeUndefined();
+    expect(ctx.borrowedTabs.size).toBe(0);
+    expect(sm.has("aa11")).toBe(false);
+    expect(cdp.detachSession).toHaveBeenCalledWith("aa11");
+    expect(aw.remove).toHaveBeenCalledWith(100);
+    if (timing === "before teardown" || timing === "before its turn in the return loop") {
+      expect(tabs.move).not.toHaveBeenCalledWith(closedTabId, expect.anything());
+    }
   });
 });
 

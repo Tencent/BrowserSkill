@@ -43,10 +43,16 @@ pub mod reason {
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
+    pub const FILL_VALUE_INVALID: &str = "fill_value_invalid";
+    pub const FILL_TARGET_CHANGED: &str = "fill_target_changed";
+    pub const FILL_FOCUS_LOST: &str = "fill_focus_lost";
+    pub const FILL_VALUE_MISMATCH: &str = "fill_value_mismatch";
+    pub const FILL_FAILED: &str = "fill_failed";
     pub const TARGET_NOT_SELECT: &str = "target_not_select";
     pub const OPTION_NOT_FOUND: &str = "option_not_found";
     pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
     pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
+    pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
     pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
@@ -206,6 +212,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::CdpFailed, reason::CDP_EXTENSION_ACCESS_DENIED) => RenderInfo {
+            summary: "Chrome blocked CDP access to another extension's content in this tab",
+            hint: Some(
+                "a web page can contain a restricted extension frame; disable the conflicting extension and reload, or use `bsk navigate <url>` to leave this page; reconnecting BrowserSkill alone does not remove the restriction",
+            ),
+            exit_code: base.exit_code,
+        },
         (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
             summary: "the file transfer outcome could not be confirmed",
             hint: Some(
@@ -247,7 +260,42 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TARGET_NOT_FILLABLE) => RenderInfo {
             summary: "target element is not fillable",
             hint: Some(
-                "choose an input, textarea, or contenteditable element from the latest snapshot",
+                "observe the page and choose an enabled, editable text input, textarea, or contenteditable; use the appropriate interaction for other control types",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::FILL_VALUE_INVALID) => RenderInfo {
+            summary: "the requested text does not fit the field constraints",
+            hint: Some(
+                "check the field's input type and maxlength; use a compatible value without silently truncating or changing the user's intended data",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_TARGET_CHANGED) => RenderInfo {
+            summary: "the fill target changed during the action",
+            hint: Some(
+                "observe the current page and field value; if the intended result is missing, use a fresh editable target before retrying",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_FOCUS_LOST) => RenderInfo {
+            summary: "the page moved focus away from the fill target",
+            hint: Some(
+                "observe the page for a dialog or rerender and resolve it before retrying; fill manages field focus and does not require bringing the browser to the foreground",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_VALUE_MISMATCH) => RenderInfo {
+            summary: "the fill result could not be confirmed",
+            hint: Some(
+                "observe the field before retrying; the page may have formatted the value. Continue if the visible result satisfies the user's intent; otherwise correct the remaining difference. Do not blindly repeat fill or immediately request human help",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_FAILED) => RenderInfo {
+            summary: "fill encountered a browser or page-script error",
+            hint: Some(
+                "observe the page before retrying because the field may already have changed; retry only if the intended result is missing and the target is still available",
             ),
             exit_code: base.exit_code,
         },
@@ -443,6 +491,56 @@ mod tests {
     ];
 
     #[test]
+    fn fill_reasons_provide_recovery_without_changing_exit_codes() {
+        for (code, reason, hint_fragment) in [
+            (
+                ErrorCode::InvalidParams,
+                reason::TARGET_NOT_FILLABLE,
+                "enabled, editable",
+            ),
+            (
+                ErrorCode::InvalidParams,
+                reason::FILL_VALUE_INVALID,
+                "maxlength",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_TARGET_CHANGED,
+                "fresh editable target",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_FOCUS_LOST,
+                "does not require bringing the browser",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_VALUE_MISMATCH,
+                "Continue if the visible result satisfies",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_FAILED,
+                "may already have changed",
+            ),
+        ] {
+            let data = serde_json::json!({ "reason": reason });
+            let info = info_for_error(code, Some(&data));
+            assert!(info.hint.unwrap().contains(hint_fragment), "{reason}");
+            assert_eq!(info.exit_code, info_for(code).exit_code);
+        }
+        let mismatch = serde_json::json!({ "reason": reason::FILL_VALUE_MISMATCH });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&mismatch));
+        assert_eq!(info.summary, "the fill result could not be confirmed");
+        assert!(info.hint.unwrap().contains("Do not blindly repeat fill"));
+        let unknown = serde_json::json!({ "reason": "future_fill_reason" });
+        assert_eq!(
+            info_for_error(ErrorCode::CdpFailed, Some(&unknown)),
+            info_for(ErrorCode::CdpFailed)
+        );
+    }
+
+    #[test]
     fn element_not_visible_overrides_permission_denied_copy() {
         let data = serde_json::json!({ "reason": reason::ELEMENT_NOT_VISIBLE });
         let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
@@ -452,6 +550,18 @@ mod tests {
             "expected geometry-specific hint"
         );
         assert!(!info.summary.contains("sandbox"));
+    }
+
+    #[test]
+    fn extension_access_denied_explains_the_frame_restriction_and_navigation_recovery() {
+        let data = serde_json::json!({ "reason": reason::CDP_EXTENSION_ACCESS_DENIED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert!(info.summary.contains("another extension"));
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("restricted extension frame"));
+        assert!(hint.contains("bsk navigate <url>"));
+        assert!(hint.contains("disable the conflicting extension"));
+        assert_eq!(info.exit_code, 3);
     }
 
     #[test]

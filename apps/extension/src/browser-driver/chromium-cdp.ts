@@ -165,6 +165,7 @@ export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
   private readonly attachedTabs = new Set<number>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
+  private readonly detachInFlight = new Map<number, Promise<void>>();
   private readonly tabOwners = new Map<number, Set<string>>();
   private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
   private readonly dialogSequences = new Map<number, number>();
@@ -182,7 +183,13 @@ export class ChromiumCdp {
   private networkSubscription: { dispose(): void } | null = null;
   private frameTargetSubscription: { dispose(): void } | null = null;
 
-  constructor(api: CdpDebuggerApi = chromeDebuggerApi) {
+  constructor(
+    api: CdpDebuggerApi = chromeDebuggerApi,
+    private readonly options: {
+      /** CDP observation alone does not authorize dismissing user dialogs. */
+      shouldAutoAcceptDialog?: (tabId: number) => boolean | Promise<boolean>;
+    } = {},
+  ) {
     this.api = api;
     this.bindAutoDetach();
     this.bindDialogHandler();
@@ -193,6 +200,10 @@ export class ChromiumCdp {
 
   /** Attach to `tabId` if we haven't already in this driver. */
   async ensureAttached(tabId: number): Promise<void> {
+    // Returning a tab clears the cache before Chrome finishes detaching.
+    // New observers must wait before opening the next connection to that tab.
+    const detaching = this.detachInFlight.get(tabId);
+    if (detaching) await detaching;
     if (this.attachedTabs.has(tabId)) return;
     const existing = this.attachInFlight.get(tabId);
     if (existing) {
@@ -425,6 +436,11 @@ export class ChromiumCdp {
 
   /** Detach if attached; never throws. */
   async detach(tabId: number): Promise<void> {
+    const existing = this.detachInFlight.get(tabId);
+    if (existing) {
+      await existing;
+      return;
+    }
     this.attachInFlight.delete(tabId);
     if (!this.attachedTabs.has(tabId)) return;
     this.attachedTabs.delete(tabId);
@@ -432,13 +448,19 @@ export class ChromiumCdp {
     this.clearConsoleState(tabId);
     this.clearNetworkState(tabId);
     this.clearFrameState(tabId);
-    try {
-      await this.api.detach({ tabId });
-    } catch (err) {
-      // Tab may already be gone — Chrome auto-detaches on close. Log
-      // at debug so production builds aren't noisy.
-      console.debug("[bsk cdp] detach failed (likely tab already closed)", err);
-    }
+    const detach = (async () => {
+      try {
+        await this.api.detach({ tabId });
+      } catch (err) {
+        // Tab may already be gone — Chrome auto-detaches on close. Log
+        // at debug so production builds aren't noisy.
+        console.debug("[bsk cdp] detach failed (likely tab already closed)", err);
+      }
+    })().finally(() => {
+      this.detachInFlight.delete(tabId);
+    });
+    this.detachInFlight.set(tabId, detach);
+    await detach;
   }
 
   /** True iff `ensureAttached(tabId)` has succeeded since the last detach. */
@@ -451,6 +473,17 @@ export class ChromiumCdp {
     const owners = this.tabOwners.get(tabId) ?? new Set<string>();
     owners.add(sessionId);
     this.tabOwners.set(tabId, owners);
+  }
+
+  /** Release one session's claim, preserving attachments still used by another. */
+  async releaseSessionTab(sessionId: string, tabId: number): Promise<void> {
+    const owners = this.tabOwners.get(tabId);
+    if (!owners?.delete(sessionId) || owners.size > 0) return;
+    this.tabOwners.delete(tabId);
+    // An observation may still be attaching when the tab is returned. Wait
+    // for it so detach cannot miss the attachment or remove a new owner's claim.
+    await this.attachInFlight.get(tabId)?.catch(() => {});
+    if (!this.tabOwners.has(tabId)) await this.detach(tabId);
   }
 
   /** Subscribe to all CDP events. Returned disposable removes the listener. */
@@ -639,13 +672,23 @@ export class ChromiumCdp {
   }
 
   private async onJavaScriptDialogOpening(tabId: number, params: unknown): Promise<void> {
+    if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
     const parsed = parseDialogOpeningParams(params);
     try {
+      if (
+        this.options.shouldAutoAcceptDialog &&
+        !(await this.options.shouldAutoAcceptDialog(tabId))
+      ) {
+        return;
+      }
+      // The tab may have been returned while its current scope was checked.
+      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
       const handleParams: { accept: boolean; promptText?: string } = { accept: true };
       if (parsed.type === "prompt") {
         handleParams.promptText = parsed.defaultPrompt ?? "";
       }
       await this.api.sendCommand({ tabId }, "Page.handleJavaScriptDialog", handleParams);
+      if (!this.attachedTabs.has(tabId) && !this.attachInFlight.has(tabId)) return;
       const sequence = (this.dialogSequences.get(tabId) ?? 0) + 1;
       this.dialogSequences.set(tabId, sequence);
       this.appendDialog(tabId, {
@@ -835,15 +878,9 @@ export class ChromiumCdp {
 
   /** Detach tabs only when no other live session has claimed them. */
   async detachSession(sessionId: string): Promise<void> {
-    const tabsToDetach: number[] = [];
-    for (const [tabId, owners] of this.tabOwners) {
-      owners.delete(sessionId);
-      if (owners.size === 0) {
-        this.tabOwners.delete(tabId);
-        tabsToDetach.push(tabId);
-      }
-    }
-    await Promise.all(tabsToDetach.map((tabId) => this.detach(tabId)));
+    await Promise.all(
+      Array.from(this.tabOwners.keys(), (tabId) => this.releaseSessionTab(sessionId, tabId)),
+    );
   }
 }
 

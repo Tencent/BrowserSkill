@@ -53,8 +53,14 @@ function makeHarness(initial: SessionObservation[]): Harness {
       return { ok: true, json: async () => ({ interrupted: true }) };
     },
     eventSourceFactory: () => {
-      es = { onmessage: null, close: vi.fn() };
-      return es;
+      const connection = { onmessage: null, close: vi.fn() } as EventSourceLike;
+      es = connection;
+      queueMicrotask(() =>
+        connection.onmessage?.({
+          data: JSON.stringify({ type: "snapshot", sessions: current, available: true }),
+        }),
+      );
+      return connection;
     },
     loadImage: async (id: string) => `blob:${id}`,
   });

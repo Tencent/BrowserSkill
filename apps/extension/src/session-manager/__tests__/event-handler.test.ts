@@ -87,6 +87,7 @@ describe("attachSessionEventHandler", () => {
       windowEvents: events.api,
     });
 
+    manager.forgetClosedTab(7, { isWindowClosing: true });
     events.emit(4242);
     for (let i = 0; i < 4; i += 1) await Promise.resolve();
 

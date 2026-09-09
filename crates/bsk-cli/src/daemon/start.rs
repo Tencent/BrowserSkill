@@ -232,8 +232,8 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
         // Fired by the update check task after a successful auto-update:
-        // the replacement daemon has already been spawned, so this
-        // process should shut down and let it take over.
+        // the replacement daemon (or Windows update helper) is ready, so
+        // this process should shut down and let it take over.
         let restart_notify = Arc::new(tokio::sync::Notify::new());
         let update_check_task =
             spawn_update_check_task(Arc::clone(&state), Arc::clone(&restart_notify));
@@ -539,8 +539,8 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 /// task spawns the replacement daemon (see
 /// [`DAEMON_REPLACEMENT_WAIT_ENV`]) and fires `restart` so this process
 /// shuts down and the new version takes over; on Windows the
-/// replacement can only be staged, so it just logs that a restart is
-/// needed.
+/// helper waits for this process to exit, replaces the binary, and starts
+/// the new daemon with the same configuration.
 pub(crate) fn spawn_update_check_task(
     state: Arc<DaemonState>,
     restart: Arc<tokio::sync::Notify>,
@@ -605,7 +605,11 @@ pub(crate) fn spawn_update_check_task(
                         |candidate| {
                             let target =
                                 exe_path.as_deref().context("current executable unknown")?;
-                            update::self_install_candidate(candidate, target)
+                            update::self_install_candidate(
+                                candidate,
+                                target,
+                                &restart_start_args(&state.config),
+                            )
                         },
                     )
                 })
@@ -635,10 +639,11 @@ pub(crate) fn spawn_update_check_task(
                     sessions,
                     "auto-update postponed: agent session(s) active; will retry on the next tick"
                 ),
-                update::AutoUpdateOutcome::Staged { latest } => warn!(
-                    %latest,
-                    "auto-update staged the new binary but cannot replace the running daemon in place; restart the daemon (or terminal) to finish the upgrade"
-                ),
+                update::AutoUpdateOutcome::Staged { latest } => {
+                    info!(%latest, "update helper ready; exiting so it can replace and restart the daemon");
+                    restart.notify_one();
+                    return;
+                }
                 update::AutoUpdateOutcome::Replaced { latest } => {
                     info!(
                         current = env!("CARGO_PKG_VERSION"),

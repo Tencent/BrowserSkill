@@ -172,6 +172,10 @@ intended. Read `bsk upload --help` and `bsk download --help` for all flags and e
 - Stale ref: observe again and retry the intended action once.
 - Unknown tab or session: list current tabs/sessions; never guess identifiers.
 - Timeout: inspect current page state before deciding whether one longer purposeful wait is useful.
+- Fill result unconfirmed (`fill_value_mismatch`): observe the field first; the page may have
+  formatted the value. Continue if the visible result satisfies the user's intent. Otherwise correct
+  the remaining difference; do not blindly repeat fill or immediately request human help. For other
+  fill errors, follow the returned hint and inspect current state before retrying.
 - Unsupported command: continue with available capabilities; suggest updating only when the missing
   command is necessary.
 - Unrecoverable failure: report the blocker and stop the session in a finally-style path.

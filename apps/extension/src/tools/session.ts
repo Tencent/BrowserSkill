@@ -2,7 +2,7 @@ import { type SessionManager, SessionStartCleanupError } from "@/session-manager
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
-import type { ChromeTabsApi } from "./shared";
+import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
 import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
 
@@ -84,7 +84,7 @@ export interface SessionStopResult {
 
 export interface SessionStopDeps {
   signal?: AbortSignal;
-  cdp?: {
+  cdp?: Pick<CdpRunner, "releaseSessionTab"> & {
     detachSession(sessionId: string): Promise<void>;
   };
   /**
@@ -204,15 +204,19 @@ export async function handleSessionStop(
   const returnFailures: SessionStopResult["return_failures"] = [];
   const borrowedIds = Array.from(ctx.borrowedTabs.keys());
   for (const tabId of borrowedIds) {
+    // A close event may have removed this borrow while another tab returned.
+    if (!ctx.borrowedTabs.has(tabId)) continue;
     try {
       const tabManagement = {
         ...(deps.tabManagement ?? {}),
+        cdp: deps.cdp ?? deps.tabManagement?.cdp,
         signal: deps.signal,
         isAgentWindowId:
           deps.tabManagement?.isAgentWindowId ??
           ((windowId: number) => manager.findByWindowId(windowId) !== null),
       };
       const outcome = await returnBorrowedTab(ctx, tabId, tabManagement);
+      if (!ctx.borrowedTabs.has(tabId)) continue;
       if (typeof outcome === "object" && "code" in outcome) {
         console.warn(`[bsk session_stop] auto-return failed for tab ${tabId}`, outcome);
         returnFailures?.push({
@@ -225,6 +229,7 @@ export async function handleSessionStop(
         ctx.borrowedTabs.delete(tabId);
       }
     } catch (err) {
+      if (!ctx.borrowedTabs.has(tabId)) continue;
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`[bsk session_stop] auto-return threw for tab ${tabId}: ${message}`);
       returnFailures?.push({
@@ -235,8 +240,15 @@ export async function handleSessionStop(
     }
   }
 
+  // A previously failed tab may have closed during a later return. Only
+  // confirmed close events remove borrows; ordinary move failures stay retryable.
+  const pendingReturnFailures = returnFailures.filter((failure) =>
+    ctx.borrowedTabs.has(failure.tab_id),
+  );
   if (deps.signal?.aborted) {
-    const nonCancelFailures = returnFailures?.filter((failure) => failure.code !== "cancelled");
+    const nonCancelFailures = pendingReturnFailures.filter(
+      (failure) => failure.code !== "cancelled",
+    );
     if (nonCancelFailures && nonCancelFailures.length > 0) {
       return {
         ...(returnedTabIds.length > 0 ? { returned_tab_ids: returnedTabIds } : {}),
@@ -248,8 +260,8 @@ export async function handleSessionStop(
 
   const result: SessionStopResult = {};
   if (returnedTabIds.length > 0) result.returned_tab_ids = returnedTabIds;
-  if (returnFailures && returnFailures.length > 0) {
-    result.return_failures = returnFailures;
+  if (pendingReturnFailures.length > 0) {
+    result.return_failures = pendingReturnFailures;
     // A failed return means at least one borrowed user tab may still be
     // inside the Agent Window. Keep the session/window alive so the user
     // can retry `bsk session stop` or explicitly `bsk tab return` after the

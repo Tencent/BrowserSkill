@@ -147,20 +147,26 @@ Start a new Agent session and write a prompt that needs the browser, for example
 Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?
 BrowserSkill ships a first-class dsh plugin on npm as
 [`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin).
-It injects native `browser_*` tools (no shelling out to `bsk`) and a live Web UI
-overlay of each Agent Window.
+It gives the agent native `browser_*` tools and a live view of its browser sessions
+in the Web UI. The plugin runs `bsk` on the agent's behalf.
 
-Add it to a dsh profile, then start that profile:
+Install the `bsk` CLI and connect the browser extension first. Then add the plugin
+to a dsh profile and start it (replace `web` with your profile name):
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-The plugin carries its own copy of the skill, so `bsk install-skill` is not needed
-for dsh — but the `bsk` CLI and the browser extension are still prerequisites. See
-the [plugin README](packages/dsh-plugin-browserskill/README.md) for the tool list,
-configuration, and the observation overlay.
+The plugin includes the `browser-skill` skill, so `bsk install-skill` is not needed
+for dsh. Installed plugins do not update automatically. To upgrade this plugin:
+
+```sh
+dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+```
+
+Restart the profile after upgrading. See the
+[plugin README](packages/dsh-plugin-browserskill/README.md) for usage and configuration.
 
 ## How It Works
 

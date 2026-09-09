@@ -97,6 +97,10 @@ Continue from returned sequence cursors instead of rereading the same buffer.
 - Unknown tab: list tabs instead of guessing.
 - Unknown session: list owned sessions or start one; never try foreign ids.
 - Timeout: inspect current state before deciding whether one longer purposeful wait is useful.
+- Fill result unconfirmed: observe the field first; the page may have formatted the value. Continue
+  if the visible result satisfies the user's intent. Otherwise correct the remaining difference;
+  do not blindly repeat fill or immediately request human help. For other fill errors, follow the
+  returned hint and inspect current state before retrying.
 - Unrecoverable failure: report the blocker and stop the owned session.
 
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported. Do not

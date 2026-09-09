@@ -10,7 +10,7 @@ import {
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
-import { isRpcError, lookupSession } from "./shared";
+import { type CdpRunner, isRpcError, lookupSession } from "./shared";
 
 export type TabScope = "user" | "agent" | "all";
 
@@ -287,6 +287,10 @@ export interface TabManagementDeps {
   approveBorrow?: BorrowConfirmationApprover;
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
+  /** Releases this session's CDP claim after a borrowed tab is returned. */
+  cdp?: Pick<CdpRunner, "releaseSessionTab">;
+  /** Runs after tab_return validation, before moving the borrowed tab. */
+  beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
    * Reports whether `windowId` is any live session's Agent Window.
    * `tab_return`'s fallback window picker uses this to avoid moving a
@@ -945,16 +949,22 @@ async function cleanupUnusedFallbackWindow(
   }
 }
 
-function resetAgentOverlaysInReturnedTab(
+async function releaseReturnedTabState(
   ctx: SessionContext,
   tabId: number,
   deps: TabManagementDeps,
-): void {
+): Promise<void> {
   void getAgentOverlayResetApi(deps)
     .resetAgentOverlays(tabId, ctx.sessionId)
     .catch((err) => {
       console.debug("[bsk tab_return] agent overlay reset failed", err);
     });
+  try {
+    await deps.cdp?.releaseSessionTab?.(ctx.sessionId, tabId);
+  } catch (err) {
+    // A successful move must not be retried because debugger cleanup failed.
+    console.debug("[bsk tab_return] CDP release failed", err);
+  }
 }
 
 /**
@@ -1028,7 +1038,7 @@ export async function returnBorrowedTab(
     });
     const movedTab = Array.isArray(moved) ? moved[0] : moved;
     const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
-    resetAgentOverlaysInReturnedTab(ctx, tabId, deps);
+    await releaseReturnedTabState(ctx, tabId, deps);
     return {
       tabId,
       toWindowId: targetWindowId,
@@ -1070,7 +1080,7 @@ export async function returnBorrowedTab(
         });
         const movedTab = Array.isArray(moved) ? moved[0] : moved;
         const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : target.index;
-        resetAgentOverlaysInReturnedTab(ctx, tabId, deps);
+        await releaseReturnedTabState(ctx, tabId, deps);
         return {
           tabId,
           toWindowId: target.windowId,
@@ -1116,6 +1126,7 @@ export async function handleTabReturn(
       message: `tab_return: tab ${params.tab_id} is not borrowed by this session`,
     };
   }
+  await deps.beforeReturn?.(ctx.sessionId, params.tab_id);
   const outcome = await returnBorrowedTab(ctx, params.tab_id, {
     ...deps,
     isAgentWindowId:

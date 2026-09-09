@@ -49,6 +49,47 @@ describe("ToolDispatcher", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    "tool.snapshot",
+    "tool.evaluate",
+    "tool.get_html",
+    "tool.console",
+  ])("annotates Chrome extension-access failures from %s", async (method) => {
+    const tab = { id: 7, windowId: 4242, active: true, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("test");
+    const error = new Error("Cannot access a chrome-extension:// URL of different extension");
+    const cdp = {
+      send: vi.fn().mockRejectedValue(error),
+      ensureConsoleCapture: vi.fn().mockRejectedValue(error),
+      consoleEntriesSince: vi.fn(),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    deliver(makeRequest(method, { session_id: "test", expression: "document.title" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      error: {
+        code: "cdp_failed",
+        data: { reason: "cdp_extension_access_denied" },
+      },
+    });
+    dispatcher.stop();
+  });
+
   it("uses the configured recording runtime for start and stop", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
@@ -745,6 +786,135 @@ describe("ToolDispatcher", () => {
       7,
       expect.objectContaining({ enabled: false }),
     );
+  });
+
+  it.each([
+    { tab_id: 7, code: "not_found" },
+    { tab_id: undefined, code: "invalid_params" },
+  ])("keeps hover when tab_return is rejected with $code", async ({ tab_id, code }) => {
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        sendMessage,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 100, active: true }]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 100),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    await sessions.start("aa11");
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as unknown as TestDispatcherCdp,
+    });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+    helpers.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    await helpers.setHoverBypass("aa11", 7, true);
+    dispatcher.start();
+    deliver(makeRequest("tool.tab_return", { session_id: "aa11", tab_id }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ error: { code } });
+    expect(cdp.releaseSessionTab).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalledWith(7, expect.objectContaining({ enabled: false }));
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+    expect(cdp.send).toHaveBeenCalledExactlyOnceWith(7, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: 10,
+      y: 20,
+    });
+    dispatcher.stop();
+  });
+
+  it("releases the returned tab's hover before moving it and leaves other tabs alone", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const move = vi.fn(async () => {
+      expect(sendMessage).toHaveBeenCalledWith(7, expect.objectContaining({ enabled: false }));
+      return { id: 7, windowId: 200, index: 4 };
+    });
+    vi.stubGlobal("chrome", {
+      tabs: { sendMessage, move },
+      windows: { get: vi.fn(async () => ({ id: 200 })) },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 100),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as unknown as TestDispatcherCdp,
+    });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+    for (const [sessionId, tabId] of [
+      ["aa11", 7],
+      ["aa11", 8],
+      ["bb22", 9],
+    ] as const) {
+      helpers.rememberHover(sessionId, { tab_id: tabId, x: 10, y: 20 });
+      await helpers.setHoverBypass(sessionId, tabId, true);
+    }
+    dispatcher.start();
+    deliver(makeRequest("tool.tab_return", { session_id: "aa11", tab_id: 7 }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, returned_to_window_id: 200 } });
+    expect(cdp.releaseSessionTab).toHaveBeenCalledExactlyOnceWith("aa11", 7);
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+    expect(cdp.send).not.toHaveBeenCalled();
+    for (const [sessionId, tabId] of [
+      ["aa11", 8],
+      ["bb22", 9],
+    ] as const) {
+      expect(sendMessage).not.toHaveBeenCalledWith(
+        tabId,
+        expect.objectContaining({ enabled: false }),
+      );
+      await helpers.withHoverReassert({ session_id: sessionId, tab_id: tabId }, async () => ({}));
+      expect(cdp.send).toHaveBeenLastCalledWith(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: 10,
+        y: 20,
+      });
+    }
+    dispatcher.stop();
   });
 
   it("transfers hover overlay bypass ownership between sessions", async () => {

@@ -1399,6 +1399,28 @@ mod windows {
                 connected = pipe.connect() => {
                     match connected {
                         Ok(()) => {
+                            // Keep the connected instance alive until its replacement
+                            // exists. Otherwise a fast handler can close the last
+                            // instance and make new clients fail with NotFound.
+                            loop {
+                                match ServerOptions::new()
+                                    .access_inbound(true)
+                                    .access_outbound(true)
+                                    .create(&listener.pipe_name)
+                                {
+                                    Ok(next) => {
+                                        listener.first = Some(next);
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        warn!(?err, "create next named-pipe instance failed");
+                                        tokio::select! {
+                                            _ = &mut shutdown => return,
+                                            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                                        }
+                                    }
+                                }
+                            }
                             on_open();
                             let handler = handler.clone();
                             let on_act = on_activity.clone();
@@ -1466,6 +1488,118 @@ mod windows {
             write_half.flush().await?;
         }
         Ok(())
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+        use std::time::Duration;
+        use tokio::net::windows::named_pipe::ClientOptions;
+        use tokio::sync::oneshot;
+
+        fn isolated_listener() -> NamedPipeListener {
+            let pipe_name = format!(r"\\.\pipe\bsk-test-{}", uuid::Uuid::new_v4());
+            let first = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_name)
+                .unwrap();
+            NamedPipeListener {
+                pipe_name,
+                first: Some(first),
+            }
+        }
+
+        #[tokio::test]
+        async fn next_instance_exists_before_connection_is_handed_off() {
+            let listener = isolated_listener();
+            let name = listener.pipe_name.clone();
+            let probe_name = name.clone();
+            let (probe_tx, probe_rx) = oneshot::channel();
+            let probe_tx = Mutex::new(Some(probe_tx));
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let server = tokio::spawn(serve(
+                listener,
+                crate::daemon::ipc::default_ping_handler(),
+                move || {
+                    if let Some(tx) = probe_tx.lock().unwrap().take() {
+                        // This callback runs before the connection task can finish.
+                        // A second client must already have an instance to open.
+                        let result = ClientOptions::new().open(&probe_name).map(drop);
+                        let _ = tx.send(result);
+                    }
+                },
+                || {},
+                || {},
+                async {
+                    let _ = stop_rx.await;
+                },
+            ));
+            let client = ClientOptions::new().open(&name).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), probe_rx).await;
+            drop(client);
+            let _ = stop_tx.send(());
+            server.await.unwrap();
+            result
+                .expect("accept callback ran")
+                .unwrap()
+                .expect("next pipe instance is ready");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn rapid_disconnects_and_concurrent_rpc_connections() {
+            let listener = isolated_listener();
+            let name = listener.pipe_name.clone();
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let server = tokio::spawn(serve(
+                listener,
+                crate::daemon::ipc::default_ping_handler(),
+                || {},
+                || {},
+                || {},
+                async {
+                    let _ = stop_rx.await;
+                },
+            ));
+            let exercise = async {
+                // Include clients that close without sending any request.
+                for _ in 0..64 {
+                    drop(
+                        crate::ipc_client::Client::connect_path(name.clone().into())
+                            .await
+                            .unwrap(),
+                    );
+                }
+                let mut clients = tokio::task::JoinSet::new();
+                for _ in 0..8 {
+                    let name = name.clone();
+                    clients.spawn(async move {
+                        for _ in 0..32 {
+                            let mut client =
+                                crate::ipc_client::Client::connect_path(name.clone().into())
+                                    .await
+                                    .unwrap();
+                            let reply: bsk_protocol::PingResult = client
+                                .call(
+                                    bsk_protocol::Method::SystemPing,
+                                    &serde_json::json!({}),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            assert!(reply.pong);
+                        }
+                    });
+                }
+                while let Some(result) = clients.join_next().await {
+                    result.unwrap();
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_secs(30), exercise).await;
+            let _ = stop_tx.send(());
+            server.await.unwrap();
+            result.expect("connection exercise completed");
+        }
     }
 }
 

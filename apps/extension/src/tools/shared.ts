@@ -57,6 +57,7 @@ export interface CdpRunner {
   getFrameGraph?(tabId: number): Promise<CdpFrameGraph>;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
+  releaseSessionTab?(sessionId: string, tabId: number): Promise<void>;
   onEvent?(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
     dispose(): void;
   };

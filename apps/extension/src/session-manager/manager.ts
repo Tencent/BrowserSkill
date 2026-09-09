@@ -117,10 +117,16 @@ export class SessionManager {
     return Array.from(this.sessions.values());
   }
 
-  /** Remove a closed tab from agent-created ownership tracking. */
-  forgetAgentCreatedTab(tabId: number): void {
+  /**
+   * Forget a tab Chrome has removed, including any uncommitted borrow.
+   * Whole-window closures keep committed borrows until the window-removed
+   * handler reports which user tabs could not be returned.
+   */
+  forgetClosedTab(tabId: number, { isWindowClosing = false } = {}): void {
+    this.borrowReservations.delete(tabId);
     for (const ctx of this.sessions.values()) {
       ctx.agentCreatedTabs.delete(tabId);
+      if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
     }
   }
 

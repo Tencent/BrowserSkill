@@ -215,21 +215,29 @@ function makeCdp(snapshot: unknown) {
       if (method === "Runtime.evaluate") {
         return {
           result: {
-            value: {
-              controls: [
+            deepSerializedValue: {
+              type: "array",
+              value: [
                 {
-                  state: "filled",
-                  sensitive: true,
-                  defaultValue: "hunter2",
-                  value: "hunter2",
-                  placeholder: "secret",
+                  type: "array",
+                  value: [
+                    { type: "node", value: { backendNodeId: 13 } },
+                    {
+                      type: "string",
+                      value: JSON.stringify({
+                        state: "filled",
+                        sensitive: true,
+                        placeholder: "secret",
+                      }),
+                    },
+                  ],
                 },
               ],
-              childFrames: [],
             },
           },
         };
       }
+      if (method === "Runtime.releaseObjectGroup") return {};
       throw new Error(`unexpected ${method}`);
     }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
   };
@@ -273,8 +281,11 @@ describe("captureViewModel", () => {
     expect(cdp.send).toHaveBeenCalledWith(
       4,
       "Runtime.evaluate",
-      expect.objectContaining({ returnByValue: true }),
+      expect.objectContaining({
+        serializationOptions: expect.objectContaining({ serialization: "deep" }),
+      }),
     );
+    expect(cdp.send).toHaveBeenCalledWith(4, "Runtime.releaseObjectGroup", expect.anything());
     expect(cdp.send).not.toHaveBeenCalledWith(4, "DOM.resolveNode", expect.anything());
     expect(cdp.send).not.toHaveBeenCalledWith(4, "Runtime.callFunctionOn", expect.anything());
   });

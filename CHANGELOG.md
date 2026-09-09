@@ -5,7 +5,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
-## [Unreleased]
+## [0.2.1] - 2026-09-09
+
+### Changed
+- DSH Plugin: clarified installation, configuration, profile restart, and upgrade instructions
+
+### Fixed
+- CLI: reliable Windows self-updates, including executable replacement and daemon restart
+- CLI: Windows named-pipe connection continuity and stale daemon process detection
+- Windows installer: PowerShell 5.1 compatibility, path quoting, and staged executable replacement
+- CLI / DSH Plugin: cancellation propagation and upload/download cleanup when the parent process exits
+- Extension: tab ownership and session cleanup when agent tabs fail to open or borrowed tabs are returned or closed
+- Extension: navigation recovery when other extensions restrict Chrome DevTools Protocol access
+- Extension: background input filling, automatic append behavior, and verification of field values before reporting success
+- Extension: match observed form state to the correct element after page changes
+- Extension: UUID generation fallback for recording and overlays on insecure origins
+- Browser locale matching for regional language variants
+- DSH Plugin: observation state synchronization, thumbnail capture lifecycle, and stale preview cleanup
+- DSH Plugin: removed the obsolete client runtime host dependency
 
 ## [0.2.0] - 2026-09-02
 
