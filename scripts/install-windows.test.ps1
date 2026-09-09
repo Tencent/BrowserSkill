@@ -102,6 +102,7 @@ $oldVersion = $env:BSK_VERSION
 $oldProcessArch = $env:PROCESSOR_ARCHITECTURE
 $oldNativeArch = $env:PROCESSOR_ARCHITEW6432
 $daemon = $null
+$script:DownloadServer = $null
 try {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
     $bashRc = Join-Path $root ".bashrc"
@@ -212,6 +213,41 @@ try {
         }
         $fixtureArchive = Join-Path $root 'release.zip'
         Compress-Archive -LiteralPath $source -DestinationPath $fixtureArchive -CompressionLevel Fastest
+        # Serve the ZIP over loopback HTTP. Only the URL is redirected below;
+        # Invoke-WebRequest and the installer's disk writes remain real.
+        $script:DownloadServer = Start-Job -ArgumentList $fixtureArchive -ScriptBlock {
+            param($Archive)
+            $ErrorActionPreference = 'Stop'
+            $body = [IO.File]::ReadAllBytes($Archive)
+            $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+            try {
+                $listener.Start()
+                Write-Output $listener.LocalEndpoint.Port
+                while ($true) {
+                    if (-not $listener.Pending()) { Start-Sleep -Milliseconds 50; continue }
+                    $client = $listener.AcceptTcpClient()
+                    try {
+                        $stream = $client.GetStream()
+                        $stream.ReadTimeout = 5000
+                        $stream.WriteTimeout = 5000
+                        $reader = [IO.StreamReader]::new($stream)
+                        while (($line = $reader.ReadLine()) -and $line.Length) { }
+                        $header = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 200 OK`r`nContent-Type: application/octet-stream`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+                        $stream.Write($header, 0, $header.Length)
+                        $stream.Write($body, 0, $body.Length)
+                    } finally { $client.Dispose() }
+                }
+            } finally { $listener.Stop() }
+        }
+        $serverPort = $null
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (-not $serverPort) {
+            $serverPort = Receive-Job $script:DownloadServer
+            if ($script:DownloadServer.State -ne 'Running' -or [DateTime]::UtcNow -gt $deadline) {
+                throw 'download fixture failed to start'
+            }
+            if (-not $serverPort) { Start-Sleep -Milliseconds 50 }
+        }
         $asset = @{ sha256 = (Get-FileHash -LiteralPath $fixtureArchive).Hash }
         $fixtureManifest = @{ version = '9.8.7'; assets = @{ 'windows-x64' = $asset } }
         $downloads = New-Object 'System.Collections.Generic.List[string]'
@@ -223,7 +259,8 @@ try {
             [CmdletBinding()]
             param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
             $downloads.Add($Uri)
-            [IO.File]::Copy($fixtureArchive, $OutFile)
+            $PSBoundParameters['Uri'] = "http://127.0.0.1:$serverPort/release.zip"
+            Microsoft.PowerShell.Utility\Invoke-WebRequest @PSBoundParameters -TimeoutSec 15
         }
         $GitHub = 'https://example.invalid/fixture'
         $InstallDir = Join-Path $root 'installed [literal]'
@@ -282,6 +319,10 @@ catch {
     throw
 }
 finally {
+    if ($script:DownloadServer) {
+        Stop-Job $script:DownloadServer
+        Remove-Job $script:DownloadServer
+    }
     if ($daemon -and -not $daemon.HasExited) {
         Stop-Process -Id $daemon.Id -Force
         $daemon.WaitForExit(5000) | Out-Null
