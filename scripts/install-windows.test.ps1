@@ -143,11 +143,36 @@ try {
     & $target --version
     if ($LASTEXITCODE -ne 0) { throw "replacement is not executable" }
 
+    # Installing into a new directory must also stop a daemon from the old one.
+    $newTargetDir = Join-Path $root "new install"
+    [IO.Directory]::CreateDirectory($newTargetDir) | Out-Null
+    $newTarget = Join-Path $newTargetDir "bsk.exe"
+    $before = (Get-FileHash -LiteralPath $target).Hash
+    $daemon = Start-Process -FilePath $target -ArgumentList @('daemon', 'start', '--foreground', '--port', '0') -WindowStyle Hidden -PassThru
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    while (-not [IO.File]::Exists($infoPath)) {
+        if ($daemon.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw "old-directory daemon failed to start" }
+        Start-Sleep -Milliseconds 50
+    }
+    Install-Binary $source $newTarget
+    if (-not $daemon.WaitForExit(5000)) { throw "new-directory install left the old daemon running" }
+    Assert-Equal (Get-FileHash -LiteralPath $target).Hash $before
+    Assert-Equal (Get-FileHash -LiteralPath $newTarget).Hash (Get-FileHash -LiteralPath $source).Hash
+    & $newTarget --version
+    if ($LASTEXITCODE -ne 0) { throw "new-directory installation is not executable" }
+    if (@(Get-ChildItem -LiteralPath $newTargetDir -Filter "*.install-*").Count) { throw "new-directory staging files leaked" }
+
     # Refuse replacement when daemon identity cannot be verified.
     [IO.File]::WriteAllText($infoPath, 'invalid daemon metadata')
     $before = (Get-FileHash -LiteralPath $target).Hash
     Assert-Fails { Install-Binary $source $target }
     Assert-Equal (Get-FileHash -LiteralPath $target).Hash $before
+
+    # A failed stop must also prevent installation to a previously empty target.
+    $blockedTarget = Join-Path $newTargetDir "blocked.exe"
+    Assert-Fails { Install-Binary $source $blockedTarget }
+    if (Test-Path -LiteralPath $blockedTarget) { throw "failed stop created an installation" }
+    if (@(Get-ChildItem -LiteralPath $newTargetDir -Filter "*.install-*").Count) { throw "failed stop leaked staging files" }
     [IO.File]::Delete($infoPath)
 
     # A remaining lock must fail without truncation or staging debris.

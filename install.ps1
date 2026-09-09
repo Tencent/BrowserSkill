@@ -132,18 +132,19 @@ function Install-Binary {
     $staged = "$Target.install-$([Guid]::NewGuid().ToString('N'))"
     try {
         [System.IO.File]::Copy($Source, $staged)
+        # The running daemon may come from another installation directory.
+        # Use the downloaded CLI: older versions have broken Windows liveness checks.
+        # Stop verifies daemon identity and uses the current BSK_HOME.
+        & $Source daemon stop
+        if ($LASTEXITCODE -ne 0) { throw "could not stop bsk daemon; installation was not changed" }
         if ([System.IO.File]::Exists($Target)) {
-            # Use the downloaded CLI: older versions have broken Windows
-            # liveness checks. Stop verifies daemon identity before terminating it.
-            & $Source daemon stop
-            if ($LASTEXITCODE -ne 0) { throw "could not stop bsk daemon; existing installation was not replaced" }
             # PowerShell 5.1 converts $null to an empty path for string parameters.
             [System.IO.File]::Replace($staged, $Target, [NullString]::Value)
-            Write-Log "daemon will restart automatically on the next browser command"
         }
         else {
             [System.IO.File]::Move($staged, $Target)
         }
+        Write-Log "daemon will restart automatically on the next browser command"
     }
     finally {
         if ([System.IO.File]::Exists($staged)) { [System.IO.File]::Delete($staged) }
