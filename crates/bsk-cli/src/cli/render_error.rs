@@ -40,6 +40,7 @@ use bsk_protocol::ErrorCode;
 pub mod reason {
     pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
     pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
+    pub const REF_KIND_UNSUPPORTED: &str = "ref_kind_unsupported";
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
@@ -244,6 +245,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             summary: "tab is borrowed by another session",
             hint: Some(
                 "return the tab from the borrowing session via `bsk tab return <tab-id> --session <id>` or stop that session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::REF_KIND_UNSUPPORTED) => RenderInfo {
+            summary: "this tool does not support the ref target type",
+            hint: Some(
+                "use a DOM ref for DOM operations; visual-region refs require an available visual screenshot path",
             ),
             exit_code: base.exit_code,
         },
@@ -662,6 +670,15 @@ mod tests {
         let timeout = serde_json::json!({ "reason": reason::TRANSFER_TIMEOUT });
         let info = info_for_error(ErrorCode::Timeout, Some(&timeout));
         assert!(info.summary.contains("timed out after browser dispatch"));
+    }
+
+    #[test]
+    fn visual_ref_type_error_has_specific_guidance() {
+        let data = serde_json::json!({ "reason": reason::REF_KIND_UNSUPPORTED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&data));
+        assert!(info.summary.contains("ref target type"));
+        assert!(info.hint.unwrap().contains("DOM ref"));
+        assert_eq!(info.exit_code, info_for(ErrorCode::Unsupported).exit_code);
     }
 
     #[test]

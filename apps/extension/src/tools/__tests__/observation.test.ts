@@ -3813,7 +3813,9 @@ describe("handleSnapshot", () => {
 
     if ("code" in result) throw new Error(`unexpected error: ${JSON.stringify(result)}`);
     expect(result.text).toContain('@e1 button "Frame action"');
-    const frameRef = [...ctx.refStore.entries()].find(([, entry]) => entry.backendNodeId === 22);
+    const frameRef = [...ctx.refStore.entries()].find(
+      ([, entry]) => entry.kind === "dom" && entry.backendNodeId === 22,
+    );
     expect(frameRef?.[1]).toMatchObject({
       tabId: 4,
       frameId: "child",

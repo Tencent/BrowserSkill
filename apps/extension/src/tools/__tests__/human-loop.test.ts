@@ -405,6 +405,7 @@ describe("handleRequestHelp", () => {
               agentWindowId: 99,
               refStore: {
                 resolveEntry: () => ({
+                  kind: "dom",
                   backendNodeId: 42,
                   tabId: 5,
                   frameId: "child",

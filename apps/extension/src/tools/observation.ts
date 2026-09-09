@@ -48,7 +48,7 @@ import {
   normaliseRef as sharedNormaliseRef,
   type ToolEffect,
 } from "./shared";
-import { resolveSnapshotRef } from "./snapshot-ref";
+import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
@@ -308,6 +308,12 @@ export async function handleScreenshot(
     if (!deps.cdp) {
       return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
     }
+    if (lookupRefTarget(ctx, ref, target.tabId)?.kind === "visual-region")
+      return rpcError(
+        "unsupported",
+        "ref_kind_unsupported",
+        "visual-region screenshot execution is not available in this build",
+      );
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
     if (signal?.aborted) return cancelled("screenshot");

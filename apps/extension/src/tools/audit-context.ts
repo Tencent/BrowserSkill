@@ -28,6 +28,8 @@ export async function auditContext(
     operation_id: params._audit_id,
     tab_id: tab.id,
     ...(url ? { url } : {}),
-    ...(ref?.tabId === tab.id && ref.name ? { target: ref.name.slice(0, 160) } : {}),
+    ...(ref?.kind === "dom" && ref.tabId === tab.id && ref.name
+      ? { target: ref.name.slice(0, 160) }
+      : {}),
   };
 }
