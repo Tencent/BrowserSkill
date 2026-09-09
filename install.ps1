@@ -213,7 +213,9 @@ function Main {
         }
 
         Write-Log "extracting ${archiveName}"
-        Expand-Archive -LiteralPath $archivePath -DestinationPath $tempDir -Force
+        # PowerShell 5.1's Expand-Archive treats the destination as a wildcard path.
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($archivePath, $tempDir)
 
         if (-not (Test-Path -LiteralPath (Join-Path $tempDir "bsk.exe"))) {
             Write-Die "bsk.exe not found in archive"
