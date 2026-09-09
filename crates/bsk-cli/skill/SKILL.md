@@ -16,6 +16,47 @@ are explicitly borrowed.
 Do not use this skill for tasks with no browser, for extension installation, or when the user only
 wants instructions. Never extract credentials, cookies, tokens, or other secrets from pages.
 
+## Prerequisites and first-time setup
+
+The `bsk` CLI and BrowserSkill extension must run on the machine with the user's browser.
+Installing this skill alone does not install either runtime component.
+
+Check `bsk --version` before the first browser task. If the CLI is missing, use the official
+installer for the current platform; skip installation when `bsk` is already available.
+
+**macOS / Linux (sh, bash, or zsh):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+bsk --version
+```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
+bsk --version
+```
+
+The default install directory is `~/.local/bin`; no administrator privileges are needed.
+If the command is still unavailable, check that directory and the current process's `PATH` before
+reinstalling. Restart the terminal or agent if it inherited an older `PATH`.
+
+Run `bsk doctor` before starting the first session. If no extension is connected, ask the user to
+install or enable BrowserSkill in the browser profile they want to automate:
+
+- [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
+- [Microsoft Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
+
+Have the user open the extension popup and wait for its green connected state, then rerun
+`bsk doctor`. Proceed when every check is `ok` or `na`; otherwise follow the failing check's hint.
+Extension installation is a manual prerequisite, not a browser automation step.
+
+See the official [installation guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md)
+for setup troubleshooting and [Quick Start](https://github.com/Tencent/BrowserSkill#quick-start)
+for installing the skill into another agent harness.
+
 ## Required lifecycle
 
 Every browser task owns a bounded session:
