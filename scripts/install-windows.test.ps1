@@ -1,11 +1,11 @@
 ﻿#Requires -Version 5.1
 param(
     [string]$BskPath = (Join-Path $PSScriptRoot "../target/debug/bsk.exe"),
-    [switch]$ArchitectureOnly
+    [switch]$HelpersOnly
 )
 $ErrorActionPreference = "Stop"
 
-# Load definitions, never Main: no downloads or changes to the real user PATH.
+# Load definitions without running Main. Registry PATH writes are isolated below.
 $installer = Join-Path $PSScriptRoot "../install.ps1"
 $tokens = $null
 $errors = $null
@@ -69,22 +69,38 @@ function Assert-Fails([scriptblock]$Action) {
         $env:PROCESSOR_ARCHITEW6432 = $oldNativeArch
     }
 }
-if ($ArchitectureOnly) { return }
-
 $dir = 'C:\Users\Alice\.local\bin'
-foreach ($existing in @('', 'C:\WindowsApps', 'C:\A;C:\B')) {
-    $script:UserPath = $existing
-    Add-ToUserPath $dir
-    $expected = if ($existing) { "$existing;$dir" } else { $dir }
-    Assert-Equal $script:UserPath $expected
-    Add-ToUserPath $dir
-    Assert-Equal $script:UserPath $expected
+$pathCases = @(
+    @{ Existing = ''; Expected = $dir }
+    @{ Existing = 'C:\WindowsApps'; Expected = "$dir;C:\WindowsApps" }
+    @{ Existing = 'C:\A;C:\B'; Expected = "$dir;C:\A;C:\B" }
+    @{ Existing = "C:\old-bsk;$dir;C:\B;$($dir.ToUpperInvariant())"; Expected = "$dir;C:\old-bsk;C:\B" }
+)
+$oldPath = $env:PATH
+try {
+    foreach ($case in $pathCases) {
+        $script:UserPath = $case.Existing
+        $env:PATH = $case.Existing
+        foreach ($attempt in 1..2) {
+            Add-ToUserPath $dir
+            Add-ToSessionPath $dir
+            Assert-Equal $script:UserPath $case.Expected
+            Assert-Equal $env:PATH $case.Expected
+        }
+    }
+} finally { $env:PATH = $oldPath }
+if ($HelpersOnly) {
+    Write-Host "Windows installer helper regressions passed ($($PSVersionTable.PSVersion))"
+    return
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ("bsk-install-test-" + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($root) | Out-Null
 $oldBskHome = $env:BSK_HOME
 $oldAutoUpdate = $env:BSK_AUTO_UPDATE
+$oldVersion = $env:BSK_VERSION
+$oldProcessArch = $env:PROCESSOR_ARCHITECTURE
+$oldNativeArch = $env:PROCESSOR_ARCHITEW6432
 $daemon = $null
 try {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -180,6 +196,84 @@ try {
     try { Assert-Fails { Install-Binary $source $target } } finally { $lock.Dispose() }
     Assert-Equal (Get-FileHash -LiteralPath $target).Hash $before
     if (@(Get-ChildItem -LiteralPath $targetDir -Filter "*.install-*").Count) { throw "staging files leaked" }
+
+    # Exercise Main with real ZIPs/executables, isolating network and user state.
+    & {
+        $fixtureTemp = Join-Path $root 'temp [literal]'
+        [IO.Directory]::CreateDirectory($fixtureTemp) | Out-Null
+        $mainDefinition = ($ast.EndBlock.Statements | Where-Object {
+            $_ -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq 'Main'
+        }).Extent.Text.Replace('[System.IO.Path]::GetTempPath()', '$fixtureTemp')
+        Invoke-Expression $mainDefinition
+        function Write-Die([string]$Message) { throw $Message }
+        $bashProfile = (Get-Command Add-ToBashProfile).ScriptBlock
+        function Add-ToBashProfile([string]$Dir) {
+            & $bashProfile $Dir (Join-Path $root 'flow.bashrc')
+        }
+        $fixtureArchive = Join-Path $root 'release.zip'
+        Compress-Archive -LiteralPath $source -DestinationPath $fixtureArchive -CompressionLevel Fastest
+        $asset = @{ sha256 = (Get-FileHash -LiteralPath $fixtureArchive).Hash }
+        $fixtureManifest = @{ version = '9.8.7'; assets = @{ 'windows-x64' = $asset } }
+        $downloads = New-Object 'System.Collections.Generic.List[string]'
+        function Invoke-RestMethod([string]$Uri) {
+            if (-not $fixtureManifest) { throw 'fixture manifest unavailable' }
+            return $fixtureManifest
+        }
+        function Invoke-WebRequest {
+            [CmdletBinding()]
+            param([string]$Uri, [string]$OutFile, [switch]$UseBasicParsing)
+            $downloads.Add($Uri)
+            [IO.File]::Copy($fixtureArchive, $OutFile)
+        }
+        $GitHub = 'https://example.invalid/fixture'
+        $InstallDir = Join-Path $root 'installed [literal]'
+        $installed = Join-Path $InstallDir 'bsk.exe'
+        $env:BSK_VERSION = $null
+        $env:PROCESSOR_ARCHITECTURE = 'AMD64'
+        $env:PROCESSOR_ARCHITEW6432 = $null
+        $script:UserPath = "$targetDir;$InstallDir;$($InstallDir.ToUpperInvariant())"
+        $env:PATH = "$targetDir;$InstallDir;$oldPath"
+        Assert-Equal (Get-Command bsk -CommandType Application).Source $target
+        Main
+        Assert-Equal $downloads.Count 1
+        Assert-Equal (Get-Command bsk -CommandType Application).Source $installed
+        Assert-Equal $script:UserPath "$InstallDir;$targetDir"
+        Assert-Equal (Get-FileHash -LiteralPath $installed).Hash (Get-FileHash -LiteralPath $source).Hash
+        Assert-Equal @(Get-ChildItem -LiteralPath $fixtureTemp -Force).Count 0
+
+        # ARM64 must be listed in the manifest before any archive is requested.
+        $env:PROCESSOR_ARCHITECTURE = 'ARM64'
+        $downloads.Clear()
+        $message = $null
+        try { Main } catch { $message = $_.Exception.Message }
+        Assert-Equal $message 'version.json does not list a Windows ARM64 package for bsk 9.8.7'
+        Assert-Equal $downloads.Count 0
+        $env:BSK_VERSION = '9.8.7'
+        $fixtureManifest = $null
+        $message = $null
+        try { Main } catch { $message = $_.Exception.Message }
+        Assert-Equal $message 'version.json does not list a Windows ARM64 package for bsk 9.8.7'
+        Assert-Equal $downloads.Count 0
+
+        # Keep pinned x64 installs compatible with older releases without manifests.
+        $env:PROCESSOR_ARCHITECTURE = 'AMD64'
+        Main
+        Assert-Equal $downloads.Count 1
+        Assert-Equal @(Get-ChildItem -LiteralPath $fixtureTemp -Force).Count 0
+
+        # A listed ARM64 archive remains selectable (the fixture uses the host EXE).
+        $fixtureManifest = @{ version = '9.8.7'; assets = @{ 'windows-arm64' = $asset } }
+        $env:PROCESSOR_ARCHITECTURE = 'ARM64'
+        Main
+        Assert-Equal $downloads[$downloads.Count - 1] "$GitHub/releases/download/cli-v9.8.7/bsk-v9.8.7-aarch64-pc-windows-msvc.zip"
+
+        # A checksum failure must clean the bracketed temp path and preserve the install.
+        $before = (Get-FileHash -LiteralPath $installed).Hash
+        $fixtureManifest.assets['windows-arm64'] = @{ sha256 = '0' * 64 }
+        Assert-Fails { Main }
+        Assert-Equal (Get-FileHash -LiteralPath $installed).Hash $before
+        Assert-Equal @(Get-ChildItem -LiteralPath $fixtureTemp -Force).Count 0
+    }
     Write-Host "Windows installer regressions passed ($($PSVersionTable.PSVersion))"
 }
 catch {
@@ -194,6 +288,10 @@ finally {
     }
     $env:BSK_HOME = $oldBskHome
     $env:BSK_AUTO_UPDATE = $oldAutoUpdate
+    $env:BSK_VERSION = $oldVersion
+    $env:PROCESSOR_ARCHITECTURE = $oldProcessArch
+    $env:PROCESSOR_ARCHITEW6432 = $oldNativeArch
+    $env:PATH = $oldPath
     Remove-Item Env:BSK_TEST_RC -ErrorAction SilentlyContinue
     # Resolve and verify before recursive cleanup; only this fixture is removed.
     $resolvedRoot = [IO.Path]::GetFullPath($root)

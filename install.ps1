@@ -3,7 +3,7 @@
 install.ps1 — install the bsk CLI on Windows from GitHub Releases.
 
 .DESCRIPTION
-Downloads the latest (or pinned) bsk release for Windows x64 or ARM64,
+Downloads the latest (or pinned) bsk release for Windows x64,
 extracts bsk.exe to a user-local directory, and adds it to PATH.
 
 Usage:
@@ -73,25 +73,21 @@ function Add-ToUserPath {
 
     $currentUserPath = @([Environment]::GetEnvironmentVariable("PATH", "User") -split ";" | Where-Object { $_ })
 
-    if ($currentUserPath -contains $Dir) {
-        Write-Log "$Dir is already in your user PATH"
+    $newUserPath = (@($Dir) + @($currentUserPath | Where-Object { $_ -ine $Dir })) -join ";"
+    if (($currentUserPath -join ";") -ceq $newUserPath) {
+        Write-Log "$Dir is already first in your user PATH"
         return
     }
 
-    $newUserPath = ($currentUserPath + $Dir) -join ";"
     [Environment]::SetEnvironmentVariable("PATH", $newUserPath, "User")
-    Write-Log "added ${Dir} to user PATH"
+    Write-Log "placed ${Dir} first in user PATH"
 }
 
 function Add-ToSessionPath {
     param([string]$Dir)
 
-    $pathEntries = $env:PATH -split ";" | Where-Object { $_ }
-    if ($pathEntries -contains $Dir) {
-        return
-    }
-
-    $env:PATH = "$Dir;$env:PATH"
+    $pathEntries = @($env:PATH -split ";" | Where-Object { $_ -and $_ -ine $Dir })
+    $env:PATH = (@($Dir) + $pathEntries) -join ";"
 }
 
 # ── Git Bash (bash environment) PATH helper ──────────────────────────────────
@@ -173,14 +169,20 @@ function Main {
         Write-Log "latest version is ${version}"
     }
 
+    $platformKey = $platform.PlatformKey
+    $asset = $null
+    if ($manifest -and $manifest.assets) {
+        $asset = $manifest.assets.$platformKey
+    }
+    # ARM64 is not in the current release matrix. Require a published entry
+    # before attempting it, while preserving legacy x64 installs without a manifest.
+    if ($platform.ArchId -eq "arm64" -and -not $asset) {
+        Write-Die "version.json does not list a Windows ARM64 package for bsk $version"
+    }
+
     $archiveName = "bsk-v${version}-$($platform.TargetTriple).zip"
     $downloadUrl = "${GitHub}/releases/download/${tag}/${archiveName}"
-
-    $expectedSha = $null
-    $platformKey = $platform.PlatformKey
-    if ($manifest -and $manifest.assets) {
-        $expectedSha = $manifest.assets.$platformKey.sha256
-    }
+    $expectedSha = if ($asset) { $asset.sha256 } else { $null }
     if (-not $expectedSha) {
         if (-not $manifest) {
             Write-Log "warning: could not fetch version.json; skipping checksum verification"
@@ -201,7 +203,7 @@ function Main {
 
         if ($expectedSha) {
             Write-Log "verifying checksum"
-            $actualSha = (Get-FileHash -Algorithm SHA256 -Path $archivePath).Hash
+            $actualSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash
             if ($actualSha -ieq $expectedSha) {
                 Write-Log "checksum OK"
             }
@@ -211,13 +213,13 @@ function Main {
         }
 
         Write-Log "extracting ${archiveName}"
-        Expand-Archive -Path $archivePath -DestinationPath $tempDir -Force
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $tempDir -Force
 
-        if (-not (Test-Path (Join-Path $tempDir "bsk.exe"))) {
+        if (-not (Test-Path -LiteralPath (Join-Path $tempDir "bsk.exe"))) {
             Write-Die "bsk.exe not found in archive"
         }
 
-        if (-not (Test-Path $InstallDir)) {
+        if (-not (Test-Path -LiteralPath $InstallDir)) {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         }
 
@@ -239,12 +241,17 @@ function Main {
         & $bskPath --version
         if ($LASTEXITCODE -ne 0) { throw "installed bsk failed verification" }
 
+        $command = Get-Command bsk -ErrorAction SilentlyContinue
+        if (-not $command -or $command.CommandType -ne "Application" -or $command.Source -ine $bskPath) {
+            Write-Log "warning: 'bsk' does not resolve to $bskPath; check Get-Command bsk -All for a conflicting command"
+        }
+
         Write-Log "done"
         Write-Host ""
         Write-Host "Open a new terminal (PowerShell / Git Bash) for PATH changes to take full effect."
     }
     finally {
-        Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
