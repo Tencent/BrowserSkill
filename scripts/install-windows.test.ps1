@@ -24,9 +24,12 @@ foreach ($statement in $ast.EndBlock.Statements) {
 function Assert-Equal($Actual, $Expected) {
     if ($Actual -cne $Expected) { throw "expected [$Expected], got [$Actual]" }
 }
-function Assert-Fails([scriptblock]$Action) {
+function Assert-Fails([scriptblock]$Action, [string]$MessageContains) {
     $failed = $false
-    try { & $Action } catch { $failed = $true }
+    try { & $Action } catch {
+        $failed = $true
+        if ($MessageContains -and -not $_.Exception.Message.Contains($MessageContains)) { throw }
+    }
     if (-not $failed) { throw "expected failure" }
 }
 
@@ -127,7 +130,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Git Bash failed" }
     Assert-Equal $actual ('/c' + $special.Substring(2).Replace('\', '/'))
 
-    $env:BSK_HOME = Join-Path $root "home"
+    $env:BSK_HOME = Join-Path $root "home [state]"
     $env:BSK_AUTO_UPDATE = "off"
     [IO.Directory]::CreateDirectory($env:BSK_HOME) | Out-Null
     $sourceDir = Join-Path $root "download"
@@ -137,7 +140,8 @@ try {
     $targetDir = Join-Path $root "中文 space [x] & install"
     [IO.Directory]::CreateDirectory($targetDir) | Out-Null
     $target = Join-Path $targetDir "bsk.exe"
-    Install-Binary $source $target
+    $firstInstallOutput = Install-Binary $source $target 6>&1 | Out-String
+    if ($firstInstallOutput -match 'daemon will restart') { throw 'fresh install reported a daemon restart' }
     Assert-Equal (Get-FileHash -LiteralPath $target).Hash (Get-FileHash -LiteralPath $source).Hash
 
     $daemon = Start-Process -FilePath $target -ArgumentList @('daemon', 'start', '--foreground', '--port', '0') -WindowStyle Hidden -PassThru
@@ -182,15 +186,19 @@ try {
     # Refuse replacement when daemon identity cannot be verified.
     [IO.File]::WriteAllText($infoPath, 'invalid daemon metadata')
     $before = (Get-FileHash -LiteralPath $target).Hash
-    Assert-Fails { Install-Binary $source $target }
+    Assert-Fails { Install-Binary $source $target } -MessageContains $infoPath
     Assert-Equal (Get-FileHash -LiteralPath $target).Hash $before
 
     # A failed stop must also prevent installation to a previously empty target.
     $blockedTarget = Join-Path $newTargetDir "blocked.exe"
-    Assert-Fails { Install-Binary $source $blockedTarget }
+    Assert-Fails { Install-Binary $source $blockedTarget } -MessageContains $infoPath
     if (Test-Path -LiteralPath $blockedTarget) { throw "failed stop created an installation" }
     if (@(Get-ChildItem -LiteralPath $newTargetDir -Filter "*.install-*").Count) { throw "failed stop leaked staging files" }
+    Assert-Equal ([IO.File]::ReadAllText($infoPath)) 'invalid daemon metadata'
+    # Following the reported recovery path must allow the same installation to succeed.
     [IO.File]::Delete($infoPath)
+    Install-Binary $source $blockedTarget
+    Assert-Equal (Get-FileHash -LiteralPath $blockedTarget).Hash (Get-FileHash -LiteralPath $source).Hash
 
     # A remaining lock must fail without truncation or staging debris.
     $lock = [IO.File]::Open($target, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
@@ -271,7 +279,11 @@ try {
         $script:UserPath = "$targetDir;$InstallDir;$($InstallDir.ToUpperInvariant())"
         $env:PATH = "$targetDir;$InstallDir;$oldPath"
         Assert-Equal (Get-Command bsk).Source $target
-        Main
+        $installOutput = Main 6>&1 | Out-String
+        if ($installOutput -notmatch 'current session only' -or
+            $installOutput -notmatch 'Machine PATH' -or $installOutput -notmatch 'Get-Command bsk -All') {
+            throw 'install did not explain PATH verification in a new terminal'
+        }
         Assert-Equal $downloads.Count 1
         Assert-Equal (Get-Command bsk).Source $installed
         Assert-Equal $script:UserPath "$InstallDir;$targetDir"
