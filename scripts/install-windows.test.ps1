@@ -233,10 +233,10 @@ try {
         $env:PROCESSOR_ARCHITEW6432 = $null
         $script:UserPath = "$targetDir;$InstallDir;$($InstallDir.ToUpperInvariant())"
         $env:PATH = "$targetDir;$InstallDir;$oldPath"
-        Assert-Equal (Get-Command bsk -CommandType Application).Source $target
+        Assert-Equal (Get-Command bsk).Source $target
         Main
         Assert-Equal $downloads.Count 1
-        Assert-Equal (Get-Command bsk -CommandType Application).Source $installed
+        Assert-Equal (Get-Command bsk).Source $installed
         Assert-Equal $script:UserPath "$InstallDir;$targetDir"
         Assert-Equal (Get-FileHash -LiteralPath $installed).Hash (Get-FileHash -LiteralPath $source).Hash
         Assert-Equal @(Get-ChildItem -LiteralPath $fixtureTemp -Force).Count 0
