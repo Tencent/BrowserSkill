@@ -7,6 +7,7 @@ import type { CdpRunner } from "../../shared";
 import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
 import { buildSemanticGraph, buildSemanticVomScene } from "../semantic-graph";
 import { REQUESTED_STYLES, type SnapshotReply, VISUAL_STYLES } from "../snapshot";
+import { deduplicateVisualCandidates } from "../visual-dedup";
 import { discoverVisualCandidates } from "../visual-discovery";
 
 function fixture(
@@ -1459,6 +1460,15 @@ describe("visual facts integration", () => {
       document: { frameId: "main", documentElementBackendNodeId: 1 },
       region: { crop: { x: 10, y: 20, width: 100, height: 40 } },
     });
+    const deduplicated = await deduplicateVisualCandidates(result);
+    expect(deduplicated.candidates).toEqual(result.candidates);
+    expect(deduplicated.candidates[0]).toBe(result.candidates[0]);
+    expect(deduplicated).toMatchObject({
+      candidateCount: 1,
+      deduplicatedCount: 0,
+      dedupDegraded: false,
+    });
+    expect(logs).toHaveLength(before);
     expect(facts.documents[0].index.nodes.get(2)?.layout?.clientRect).toEqual([0, 0, 100, 40]);
     expect(facts.documents[0].geometry?.pageScale).toBe(1);
     const baseline = fixture({ frames: [{ frameId: "main", target: { tabId: 4 } }] });
