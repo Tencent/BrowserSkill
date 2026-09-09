@@ -1,5 +1,8 @@
 ﻿#Requires -Version 5.1
-param([string]$BskPath = (Join-Path $PSScriptRoot "../target/debug/bsk.exe"))
+param(
+    [string]$BskPath = (Join-Path $PSScriptRoot "../target/debug/bsk.exe"),
+    [switch]$ArchitectureOnly
+)
 $ErrorActionPreference = "Stop"
 
 # Load definitions, never Main: no downloads or changes to the real user PATH.
@@ -26,6 +29,47 @@ function Assert-Fails([scriptblock]$Action) {
     try { & $Action } catch { $failed = $true }
     if (-not $failed) { throw "expected failure" }
 }
+
+# Isolate the fatal-error stub and restore the real process environment.
+& {
+    function Write-Die([string]$Message) { throw $Message }
+    $oldProcessArch = $env:PROCESSOR_ARCHITECTURE
+    $oldNativeArch = $env:PROCESSOR_ARCHITEW6432
+    try {
+        $cases = @(
+            @{ Process = 'AMD64'; Native = $null; Arch = 'x64'; Triple = 'x86_64-pc-windows-msvc' }
+            @{ Process = 'ARM64'; Native = $null; Arch = 'arm64'; Triple = 'aarch64-pc-windows-msvc' }
+            @{ Process = 'amd64'; Native = $null; Arch = 'x64'; Triple = 'x86_64-pc-windows-msvc' }
+            @{ Process = 'x86'; Native = 'AMD64'; Arch = 'x64'; Triple = 'x86_64-pc-windows-msvc' }
+            @{ Process = 'x86'; Native = 'ARM64'; Arch = 'arm64'; Triple = 'aarch64-pc-windows-msvc' }
+            @{ Process = $null; Native = 'AMD64'; Arch = 'x64'; Triple = 'x86_64-pc-windows-msvc' }
+            @{ Process = 'x86'; Native = $null; Error = 'unsupported architecture: x86 (x64 and ARM64 only)' }
+            @{ Process = 'AMD64'; Native = 'IA64'; Error = 'unsupported architecture: IA64 (x64 and ARM64 only)' }
+            @{ Process = $null; Native = $null; Error = 'could not detect Windows architecture: PROCESSOR_ARCHITEW6432 and PROCESSOR_ARCHITECTURE are empty' }
+        )
+        foreach ($case in $cases) {
+            $env:PROCESSOR_ARCHITECTURE = $case.Process
+            $env:PROCESSOR_ARCHITEW6432 = $case.Native
+            if ($case.Error) {
+                $message = $null
+                try { Get-PlatformTriple | Out-Null } catch { $message = $_.Exception.Message }
+                Assert-Equal $message $case.Error
+            }
+            else {
+                $platform = Get-PlatformTriple
+                Assert-Equal $platform.ArchId $case.Arch
+                Assert-Equal $platform.TargetTriple $case.Triple
+                Assert-Equal $platform.PlatformKey "windows-$($case.Arch)"
+            }
+        }
+        Write-Host "Windows installer architecture regressions passed ($($PSVersionTable.PSVersion))"
+    }
+    finally {
+        $env:PROCESSOR_ARCHITECTURE = $oldProcessArch
+        $env:PROCESSOR_ARCHITEW6432 = $oldNativeArch
+    }
+}
+if ($ArchitectureOnly) { return }
 
 $dir = 'C:\Users\Alice\.local\bin'
 foreach ($existing in @('', 'C:\WindowsApps', 'C:\A;C:\B')) {

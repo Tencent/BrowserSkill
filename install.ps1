@@ -3,7 +3,7 @@
 install.ps1 — install the bsk CLI on Windows from GitHub Releases.
 
 .DESCRIPTION
-Downloads the latest (or pinned) bsk release for Windows x64,
+Downloads the latest (or pinned) bsk release for Windows x64 or ARM64,
 extracts bsk.exe to a user-local directory, and adds it to PATH.
 
 Usage:
@@ -38,11 +38,17 @@ function Write-Die {
 # ── Platform / architecture detection ─────────────────────────────────────────
 
 function Get-PlatformTriple {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+    # RuntimeInformation.ProcessArchitecture can be unavailable in Windows PowerShell 5.1.
+    # WOW64 exposes the native architecture separately from the 32-bit process.
+    $arch = $env:PROCESSOR_ARCHITEW6432
+    if (-not $arch) { $arch = $env:PROCESSOR_ARCHITECTURE }
+    if (-not $arch) {
+        Write-Die "could not detect Windows architecture: PROCESSOR_ARCHITEW6432 and PROCESSOR_ARCHITECTURE are empty"
+    }
 
     switch ($arch) {
-        "X64"  { $archId = "x64" }
-        "Arm64" { $archId = "arm64" }
+        "AMD64" { $archId = "x64" }
+        "ARM64" { $archId = "arm64" }
         default { Write-Die "unsupported architecture: $arch (x64 and ARM64 only)" }
     }
 
