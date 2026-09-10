@@ -416,6 +416,39 @@ describe("recorded user steps reach the exported trace", () => {
     expect(step?.result.state).toBeTruthy();
   });
 
+  it("records a reload of the page the recording is on", async () => {
+    // Issue #139: a reload commits to the URL the tab is already on, so it used to
+    // be dropped as the duplicate half of a navigation and the trace had no step
+    // for it, even though replaying the flow may depend on the refresh.
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
+
+    const details = { tabId: TAB_ID, frameId: 0, url: START_URL };
+    chromeApi.webNavigationOnCommitted.emit({
+      ...details,
+      transitionType: "reload",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    chromeApi.webNavigationOnCompleted.emit(
+      details as unknown as chrome.webNavigation.WebNavigationFramedCallbackDetails,
+    );
+    // Let findRecordingForTab's tab lookup and the settle capture resolve.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
+
+    expect(trace.steps).toHaveLength(1);
+    const [step] = trace.steps;
+    expect(step).toMatchObject({ op: "navigate", to: START_URL, cause: "reload" });
+    expect(step?.state).toBeTruthy();
+    expect(step?.result.state).toBeTruthy();
+  });
+
   it("reports an address-bar navigation from the page it started on, not the redirect hop", async () => {
     const chromeApi = installChrome();
     const manager = fakeManager();

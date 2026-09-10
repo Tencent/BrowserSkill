@@ -115,6 +115,37 @@ describe("recording-step-buffer", () => {
     });
   });
 
+  it("records a reload of the current page instead of dropping it as a same-URL navigation", () => {
+    const buffer = {
+      steps: [],
+      navigation: { currentUrl: "https://example.com/a", pendingNavigation: false },
+    };
+    const result = observeRecordedNavigation(
+      buffer,
+      "https://example.com/a",
+      undefined,
+      "reload",
+      [],
+    );
+    expect(result).toEqual({ kind: "appended", index: 0 });
+    expect(buffer.steps[0]).toMatchObject({
+      op: "navigate",
+      url: "https://example.com/a",
+      transitionType: "reload",
+    });
+  });
+
+  it("still collapses the completion that follows a reload onto the recorded step", () => {
+    const buffer = {
+      steps: [],
+      navigation: { currentUrl: "https://example.com/a", pendingNavigation: false },
+    };
+    observeRecordedNavigation(buffer, "https://example.com/a", undefined, "reload", []);
+    // webNavigation.onCompleted reports the same URL and carries no transition type.
+    expect(observeRecordedNavigation(buffer, "https://example.com/a")).toEqual({ kind: "noop" });
+    expect(buffer.steps).toHaveLength(1);
+  });
+
   it("asks the recorder to coalesce redirect hops instead of emitting each one", () => {
     const buffer = {
       steps: [],
