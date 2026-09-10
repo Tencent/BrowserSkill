@@ -20,11 +20,19 @@ import {
   visualProjectionIssue,
 } from "./visual-region";
 
+/** Shared observation-time addresses, not cached live geometry. */
+export interface VisualFramePath {
+  readonly document: DocumentIdentity;
+  readonly parent?: { readonly ownerBackendNodeId: number; readonly frame: VisualFramePath };
+}
+
 export interface VisualCandidate {
   readonly document: DocumentIdentity;
   readonly backendNodeId: number;
   readonly parentBackendNodeId: number | null;
   readonly label?: string;
+  /** Absent when execution ancestry could not be established; discovery is still retained. */
+  readonly framePath?: VisualFramePath;
   readonly region: Extract<VisualRegionResult, { status: "available" }>;
 }
 
@@ -113,6 +121,7 @@ export async function discoverVisualCandidates(
   const candidates: VisualCandidate[] = [];
   const issues: VisualDiscoveryIssue[] = [];
   const documents = new Map(facts.documents.map((document) => [document.frame.frameId, document]));
+  const framePaths = new Map<string, VisualFramePath>();
   const contexts = new Map<string, Map<number, NodeContext>>();
   const roots = new Map<string, VisualContext>();
 
@@ -248,6 +257,16 @@ export async function discoverVisualCandidates(
           root.issue ??
           (!doc.identity ? "identity-unverified" : visualProjectionIssue(doc.geometry)),
       };
+      if (doc.identity) {
+        const parentPath = frame.parentFrameId ? framePaths.get(frame.parentFrameId) : undefined;
+        if (!frame.parentFrameId && frame.frameId === facts.rootFrameId)
+          framePaths.set(frame.frameId, { document: doc.identity });
+        else if (parentPath && frame.ownerBackendNodeId !== undefined)
+          framePaths.set(frame.frameId, {
+            document: doc.identity,
+            parent: { ownerBackendNodeId: frame.ownerBackendNodeId, frame: parentPath },
+          });
+      }
       roots.set(frame.frameId, root);
       contexts.set(frame.frameId, new Map());
     }
@@ -291,6 +310,7 @@ export async function discoverVisualCandidates(
         const label = node.attrs["aria-label"]?.trim() || node.attrs.title?.trim();
         candidates.push({
           document: document.identity,
+          framePath: framePaths.get(document.frame.frameId),
           backendNodeId: node.backendNodeId,
           parentBackendNodeId: node.parentBackendNodeId,
           ...(label ? { label } : {}),

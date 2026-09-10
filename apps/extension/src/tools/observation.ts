@@ -1,3 +1,8 @@
+import { parsePngDimensions } from "./png";
+import { captureVisualScreenshot } from "./visual-screenshot";
+
+export { parsePngDimensions } from "./png";
+
 import type { CapturedSceneInput } from "./vom/facts";
 // Observation handlers — `tool.snapshot`, `tool.get_html`, `tool.screenshot`,
 // and semantic `tool.observe` (design §7). Each handler resolves the target
@@ -99,38 +104,6 @@ export const normaliseRef = sharedNormaliseRef;
 export function stripDataUrlPrefix(dataUrl: string): string {
   const m = /^data:image\/[a-z+]+;base64,/i.exec(dataUrl);
   return m ? dataUrl.slice(m[0].length) : dataUrl;
-}
-
-/**
- * Parse a PNG's IHDR chunk and return `(width, height)`. Returns
- * `null` on any malformed input so callers fall back to `0/0` instead
- * of throwing.
- *
- * PNG layout: 8-byte signature, then a 4-byte length, 4-byte type
- * ("IHDR"), then the chunk data — width is bytes 16-19 BE, height is
- * 20-23 BE.
- */
-export function parsePngDimensions(base64: string): { width: number; height: number } | null {
-  try {
-    // atob is available in MV3 service workers.
-    const head = base64.length > 64 ? base64.slice(0, 64) : base64;
-    const bin = atob(head);
-    if (bin.length < 24) return null;
-    if (bin.charCodeAt(0) !== 0x89 || bin.charCodeAt(1) !== 0x50 || bin.charCodeAt(2) !== 0x4e) {
-      return null;
-    }
-    const u32 = (off: number) =>
-      (bin.charCodeAt(off) << 24) |
-      (bin.charCodeAt(off + 1) << 16) |
-      (bin.charCodeAt(off + 2) << 8) |
-      bin.charCodeAt(off + 3);
-    const width = u32(16) >>> 0;
-    const height = u32(20) >>> 0;
-    if (width === 0 || height === 0) return null;
-    return { width, height };
-  } catch {
-    return null;
-  }
 }
 
 export interface ScreenshotDeps {
@@ -308,12 +281,17 @@ export async function handleScreenshot(
     if (!deps.cdp) {
       return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
     }
-    if (lookupRefTarget(ctx, ref, target.tabId)?.kind === "visual-region")
-      return rpcError(
-        "unsupported",
-        "ref_kind_unsupported",
-        "visual-region screenshot execution is not available in this build",
+    const entry = lookupRefTarget(ctx, ref, target.tabId);
+    if (entry?.kind === "visual-region") {
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const captured = await withExtensionOverlayHidden(
+        target.tabId,
+        () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
+        deps.sendToTab,
       );
+      if (isRpcError(captured)) return captured;
+      return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });
+    }
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
     if (signal?.aborted) return cancelled("screenshot");

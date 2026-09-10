@@ -11,7 +11,7 @@ export async function verifyDocumentIdentity(
   identity: DocumentIdentity,
   signal?: AbortSignal,
 ): Promise<"current" | "changed" | "unavailable"> {
-  return verifyIdentity(cdp, identity, signal);
+  return (await verifyIdentity(cdp, identity, signal)).status;
 }
 
 /** Verify the visual anchor in its original frame; geometry is checked by screenshot execution. */
@@ -20,7 +20,24 @@ export async function verifyVisualTargetIdentity(
   candidate: VisualCandidate,
   signal?: AbortSignal,
 ): Promise<"current" | "changed" | "unavailable"> {
-  return verifyIdentity(cdp, candidate.document, signal, candidate.backendNodeId);
+  return (await verifyIdentity(cdp, candidate.document, signal, candidate.backendNodeId)).status;
+}
+
+export type VerifiedNodeResult =
+  | { status: "changed" | "unavailable" }
+  | { status: "current"; objectId: string; objectGroup: string };
+
+/** Caller must release objectGroup in finally after its local read. */
+export async function resolveVerifiedNode(
+  cdp: CdpRunner,
+  identity: DocumentIdentity,
+  backendNodeId: number,
+  signal?: AbortSignal,
+): Promise<VerifiedNodeResult> {
+  const result = await verifyIdentity(cdp, identity, signal, backendNodeId, true);
+  return result.status === "current" && result.objectId && result.objectGroup
+    ? { status: "current", objectId: result.objectId, objectGroup: result.objectGroup }
+    : { status: result.status === "changed" ? "changed" : "unavailable" };
 }
 
 async function verifyIdentity(
@@ -28,15 +45,22 @@ async function verifyIdentity(
   identity: DocumentIdentity,
   signal?: AbortSignal,
   anchorBackendNodeId?: number,
-): Promise<"current" | "changed" | "unavailable"> {
+  retain = false,
+): Promise<{
+  status: "current" | "changed" | "unavailable";
+  objectId?: string;
+  objectGroup?: string;
+}> {
   const attached = () => cdp.getAttachmentId?.(identity.target.tabId) === identity.attachmentId;
   throwIfAborted(signal);
-  if (!attached()) return "changed";
+  if (!attached()) return { status: "changed" };
   const objectGroup = `bsk-document-identity-${crypto.randomUUID()}`;
   const send = <T>(method: string, params: object) => {
     throwIfAborted(signal);
     return sendToCdpTarget<T>(cdp, identity.target, method, params);
   };
+  let objectId: string | undefined;
+  let retained = false;
   try {
     const world = await send<{ executionContextId: number }>("Page.createIsolatedWorld", {
       frameId: identity.frameId,
@@ -63,7 +87,8 @@ async function verifyIdentity(
         executionContextId: world.executionContextId,
         objectGroup,
       });
-      if (!anchor.object?.objectId) return "unavailable";
+      if (!anchor.object?.objectId) return { status: "unavailable" };
+      objectId = anchor.object.objectId;
       reply = await send<RootReply>("Runtime.callFunctionOn", {
         objectId: anchor.object.objectId,
         functionDeclaration:
@@ -72,20 +97,24 @@ async function verifyIdentity(
         serializationOptions,
       });
     }
-    if (!attached()) return "changed";
+    if (!attached()) return { status: "changed" };
     const root = reply.result?.deepSerializedValue;
-    if (root?.type === "null") return "changed";
+    if (root?.type === "null") return { status: "changed" };
     const id = root?.type === "node" ? root.value?.backendNodeId : undefined;
-    if (id === undefined) return "unavailable";
-    return id === identity.documentElementBackendNodeId ? "current" : "changed";
+    if (id === undefined) return { status: "unavailable" };
+    if (id !== identity.documentElementBackendNodeId) return { status: "changed" };
+    throwIfAborted(signal);
+    retained = retain && !!objectId;
+    return { status: "current", ...(retained ? { objectId, objectGroup } : {}) };
   } catch (error) {
     throwIfAborted(signal);
     if (isAbortError(error)) throw error;
-    return attached() ? "unavailable" : "changed";
+    return { status: attached() ? "unavailable" : "changed" };
   } finally {
-    await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
-      objectGroup,
-    }).catch(() => {});
+    if (!retained)
+      await sendToCdpTarget(cdp, identity.target, "Runtime.releaseObjectGroup", {
+        objectGroup,
+      }).catch(() => {});
     throwIfAborted(signal);
   }
 }
