@@ -239,6 +239,7 @@ export function createPageCapture(onCancel: (id: string) => void) {
 
   return {
     async handle(request: PageRequest): Promise<PageMetrics> {
+      if (request.action === "probe") return measure();
       if (request.action === "begin") {
         if (task && !task.signal.aborted) throw new ScreenshotError("busy");
         task = prepare(request.id, request.label, request.cancelLabel);

@@ -26,6 +26,7 @@ function setup(saved: CaptureState | null = null, busy = false) {
       onMessage: event(),
     },
     tabs: {
+      sendMessage: vi.fn(async () => ({ ok: true, metrics: {} })),
       get: vi.fn(async () => ({
         id: 4,
         windowId: 1,
@@ -79,6 +80,17 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("independent screenshot jobs", () => {
+  it("reports inaccessible documents before starting the capture engine", async () => {
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockRejectedValue(new Error("Receiving end does not exist"));
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { phase: "error", error: "unavailable" },
+      }),
+    );
+    expect(capturePage).not.toHaveBeenCalled();
+  });
   it("saves a completed result and opens the extension preview", async () => {
     const { api, call } = setup();
     expect(await call("start")).toMatchObject({

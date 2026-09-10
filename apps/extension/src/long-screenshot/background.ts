@@ -129,6 +129,9 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 });
         documentId = frame?.documentId;
         if (!documentId) throw new ScreenshotError("unavailable");
+        // Fail with a refresh/unsupported-page hint before acquiring any capture
+        // backend if this document cannot receive the extension content script.
+        await page({ action: "probe" });
         await checkTab();
         source = await openScreenshotSource(tabId, windowId, controller.signal, checkTab);
         const result = await capturePage({

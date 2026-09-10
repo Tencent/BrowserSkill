@@ -49,6 +49,7 @@ export interface PageMetrics {
 }
 
 export type PageCommand =
+  | { action: "probe" }
   | { action: "begin"; label: string; cancelLabel: string }
   | { action: "move"; y: number; capture: boolean }
   | { action: "inspect" }
