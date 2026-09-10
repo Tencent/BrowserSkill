@@ -66,6 +66,16 @@
       "copied": "已复制",
       "hintDisconnected": "连接后可用",
       "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取写出的 `./trace` 目录包（`trace.json` + `states/`），总结我做了什么。"
+    },
+    "interaction": {
+      "title": "自动化设置",
+      "confirmTabBorrow": "借用标签页前确认",
+      "confirmTabBorrowHint": "Agent 使用你已打开的标签页前，需要你允许。",
+      "requestHelpEnabled": "允许请求人工协助",
+      "requestHelpEnabledHint": "遇到登录、验证码或无法继续的步骤时，等待你处理。关闭后立即返回受阻。",
+      "scope": "设置自动保存，适用于当前浏览器配置文件。",
+      "readFailed": "无法读取自动化设置，请重新打开插件。",
+      "writeFailed": "保存失败，设置未更改，请重试。"
     }
   },
   "controlOverlay": {

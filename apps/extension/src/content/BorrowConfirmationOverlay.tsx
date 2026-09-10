@@ -9,14 +9,12 @@ export interface BorrowRequestData {
   tabTitle: string;
   timeoutMs: number;
   onAllow: () => void;
-  onDeny: () => void;
+  onDeny: (timedOut?: boolean) => void;
 }
 
 interface Props {
   requests: BorrowRequestData[];
 }
-
-const EXIT_ANIMATION_MS = 150;
 
 export function BorrowConfirmationOverlay({ requests }: Props) {
   const activeRequest = requests.find((r) => r.isActiveTab);
@@ -82,19 +80,19 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
     settledRef.current = true;
     setAwaitingAutoDeny(false);
     setExiting(true);
-    setTimeout(() => onAllowRef.current(), EXIT_ANIMATION_MS);
+    onAllowRef.current();
   }
 
   function handleAllow() {
     triggerAllow();
   }
 
-  function handleDeny() {
+  function handleDeny(timedOut = false) {
     if (settledRef.current) return;
     settledRef.current = true;
     setAwaitingAutoDeny(false);
     setExiting(true);
-    setTimeout(() => onDenyRef.current(), EXIT_ANIMATION_MS);
+    onDenyRef.current(timedOut);
   }
 
   useEffect(() => {
@@ -113,7 +111,7 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
   useEffect(() => {
     if (!awaitingAutoDeny || settledRef.current) return;
     const id = setTimeout(() => {
-      handleDeny();
+      handleDeny(true);
     }, PROGRESS_TRANSITION_MS);
     return () => clearTimeout(id);
   }, [awaitingAutoDeny]);
@@ -143,14 +141,14 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
             onProgressTransitionEnd={(propertyName) => {
               if (!awaitingAutoDeny || secondsLeft !== 0) return;
               if (propertyName !== "stroke-dashoffset") return;
-              handleDeny();
+              handleDeny(true);
             }}
           />
           <span className="text-[13px] text-gray-500">
             {t("borrowConfirmation.autoDeny", { count: secondsLeft })}
           </span>
         </div>
-        <ActionButtons onDeny={handleDeny} onAllow={handleAllow} />
+        <ActionButtons onDeny={() => handleDeny()} onAllow={handleAllow} />
       </div>
     );
   }
@@ -160,7 +158,7 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
       data-slot="borrow-confirmation-toast"
       className={`flex w-80 flex-col rounded-xl border border-[#ffedd5] bg-[#FFFBF7] p-4 pb-3.5 shadow-[0_10px_40px_rgba(124,45,18,0.1)] ${cardClass}`}
     >
-      <BorrowToastHeader onDeny={handleDeny} />
+      <BorrowToastHeader onDeny={() => handleDeny()} />
       <p className="mb-2.5 text-[13px] leading-relaxed text-[#555]">
         {t("borrowConfirmation.targetTab")}
         <br />
@@ -174,7 +172,7 @@ function BorrowRequestItem({ request, isModal }: { request: BorrowRequestData; i
           handleDeny();
         }}
       />
-      <ActionButtons onDeny={handleDeny} onAllow={handleAllow} gapClass="gap-2" />
+      <ActionButtons onDeny={() => handleDeny()} onAllow={handleAllow} gapClass="gap-2" />
     </div>
   );
 }

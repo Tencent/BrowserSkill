@@ -47,6 +47,8 @@ impl std::fmt::Display for SessionId {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub unattended: bool,
+    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub id: SessionId,
     pub browser_id: BrowserId,
     pub agent_window_id: Option<i64>,
@@ -56,6 +58,7 @@ pub struct Session {
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
         SessionStatusEntry {
+            interaction: self.interaction,
             session_id: self.id.0.clone(),
             browser_instance_id: self.browser_id.0.clone(),
             agent_window_id: self.agent_window_id,
@@ -142,6 +145,8 @@ impl SessionRegistry {
             guard.insert(
                 candidate.clone(),
                 Session {
+                    interaction: None,
+                    unattended: false,
                     id: candidate.clone(),
                     browser_id: browser_id.clone(),
                     agent_window_id: None,
@@ -196,6 +201,23 @@ impl SessionRegistry {
             .expect("session activity registry poisoned")
             .remove(id);
         removed
+    }
+
+    /// Accept preference updates only from the browser owning the session.
+    pub fn update_interaction(
+        &self,
+        id: &SessionId,
+        browser: &BrowserId,
+        policy: bsk_protocol::tools::InteractionPolicy,
+    ) {
+        let mut guard = self.inner.lock().expect("session registry poisoned");
+        if let Some(session) = guard.get_mut(id).filter(|s| &s.browser_id == browser) {
+            session.interaction = Some(if session.unattended {
+                bsk_protocol::tools::InteractionPolicy::UNATTENDED
+            } else {
+                policy
+            });
+        }
     }
 
     pub fn get(&self, id: &SessionId) -> Option<Session> {
@@ -406,6 +428,7 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentWindowOptions {
+    pub unattended: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: focused).
@@ -453,15 +476,31 @@ pub async fn start_session(
             instance_ids,
         },
     })?;
+    if window.unattended
+        && !bsk_protocol::tools::supports_interaction_policy(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: bsk_protocol::ErrorCode::Unsupported,
+            message: "Unattended sessions require an extension supporting protocol 1.2; update BrowserSkill".into(),
+            data: None,
+        }));
+    }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
+    {
+        let mut guard = sessions.inner.lock().expect("session registry poisoned");
+        if let Some(session) = guard.get_mut(&session_id) {
+            session.unattended = window.unattended;
+        }
+    }
     let params = SessionStartParams {
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),
         height: window.size.map(|(_, height)| height),
         focused: window.focused,
+        unattended: window.unattended,
     };
     let rpc_id = next_rpc_id("sess-start");
     let request = RequestFrame {
@@ -540,9 +579,9 @@ pub async fn start_session(
             .await);
         }
     };
-    let agent_window_id = match response.body {
+    let start_result = match response.body {
         ResponseBody::Ok(v) => match serde_json::from_value::<SessionStartResult>(v) {
-            Ok(parsed) => parsed.agent_window_id,
+            Ok(parsed) => parsed,
             Err(_) => {
                 sessions.cancel_reservation(&session_id);
                 return Err(StartSessionError::ExtensionError(RpcError {
@@ -557,8 +596,18 @@ pub async fn start_session(
             return Err(StartSessionError::ExtensionError(err));
         }
     };
+    {
+        let mut guard = sessions.inner.lock().expect("session registry poisoned");
+        if let Some(session) = guard.get_mut(&session_id) {
+            session.interaction = if window.unattended {
+                Some(bsk_protocol::tools::InteractionPolicy::UNATTENDED)
+            } else {
+                session.interaction.or(start_result.interaction)
+            };
+        }
+    }
     let session = sessions
-        .commit_reservation(&session_id, agent_window_id)
+        .commit_reservation(&session_id, start_result.agent_window_id)
         .ok_or_else(|| {
             StartSessionError::ExtensionError(RpcError {
                 code: bsk_protocol::ErrorCode::ProtocolError,

@@ -51,6 +51,12 @@ When multiple browsers are connected, use `bsk browsers` and start with
 Agent Window does not need to interrupt the user's current work; it is not a flag on other commands.
 Run `bsk doctor` when startup or transport problems persist after one retry.
 
+For user-authorized unattended work, start with `bsk session start --unattended --no-focus`.
+This session skips tab-borrow confirmation and returns `outcome: disabled` from `request-help`.
+It does not change the browser's saved settings. `session start` and `session list` JSON report
+the effective `interaction` policy. Ordinary sessions follow the extension popup's Automation
+settings for borrow confirmation and human assistance; both are enabled by default.
+
 ## Work toward one observable goal
 
 - Derive a concrete success condition from the user's request or a supplied trace.
@@ -123,6 +129,13 @@ Normal page writes affect only Agent Window tabs. To operate a user tab, first l
 after the relevant step with `bsk tab return <tab-id>`; never invent a tab id or keep a personal tab
 borrowed across unrelated work.
 
+An explicitly authorized single borrow can use `--no-confirm`; it applies only to that command.
+`tab borrow --timeout 120s` changes the confirmation wait (default 60s). These options require
+an updated CLI, daemon, and extension. Repeating a completed borrow in the same session returns
+its existing result. Do not repeat pending requests, denied requests, or confirmation timeouts,
+or switch to another browser tool to bypass them. If `reason` is `borrow_outcome_unknown`, inspect
+tab and session state before continuing; the tab may already have moved.
+
 ## Ask the human when needed
 
 Use `bsk request-help` for login, captcha, OTP, payment confirmation, consent, or another step the
@@ -135,6 +148,10 @@ The result `outcome` is one of `continued`, `completed`, `cancelled`, `timed_out
 `continued` or `completed`. Treat `cancelled` as rejection, and `timed_out` or `disabled` as a
 blocker rather than a reason to retry. After control returns, run a fresh `bsk observe` before
 reasoning about the page or using refs.
+
+When help is disabled by browser settings, `--unattended`, or `BSK_REQUEST_HELP=off`, report the
+blocked step and continue only independent work. Disabled assistance does not complete login,
+verification, or consent, and does not authorize changing settings to obtain approval.
 
 ## Command inventory
 

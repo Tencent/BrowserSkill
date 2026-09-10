@@ -146,6 +146,30 @@ daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只�
 /browser-skill open example.com and summarize what is on the page.
 ```
 
+### 自动化设置与无人值守
+
+插件弹窗提供两个默认开启的独立设置：**借用标签页前确认**、**允许请求人工协助**。
+关闭两项后，当前浏览器配置文件中的任务可以免确认借用标签页，并在需要人工操作时立即返回受阻。
+设置自动保存，对现有会话和新会话生效。关闭借用确认会放行遵循该偏好的待确认请求；
+关闭人工协助会将等待中的求助结束为 `disabled`。单次调用显式指定的确认行为优先于浏览器偏好。
+
+也可以只让本次任务无人值守，不修改插件设置：
+
+```sh
+bsk session start --unattended --no-focus
+bsk tab borrow <tab-id> --session <session-id>
+bsk session stop <session-id>
+```
+
+无人值守模式随会话保留，后续命令无需重复传入参数。`request-help` 会立即返回 `outcome: "disabled"`；
+这表示人工步骤仍受阻，不代表自动完成了登录或验证码。已有的 `BSK_REQUEST_HELP=off` 继续可用，
+它只关闭求助，不影响借用确认。
+
+单次免确认使用 `bsk tab borrow <tab-id> --session <id> --no-confirm`；
+`--timeout 60s` 设置借用确认的等待时间。`session start --json` 和 `session list --json`
+会返回当前会话的 `interaction` 策略。新 CLI 参数要求 Daemon 和扩展均支持协议 1.2，
+旧版本会明确提示升级。这些设置控制 BrowserSkill 自身的提示，Agent 宿主的命令审批由宿主管理。
+
 ## DeepSeek Harness 插件
 
 在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它为 Agent 提供原生 `browser_*` 工具，由插件代为调用 `bsk`，并在 Web UI 中实时展示浏览器会话。

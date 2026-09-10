@@ -66,6 +66,16 @@
       "copied": "Copied",
       "hintDisconnected": "Available when connected",
       "promptTemplate": "Use BrowserSkill's `bsk` CLI to record the browser actions I'm about to demonstrate.\n\nSteps:\n1. Run: {{command}}\n2. Once you confirm it's started, I'll operate in the opened window myself.\n3. After I click Finish, read the written `./trace` bundle (`trace.json` + `states/`) and summarize what I did."
+    },
+    "interaction": {
+      "title": "Automation settings",
+      "confirmTabBorrow": "Confirm before borrowing tabs",
+      "confirmTabBorrowHint": "Ask before an agent uses a tab you already have open.",
+      "requestHelpEnabled": "Allow requests for human help",
+      "requestHelpEnabledHint": "Wait for you at login, captcha, or other blocked steps. When off, report the blocker immediately.",
+      "scope": "Saved automatically for this browser profile.",
+      "readFailed": "Could not load settings. Reopen the extension.",
+      "writeFailed": "Could not save. Your settings have not changed. Try again."
     }
   },
   "controlOverlay": {

@@ -444,6 +444,20 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
             }
+            bsk_protocol::EventKind::SessionInteractionChanged => {
+                #[derive(serde::Deserialize)]
+                struct Change {
+                    session_id: String,
+                    interaction: bsk_protocol::tools::InteractionPolicy,
+                }
+                if let Ok(change) = serde_json::from_value::<Change>(ev.payload) {
+                    state.sessions.update_interaction(
+                        &super::sessions::SessionId(change.session_id),
+                        &client.id,
+                        change.interaction,
+                    );
+                }
+            }
             bsk_protocol::EventKind::SessionWindowClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);
             }

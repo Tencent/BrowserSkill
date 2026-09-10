@@ -5,6 +5,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::ErrorCode;
 
+/// Protocol 1.2 supports interaction preferences and unattended sessions.
+pub const INTERACTION_POLICY_PROTOCOL: &str = "1.2";
+
+pub fn supports_interaction_policy(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, INTERACTION_POLICY_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BorrowConfirmationPolicy {
+    Always,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestHelpPolicy {
+    Enabled,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InteractionPolicy {
+    pub borrow_confirmation: BorrowConfirmationPolicy,
+    pub request_help: RequestHelpPolicy,
+}
+
+impl InteractionPolicy {
+    pub const UNATTENDED: Self = Self {
+        borrow_confirmation: BorrowConfirmationPolicy::Never,
+        request_help: RequestHelpPolicy::Disabled,
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
     pub session_id: String,
@@ -20,10 +58,15 @@ pub struct SessionStartParams {
     /// extension's default (`true`) for compatibility with older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused: Option<bool>,
+    /// Disable borrow confirmation and human-help waits for this session.
+    #[serde(default)]
+    pub unattended: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<InteractionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_window_id: Option<i64>,
 }
@@ -52,6 +95,19 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn interaction_policy_requires_a_compatible_protocol() {
+        for protocol in ["1.0", "1.1", "2.0", "invalid"] {
+            assert!(!supports_interaction_policy(protocol), "{protocol}");
+        }
+        for protocol in ["1.2", "1.3"] {
+            assert!(supports_interaction_policy(protocol), "{protocol}");
+        }
+        let legacy: SessionStartParams =
+            serde_json::from_value(json!({"session_id": "abcd"})).unwrap();
+        assert!(!legacy.unattended);
+    }
 
     #[test]
     fn session_start_focus_is_optional_and_round_trips_false() {

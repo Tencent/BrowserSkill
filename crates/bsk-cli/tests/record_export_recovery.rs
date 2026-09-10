@@ -120,6 +120,7 @@ fn run_extension(
                         serde_json::from_value(request.params.clone().unwrap()).unwrap();
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(100),
                         })
                         .unwrap(),

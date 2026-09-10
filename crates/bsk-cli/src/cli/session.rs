@@ -50,6 +50,9 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Skip tab-borrow confirmation and return immediately from human-help requests.
+    #[arg(long)]
+    pub unattended: bool,
     /// Target browser instance id (only required when multiple browsers
     /// are connected).
     #[arg(long)]
@@ -97,6 +100,7 @@ pub struct SessionStopArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    unattended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +113,8 @@ struct StartParams {
 
 #[derive(Debug, Deserialize)]
 pub struct StartReply {
+    #[serde(default)]
+    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default)]
@@ -186,6 +192,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             width: args.width,
             height: args.height,
             focused: args.no_focus.then_some(false),
+            unattended: args.unattended,
         },
     );
     waited.store(true, Ordering::SeqCst);
@@ -198,6 +205,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
                         "session_id": reply.session_id,
                         "browser_instance_id": reply.browser_instance_id,
                         "agent_window_id": reply.agent_window_id,
+                        "interaction": reply.interaction,
                     }))
                     .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
                 );
@@ -216,6 +224,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub unattended: bool,
     pub browser: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -224,6 +233,9 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.unattended {
+        crate::cli::interaction_policy::require_support(&sock)?;
+    }
     call(
         sock,
         Method::SessionStart,
@@ -232,6 +244,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             width: opts.width,
             height: opts.height,
             focused: opts.focused,
+            unattended: opts.unattended,
         }),
         SESSION_START_IPC_TIMEOUT,
     )

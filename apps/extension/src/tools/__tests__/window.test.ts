@@ -102,11 +102,28 @@ describe("handleWindowResize", () => {
 });
 
 describe("handleSessionStart window size", () => {
+  it("stores unattended mode per session and reports the effective policy", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+    const unattended = await handleSessionStart(sm, { session_id: "auto", unattended: true });
+    const ordinary = await handleSessionStart(sm, { session_id: "normal" });
+    expect(unattended).toMatchObject({
+      interaction: { borrow_confirmation: "never", request_help: "disabled" },
+    });
+    expect(ordinary).toMatchObject({
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
+    expect(sm.get("auto")?.unattended).toBe(true);
+    expect(sm.get("normal")?.unattended).toBe(false);
+  });
+
   it("passes width/height through to Agent Window creation", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11", width: 1280, height: 800 });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
   });
 
@@ -114,7 +131,10 @@ describe("handleSessionStart window size", () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11" });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", {});
   });
 
@@ -122,7 +142,10 @@ describe("handleSessionStart window size", () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11", focused: false });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
   });
 

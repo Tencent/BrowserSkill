@@ -82,15 +82,16 @@ Use `browser_tabs` to list returned tab ids before selecting, closing, borrowing
 Borrow a user tab only for the immediate task, and return it as soon as that step is complete. Never
 invent a tab id or keep a personal tab borrowed across unrelated work.
 
+Honor Automation settings. Never repeat denied or expired borrows; inspect tabs if the outcome is unknown.
+
 ## Ask the human when needed
 
 Use `browser_assist` action `request-help` for login, captcha, OTP, payment confirmation, consent, or
 another step the user must complete. Give a precise prompt and highlight fresh targets when concrete
 controls are involved. Use completion criteria only for a clear stable success signal.
 
-Resume only after the user continues or the criteria complete. Treat cancellation as rejection and
-timeout as a blocker rather than retrying. Observe again after control returns before reasoning about
-the new state or using refs.
+Resume only after continuation or completion. Cancellation, timeout, or disabled help blocks the
+step; do not retry or switch tools. Observe again after control returns before using refs.
 
 The same tool can resize the Agent Window or emulate a device when the task requires visual or
 responsive testing. Emulation is scoped to one tab.

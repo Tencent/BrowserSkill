@@ -126,11 +126,13 @@ pub struct TabSelectResult {
 /// index so `tab_return` (or session_stop) can put it back.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TabBorrowParams {
+    /// Maximum time to wait for user confirmation (default 60 seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_timeout_ms: Option<u32>,
     pub tab_id: i64,
     pub session_id: String,
-    /// Whether to wait for an inline user confirmation overlay (M10
-    /// will introduce the UI). Currently ignored: the M8 stub always
-    /// proceeds when `false` and forwards `true` to a no-op approver.
+    /// Override the browser confirmation preference for this borrow.
+    /// Unattended sessions always skip confirmation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<bool>,
 }

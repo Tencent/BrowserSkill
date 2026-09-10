@@ -13,6 +13,7 @@ import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
+import { InteractionSettings } from "./interaction-settings";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
@@ -274,6 +275,8 @@ export function App() {
               />
             </div>
           </section>
+
+          <InteractionSettings />
 
           <section
             className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"

@@ -13,6 +13,7 @@ export interface SessionContext {
    */
   agentCreatedTabs: Set<number>;
   createdAtMs: number;
+  unattended?: boolean;
 }
 
 /** Whether this session has explicitly claimed control of `tabId`. */
@@ -38,6 +39,7 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  unattended?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
@@ -156,7 +158,8 @@ export class SessionManager {
    * write after `chrome.tabs.move`.
    */
   tryReserveBorrow(tabId: number, sessionId: string): BorrowReservation | { borrowedBy: string } {
-    const borrowedBy = this.findBorrowingSession(tabId, sessionId);
+    const borrowedBy =
+      this.borrowReservations.get(tabId) ?? this.findBorrowingSession(tabId, sessionId);
     if (borrowedBy) return { borrowedBy };
     this.borrowReservations.set(tabId, sessionId);
     let closed = false;
@@ -216,6 +219,7 @@ export class SessionManager {
         // by its concrete Chrome tab id.
         agentCreatedTabs: new Set([homeTabId]),
         createdAtMs: this.now(),
+        unattended: opts.unattended === true,
       };
       this.sessions.set(sessionId, ctx);
       this.windowIndex.set(windowId, sessionId);

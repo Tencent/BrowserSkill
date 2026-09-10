@@ -169,6 +169,34 @@ Start a new Agent session and write a prompt that needs the browser, for example
 /browser-skill open example.com and summarize what is on the page.
 ```
 
+### Automation and unattended sessions
+
+The extension popup has two independent **Automation settings**, both enabled by default:
+**Confirm before borrowing tabs** and **Allow requests for human help**. Turn both off for
+unattended operation in that browser profile. Preferences are saved automatically and apply to
+existing sessions as well as new ones. Turning confirmation off releases pending confirmation
+requests that follow the preference; turning help off finishes pending help requests as `disabled`.
+An explicit per-call confirmation override still takes precedence over the browser preference.
+
+For a single unattended task, keep your browser preferences and use:
+
+```sh
+bsk session start --unattended --no-focus
+bsk tab borrow <tab-id> --session <session-id>
+bsk session stop <session-id>
+```
+
+The session remembers unattended mode across commands. It skips tab-borrow confirmation and
+returns `outcome: "disabled"` immediately from `request-help`. The task may still be blocked by a
+login or captcha; `disabled` does not mean that step was completed. `BSK_REQUEST_HELP=off` remains
+supported and only disables help requests, not borrow confirmation.
+
+To skip one borrow confirmation, use `bsk tab borrow <tab-id> --session <id> --no-confirm`.
+`--timeout 60s` sets the borrow confirmation wait. `session start --json` and `session list --json`
+include the effective `interaction` policy. Protocol 1.2 support is required on both the daemon
+and extension for the new CLI overrides; unsupported versions produce an explicit update error.
+These settings govern BrowserSkill prompts, not the agent host's command approvals.
+
 ## DeepSeek Harness plugin
 
 Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?

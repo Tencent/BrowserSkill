@@ -324,6 +324,27 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    if let Some(session) = state.sessions.get(&session_id) {
+        if method == Method::ToolRequestHelp && session.unattended {
+            return ResponseBody::Ok(serde_json::json!({
+                "outcome": "disabled", "tab_id": params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
+                "note": "request-help disabled for this unattended session",
+            }));
+        }
+        if method == Method::ToolTabBorrow
+            && (params.get("confirm") == Some(&Value::Bool(false))
+                || params.get("confirmation_timeout_ms").is_some())
+        {
+            if let Some(browser) = state.browsers.get(&session.browser_id) {
+                if !bsk_protocol::tools::supports_interaction_policy(
+                    &browser.extension_protocol_version,
+                ) {
+                    return ResponseBody::Err(RpcError { code: ErrorCode::Unsupported,
+                        message: "Borrow confirmation overrides require an extension supporting protocol 1.2; update BrowserSkill".into(), data: None });
+                }
+            }
+        }
+    }
     // Pre-flight: if the user has clicked the agent-window mask's
     // stop button, every session carries a one-shot "pending
     // interrupt" marker. The marker is consumed by the next method
@@ -706,8 +727,22 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 }
 
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
+    if *method == Method::ToolTabBorrow {
+        let ms = params
+            .get("confirmation_timeout_ms")
+            .map_or(Some(60_000), Value::as_u64)
+            .filter(|ms| (1..=2_147_000_000).contains(ms))
+            .ok_or_else(|| {
+                invalid_params("confirmation_timeout_ms must be a positive bounded integer")
+            })?;
+        // Include the UI countdown/fade and Chrome move before deadline cancellation.
+        return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
+    }
     tool_dispatch_timeout(params).map(|timeout| {
-        if matches!(method, Method::ToolUpload | Method::ToolDownload) {
+        if matches!(
+            method,
+            Method::ToolUpload | Method::ToolDownload | Method::ToolRequestHelp
+        ) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout
@@ -723,6 +758,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub unattended: bool,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -734,6 +771,8 @@ struct CliSessionStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -833,6 +872,7 @@ async fn handle_session_start(
     let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
+            unattended: false,
             browser_instance_id: None,
             width: None,
             height: None,
@@ -866,6 +906,7 @@ async fn handle_session_start(
         AgentWindowOptions {
             size: window_size,
             focused: params.focused,
+            unattended: params.unattended,
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
@@ -875,6 +916,7 @@ async fn handle_session_start(
     {
         Ok(session) => {
             let result = CliSessionStartResult {
+                interaction: session.interaction,
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),
                 agent_window_id: session.agent_window_id,
@@ -1617,6 +1659,38 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[test]
+    fn borrow_wait_budget_covers_the_confirmation_and_browser_move() {
+        let ordinary =
+            tool_dispatch_transport_timeout(&Method::ToolTabBorrow, &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(ordinary, Duration::from_secs(75));
+        let custom = tool_dispatch_transport_timeout(
+            &Method::ToolTabBorrow,
+            &serde_json::json!({"confirmation_timeout_ms": 120_000}),
+        )
+        .unwrap();
+        assert_eq!(custom, Duration::from_secs(135));
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!("60s"),
+            serde_json::json!(2_147_000_001_u64),
+        ] {
+            assert!(
+                tool_dispatch_transport_timeout(
+                    &Method::ToolTabBorrow,
+                    &serde_json::json!({"confirmation_timeout_ms": invalid})
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            tool_dispatch_transport_timeout(&Method::ToolClick, &serde_json::json!({})).unwrap(),
+            DEFAULT_TOOL_TIMEOUT
+        );
+    }
 
     #[test]
     fn session_stop_timeout_covers_stop_round_trip() {

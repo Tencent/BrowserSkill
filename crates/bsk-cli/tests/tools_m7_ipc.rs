@@ -136,6 +136,7 @@ where
                     window_id += 1;
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(id),
                         })
                         .unwrap(),

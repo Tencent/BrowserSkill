@@ -111,9 +111,12 @@ pub struct TabBorrowArgs {
     #[arg(long)]
     pub session: String,
     /// Skip the inline confirmation overlay when borrowing a tab.
-    /// Accepted for forward compatibility; currently has no effect.
+    /// Overrides the browser preference for this borrow only.
     #[arg(long = "no-confirm", action = clap::ArgAction::SetTrue)]
     pub no_confirm: bool,
+    /// Maximum time to wait for user confirmation (default 60s).
+    #[arg(long, value_parser = crate::cli::navigate::parse_timeout_ms)]
+    pub timeout: Option<u32>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -200,15 +203,25 @@ fn run_select(sock: PathBuf, args: TabSelectArgs, format: Format) -> Result<(), 
 }
 
 fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), CliError> {
+    if args.no_confirm || args.timeout.is_some() {
+        crate::cli::interaction_policy::require_support(&sock)?;
+    }
     let params = TabBorrowParams {
         session_id: args.session,
         tab_id: args.tab_id,
-        // M8: confirm is ignored on the daemon/extension side; we
-        // surface the CLI flag so the same invocation keeps working
-        // once M10 wires the inline overlay.
+        confirmation_timeout_ms: args.timeout,
         confirm: if args.no_confirm { Some(false) } else { None },
     };
-    let reply: TabBorrowResult = ipc_call("tab-borrow-1", Method::ToolTabBorrow, sock, params)?;
+    let reply: TabBorrowResult = crate::cli::business_rpc::call(
+        sock,
+        "tab-borrow-1",
+        Method::ToolTabBorrow,
+        Some(params),
+        std::time::Duration::from_millis(u64::from(args.timeout.unwrap_or(60_000)))
+            + std::time::Duration::from_secs(15)
+            + crate::daemon::queue::CANCEL_CLEANUP_TIMEOUT
+            + std::time::Duration::from_secs(5),
+    )?;
     print_payload(&reply, format, || {
         println!(
             "borrowed tab_id={} from window={} index={} → agent_window={}",
