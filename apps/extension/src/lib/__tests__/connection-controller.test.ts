@@ -238,7 +238,7 @@ describe("ConnectionController connectionEnabled", () => {
     const first = transport.send.mock.calls[0]?.[0] as { id: string };
 
     transport.emitState("disconnected");
-    transport.emitState("connected");
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
     const second = transport.send.mock.calls[1]?.[0] as { id: string };
     expect(second.id).not.toBe(first.id);
 

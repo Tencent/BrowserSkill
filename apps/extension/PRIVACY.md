@@ -57,7 +57,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 
 ## 6. Where Data Goes
 
-All Extension activity stays on the user's local device. The only network traffic the Extension generates is a WebSocket connection to `ws://127.0.0.1:52800` (loopback only). What the AI agent connected to that local daemon does with the data afterwards (for example, sending a screenshot to an LLM provider) is governed by the privacy policy of that agent or LLM provider, **not** by this policy. BrowserSkill is not a party to those communications.
+All Extension activity stays on the user's local device. The only network traffic the Extension generates is a WebSocket connection to the local bsk daemon on `127.0.0.1` (loopback only; default port **52800**, configurable in the extension popup). What the AI agent connected to that local daemon does with the data afterwards (for example, sending a screenshot to an LLM provider) is governed by the privacy policy of that agent or LLM provider, **not** by this policy. BrowserSkill is not a party to those communications.
 
 ## 7. Data Retention
 
@@ -80,7 +80,7 @@ The Extension is a developer tool and is not directed at children under 13. It d
 
 ## 10. Security
 
-Because the Extension communicates only with `127.0.0.1`, no data is exposed to the network. Users should still avoid running BrowserSkill in untrusted environments, since any local process able to bind to `127.0.0.1:52800` could send commands to the Extension. Run BrowserSkill only on machines you control.
+Because the Extension communicates only with `127.0.0.1`, no data is exposed to the network. Users should still avoid running BrowserSkill in untrusted environments, since any local process able to bind to the configured loopback port could send commands to the Extension. Run BrowserSkill only on machines you control.
 
 ## 11. Open Source and Auditability
 
