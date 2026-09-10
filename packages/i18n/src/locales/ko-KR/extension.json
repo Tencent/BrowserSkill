@@ -6,27 +6,27 @@
       "disconnected": "연결되지 않음",
       "connecting": "연결 중…",
       "connected": "연결됨",
-      "version_skew": "프로토콜 불일치",
+      "version_skew": "연결됨",
       "disabled": "연결 꺼짐"
     },
     "stateDetail": {
       "disconnected": "BrowserSkill을 열어 연결하세요.",
       "connecting": "BrowserSkill에 연결 중…",
       "connected": "자동화 작업을 수행할 준비가 되었습니다.",
-      "version_skew": "일부 기능을 사용하지 못할 수 있습니다."
+      "version_skew": "프로토콜 버전이 다릅니다. 업그레이드해 주세요."
     },
     "stateBadge": {
       "disconnected": "대기",
       "connecting": "시작 중",
       "connected": "준비됨",
-      "version_skew": "조치 필요",
+      "version_skew": "업그레이드 가능",
       "disabled": "꺼짐"
     },
     "connectionToggleTitle": "BrowserSkill 연결",
     "controlHintsToggleTitle": "제어 표시",
     "controlHintsToggleHint": "에이전트가 페이지를 제어하는 동안 상태 표시와 주황색 테두리를 표시합니다.",
     "controlHintsInfoLabel": "제어 표시에 관하여",
-    "versionSkewWarning": "확장 프로그램 프로토콜 v{{extensionProtocol}}, 데몬 프로토콜 v{{daemonProtocol}}.",
+    "versionSkewWarning": "확장 프로그램 프로토콜 v{{extensionProtocol}}, CLI 프로토콜 v{{cliProtocol}}. 프로토콜 버전이 다릅니다. 업그레이드해 주세요.",
     "upgradeAvailable": "업그레이드 가능",
     "launcher": {
       "title": "빠른 작업"
@@ -77,7 +77,7 @@
   },
   "helpRequest": {
     "title": "에이전트가 도움을 요청했습니다",
-    "compactStatus": "에이전트가 이 단계를 완료할 때까지 기다리고 있습니다",
+    "compactStatus": "이 단계를 완료해 주세요. 에이전트가 기다리고 있습니다.",
     "noteLabel": "에이전트에게 남길 메모(선택 사항)",
     "notePlaceholder": "에이전트에게 메모 남기기(선택 사항)",
     "continue": "완료하고 제어권 돌려주기",

@@ -237,7 +237,7 @@ The repository is a Cargo + pnpm workspace:
 - `crates/bsk-cli` — `bsk` CLI and local daemon
 - `crates/bsk-protocol` — shared wire types and JSON schemas
 - `apps/extension` — browser extension
-- `packages/ui` and `packages/i18n` — shared extension UI support
+- `packages/ui` and [`packages/i18n`](packages/i18n/README.md) — shared extension UI support, including English, Simplified Chinese and Korean localization
 - `packages/dsh-plugin-browserskill` — DeepSeek Harness plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`)
 - [`evals/browser`](evals/browser/README.md) — deterministic local pages and agent-neutral browser capability evaluation
 
