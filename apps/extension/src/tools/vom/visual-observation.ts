@@ -95,6 +95,13 @@ export function attachVisualEntries(
           : {}),
         parentId,
         sourceId: own,
+        rect: {
+          x: c.region.crop.x,
+          y: c.region.crop.y,
+          w: c.region.crop.width,
+          h: c.region.crop.height,
+        },
+        paintOrder: source?.vom.paintOrder,
         beforeId: own ?? list[lo]?.id,
         label: c.label,
         frameId: c.document.frameId,
@@ -159,6 +166,7 @@ interface Page {
   refs: RenderedRef[];
   more: boolean;
   frameIds: Set<string>;
+  consumed: number;
 }
 interface Continuation {
   output: ObservationOutput;
@@ -186,6 +194,7 @@ function page(
   state: Continuation,
   budget: number | undefined,
   continued: boolean,
+  nextToken: string,
 ): Page | RpcError {
   const max = budget ?? Infinity;
   if (!(max >= 0) || Number.isNaN(max)) return failure("max_tokens must be nonnegative");
@@ -193,7 +202,7 @@ function page(
     ...state.output.render.headers,
     ...(continued ? ["@continued same observation; only refs in this response are current."] : []),
   ];
-  const footer = `@more observe --cursor ${state.token}; use this page's refs before continuing.`;
+  const footer = `@more observe --cursor ${nextToken}; use this page's refs before continuing.`;
   if (continued && state.buffer[0]?.context) headers.push(state.buffer[0].context);
   const fixed = [...headers, ...state.output.notices];
   let used = fixed.reduce((n, line) => n + cost(line), 0);
@@ -204,14 +213,14 @@ function page(
   let emitted = 0;
   while (true) {
     // One-row lookahead avoids reserving a continuation footer on the final row.
-    while (state.buffer.length < 2 && !state.exhausted) {
+    while (state.buffer.length < emitted + 2 && !state.exhausted) {
       const next = state.output.render.rows.next();
       if (next.done) state.exhausted = true;
       else state.buffer.push(next.value);
     }
-    const row = state.buffer[0];
+    const row = state.buffer[emitted];
     if (!row) break;
-    const reserve = state.buffer.length > 1 || !state.exhausted ? cost(footer) : 0;
+    const reserve = state.buffer.length > emitted + 1 || !state.exhausted ? cost(footer) : 0;
     let text = row.text;
     if (used + cost(text) + reserve > max && row.minimal) text = row.minimal;
     if (used + cost(text) + reserve > max) {
@@ -223,12 +232,11 @@ function page(
     lines.push(text);
     used += cost(text);
     emitted++;
-    state.buffer.shift();
   }
   lines.push(...state.output.notices);
-  const more = state.buffer.length > 0 || !state.exhausted;
+  const more = state.buffer.length > emitted || !state.exhausted;
   if (more) lines.push(footer);
-  return { text: lines.join("\n"), refs, more, frameIds };
+  return { text: lines.join("\n"), refs, more, frameIds, consumed: emitted };
 }
 
 export async function publishObservationPage(
@@ -264,13 +272,9 @@ export async function publishObservationPage(
     return failure("retry this cursor with the same budget, or use next_cursor");
   // Retry retains exactly the latest output; it cannot advance the iterator twice.
   const retry = input.cursor && state.last?.input === input.cursor ? state.last : undefined;
-  const previousToken = state.token;
-  if (input.cursor && !retry) state.token = crypto.randomUUID();
-  const rendered = retry ? undefined : page(state, budget, !!input.cursor);
-  if (rendered && "code" in rendered) {
-    state.token = previousToken;
-    return rendered;
-  }
+  const nextToken = crypto.randomUUID();
+  const rendered = retry ? undefined : page(state, budget, !!input.cursor, nextToken);
+  if (rendered && "code" in rendered) return rendered;
   const identities = new Map<string, DocumentIdentity>(retry?.identities);
   if (state.output.rootIdentity)
     identities.set(state.output.rootIdentity.frameId, state.output.rootIdentity);
@@ -289,12 +293,12 @@ export async function publishObservationPage(
   }
   if (input.cursor) {
     if (!state.output.rootIdentity || missingIdentity) {
-      continuations.delete(store);
+      if (continuations.get(store) === state) continuations.delete(store);
       return failure("observation identity unavailable; observe again");
     }
     for (const identity of identities.values()) {
       if ((await verifyDocumentIdentity(cdp, identity, signal)) !== "current") {
-        continuations.delete(store);
+        if (continuations.get(store) === state) continuations.delete(store);
         return failure("observation DOM changed; observe again");
       }
     }
@@ -320,7 +324,10 @@ export async function publishObservationPage(
       },
     ];
   });
+  // Publish only after validation; cancelled preparation leaves buffered rows and refs intact.
   store.replace(entries);
+  state.buffer.splice(0, rendered!.consumed);
+  state.token = nextToken;
   state.revision = store.revision;
   const result: ObserveResult = {
     text: rendered!.text,

@@ -1143,7 +1143,8 @@ async function handleVomObservation(
         : {}),
     });
   } catch (err) {
-    clearObservationContinuation(ctx.refStore);
+    // Fresh observations clear their predecessor before capture. Continuation owns
+    // invalidation; cancellation must preserve its unpublished page for retry.
     if (isAbortError(err)) return cancelled(toolName);
     return {
       code: "cdp_failed",

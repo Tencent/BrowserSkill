@@ -539,3 +539,261 @@ it.each([
   expect(rows.some((r) => r.text.includes("Distinct semantics"))).toBe(kind === "different");
   if (kind === "action") expect(rows.filter((r) => r.ref)).toHaveLength(2);
 });
+
+it.each([
+  "source",
+  "parent",
+  "frame",
+  "unplaced",
+])("does not resurrect modal background Canvas via %s", async (kind) => {
+  const f = fixture(1);
+  f.scene.rootFrameId = "top";
+  f.scene.nodes.push(node(2, 1, kind === "frame" ? "iframe" : "canvas"));
+  f.scene.nodes.push({
+    ...node(10, 1, "dialog", "Login"),
+    position: "fixed",
+    rect: { x: 0, y: 0, w: 800, h: 600 },
+  });
+  f.scene.visuals = [
+    {
+      key: 0,
+      frameId: kind === "frame" ? "child" : "top",
+      parentId: kind === "unplaced" ? null : 2,
+      ...(kind === "source" ? { sourceId: 2 } : {}),
+    },
+  ];
+  f.output.render = prepareObservationRender(f.scene);
+  const result = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+  expect(result.text).toContain("focus=L1");
+  expect(result.text).not.toContain("[visual:screenshot]");
+  expect(result.text).not.toContain("Unplaced Canvas");
+  expect([...f.store.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(false);
+  f.scene.nodes = f.scene.nodes.filter((n) => n.id !== 10);
+  expect(
+    Array.from({ [Symbol.iterator]: () => prepareObservationRender(f.scene).rows }).filter(
+      (r) => r.ref?.visualKey !== undefined,
+    ),
+  ).toHaveLength(1);
+});
+
+it("preserves modal Canvas with omitted semantics and admits proven foreground fallback", () => {
+  const scene: VomScene = {
+    rootFrameId: "top",
+    viewport: { width: 1000, height: 800 },
+    nodes: [
+      node(1, null, "rootwebarea"),
+      {
+        ...node(10, 1, "dialog", "Login"),
+        position: "fixed",
+        rect: { x: 0, y: 0, w: 800, h: 600 },
+      },
+    ],
+    visuals: [
+      { key: 0, parentId: 10, frameId: "top" },
+      {
+        key: 1,
+        parentId: null,
+        frameId: "top",
+        paintOrder: 11,
+        rect: { x: 10, y: 10, w: 40, h: 40 },
+      },
+    ],
+  };
+  const result = Array.from({ [Symbol.iterator]: () => prepareObservationRender(scene).rows });
+  expect(result.filter((r) => r.ref?.visualKey !== undefined).map((r) => r.ref!.visualKey)).toEqual(
+    [0, 1],
+  );
+});
+
+it.each([
+  true,
+  false,
+])("applies the existing active-region policy to Canvas (enabled=%s)", (enabled) => {
+  const scene: VomScene = {
+    rootFrameId: "top",
+    viewport: { width: 1000, height: 800 },
+    nodes: [
+      node(1, null, "rootwebarea"),
+      node(2, 1, "canvas"),
+      {
+        ...node(10, 1, "group", "Popover"),
+        position: "fixed",
+        rect: { x: 0, y: 0, w: 100, h: 100 },
+      },
+    ],
+    visuals: [
+      {
+        key: 0,
+        parentId: 1,
+        sourceId: 2,
+        frameId: "top",
+        rect: { x: 0, y: 0, w: 100, h: 30 },
+        paintOrder: 2,
+      },
+    ],
+  };
+  const rendered = Array.from({
+    [Symbol.iterator]: () => prepareObservationRender(scene, { activeRegionPolicy: enabled }).rows,
+  });
+  expect(rendered.filter((r) => r.ref?.visualKey !== undefined)).toHaveLength(enabled ? 0 : 1);
+});
+
+it.each([
+  "Runtime.evaluate",
+  "Runtime.releaseObjectGroup",
+])("retains a cancelled page through handleObserve during %s", async (method) => {
+  const f = fixture(35, 100);
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => 100,
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  const ctx = await manager.start("cancel-test");
+  const first = success(await publishObservationPage(ctx.refStore, f.cdp, 4, { output: f.output }));
+  const originalRefs = [...ctx.refStore.entries()];
+  const revision = ctx.refStore.revision;
+  const controller = new AbortController();
+  const original = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (tab, command) => {
+    const result = await original(tab, command);
+    if (command === method) controller.abort();
+    return result;
+  });
+  const tab = { id: 4, windowId: 100, url: "http://fixture.test" } as chrome.tabs.Tab;
+  const cancelled = await handleObserve(
+    manager,
+    { session_id: "cancel-test", cursor: first.next_cursor },
+    { cdp: f.cdp, tabsApi: { get: async () => tab, query: async () => [tab] } },
+    controller.signal,
+  );
+  expect(cancelled).toHaveProperty("code", "cancelled");
+  expect(ctx.refStore.revision).toBe(revision);
+  expect([...ctx.refStore.entries()]).toEqual(originalRefs);
+  f.send.mockImplementation(original);
+  const seen = new Set(originalRefs.map(([ref]) => ref));
+  let cursor = first.next_cursor;
+  while (cursor) {
+    const page = success(await publishObservationPage(ctx.refStore, f.cdp, 4, { cursor }));
+    expect(await publishObservationPage(ctx.refStore, f.cdp, 4, { cursor })).toEqual(page);
+    for (const [ref] of ctx.refStore.entries()) {
+      expect(seen.has(ref)).toBe(false);
+      seen.add(ref);
+    }
+    cursor = page.next_cursor;
+  }
+  expect(seen.size).toBe(35);
+});
+
+it("preserves a Canvas containing an active region rather than treating it as background", () => {
+  const scene: VomScene = {
+    rootFrameId: "top",
+    viewport: { width: 1000, height: 800 },
+    nodes: [
+      node(1, null, "rootwebarea"),
+      { ...node(2, 1, "canvas"), paintOrder: 5 },
+      {
+        ...node(10, 2, "group", "Popover"),
+        paintOrder: 5,
+        position: "fixed",
+        rect: { x: 0, y: 0, w: 100, h: 100 },
+      },
+    ],
+    visuals: [{ key: 0, parentId: 1, sourceId: 2, frameId: "top" }],
+  };
+  const result = prepareObservationRender(scene, { activeRegionPolicy: true });
+  const text = [
+    ...result.headers,
+    ...Array.from({ [Symbol.iterator]: () => result.rows }, (r) => r.text),
+  ].join("\n");
+  expect(text).toContain("[visual:screenshot]");
+  expect(text).toContain('group "Popover"');
+});
+
+it("an old cancelled validation cannot clear a newer observation", async () => {
+  const f = fixture(20, 100);
+  const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+  const controller = new AbortController();
+  const original = f.send.getMockImplementation()!;
+  let newer: ObserveResult | undefined;
+  f.send.mockImplementation(async (tab, method) => {
+    if (method === "Runtime.evaluate") {
+      newer = success(
+        await publishObservationPage(f.store, f.cdp, 4, { output: fixture(25, 100).output }),
+      );
+      controller.abort();
+    }
+    return original(tab, method);
+  });
+  await expect(
+    publishObservationPage(f.store, f.cdp, 4, { cursor: first.next_cursor }, controller.signal),
+  ).rejects.toThrow();
+  f.send.mockImplementation(original);
+  expect(
+    success(await publishObservationPage(f.store, f.cdp, 4, { cursor: newer!.next_cursor }))
+      .ref_count,
+  ).toBeGreaterThan(0);
+});
+
+it("keeps excluded Canvas out of every continuation page", async () => {
+  const f = fixture(36, 100);
+  f.scene.rootFrameId = "top";
+  f.scene.nodes.push({
+    ...node(10, 1, "dialog", "Login"),
+    position: "fixed",
+    rect: { x: 0, y: 0, w: 800, h: 600 },
+  });
+  f.scene.visuals!.forEach((v, i) => {
+    v.parentId = i === 0 ? 1 : 10;
+  });
+  f.output.render = prepareObservationRender(f.scene);
+  let result = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+  let count = 0;
+  while (true) {
+    for (const [, entry] of f.store.entries())
+      if (entry.kind === "visual-region") {
+        expect(entry.candidate.backendNodeId).not.toBe(100);
+        count++;
+      }
+    if (!result.next_cursor) break;
+    result = success(
+      await publishObservationPage(f.store, f.cdp, 4, { cursor: result.next_cursor }),
+    );
+  }
+  expect(count).toBe(35);
+});
+
+it("can retry a cancelled final page with a smaller budget without losing buffered rows", async () => {
+  const f = fixture(20, 100);
+  const first = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+  const seen = new Set([...f.store.entries()].map(([ref]) => ref));
+  const controller = new AbortController();
+  const original = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (tab, method) => {
+    if (method === "Runtime.evaluate") controller.abort();
+    return original(tab, method);
+  });
+  await expect(
+    publishObservationPage(
+      f.store,
+      f.cdp,
+      4,
+      { cursor: first.next_cursor, maxTokens: 10000 },
+      controller.signal,
+    ),
+  ).rejects.toThrow();
+  f.send.mockImplementation(original);
+  let cursor = first.next_cursor;
+  while (cursor) {
+    const result = success(
+      await publishObservationPage(f.store, f.cdp, 4, { cursor, maxTokens: 100 }),
+    );
+    for (const [ref] of f.store.entries()) {
+      expect(seen.has(ref)).toBe(false);
+      seen.add(ref);
+    }
+    cursor = result.next_cursor;
+  }
+  expect(seen.size).toBe(20);
+});

@@ -1109,7 +1109,11 @@ function collectDescendants(nodes: VomNode[], roots: Set<number>): Set<number> {
   return included;
 }
 
-function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
+function applyActiveRegionPolicy(
+  nodes: VomNode[],
+  scene: VomScene,
+  visualSources?: ReadonlyMap<number, VomNode>,
+): VomNode[] {
   const parentMap = buildParentMap(nodes);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
@@ -1127,10 +1131,10 @@ function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {
-    if (!isVomReferenceNode(target)) continue;
+    if (target.visualKey === undefined && !isVomReferenceNode(target)) continue;
     const blocked = candidates.some((candidate) =>
       isBlockedByRegion(
-        target,
+        visualSources?.get(target.id) ?? target,
         candidate.node,
         parentMap,
         nodesById,
@@ -1208,20 +1212,65 @@ export function prepareObservationRender(
 } {
   const recovered = applyVomInteractionRecovery(scene.nodes);
   const layer = detectBlockingLayer(recovered, scene.viewport, scene.rootFrameId);
-  const included = layer ? collectDescendants(recovered, layer.members) : undefined;
-  const visible = included
-    ? recovered.filter((n) => included.has(n.id))
+  const recoveredById = new Map(recovered.map((n) => [n.id, n]));
+  let nextId = recovered.reduce((max, n) => Math.max(max, n.id), 0) + 1;
+  // Scope targets participate in existing filtering, never in blocker detection.
+  // Keep the exact source as parent so an excluded source cannot reappear via fallback.
+  const visualTargets: VomNode[] = (scene.visuals ?? []).map((v) => ({
+    id: nextId++,
+    parentId: v.sourceId ?? v.parentId,
+    frameId: v.frameId,
+    visualKey: v.key,
+    tag: "canvas",
+    rect: v.rect ?? (v.sourceId === undefined ? null : recoveredById.get(v.sourceId)?.rect) ?? null,
+    paintOrder:
+      v.paintOrder ??
+      (v.sourceId === undefined ? undefined : recoveredById.get(v.sourceId)?.paintOrder) ??
+      0,
+    position: "static",
+    pointerEvents: "none",
+    referenceable: false,
+  }));
+  const visualSources = new Map<number, VomNode>();
+  for (let i = 0; i < visualTargets.length; i++) {
+    const sourceId = scene.visuals![i].sourceId;
+    const source = sourceId === undefined ? undefined : recoveredById.get(sourceId);
+    if (source) visualSources.set(visualTargets[i].id, { ...source, rect: visualTargets[i].rect });
+  }
+  const scopeNodes = [...recovered, ...visualTargets];
+  const members = layer ? new Set(layer.members) : undefined;
+  if (members && layer) {
+    const blocker = recoveredById.get(layer.rootId)!;
+    for (let i = 0; i < visualTargets.length; i++) {
+      const target = visualTargets[i];
+      const v = scene.visuals![i];
+      if (
+        v.sourceId === undefined &&
+        v.paintOrder !== undefined &&
+        target.frameId === blocker.frameId &&
+        target.paintOrder >= blocker.paintOrder
+      )
+        members.add(target.id);
+    }
+  }
+  const included = members ? collectDescendants(scopeNodes, members) : undefined;
+  const scoped = included
+    ? scopeNodes.filter((n) => included.has(n.id))
     : options.activeRegionPolicy
-      ? applyActiveRegionPolicy(recovered, scene)
-      : recovered;
+      ? applyActiveRegionPolicy(scopeNodes, scene, visualSources)
+      : scopeNodes;
+  const allowedVisuals = new Set(
+    scoped.filter((n) => n.visualKey !== undefined).map((n) => n.visualKey),
+  );
+  const visible = scoped.filter((n) => n.visualKey === undefined);
   const byId = new Map(visible.map((n) => [n.id, n]));
   const ids = new Set(byId.keys());
-  let nextId = visible.reduce((max, n) => Math.max(max, n.id), 0) + 1;
   const before = new Map<number, VomNode[]>();
   const tail: VomNode[] = [];
   const fallbackGroups = new Map<string, number>();
   const representedSources = new Set<number>();
   for (const v of scene.visuals ?? []) {
+    if (!allowedVisuals.has(v.key)) continue;
     const source = v.sourceId === undefined ? undefined : byId.get(v.sourceId);
     // Only suppress an exact passive Canvas description already carried by the visual line.
     // Action refs and distinct semantic content remain separate.

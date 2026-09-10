@@ -57,6 +57,9 @@ export interface VomNode {
 }
 
 export interface VisualEntry {
+  /** Existing capture geometry/order used only by observation scope filtering. */
+  rect?: Rect;
+  paintOrder?: number;
   /** Exact retained Canvas node, distinct from the next sibling insertion point. */
   sourceId?: number;
   fallbackContext?: string;
