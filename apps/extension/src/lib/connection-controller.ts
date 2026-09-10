@@ -245,6 +245,7 @@ export class ConnectionController {
     this.clearHandshakeRetry();
     this.handshake = null;
     this.lastError = null;
+    this.setState("disconnected");
     this.fire();
     // Install the gate before disconnect can synchronously notify listeners.
     this.transition = Promise.resolve().then(async () => {

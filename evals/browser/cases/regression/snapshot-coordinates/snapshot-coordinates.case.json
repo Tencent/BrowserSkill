@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "snapshot-coordinates",
+  "title": "Scrolled and nested frame coordinate fixture",
+  "suite": "regression",
+  "tags": ["geometry", "iframe", "scroll"],
+  "fixture": { "startPath": "/snapshot-coordinates" },
+  "prompts": {
+    "en": "Open {url}, observe the page and its frames, report the GEOMETRY marker, then close the session.",
+    "zh-CN": "打开 {url}，观察页面及其 iframe，报告 GEOMETRY 标记，然后关闭会话。"
+  },
+  "coverage": ["session.start", "session.stop", "page.navigate", "inspect.observe"],
+  "assertions": {
+    "site": [
+      {
+        "label": "root fixture scrolled and settled",
+        "type": "geometry.ready",
+        "where": { "data.root": true },
+        "minCount": 1
+      }
+    ],
+    "response": [{ "label": "observed the fixture marker", "includes": "GEOMETRY-195" }],
+    "adapter": [{ "label": "browser session was closed", "key": "sessionStopped" }]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      { "action": "wait-site-event", "type": "geometry.ready", "where": { "root": true } },
+      { "action": "observe" }
+    ]
+  }
+}

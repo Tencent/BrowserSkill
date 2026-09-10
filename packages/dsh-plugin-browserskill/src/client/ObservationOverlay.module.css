@@ -142,6 +142,8 @@
   right: 6px;
   width: 16px;
   height: 16px;
+  padding: 0;
+  cursor: pointer;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;

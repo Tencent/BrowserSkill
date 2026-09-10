@@ -3,8 +3,10 @@
  * between the content-script control overlay and the background SW.
  *
  * Content script → background:
- *  - `{ kind: "overlay.ready" }` → background replies with the authoritative
- *      overlay state for the sender's window.
+ *  - `{ kind: "overlay.ready" }` → background decides the per-tab state first
+ *      (see overlayStateForTab) and pushes the authoritative overlay state for
+ *      that tab. It also proactively pushes on tab create and control-mode
+ *      change, so a tab usually receives state before it ever sends ready.
  *  - `{ kind: "overlay.interrupt", sessionId }` → background asks the
  *      daemon (via a `session.user_interrupt` WS event) to cancel
  *      every inflight + queued tool call for that session with

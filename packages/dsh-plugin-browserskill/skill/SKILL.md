@@ -51,10 +51,17 @@ Use `browser_inspect` action `observe` as the primary semantic page view. It ret
 text, and `@eN` refs. Prefer fresh refs over raw selectors. Refs invalidate after navigation and may
 also become stale after large DOM changes, so observe again before the next interaction.
 
-Use `browser_interact` for click, hover, fill, select, and key actions. An observation marks a
-hover-only surface as `@e1 button "Products" [hover first: Shoes | Bags]`. The listed items are
-labels, not usable refs: hover the trigger, observe again, then act on the revealed item's own ref.
-Do not click the trigger itself unless the user wants the trigger's action.
+Use `browser_interact` for click, hover, scroll-to, focus, blur, fill, select, press and wheel.
+`scroll-to` reveals a target and returns its visible border-box bounds in top-level viewport CSS
+pixels, clipped by ancestors. Partial visibility suffices; hidden/fully clipped targets fail.
+This does not test occlusion. Use refs for iframe/shadow-root targets; selectors search the main document.
+
+`wheel` takes signed `deltaX`/`deltaY` (one nonzero). Optional `target` is scrolled into view first;
+otherwise input lands at the viewport centre. Results echo input, not completed scrolling; observe afterwards.
+
+`focus`/`blur` enter or leave focus-triggered states. Hover-only surfaces appear as
+`@e1 button "Products" [hover first: Shoes | Bags]`. Items are labels, not refs:
+hover the trigger, observe, then use the revealed item's ref. Click the trigger only if its action is wanted.
 
 Escalate reading only as needed:
 
@@ -97,6 +104,10 @@ Continue from returned sequence cursors instead of rereading the same buffer.
 - Unknown tab: list tabs instead of guessing.
 - Unknown session: list owned sessions or start one; never try foreign ids.
 - Timeout: inspect current state before deciding whether one longer purposeful wait is useful.
+- Fill result unconfirmed: observe the field first; the page may have formatted the value. Continue
+  if the visible result satisfies the user's intent. Otherwise correct the remaining difference;
+  do not blindly repeat fill or immediately request human help. For other fill errors, follow the
+  returned hint and inspect current state before retrying.
 - Unrecoverable failure: report the blocker and stop the owned session.
 
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported. Do not

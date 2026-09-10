@@ -433,6 +433,7 @@ describe("handleRequestHelp", () => {
       if (method === "DOM.getContentQuads") {
         return { quads: [[10, 20, 110, 20, 110, 60, 10, 60]] };
       }
+      if (method === "Runtime.evaluate") return { result: { value: { width: 200, height: 100 } } };
       if (method === "Page.getLayoutMetrics") {
         return { cssLayoutViewport: { clientWidth: 200, clientHeight: 100 } };
       }

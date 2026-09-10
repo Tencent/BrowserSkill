@@ -1,9 +1,10 @@
+import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SnapshotInfo } from "@/lib/connection-controller";
 import { STORAGE_KEYS } from "@/lib/instance-id";
 import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
-import { EXTENSION_VERSION } from "@/transport/handshake";
+import { EXTENSION_VERSION, PROTOCOL_VERSION } from "@/transport/handshake";
 import { App } from "./App";
 import { useConnectionState } from "./use-connection-state";
 
@@ -58,8 +59,9 @@ describe("App", () => {
     });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     cleanup();
+    await i18n.changeLanguage("zh-CN");
     vi.clearAllMocks();
   });
 
@@ -148,8 +150,8 @@ describe("App", () => {
 
     expect(screen.queryByText(/^扩展 v/)).toBeNull();
     expect(screen.queryByText(/^daemon v/)).toBeNull();
-    expect(screen.getByTitle("扩展版本").textContent).toBe(EXTENSION_VERSION);
-    expect(screen.getByTitle("bsk 版本").textContent).toBe(mockDaemonVersion);
+    expect(screen.getByTitle("扩展版本").textContent).toBe(`Ext ${EXTENSION_VERSION}`);
+    expect(screen.getByTitle("bsk 版本").textContent).toBe(`CLI ${mockDaemonVersion}`);
     expect(screen.getByText("03c3e47f")).toBeTruthy();
 
     const copyButton = screen.getByRole("button", { name: "复制实例 ID" });
@@ -322,6 +324,52 @@ describe("App", () => {
     expect(copyButton.getAttribute("disabled")).toBeNull();
     fireEvent.click(copyButton);
     expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders Korean upgrade guidance and copies usable recording instructions", async () => {
+    await i18n.changeLanguage("ko-KR");
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "version_skew",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("연결됨")).toBeTruthy();
+    expect(screen.getByText("업그레이드 가능")).toBeTruthy();
+    expect(
+      screen.getByText(
+        `확장 프로그램 프로토콜 v${PROTOCOL_VERSION}, CLI 프로토콜 v1.0. 프로토콜 버전이 다릅니다. 업그레이드해 주세요.`,
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "빠른 작업" }));
+    fireEvent.click(screen.getByRole("button", { name: /작업 기록/ }));
+    fireEvent.change(screen.getByPlaceholderText("예: 게시물 작성"), {
+      target: { value: "게시물 작성" },
+    });
+    const copyButton = screen.getByRole("button", { name: "기록 지침 복사" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+    fireEvent.click(copyButton);
+
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain('bsk record start --browser 03c3e47f --purpose "게시물 작성"');
+    expect(copied).toContain("\n\n단계:\n1.");
+    expect(copied).toContain("`./trace`");
+    expect(copied).toContain("`trace.json` + `states/`");
+    expect(copied).not.toContain("{{");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("복사됨"));
   });
 });
 

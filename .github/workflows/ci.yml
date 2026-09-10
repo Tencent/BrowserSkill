@@ -37,6 +37,35 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace --locked
 
+  windows-daemon:
+    name: Windows daemon, installer and cancellation regression tests
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Windows named-pipe tests
+        run: cargo test -p bsk --lib --locked daemon::ipc::windows::tests
+
+      - name: Run Windows process liveness tests
+        run: cargo test -p bsk --lib --locked daemon::lockfile::tests
+
+      - name: Run Windows update tests
+        run: cargo test -p bsk --lib --locked cli::update::tests
+
+      - name: Run Windows update and cancellation process tests
+        run: cargo test -p bsk --test windows_update --test windows_parent_cancel --locked
+
+      - name: Run installer tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./scripts/install-windows.test.ps1
+
+      - name: Run installer tests (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/install-windows.test.ps1
+
   frontend:
     name: Frontend lint, typecheck, tests, build
     runs-on: ubuntu-latest
@@ -62,6 +91,9 @@ jobs:
 
       - name: Compile extension TypeScript
         run: pnpm --filter @browser-skill/extension compile
+
+      - name: Run localization tests
+        run: pnpm --filter @browser-skill/i18n test
 
       - name: Run extension tests
         run: pnpm ext:test

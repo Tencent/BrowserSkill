@@ -48,7 +48,13 @@ import { createPortal } from "react-dom";
 import type { SessionObservation } from "../observation";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
-import { focusOf, statusOf, useObservationView, usePip } from "./observation-view";
+import {
+  focusOf,
+  statusOf,
+  useObservationView,
+  usePip,
+  useThumbnailObservation,
+} from "./observation-view";
 import { getSidebarMode, subscribeSidebarMode } from "./sidebar-mode";
 
 // The pure view helpers live in observation-view (shared with the sidebar
@@ -341,6 +347,7 @@ export function OverlayBody(props: {
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
+  const viewRef = useThumbnailObservation(store, sessions.length > 0);
 
   const thumbId = focus?.thumbnailAttachmentId;
   useEffect(() => {
@@ -373,7 +380,12 @@ export function OverlayBody(props: {
   const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
 
   return (
-    <div className={cn(css.body, "bsk-obs")} data-state={state} data-in-pip={inPip || undefined}>
+    <div
+      ref={viewRef}
+      className={cn(css.body, "bsk-obs")}
+      data-state={state}
+      data-in-pip={inPip || undefined}
+    >
       <div
         className={css.header}
         data-testid="obs-header"
@@ -421,9 +433,15 @@ export function OverlayBody(props: {
           </div>
         )}
         {thumb?.status === "error" ? (
-          <span className={css.badge} aria-label="thumbnail failed">
+          <button
+            type="button"
+            className={css.badge}
+            aria-label="Retry thumbnail"
+            title="Frame unavailable — retry"
+            onClick={() => store.retryThumbnail(thumbId)}
+          >
             <IconWarn size={12} />
-          </span>
+          </button>
         ) : null}
       </div>
       {sessions.length >= 2 ? (

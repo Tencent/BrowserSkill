@@ -11,7 +11,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     },
     remove: async () => {},
-    ensureActiveTab: async () => {},
+    ensureActiveTab: async () => 1,
   };
 }
 

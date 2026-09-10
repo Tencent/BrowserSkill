@@ -45,6 +45,7 @@ console = { workspace = true }
 dialoguer = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
+tempfile = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 bsk-protocol = { workspace = true }
@@ -68,7 +69,6 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

@@ -28,7 +28,13 @@ import type {
   RpcError,
   WaitUntil,
 } from "@/transport/types";
+import {
+  type BrowserNavigationApi,
+  chromeBrowserNavigationApi,
+  navigateWithBrowserApi,
+} from "./browser-navigation";
 import { attachDialogs, markDialogCursor } from "./dialogs";
+import { cdpError, isCdpExtensionAccessDenied } from "./errors";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -42,6 +48,7 @@ import {
 export interface NavigationDeps {
   cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
+  browserNavigation?: BrowserNavigationApi;
   /** Optional AbortSignal — M7 abort hook (M10.2 will wire the full chain). */
   signal?: AbortSignal;
   /** Override default timeout when the caller omits `timeout_ms`. */
@@ -479,6 +486,81 @@ async function readTabUrl(api: ChromeTabsApi, tabId: number): Promise<string | u
   }
 }
 
+/** Recover only a failed preflight; never replay an already-dispatched navigation. */
+async function recoverBrowserNavigation(
+  deps: NavigationDeps,
+  tabId: number,
+  action: (api: BrowserNavigationApi) => Promise<unknown>,
+  waitUntil: WaitUntil,
+  timeoutMs: number,
+): Promise<ReloadResult | RpcError> {
+  const abort = linkedAbortSignal(deps.signal);
+  const deadline = Date.now() + timeoutMs;
+  const api = deps.browserNavigation ?? chromeBrowserNavigationApi;
+  try {
+    let outcome = await navigateWithBrowserApi(
+      api,
+      tabId,
+      () => action(api),
+      waitUntil === "networkidle" ? "commit" : waitUntil,
+      timeoutMs,
+      abort.signal,
+    );
+    if (outcome.reached === "failed") return outcome.error;
+    if (outcome.reached === "cancelled" || abort.signal.aborted) {
+      return { code: "cancelled", message: "navigation recovery aborted" };
+    }
+    if (outcome.reached === "match") {
+      // A completed reload is not a recovery if the restricted frame remains.
+      await deps.cdp.send(tabId, "Page.enable", {});
+      if (abort.signal.aborted)
+        return { code: "cancelled", message: "navigation recovery aborted" };
+      if (waitUntil === "networkidle") {
+        // webNavigation cannot prove network idle. Subscribe on the new
+        // document before enabling CDP lifecycle events after its commit.
+        const frame = await readMainFrameInfo(deps.cdp, tabId);
+        if (!frame.frameId) return cdpError("no main frame after navigation");
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          outcome = { reached: "timeout", lastLifecycle: "commit" };
+        } else {
+          const wait = startLifecycleWait(
+            deps.cdp,
+            tabId,
+            frame.frameId,
+            "networkIdle",
+            remaining,
+            abort.signal,
+            { loaderId: frame.loaderId ?? undefined },
+          );
+          await deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
+          outcome = await wait.promise;
+        }
+      }
+    }
+    if (outcome.reached === "cancelled" || abort.signal.aborted) {
+      return { code: "cancelled", message: "navigation recovery aborted" };
+    }
+    return {
+      tab_id: tabId,
+      final_url: await readTabUrl(deps.tabsApi, tabId),
+      reached: outcome.reached === "match" ? waitUntil : "timeout",
+      ...(outcome.reached === "timeout"
+        ? {
+            error_text: `timed out waiting for ${waitUntil} during navigation recovery after ${timeoutMs}ms`,
+          }
+        : {}),
+    };
+  } catch (error) {
+    return abort.signal.aborted
+      ? { code: "cancelled", message: "navigation recovery aborted" }
+      : cdpError(error);
+  } finally {
+    abort.abort();
+    abort.cleanup();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // tool.navigate
 // ---------------------------------------------------------------------------
@@ -505,7 +587,20 @@ export async function handleNavigate(
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await ensureCdpReady(deps.cdp, target.tabId);
+    try {
+      await ensureCdpReady(deps.cdp, target.tabId);
+    } catch (error) {
+      if (!isCdpExtensionAccessDenied(error)) throw error;
+      const recovered = await recoverBrowserNavigation(
+        deps,
+        target.tabId,
+        (api) => api.update(target.tabId, { url: params.url }),
+        waitUntil,
+        timeoutMs,
+      );
+      if (isRpcError(recovered)) return recovered;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, { ...recovered, url: params.url });
+    }
     const expected = cdpLifecycleName(waitUntil);
     const beforeReadyState = await probeMainFrameReadyState(deps.cdp, target.tabId);
     const beforeFrame = await readMainFrameInfo(deps.cdp, target.tabId);
@@ -574,10 +669,7 @@ export async function handleNavigate(
       }`,
     });
   } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    return cdpError(err);
   }
 }
 
@@ -727,7 +819,24 @@ export async function handleReload(
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await ensureCdpReady(deps.cdp, target.tabId);
+    try {
+      await ensureCdpReady(deps.cdp, target.tabId);
+    } catch (error) {
+      if (!isCdpExtensionAccessDenied(error)) throw error;
+      const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
+      const recovered = await recoverBrowserNavigation(
+        deps,
+        target.tabId,
+        (api) => api.reload(target.tabId, { bypassCache: ignoreCache }),
+        waitUntil,
+        timeoutMs,
+      );
+      if (isRpcError(recovered)) return recovered;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        ...recovered,
+        previous_url: previousUrl,
+      });
+    }
     const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
     const beforeFrame = await readMainFrameInfo(deps.cdp, target.tabId);
     const expected = cdpLifecycleName(waitUntil);
@@ -776,10 +885,7 @@ export async function handleReload(
       }`,
     });
   } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    return cdpError(err);
   }
 }
 

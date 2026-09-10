@@ -19,10 +19,12 @@ interface Harness {
   emitRaw: (event: unknown) => void;
   fetches: { url: string; init?: { body?: string } }[];
   loadImage: ReturnType<typeof vi.fn>;
+  eventUrls: string[];
 }
 
 function makeHarness(initial: SessionObservation[]): Harness {
   const fetches: Harness["fetches"] = [];
+  const eventUrls: string[] = [];
   let es: EventSourceLike | undefined;
   let current = initial;
   const loadImage = vi.fn(async (id: string) => `blob:${id}`);
@@ -34,9 +36,16 @@ function makeHarness(initial: SessionObservation[]): Harness {
       }
       return { ok: true, json: async () => ({ interrupted: true }) };
     },
-    eventSourceFactory: () => {
-      es = { onmessage: null, close: vi.fn() };
-      return es;
+    eventSourceFactory: (url) => {
+      eventUrls.push(url);
+      const connection = { onmessage: null, close: vi.fn() } as EventSourceLike;
+      es = connection;
+      queueMicrotask(() =>
+        connection.onmessage?.({
+          data: JSON.stringify({ type: "snapshot", sessions: current, available: true }),
+        }),
+      );
+      return connection;
     },
     loadImage,
   });
@@ -58,10 +67,120 @@ function makeHarness(initial: SessionObservation[]): Harness {
     },
     fetches,
     loadImage,
+    eventUrls,
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+describe("visible thumbnail demand", () => {
+  function intersections() {
+    const observers: Array<{
+      notify: (visible: boolean) => void;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        private target?: Element;
+        disconnect = vi.fn();
+        constructor(private callback: IntersectionObserverCallback) {
+          observers.push(this);
+        }
+        observe(target: Element) {
+          this.target = target;
+        }
+        notify(visible: boolean) {
+          this.callback(
+            [{ target: this.target, isIntersecting: visible } as IntersectionObserverEntry],
+            this as unknown as IntersectionObserver,
+          );
+        }
+      },
+    );
+    return observers;
+  }
+
+  it("pauses screenshots on collapse while keeping the metadata feed", async () => {
+    const observers = intersections();
+    const h = makeHarness([BUSY]);
+    const { unmount } = render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=1");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    expect(h.es().close).not.toHaveBeenCalled();
+    expect(observers[0].disconnect).toHaveBeenCalledOnce();
+    // A callback queued before disconnect must not reclaim screenshot demand.
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    fireEvent.click(screen.getByRole("button", { name: /Expand browser observation/ }));
+    act(() => observers[1].notify(true));
+    expect(h.eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=1");
+    unmount();
+    expect(h.es().close).toHaveBeenCalledOnce();
+  });
+
+  it("ignores an initial visibility notification delivered after collapse", async () => {
+    const observers = intersections();
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls).toEqual(["/bsk-observation/events?thumbnails=0"]);
+  });
+
+  it("pauses for a hidden document or hidden panel and resumes when visible", async () => {
+    const observers = intersections();
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByTestId("obs-card");
+    act(() => observers[0].notify(true));
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+    act(() => {
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=0");
+    act(() => {
+      visibility = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+    act(() => observers[0].notify(false));
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=0");
+  });
+
+  it("keeps a visible PiP watching when the main document is hidden", async () => {
+    // The detached PiP test document has no window/IntersectionObserver.
+    vi.stubGlobal("IntersectionObserver", undefined);
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    const pipDoc = document.implementation.createHTMLDocument("pip");
+    Object.defineProperty(pipDoc, "visibilityState", { value: "visible" });
+    (window as unknown as Record<string, unknown>).documentPictureInPicture = {
+      requestWindow: async () => ({ document: pipDoc, addEventListener: () => {}, close: vi.fn() }),
+    };
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Pop out/ }));
+    await waitFor(() => expect(pipDoc.body.textContent).toContain("s1"));
+    act(() => {
+      visibility = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(h.eventUrls.at(-1)).toContain("thumbnails=1");
+  });
+});
 
 describe("ObservationOverlay", () => {
   beforeEach(() => {
@@ -90,6 +209,16 @@ describe("ObservationOverlay", () => {
     render(<ObservationOverlay store={h.store} />);
     await waitFor(() => expect(h.loadImage).toHaveBeenCalledWith("att-9"));
     await screen.findByRole("img", { name: "session s1 view" });
+  });
+
+  it("offers a retry after a thumbnail fails without requiring a new frame id", async () => {
+    const h = makeHarness([{ ...BUSY, thumbnailAttachmentId: "att-9" }]);
+    h.loadImage.mockRejectedValueOnce(new Error("temporary failure"));
+    render(<ObservationOverlay store={h.store} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Retry thumbnail" }));
+    await screen.findByRole("img", { name: "session s1 view" });
+    expect(h.loadImage).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "Retry thumbnail" })).toBeNull();
   });
 
   it("keeps the current frame on stage while the next thumbnail loads", async () => {

@@ -1,12 +1,19 @@
-// ObservationClientStore: initial fetch + SSE application, thumbnail loading
+// ObservationClientStore: ordered SSE snapshots/increments, thumbnail loading
 // lifecycle, interrupt wire shape. All I/O faked.
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type EventSourceLike, ObservationClientStore } from "../../src/client/observation-store";
 import type { ObservationEvent, SessionObservation } from "../../src/observation";
 
 const OBS_IDLE: SessionObservation = { sessionId: "s1", action: "idle", since: 1000 };
 const OBS_BUSY: SessionObservation = { sessionId: "s1", action: "clicking", since: 2000 };
+const stores: ObservationClientStore[] = [];
+
+afterEach(() => {
+  for (const store of stores.splice(0)) store.stop();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
 
 function harness(state: SessionObservation[] = []) {
   const fetches: {
@@ -14,6 +21,7 @@ function harness(state: SessionObservation[] = []) {
     init?: { method?: string; body?: string; headers?: Record<string, string> };
   }[] = [];
   const esInstances: EventSourceLike[] = [];
+  const eventUrls: string[] = [];
   const fetchFn = vi.fn(
     async (
       url: string,
@@ -29,11 +37,14 @@ function harness(state: SessionObservation[] = []) {
   const eventSourceFactory = (url: string) => {
     const es: EventSourceLike = { onmessage: null, close: vi.fn() };
     esInstances.push(es);
+    eventUrls.push(url);
+    queueMicrotask(() => emit(es, { type: "snapshot", sessions: state, available: true }));
     return es;
   };
   const loadImage = vi.fn(async (id: string) => `blob:url-${id}`);
   const store = new ObservationClientStore({ fetchFn, eventSourceFactory, loadImage });
-  return { store, fetches, esInstances, loadImage };
+  stores.push(store);
+  return { store, fetches, esInstances, eventUrls, loadImage };
 }
 
 function emit(es: EventSourceLike, event: ObservationEvent): void {
@@ -73,7 +84,9 @@ describe("ObservationClientStore", () => {
   });
 
   it("loads each thumbnail once and reports ready", async () => {
-    const { store, loadImage } = harness();
+    const { store, loadImage } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "att-1" }]);
+    store.start();
+    await Promise.resolve();
     store.ensureThumbnail("att-1");
     store.ensureThumbnail("att-1");
     expect(loadImage).toHaveBeenCalledTimes(1);
@@ -86,7 +99,9 @@ describe("ObservationClientStore", () => {
   });
 
   it("marks failed thumbnail loads as error", async () => {
-    const { store, loadImage } = harness();
+    const { store, loadImage } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "att-bad" }]);
+    store.start();
+    await Promise.resolve();
     loadImage.mockRejectedValueOnce(new Error("nope"));
     store.ensureThumbnail("att-bad");
     await vi.waitFor(() => expect(store.getSnapshot().thumbnails["att-bad"].status).toBe("error"));
@@ -124,9 +139,7 @@ describe("ObservationClientStore", () => {
 
 describe("thumbnail blob URL lifecycle", () => {
   function withRevokeSpy() {
-    const revoke = vi.fn();
-    (URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = revoke;
-    return revoke;
+    return vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   }
 
   it("holds the last ready frame until the replacement decodes", async () => {
@@ -231,16 +244,216 @@ describe("thumbnail blob URL lifecycle", () => {
   });
 });
 
-describe("SSE (re)open resync", () => {
-  it("refetches the full state when the stream (re)opens", async () => {
+describe("SSE snapshot ordering", () => {
+  it("ignores events from a stopped connection after a restart", async () => {
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+    const old = esInstances[0];
+    store.stop();
+    emit(old, { type: "upsert", session: OBS_BUSY });
+    expect(store.getSnapshot().sessions).toEqual([]);
+    store.start();
+    await Promise.resolve();
+    emit(esInstances[1], { type: "upsert", session: OBS_BUSY });
+    emit(old, { type: "snapshot", sessions: [], available: false });
+    emit(old, { type: "remove", session: OBS_BUSY });
+    expect(store.getSnapshot()).toMatchObject({ sessions: [OBS_BUSY], available: true });
+  });
+
+  it("does not apply a queued initial snapshot after stop", async () => {
+    const { store } = harness([OBS_BUSY]);
+    store.start();
+    store.stop();
+    await Promise.resolve();
+    expect(store.getSnapshot()).toMatchObject({ sessions: [], thumbnails: {}, subscribed: false });
+  });
+
+  it("replaces state on reconnect before applying subsequent events, without a competing fetch", async () => {
     const { store, fetches, esInstances } = harness([OBS_IDLE]);
     store.start();
     await vi.waitFor(() => expect(store.getSnapshot().sessions).toHaveLength(1));
-    const before = fetches.filter((f) => f.url === "/bsk-observation/state").length;
-    esInstances[0].onopen?.();
-    await vi.waitFor(() =>
-      expect(fetches.filter((f) => f.url === "/bsk-observation/state").length).toBe(before + 1),
-    );
+    emit(esInstances[0], { type: "snapshot", sessions: [], available: false });
+    expect(store.getSnapshot()).toMatchObject({ sessions: [], available: false });
+    emit(esInstances[0], { type: "upsert", session: OBS_BUSY });
+    await Promise.resolve();
+    expect(store.getSnapshot().sessions).toEqual([OBS_BUSY]);
+    expect(fetches).toEqual([]);
     store.stop();
+  });
+});
+
+describe("thumbnail recovery and stale loads", () => {
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: Error) => void;
+    const promise = new Promise<T>((yes, no) => {
+      resolve = yes;
+      reject = no;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("retries a transient failure without needing a different frame id", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, loadImage } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
+    store.start();
+    await Promise.resolve();
+    loadImage.mockRejectedValueOnce(new Error("temporary"));
+    store.ensureThumbnail("a1");
+    await Promise.resolve();
+    expect(store.getSnapshot().thumbnails.a1.status).toBe("error");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(loadImage).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().displayFrames.s1).toEqual({ status: "ready", url: "blob:url-a1" });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("bounds automatic retries and allows an explicit recovery", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, loadImage } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
+    store.start();
+    await Promise.resolve();
+    loadImage.mockRejectedValue(new Error("offline"));
+    store.ensureThumbnail("a1");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(loadImage).toHaveBeenCalledTimes(3);
+    expect(vi.getTimerCount()).toBe(0);
+    store.ensureThumbnail("a1");
+    expect(loadImage).toHaveBeenCalledTimes(3);
+    loadImage.mockResolvedValue("blob:recovered");
+    store.retryThumbnail("a1");
+    await Promise.resolve();
+    expect(store.getSnapshot().displayFrames.s1.url).toBe("blob:recovered");
+  });
+
+  it("cancels backoff when a reconnect retries the current frame", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const session = { ...OBS_IDLE, thumbnailAttachmentId: "a1" };
+    const { store, esInstances, loadImage } = harness([session]);
+    store.start();
+    await Promise.resolve();
+    loadImage.mockRejectedValueOnce(new Error("offline"));
+    store.ensureThumbnail("a1");
+    await Promise.resolve();
+    emit(esInstances[0], { type: "snapshot", sessions: [session], available: true });
+    await Promise.resolve();
+    expect(store.getSnapshot().thumbnails.a1.status).toBe("ready");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(loadImage).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "remove",
+    "reset",
+    "stop",
+    "missing-thumbnail",
+    "snapshot-removal",
+  ])("cleans frames and cancels retries on %s", async (action) => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const { store, esInstances, loadImage } = harness([
+      { ...OBS_IDLE, thumbnailAttachmentId: "a1" },
+    ]);
+    store.start();
+    await Promise.resolve();
+    store.ensureThumbnail("a1");
+    await Promise.resolve();
+    emit(esInstances[0], { type: "upsert", session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" } });
+    loadImage.mockRejectedValueOnce(new Error("no frame"));
+    store.ensureThumbnail("a2");
+    await Promise.resolve();
+    expect(store.getSnapshot().displayFrames.s1).toEqual({ status: "error", url: "blob:url-a1" });
+    if (action === "stop") store.stop();
+    else if (action === "remove") emit(esInstances[0], { type: "remove", session: OBS_IDLE });
+    else if (action === "reset") emit(esInstances[0], { type: "reset" });
+    else if (action === "missing-thumbnail")
+      emit(esInstances[0], { type: "upsert", session: OBS_IDLE });
+    else emit(esInstances[0], { type: "snapshot", sessions: [], available: true });
+    expect(store.getSnapshot().thumbnails).toEqual({});
+    expect(store.getSnapshot().displayFrames).toEqual({});
+    expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:url-a1");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(loadImage).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    "resolve",
+    "reject",
+  ])("ignores a stale load's %s even when the same id is loaded again", async (outcome) => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const { store, esInstances, loadImage } = harness([
+      { ...OBS_IDLE, thumbnailAttachmentId: "a1" },
+    ]);
+    const old = deferred<string>();
+    loadImage.mockReturnValueOnce(old.promise);
+    store.start();
+    await Promise.resolve();
+    store.ensureThumbnail("a1");
+    emit(esInstances[0], { type: "upsert", session: { ...OBS_IDLE, thumbnailAttachmentId: "a2" } });
+    emit(esInstances[0], { type: "upsert", session: { ...OBS_IDLE, thumbnailAttachmentId: "a1" } });
+    store.ensureThumbnail("a1");
+    await Promise.resolve();
+    if (outcome === "resolve") old.resolve("blob:stale");
+    else old.reject(new Error("stale error"));
+    await Promise.resolve();
+    expect(store.getSnapshot().displayFrames.s1).toEqual({ status: "ready", url: "blob:url-a1" });
+    expect(revoke).not.toHaveBeenCalledWith("blob:url-a1");
+    if (outcome === "resolve") expect(revoke).toHaveBeenCalledWith("blob:stale");
+  });
+
+  it.each(["resolve", "reject"])("ignores an in-flight load's %s after stop", async (outcome) => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const { store, loadImage } = harness([{ ...OBS_IDLE, thumbnailAttachmentId: "a1" }]);
+    const pending = deferred<string>();
+    loadImage.mockReturnValueOnce(pending.promise);
+    store.start();
+    await Promise.resolve();
+    store.ensureThumbnail("a1");
+    store.stop();
+    if (outcome === "resolve") pending.resolve("blob:late");
+    else pending.reject(new Error("late error"));
+    await Promise.resolve();
+    expect(store.getSnapshot()).toMatchObject({ sessions: [], thumbnails: {}, displayFrames: {} });
+    if (outcome === "resolve") expect(revoke).toHaveBeenCalledWith("blob:late");
+  });
+});
+
+describe("thumbnail viewer leases", () => {
+  it("keeps metadata subscribed while the last screenshot viewer leaves", async () => {
+    const { store, eventUrls, esInstances } = harness([OBS_IDLE]);
+    store.acquire();
+    await Promise.resolve();
+    expect(eventUrls).toEqual(["/bsk-observation/events?thumbnails=0"]);
+    const first = store.watchThumbnails();
+    expect(eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=1");
+    const second = store.watchThumbnails();
+    expect(eventUrls).toHaveLength(2);
+    first();
+    first();
+    expect(eventUrls).toHaveLength(2);
+    second();
+    expect(eventUrls.at(-1)).toBe("/bsk-observation/events?thumbnails=0");
+    expect(store.getSnapshot().subscribed).toBe(true);
+    store.release();
+    expect(esInstances.at(-1)?.close).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().subscribed).toBe(false);
+  });
+
+  it("ignores delayed snapshots from a replaced stream without clearing the displayed state", async () => {
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+    emit(esInstances[0], { type: "upsert", session: OBS_BUSY });
+    const release = store.watchThumbnails();
+    expect(store.getSnapshot().sessions).toEqual([OBS_BUSY]);
+    await Promise.resolve();
+    emit(esInstances[1], { type: "upsert", session: OBS_BUSY });
+    emit(esInstances[0], { type: "snapshot", sessions: [], available: false });
+    expect(store.getSnapshot()).toMatchObject({ sessions: [OBS_BUSY], available: true });
+    store.stop();
+    release();
+    expect(esInstances).toHaveLength(2);
   });
 });

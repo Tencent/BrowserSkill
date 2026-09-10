@@ -28,6 +28,7 @@ pub mod record_recovery;
 pub mod record_state;
 pub mod render_error;
 pub mod screenshot;
+pub mod scroll;
 pub mod session;
 pub mod snapshot;
 pub mod status;
@@ -35,6 +36,7 @@ pub mod tab;
 pub mod update;
 pub mod upload;
 pub mod waits;
+pub mod wheel;
 pub mod window;
 
 use clap::{Args, Parser, Subcommand};
@@ -47,18 +49,22 @@ use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
 use crate::cli::install_skill::InstallSkillArgs;
-use crate::cli::interaction::{ClickArgs, FillArgs, HoverArgs, PressArgs, SelectArgs};
+use crate::cli::interaction::{
+    BlurArgs, ClickArgs, FillArgs, FocusArgs, HoverArgs, PressArgs, SelectArgs,
+};
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
 use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
+use crate::cli::scroll::ScrollToArgs;
 use crate::cli::session::SessionCmd;
 use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
 use crate::cli::upload::UploadArgs;
 use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
+use crate::cli::wheel::WheelArgs;
 use crate::cli::window::WindowCmd;
 
 /// Tool calls wait slightly longer than the daemon's 30s tool timeout so
@@ -173,6 +179,19 @@ pub enum Command {
     /// Hover a snapshot ref or CSS selector.
     Hover(HoverArgs),
 
+    /// Dispatch a native mouse-wheel event at the viewport centre or an element.
+    Wheel(WheelArgs),
+
+    /// Scroll a snapshot ref or CSS selector into the visible viewport.
+    #[command(name = "scroll-to")]
+    ScrollTo(ScrollToArgs),
+
+    /// Focus a snapshot ref or CSS selector.
+    Focus(FocusArgs),
+
+    /// Remove focus from a snapshot ref or CSS selector.
+    Blur(BlurArgs),
+
     /// Fill an input / textarea / contenteditable.
     Fill(FillArgs),
 
@@ -182,7 +201,7 @@ pub enum Command {
     /// Set `<select>` option values by `value` attribute.
     Select(SelectArgs),
 
-    /// Upload one or more local files through a page file chooser.
+    /// Upload files through a page file input or explicit drop target.
     Upload(UploadArgs),
 
     /// Capture one browser download and write it to a local path.

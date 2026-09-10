@@ -189,6 +189,10 @@ importers:
       react-i18next:
         specifier: ^15.3.4
         version: 15.7.4(i18next@24.2.3(typescript@5.9.3))(react@19.2.6)(typescript@5.9.3)
+    devDependencies:
+      vitest:
+        specifier: ^4.1.6
+        version: 4.1.6(@types/node@25.8.0)(happy-dom@15.11.7)(vite@8.0.13(@types/node@25.8.0)(esbuild@0.27.7)(jiti@2.7.0))
 
   packages/ui:
     dependencies:

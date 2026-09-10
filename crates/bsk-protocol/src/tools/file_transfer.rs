@@ -15,6 +15,20 @@ pub struct UploadFile {
     pub staged_path: Option<String>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UploadMode {
+    #[default]
+    Input,
+    Drop,
+}
+
+impl UploadMode {
+    fn is_input(&self) -> bool {
+        matches!(self, Self::Input)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct UploadParams {
     pub session_id: String,
@@ -30,6 +44,8 @@ pub struct UploadParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
     pub files: Vec<UploadFile>,
+    #[serde(default, skip_serializing_if = "UploadMode::is_input")]
+    pub mode: UploadMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u32>,
 }
@@ -151,11 +167,32 @@ mod tests {
                 name: "image.png".into(),
                 staged_path: None,
             }],
+            mode: UploadMode::Input,
             timeout_ms: None,
         })
         .unwrap();
         assert_eq!(value["ref"], "@e3");
         assert!(value["files"][0].get("staged_path").is_none());
+        assert!(value.get("mode").is_none());
+    }
+
+    #[test]
+    fn upload_drop_mode_is_explicit_on_the_wire() {
+        let value = serde_json::to_value(UploadParams {
+            session_id: "s1".into(),
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            files: vec![UploadFile {
+                transfer_id: "tr_1".into(),
+                name: "image.png".into(),
+                staged_path: None,
+            }],
+            mode: UploadMode::Drop,
+            timeout_ms: None,
+        })
+        .unwrap();
+        assert_eq!(value["mode"], "drop");
     }
 
     #[test]

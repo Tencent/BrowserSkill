@@ -2,8 +2,13 @@
 // target, then delegate the browser protocol transaction to the file-input
 // transaction module.
 
+import {
+  type CaptureSuppressSendToTab,
+  withExtensionOverlayHidden,
+} from "@/lib/capture-suppress-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
+import { uploadThroughFileDrop } from "./file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import {
@@ -18,6 +23,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 
 export interface UploadDeps extends InteractionDeps {
   cdp: CdpRunner;
+  sendToTab?: CaptureSuppressSendToTab;
 }
 
 export async function handleUpload(
@@ -41,19 +47,39 @@ export async function handleUpload(
   const address = await resolveActionTarget(deps.cdp, ctx, target, params, "upload");
   if (isRpcError(address)) return address;
   const timeoutMs = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
-  const transaction = await uploadThroughActivatedFileInput({
-    cdp: deps.cdp,
-    actionTarget: address,
-    files: params.files.map((file) => file.staged_path as string),
-    timeoutMs,
-    signal: deps.signal,
-    trigger: () => clickResolvedTarget(ctx, address, {}, deps),
-  });
-  if (isRpcError(transaction)) return transaction;
+  const files = params.files.map((file) => file.staged_path as string);
+  const mode = params.mode ?? "input";
+  let usedRef = address.usedRef;
+  let usedSelector = address.usedSelector;
+  if (mode === "drop") {
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    const transaction = await uploadThroughFileDrop({
+      cdp: deps.cdp,
+      actionTarget: address,
+      files,
+      timeoutMs,
+      signal: deps.signal,
+      withOverlayHidden: (operation) =>
+        withExtensionOverlayHidden(target.tabId, operation, deps.sendToTab),
+    });
+    if (isRpcError(transaction)) return transaction;
+  } else {
+    const transaction = await uploadThroughActivatedFileInput({
+      cdp: deps.cdp,
+      actionTarget: address,
+      files,
+      timeoutMs,
+      signal: deps.signal,
+      trigger: () => clickResolvedTarget(ctx, address, {}, deps),
+    });
+    if (isRpcError(transaction)) return transaction;
+    usedRef = transaction.click.used_ref;
+    usedSelector = transaction.click.used_selector;
+  }
   return {
     tab_id: target.tabId,
-    used_ref: transaction.click.used_ref,
-    used_selector: transaction.click.used_selector,
+    used_ref: usedRef,
+    used_selector: usedSelector,
     file_names: params.files.map((file) => file.name),
   };
 }

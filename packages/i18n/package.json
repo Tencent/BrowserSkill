@@ -13,6 +13,10 @@
       "default": "./src/react.tsx"
     }
   },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
   "peerDependencies": {
     "react": "^19.0.0"
   },
@@ -20,5 +24,8 @@
     "i18next": "^24.2.2",
     "i18next-browser-languagedetector": "^8.0.2",
     "react-i18next": "^15.3.4"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.6"
   }
 }

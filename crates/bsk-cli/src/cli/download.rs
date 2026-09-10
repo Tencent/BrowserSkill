@@ -9,8 +9,7 @@ use anyhow::Context;
 use base64::Engine;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, TransferChunkParams, TransferChunkResult, TransferIdParams,
-    TransferReleaseResult,
+    DownloadParams, DownloadResult, TransferChunkParams, TransferChunkResult,
 };
 use clap::Args;
 use uuid::Uuid;
@@ -70,13 +69,7 @@ pub fn dispatch(args: DownloadArgs, format: Format) -> Result<(), CliError> {
         CliError::Local(anyhow::anyhow!("daemon returned no download transfer id"))
     })?;
     let write_result = write_transfer(&info.sock_path, &transfer_id, &args.out, args.overwrite);
-    let _: Result<TransferReleaseResult, CliError> = crate::cli::business_rpc::call(
-        info.sock_path,
-        "transfer-release",
-        Method::TransferRelease,
-        Some(TransferIdParams { transfer_id }),
-        Duration::from_secs(5),
-    );
+    let _ = crate::cli::business_rpc::release_transfers(&info.sock_path, [transfer_id.as_str()]);
     write_result?;
     match format {
         Format::Json => {

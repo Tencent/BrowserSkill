@@ -10,19 +10,34 @@ use base64::Engine;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     TransferBeginParams, TransferBeginResult, TransferChunkParams, TransferChunkResult,
-    TransferIdParams, TransferReadyResult, TransferReleaseResult, UploadFile, UploadParams,
-    UploadResult,
+    TransferIdParams, TransferReadyResult, UploadFile, UploadMode, UploadParams, UploadResult,
 };
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::interaction::split_target;
 use crate::cli::navigate::parse_timeout_ms;
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum UploadModeArg {
+    #[default]
+    Input,
+    Drop,
+}
+
+impl From<UploadModeArg> for UploadMode {
+    fn from(value: UploadModeArg) -> Self {
+        match value {
+            UploadModeArg::Input => Self::Input,
+            UploadModeArg::Drop => Self::Drop,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Args)]
 pub struct UploadArgs {
-    /// Snapshot ref (`@e3`) or CSS selector for the file input / chooser trigger.
+    /// Snapshot ref (`@e3`) or CSS selector for the chooser trigger / drop target.
     pub target: Option<String>,
     #[arg(long = "ref")]
     pub ref_: Option<String>,
@@ -31,6 +46,9 @@ pub struct UploadArgs {
     /// Local file to upload. Repeat for a multiple-file input.
     #[arg(long = "file", required = true)]
     pub files: Vec<PathBuf>,
+    /// Browser mechanism used to deliver the staged files.
+    #[arg(long, value_enum, default_value_t)]
+    pub mode: UploadModeArg,
     #[arg(long)]
     pub session: String,
     #[arg(long = "tab-id")]
@@ -50,14 +68,12 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     let mut staged = Vec::new();
     for path in &args.files {
-        match stage_file(&info.sock_path, &args.session, path) {
-            Ok(file) => staged.push(file),
-            Err(err) => {
-                for (id, _) in &staged {
-                    let _ = release(&info.sock_path, id);
-                }
-                return Err(err);
-            }
+        if let Err(err) = stage_file(&info.sock_path, &args.session, path, &mut staged) {
+            let _ = crate::cli::business_rpc::release_transfers(
+                &info.sock_path,
+                staged.iter().map(|(id, _)| id.as_str()),
+            );
+            return Err(err);
         }
     }
     let params = UploadParams {
@@ -73,6 +89,7 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
                 staged_path: None,
             })
             .collect(),
+        mode: args.mode.into(),
         timeout_ms: Some(args.timeout),
     };
     let result = crate::cli::business_rpc::call::<_, UploadResult>(
@@ -82,6 +99,17 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
         Some(params),
         ipc_timeout(args.timeout),
     );
+    // The helper can reject cancellation before handing any request to the
+    // daemon. In that case staging still belongs to this CLI.
+    if result.as_ref().is_err_and(|err| {
+        err.data()
+            .is_some_and(|data| data["reason"] == "cancelled_before_dispatch")
+    }) {
+        let _ = crate::cli::business_rpc::release_transfers(
+            &info.sock_path,
+            staged.iter().map(|(id, _)| id.as_str()),
+        );
+    }
     // Once tool.upload is dispatched, staging ownership belongs to the
     // session. A transport timeout cannot prove that Chrome did not attach
     // the file, so releasing here could invalidate a late successful attach.
@@ -98,7 +126,12 @@ pub fn dispatch(args: UploadArgs, format: Format) -> Result<(), CliError> {
     Ok(())
 }
 
-fn stage_file(sock: &Path, session: &str, path: &PathBuf) -> Result<(String, String), CliError> {
+fn stage_file(
+    sock: &Path,
+    session: &str,
+    path: &PathBuf,
+    staged: &mut Vec<(String, String)>,
+) -> Result<(), CliError> {
     let mut file = File::open(path)
         .with_context(|| format!("open upload file {}", path.display()))
         .map_err(CliError::Local)?;
@@ -129,55 +162,39 @@ fn stage_file(sock: &Path, session: &str, path: &PathBuf) -> Result<(String, Str
         }),
         Duration::from_secs(10),
     )?;
-    let staged = (|| {
-        let mut offset = 0u64;
-        let mut buf = vec![0u8; begin.chunk_size as usize];
-        loop {
-            let n = file.read(&mut buf).map_err(|e| CliError::Local(e.into()))?;
-            if n == 0 {
-                break;
-            }
-            let reply: TransferChunkResult = crate::cli::business_rpc::call(
-                sock.to_path_buf(),
-                "transfer-chunk",
-                Method::TransferChunk,
-                Some(TransferChunkParams {
-                    transfer_id: begin.transfer_id.clone(),
-                    offset,
-                    data_base64: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
-                }),
-                Duration::from_secs(30),
-            )?;
-            offset = reply.next_offset;
+    // Record ownership immediately so one error path releases both completed
+    // files and the current partially staged file.
+    staged.push((begin.transfer_id.clone(), name));
+    let mut offset = 0u64;
+    let mut buf = vec![0u8; begin.chunk_size as usize];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| CliError::Local(e.into()))?;
+        if n == 0 {
+            break;
         }
-        let _: TransferReadyResult = crate::cli::business_rpc::call(
+        let reply: TransferChunkResult = crate::cli::business_rpc::call(
             sock.to_path_buf(),
-            "transfer-finish",
-            Method::TransferFinish,
-            Some(TransferIdParams {
+            "transfer-chunk",
+            Method::TransferChunk,
+            Some(TransferChunkParams {
                 transfer_id: begin.transfer_id.clone(),
+                offset,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(&buf[..n]),
             }),
-            Duration::from_secs(10),
+            Duration::from_secs(30),
         )?;
-        Ok::<_, CliError>(())
-    })();
-    if let Err(err) = staged {
-        let _ = release(sock, &begin.transfer_id);
-        return Err(err);
+        offset = reply.next_offset;
     }
-    Ok((begin.transfer_id, name))
-}
-
-fn release(sock: &Path, id: &str) -> Result<TransferReleaseResult, CliError> {
-    crate::cli::business_rpc::call(
+    let _: TransferReadyResult = crate::cli::business_rpc::call(
         sock.to_path_buf(),
-        "transfer-release",
-        Method::TransferRelease,
+        "transfer-finish",
+        Method::TransferFinish,
         Some(TransferIdParams {
-            transfer_id: id.to_string(),
+            transfer_id: begin.transfer_id.clone(),
         }),
-        Duration::from_secs(5),
-    )
+        Duration::from_secs(10),
+    )?;
+    Ok(())
 }
 
 fn ipc_timeout(timeout_ms: u32) -> Duration {

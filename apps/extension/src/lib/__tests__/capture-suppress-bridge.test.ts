@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CAPTURE_SUPPRESS,
   type CaptureSuppressMessage,
-  withOverlaysHiddenForCapture,
+  withExtensionOverlayHidden,
 } from "../capture-suppress-bridge";
 
 function recordingSendToTab(events: string[]) {
@@ -12,12 +12,12 @@ function recordingSendToTab(events: string[]) {
   });
 }
 
-describe("withOverlaysHiddenForCapture", () => {
+describe("withExtensionOverlayHidden", () => {
   it("sends begin → fn → end and returns fn's result", async () => {
     const events: string[] = [];
     const sendToTab = recordingSendToTab(events);
 
-    const result = await withOverlaysHiddenForCapture(
+    const result = await withExtensionOverlayHidden(
       7,
       async () => {
         events.push("capture");
@@ -37,7 +37,7 @@ describe("withOverlaysHiddenForCapture", () => {
     const sendToTab = recordingSendToTab(events);
 
     await expect(
-      withOverlaysHiddenForCapture(
+      withExtensionOverlayHidden(
         7,
         async () => {
           events.push("capture");
@@ -55,7 +55,7 @@ describe("withOverlaysHiddenForCapture", () => {
     });
     const fn = vi.fn(async () => "shot");
 
-    const result = await withOverlaysHiddenForCapture(7, fn, sendToTab);
+    const result = await withExtensionOverlayHidden(7, fn, sendToTab);
 
     expect(result).toBe("shot");
     expect(fn).toHaveBeenCalledTimes(1);
@@ -69,7 +69,7 @@ describe("withOverlaysHiddenForCapture", () => {
       return { type: CAPTURE_SUPPRESS, ok: true };
     });
 
-    const result = await withOverlaysHiddenForCapture(7, async () => "shot", sendToTab);
+    const result = await withExtensionOverlayHidden(7, async () => "shot", sendToTab);
 
     expect(result).toBe("shot");
     expect(sendToTab).toHaveBeenCalledTimes(2);

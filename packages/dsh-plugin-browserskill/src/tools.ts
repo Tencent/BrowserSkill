@@ -636,7 +636,9 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         session: SESSION_PARAM,
         noClear: {
           type: "boolean",
-          description: "Skip the default wipe-the-field-first pass (append instead).",
+          description:
+            "Append to the end of the existing value instead of clearing it. " +
+            "The tool moves the caret automatically; no prior click or selection is needed.",
         },
       },
       output: {

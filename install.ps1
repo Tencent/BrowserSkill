@@ -21,6 +21,7 @@ $ErrorActionPreference = "Stop"
 
 $Repo = if ($env:BSK_REPO) { $env:BSK_REPO } else { "Tencent/BrowserSkill" }
 $InstallDir = if ($env:BSK_INSTALL_DIR) { $env:BSK_INSTALL_DIR } else { Join-Path $HOME ".local\bin" }
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
 $GitHub = "https://github.com/${Repo}"
 
 function Write-Log {
@@ -64,7 +65,7 @@ function Get-PlatformTriple {
 function Add-ToUserPath {
     param([string]$Dir)
 
-    $currentUserPath = [Environment]::GetEnvironmentVariable("PATH", "User") -split ";" | Where-Object { $_ }
+    $currentUserPath = @([Environment]::GetEnvironmentVariable("PATH", "User") -split ";" | Where-Object { $_ })
 
     if ($currentUserPath -contains $Dir) {
         Write-Log "$Dir is already in your user PATH"
@@ -90,29 +91,58 @@ function Add-ToSessionPath {
 # ── Git Bash (bash environment) PATH helper ──────────────────────────────────
 
 function Add-ToBashProfile {
-    param([string]$Dir)
+    param([string]$Dir, [string]$BashRc = (Join-Path $HOME ".bashrc"))
 
     # Convert Windows path (e.g. C:\Users\foo\.local\bin) to Git-Bash Unix-style (/c/Users/foo/.local/bin)
     $unixPath = $Dir -replace '\\', '/'
     if ($unixPath -match '^([A-Z]):(.*)$') {
         $unixPath = '/' + $matches[1].ToLower() + $matches[2]
     }
-    $bashRc = Join-Path $HOME ".bashrc"
-    $exportLine = "export PATH=""${unixPath}:`$PATH""  # bsk CLI"
+    # Single-quote the literal directory; only the existing PATH is expanded.
+    $shellQuote = "'" + [char]34 + "'" + [char]34 + "'"
+    $quotedPath = "'" + $unixPath.Replace("'", $shellQuote) + "'"
+    $exportLine = "export PATH=${quotedPath}:`"`$PATH`"  # bsk CLI"
 
-    if (Test-Path $bashRc) {
-        $content = Get-Content $bashRc -Raw -ErrorAction SilentlyContinue
-        if ($content -match [regex]::Escape($unixPath)) {
+    if (Test-Path -LiteralPath $BashRc) {
+        $content = [System.IO.File]::ReadAllText($BashRc)
+        if ($content.Contains($exportLine)) {
             Write-Log "$unixPath is already in ~/.bashrc"
             return
         }
     }
 
-    Add-Content $bashRc "`n$exportLine" -Encoding ASCII
+    # Explicit BOM-less UTF-8 also works in Windows PowerShell 5.1.
+    [System.IO.File]::AppendAllText($BashRc, "`n$exportLine`n", (New-Object System.Text.UTF8Encoding($false)))
     Write-Log "added ${unixPath} to ~/.bashrc"
 }
 
 # ── Main ──────────────────────────────────────────────────────────────────────
+
+# Stage on the destination volume before stopping the daemon. Never truncate
+# the installed executable: failed replacement must leave it usable.
+function Install-Binary {
+    param([string]$Source, [string]$Target)
+
+    $staged = "$Target.install-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [System.IO.File]::Copy($Source, $staged)
+        if ([System.IO.File]::Exists($Target)) {
+            # Use the downloaded CLI: older versions have broken Windows
+            # liveness checks. Stop verifies daemon identity before terminating it.
+            & $Source daemon stop
+            if ($LASTEXITCODE -ne 0) { throw "could not stop bsk daemon; existing installation was not replaced" }
+            # PowerShell 5.1 converts $null to an empty path for string parameters.
+            [System.IO.File]::Replace($staged, $Target, [NullString]::Value)
+            Write-Log "daemon will restart automatically on the next browser command"
+        }
+        else {
+            [System.IO.File]::Move($staged, $Target)
+        }
+    }
+    finally {
+        if ([System.IO.File]::Exists($staged)) { [System.IO.File]::Delete($staged) }
+    }
+}
 
 function Main {
     $platform = Get-PlatformTriple
@@ -184,7 +214,7 @@ function Main {
             New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
         }
 
-        Copy-Item -Path (Join-Path $tempDir "bsk.exe") -Destination (Join-Path $InstallDir "bsk.exe") -Force
+        Install-Binary -Source (Join-Path $tempDir "bsk.exe") -Target (Join-Path $InstallDir "bsk.exe")
 
         Write-Log "installed bsk to $InstallDir\bsk.exe"
 
@@ -199,12 +229,8 @@ function Main {
 
         # Verify
         $bskPath = Join-Path $InstallDir "bsk.exe"
-        if (Get-Command bsk -ErrorAction SilentlyContinue) {
-            & bsk --version
-        }
-        else {
-            Write-Log "verify install: & ""$bskPath"" --version"
-        }
+        & $bskPath --version
+        if ($LASTEXITCODE -ne 0) { throw "installed bsk failed verification" }
 
         Write-Log "done"
         Write-Host ""

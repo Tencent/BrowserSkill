@@ -2,12 +2,14 @@ import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
 import type {
+  BlurParams,
   ClickParams,
   ConsoleParams,
   DownloadParams,
   EmulateParams,
   EvaluateParams,
   FillParams,
+  FocusParams,
   GetHtmlParams,
   HoverParams,
   HoverResult,
@@ -27,18 +29,29 @@ import type {
   ResponseFrame,
   RpcError,
   ScreenshotParams,
+  ScrollToParams,
   SelectParams,
   SnapshotParams,
   UploadParams,
   WaitForNavigationParams,
+  WheelParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
+import { classifyCdpError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
-import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
+import {
+  handleBlur,
+  handleClick,
+  handleFill,
+  handleFocus,
+  handleHover,
+  handlePress,
+  handleSelect,
+} from "./interaction";
 import {
   handleNavigate,
   handleNavigateBack,
@@ -60,6 +73,7 @@ import {
   handleRecordStop,
   type RecordRuntimeDeps,
 } from "./record";
+import { handleScrollTo } from "./scroll";
 import {
   handleSessionStart,
   handleSessionStop,
@@ -69,6 +83,7 @@ import {
 import { chromeTabsApi, lookupSession, resolveTargetTab } from "./shared";
 import {
   type BorrowConfirmationApprover,
+  chromeTabMutationApi,
   handleTabBorrow,
   handleTabClose,
   handleTabCreate,
@@ -84,6 +99,7 @@ import {
 } from "./tabs";
 import { handleUpload } from "./upload";
 import { handleWaitForNavigation } from "./waits";
+import { handleWheel } from "./wheel";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
@@ -118,6 +134,8 @@ export interface DispatcherDeps {
   onSessionsChanged?: () => void;
   /** Invoked before a tool that dispatches page input or mutates browser state is forwarded. */
   onBrowserControlResumed?: (sessionId: string) => void;
+  /** Invoked after a tab is explicitly claimed so its overlay can be refreshed immediately. */
+  onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   /** User approval for `tool.tab_borrow` (overlay in content script). */
   approveBorrow?: BorrowConfirmationApprover;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
@@ -147,6 +165,7 @@ export class ToolDispatcher {
   private readonly recording?: RecordRuntimeDeps;
   private readonly onSessionsChanged?: () => void;
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
+  private readonly onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
@@ -167,6 +186,7 @@ export class ToolDispatcher {
     this.recording = deps.recording;
     this.onSessionsChanged = deps.onSessionsChanged;
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
+    this.onAgentTabClaimed = deps.onAgentTabClaimed;
     this.approveBorrow = deps.approveBorrow;
     this.helpNotificationCopy = deps.helpNotificationCopy;
   }
@@ -234,7 +254,7 @@ export class ToolDispatcher {
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
       const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
-        body = { id: req.id, error: result };
+        body = { id: req.id, error: classifyCdpError(result) };
       } else {
         body = { id: req.id, result };
         if (req.method === "tool.session_start") {
@@ -302,13 +322,25 @@ export class ToolDispatcher {
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
+          // Must be wired in production: the agent-tab cleanup and the
+          // window-release decision (issue #57) read these deps directly
+          // and silently no-op when they are absent.
+          tabManagement: { tabs: chromeTabMutationApi },
+          tabsQuery: chromeTabsApi,
           signal,
         });
       }
       case "tool.tab_list":
         return handleTabList(this.sessions, req.params as TabListParams, chromeTabsApi, signal);
-      case "tool.tab_create":
-        return handleTabCreate(this.sessions, req.params as TabCreateParams, { signal });
+      case "tool.tab_create": {
+        const result = await handleTabCreate(this.sessions, req.params as TabCreateParams, {
+          signal,
+        });
+        if (!isRpcError(result)) {
+          this.onAgentTabClaimed?.(result.tab_id, result.window_id);
+        }
+        return result;
+      }
       case "tool.tab_close":
         return this.withHoverReleaseForRequest(
           req.params as TabCloseParams,
@@ -317,13 +349,22 @@ export class ToolDispatcher {
         );
       case "tool.tab_select":
         return handleTabSelect(this.sessions, req.params as TabSelectParams, { signal });
-      case "tool.tab_borrow":
-        return handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
+      case "tool.tab_borrow": {
+        const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
         });
+        if (!isRpcError(result)) {
+          this.onAgentTabClaimed?.(result.tab_id, result.agent_window_id);
+        }
+        return result;
+      }
       case "tool.tab_return":
-        return handleTabReturn(this.sessions, req.params as TabReturnParams, { signal });
+        return handleTabReturn(this.sessions, req.params as TabReturnParams, {
+          signal,
+          cdp: this.cdp,
+          beforeReturn: (sessionId, tabId) => this.releaseHoverLatch(sessionId, tabId),
+        });
       case "tool.window_resize":
         return handleWindowResize(
           this.sessions,
@@ -488,6 +529,53 @@ export class ToolDispatcher {
         );
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
+      case "tool.wheel":
+        return this.withHoverReassert(
+          req.params as WheelParams,
+          () =>
+            handleWheel(
+              this.sessions,
+              req.params as WheelParams,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, bypassOverlay }
+                : undefined,
+            ),
+          { releaseAfter: true },
+          signal,
+        );
+      case "tool.scroll_to":
+        return this.withHoverReleaseForRequest(
+          req.params as ScrollToParams,
+          () =>
+            handleScrollTo(
+              this.sessions,
+              req.params as ScrollToParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
+      case "tool.focus":
+        return this.withHoverReleaseForRequest(
+          req.params as FocusParams,
+          () =>
+            handleFocus(
+              this.sessions,
+              req.params as FocusParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
+      case "tool.blur":
+        return this.withHoverReleaseForRequest(
+          req.params as BlurParams,
+          () =>
+            handleBlur(
+              this.sessions,
+              req.params as BlurParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
       case "tool.fill":
         return this.withHoverReleaseForRequest(
           req.params as FillParams,
@@ -758,6 +846,10 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.reload":
     case "tool.click":
     case "tool.hover":
+    case "tool.wheel":
+    case "tool.scroll_to":
+    case "tool.focus":
+    case "tool.blur":
     case "tool.fill":
     case "tool.press":
     case "tool.select":

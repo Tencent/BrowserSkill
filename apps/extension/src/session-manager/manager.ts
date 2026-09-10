@@ -6,7 +6,18 @@ export interface SessionContext {
   agentWindowId: number;
   refStore: RefStore;
   borrowedTabs: Map<number, BorrowedTab>;
+  /**
+   * Tabs explicitly claimed by the agent because it created them. This
+   * includes the Agent Window's home tab and tabs created by `tool.tab_create`.
+   * Tabs opened through Chrome UI never enter this set.
+   */
+  agentCreatedTabs: Set<number>;
   createdAtMs: number;
+}
+
+/** Whether this session has explicitly claimed control of `tabId`. */
+export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolean {
+  return ctx.agentCreatedTabs.has(tabId) || ctx.borrowedTabs.has(tabId);
 }
 
 export interface BorrowedTab {
@@ -107,6 +118,19 @@ export class SessionManager {
   }
 
   /**
+   * Forget a tab Chrome has removed, including any uncommitted borrow.
+   * Whole-window closures keep committed borrows until the window-removed
+   * handler reports which user tabs could not be returned.
+   */
+  forgetClosedTab(tabId: number, { isWindowClosing = false } = {}): void {
+    this.borrowReservations.delete(tabId);
+    for (const ctx of this.sessions.values()) {
+      ctx.agentCreatedTabs.delete(tabId);
+      if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
+    }
+  }
+
+  /**
    * Look up whether `tabId` is currently borrowed by some *other*
    * session than the one calling. Used by M8 `tab_borrow` to refuse
    * a second borrow on the same Chrome tab, and by `tab_close` to
@@ -179,7 +203,7 @@ export class SessionManager {
       const { signal: _signal, ...createOptions } = opts;
       windowId = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       throwIfSessionStartAborted(opts.signal);
-      await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
+      const homeTabId = await this.agentWindow.ensureActiveTab(windowId, AGENT_WINDOW_HOME);
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
@@ -187,6 +211,10 @@ export class SessionManager {
         agentWindowId: windowId,
         refStore: new RefStore(),
         borrowedTabs: new Map(),
+        // The home tab is the session's first explicit claim. Every other
+        // tab remains free until `tab_create` or `tab_borrow` identifies it
+        // by its concrete Chrome tab id.
+        agentCreatedTabs: new Set([homeTabId]),
         createdAtMs: this.now(),
       };
       this.sessions.set(sessionId, ctx);

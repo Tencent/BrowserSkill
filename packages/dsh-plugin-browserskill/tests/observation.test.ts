@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, dirname } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   actionForLabel,
   type ObservationEvent,
@@ -138,6 +138,8 @@ function setup(opts: {
   runner?: FakeRunner;
   registry?: SessionRegistry;
   scheduler?: ReturnType<typeof fakeScheduler>;
+  thumbnails?: boolean;
+  queue?: KeyedExecutor;
 }) {
   const registry = opts.registry ?? new SessionRegistry(5);
   const runner = opts.runner ?? fakeRunner();
@@ -146,13 +148,18 @@ function setup(opts: {
     ctx: fakeCtx(),
     runner,
     registry,
-    queue: new KeyedExecutor(),
+    queue: opts.queue ?? new KeyedExecutor(),
     options: OPTIONS,
     scheduler,
   });
   const events: ObservationEvent[] = [];
-  service.subscribe((event) => events.push(event));
-  return { service, registry, runner, scheduler, events };
+  const unsubscribe = service.subscribe(
+    (event) => {
+      if (event.type !== "snapshot") events.push(event);
+    },
+    { thumbnails: opts.thumbnails ?? true },
+  );
+  return { service, registry, runner, scheduler, events, unsubscribe };
 }
 
 /** Drive the registry through a real start so the session is owned. */
@@ -224,6 +231,111 @@ describe("state machine", () => {
 });
 
 describe("thumbnail cadence", () => {
+  it("keeps metadata current without screenshots and resumes when a viewer arrives", async () => {
+    const { service, scheduler, runner, events } = setup({ thumbnails: false });
+    service.addSession("s1");
+    service.beginAction("s1", "clicking");
+    service.endAction("s1");
+    const releaseForeground = service.acquireForeground("s1");
+    releaseForeground();
+    expect(service.getState()[0].action).toBe("idle");
+    expect(events).toHaveLength(3);
+    expect(scheduler.pending()).toEqual([]);
+    expect(runner.calls).toEqual([]);
+    const snapshots: ObservationEvent[] = [];
+    const leave = service.subscribe((event) => snapshots.push(event));
+    expect(snapshots[0]).toEqual({
+      type: "snapshot",
+      sessions: service.getState(),
+      available: true,
+    });
+    expect(scheduler.pending()).toEqual([0]);
+    scheduler.runNext();
+    await waitFor(() => scheduler.pending().length === 1);
+    expect(runner.calls).toHaveLength(1);
+    leave();
+    leave();
+    expect(scheduler.pending()).toEqual([]);
+    service.endAction("s1");
+    expect(scheduler.pending()).toEqual([]);
+    const resume = service.subscribe(() => {});
+    expect(scheduler.pending()).toEqual([0]);
+    resume();
+    service.dispose();
+  });
+
+  it("does not capture in a headless service with no subscribers", () => {
+    const { service, scheduler, unsubscribe } = setup({});
+    unsubscribe();
+    service.addSession("s1");
+    service.endAction("s1");
+    expect(scheduler.pending()).toEqual([]);
+    expect(service.getState()).toHaveLength(1);
+    service.dispose();
+  });
+
+  it("keeps capturing until the last viewer leaves, including reused callbacks", () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const listener = () => {};
+    const first = service.subscribe(listener);
+    const second = service.subscribe(listener);
+    expect(scheduler.pending()).toEqual([0]);
+    first();
+    first();
+    expect(scheduler.pending()).toEqual([0]);
+    second();
+    expect(scheduler.pending()).toEqual([]);
+    service.dispose();
+  });
+
+  it("skips a queued screenshot if its last viewer leaves before execution", async () => {
+    const queue = new KeyedExecutor();
+    let unblock!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const busy = queue.run("s1", () => gate);
+    const { service, scheduler, runner, unsubscribe } = setup({ queue });
+    service.addSession("s1");
+    scheduler.runNext();
+    unsubscribe();
+    unblock();
+    await busy;
+    await queue.run("s1", async () => {});
+    expect(runner.calls).toEqual([]);
+    expect(scheduler.pending()).toEqual([]);
+    service.dispose();
+  });
+
+  it("lets an already running capture finish without restarting the loop after the last viewer leaves", async () => {
+    const runner = fakeRunner();
+    const run = runner.run.bind(runner);
+    let finish!: () => void;
+    let started = false;
+    runner.run = async (args, options) => {
+      started = true;
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return run(args, options);
+    };
+    const { service, scheduler, unsubscribe } = setup({ runner });
+    service.addSession("s1");
+    scheduler.runNext();
+    await waitFor(() => started);
+    unsubscribe();
+    finish();
+    await waitFor(() => service.getState()[0]?.thumbnailAttachmentId !== undefined);
+    const args = runner.calls[0].args;
+    await waitFor(() => !existsSync(args[args.indexOf("--out") + 1]));
+    expect(scheduler.pending()).toEqual([]);
+    const leave = service.subscribe(() => {});
+    expect(scheduler.pending()).toEqual([0]);
+    leave();
+    service.dispose();
+  });
+
   it("gives foreground work priority and resumes with one fresh capture", async () => {
     const scheduler = fakeScheduler();
     let finishCapture: ((result: BskRunResult) => void) | undefined;
@@ -540,6 +652,12 @@ describe("HTTP/SSE interface", () => {
     const eventsRes = fakeRes();
     await eventsRoute?.handler(fakeReq(), eventsRes.res as never);
     service.beginAction("s1", "clicking");
+    const streamed = eventsRes.chunks.map((chunk) => JSON.parse(chunk.slice(6)));
+    expect(streamed.map((event) => event.type)).toEqual(["snapshot", "upsert"]);
+    expect(streamed[0]).toMatchObject({
+      sessions: [{ sessionId: "s1", action: "idle" }],
+      available: true,
+    });
     expect(eventsRes.res.body()).toContain('"action":"clicking"');
     eventsRes.res.close();
 
@@ -563,6 +681,47 @@ describe("HTTP/SSE interface", () => {
 
     dispose();
     expect(routes.size).toBe(0);
+    service.dispose();
+  });
+
+  it("state-only SSE does not capture, and route disposal releases every active viewer", async () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const { routes, webServer } = routeHarness();
+    const dispose = registerObservationRoutes({ get: () => webServer } as never, service);
+    const route = routes.get("/bsk-observation/events")!;
+    const metadata = fakeRes();
+    await route.handler(fakeReq({ url: "/bsk-observation/events?thumbnails=0" }), metadata.res);
+    expect(scheduler.pending()).toEqual([]);
+    const viewing = fakeRes();
+    await route.handler(fakeReq({ url: "/bsk-observation/events?thumbnails=1" }), viewing.res);
+    expect(scheduler.pending()).toEqual([0]);
+    const endMetadata = vi.spyOn(metadata.res, "end");
+    const endViewing = vi.spyOn(viewing.res, "end");
+    dispose();
+    expect(endMetadata).toHaveBeenCalledOnce();
+    expect(endViewing).toHaveBeenCalledOnce();
+    expect(scheduler.pending()).toEqual([]);
+    viewing.res.close();
+    metadata.res.close();
+    expect(endViewing).toHaveBeenCalledOnce();
+    service.dispose();
+  });
+
+  it("releases a viewer when writing its initial snapshot fails", async () => {
+    const { service, scheduler } = setup({ thumbnails: false });
+    service.addSession("s1");
+    const { routes, webServer } = routeHarness();
+    const dispose = registerObservationRoutes({ get: () => webServer } as never, service);
+    const response = fakeRes();
+    vi.spyOn(response.res, "write").mockImplementation(() => {
+      throw new Error("closed socket");
+    });
+    const end = vi.spyOn(response.res, "end");
+    await routes.get("/bsk-observation/events")!.handler(fakeReq(), response.res);
+    expect(end).toHaveBeenCalledOnce();
+    expect(scheduler.pending()).toEqual([]);
+    dispose();
     service.dispose();
   });
 

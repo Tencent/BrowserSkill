@@ -171,6 +171,7 @@ describe("connection reconfiguration with WSTransport", () => {
     s.sockets[0].close();
     await s.controller.setConnectionEnabled(true);
     const changing = s.configure(53200);
+    expect(s.controller.snapshot().state).toBe("disconnected");
     await vi.advanceTimersByTimeAsync(30_000);
     expect(s.sockets).toHaveLength(1);
     gate.resolve();

@@ -2,9 +2,15 @@ import i18n from "i18next";
 import LanguageDetector from "i18next-browser-languagedetector";
 import { initReactI18next } from "react-i18next";
 
-import { bindChromeStorageLanguageSync, getLanguageDetectionOptions } from "./chrome-storage-sync";
+import {
+  bindChromeStorageLanguageSync,
+  chromeUiLanguageDetector,
+  getLanguageDetectionOptions,
+} from "./chrome-storage-sync";
 import enUSCommon from "./locales/en-US/common.json";
 import enUSExtension from "./locales/en-US/extension.json";
+import koKRCommon from "./locales/ko-KR/common.json";
+import koKRExtension from "./locales/ko-KR/extension.json";
 import zhCNCommon from "./locales/zh-CN/common.json";
 import zhCNExtension from "./locales/zh-CN/extension.json";
 
@@ -17,14 +23,27 @@ const resources = {
     common: enUSCommon,
     extension: enUSExtension,
   },
+  "ko-KR": {
+    common: koKRCommon,
+    extension: koKRExtension,
+  },
 } as const;
 
+const languageDetector = new LanguageDetector();
+languageDetector.addDetector(chromeUiLanguageDetector);
+
+// Drive locale normalisation off the keys we actually ship, so registering a
+// translation is the only step needed to support a new language.
+const resourceKeys = Object.keys(resources);
+
 i18n
-  .use(LanguageDetector)
+  .use(languageDetector)
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: "zh-CN",
+    // English is the international default; Chinese users still get Chinese.
+    // `zh` → zh-CN also covers zh-TW/zh-HK until a Traditional resource exists.
+    fallbackLng: { en: ["en-US"], zh: ["zh-CN"], default: ["en-US"] },
     defaultNS: "common",
     ns: ["common", "extension"],
 
@@ -32,7 +51,7 @@ i18n
       escapeValue: false,
     },
 
-    detection: getLanguageDetectionOptions(),
+    detection: getLanguageDetectionOptions(resourceKeys),
 
     react: {
       useSuspense: false,

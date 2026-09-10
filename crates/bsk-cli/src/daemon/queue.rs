@@ -438,7 +438,7 @@ async fn dispatch_with_sender(
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
-    let effect_aware_transfer = is_effect_aware_transfer(&method);
+    let deadline_cleanup = waits_for_deadline_cleanup(&method);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
@@ -475,10 +475,10 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    // Lifecycle teardown and effect-aware transfers both keep the worker busy
+    // Lifecycle teardown, wheel input and effect-aware transfers keep the worker busy
     // for bounded compensation after their original deadline. Keep the outer
     // waiter alive for the same grace period so it cannot abandon reconciliation.
-    let response_grace = if lifecycle_cancellable || effect_aware_transfer {
+    let response_grace = if lifecycle_cancellable || deadline_cleanup {
         cancel_cleanup_timeout
     } else {
         Duration::ZERO
@@ -654,7 +654,7 @@ async fn forward_one(
             .is_ok()
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
-        is_effect_aware_transfer(&job.method).then_some(&send_deadline_cancel);
+        waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
     let waited = await_with_optional_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
@@ -761,6 +761,13 @@ async fn forward_one(
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolWheel {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "wheel timed out and extension cleanup could not be confirmed".into(),
+                    data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                });
+            }
             return Err(unknown_transfer_error(
                 ErrorCode::Timeout,
                 "file transfer timed out and cleanup could not be confirmed",
@@ -805,6 +812,12 @@ async fn forward_one(
         ResponseBody::Ok(v) => Ok(v),
         ResponseBody::Err(err) => Err(err),
     }
+}
+
+// Wheel must also cancel at the daemon deadline: its extension-local deadline
+// cannot account for a request delayed in transit. Other input tools are unchanged.
+fn waits_for_deadline_cleanup(method: &Method) -> bool {
+    *method == Method::ToolWheel || is_effect_aware_transfer(method)
 }
 
 fn is_effect_aware_transfer(method: &Method) -> bool {
