@@ -47,6 +47,11 @@ extension.
 
 ## Quick Start
 
+Using an agent sandbox that reaps background processes after each command?
+Follow the [sandboxed agent setup](docs/sandboxed-agents.md) to keep the daemon
+in a persistent host environment and connect with a shared `BSK_HOME` plus
+`BSK_AUTO_START=0`. Ordinary local use keeps automatic startup by default.
+
 <details open>
 <summary><b>Install with your Agent (recommended)</b></summary>
 

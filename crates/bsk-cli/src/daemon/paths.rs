@@ -23,6 +23,10 @@ use anyhow::{Context, Result};
 /// Environment variable that overrides the home directory.
 pub const BSK_HOME_ENV: &str = "BSK_HOME";
 
+pub(crate) const BSK_HOME_HINT: &str = "set BSK_HOME to a writable private directory; \
+    when using a host daemon, use the same shared directory and allow access to it \
+    and its IPC endpoint in the sandbox settings";
+
 /// Resolve the bsk home directory:
 /// 1. `BSK_HOME` env var (any non-empty value); or
 /// 2. `~/.bsk` (using [`dirs::home_dir`]).
@@ -32,27 +36,42 @@ pub fn bsk_home() -> Result<PathBuf> {
             return Ok(PathBuf::from(p));
         }
     }
-    let home = dirs::home_dir().context("could not determine user home directory")?;
+    let home = dirs::home_dir()
+        .with_context(|| format!("could not determine user home directory; {BSK_HOME_HINT}"))?;
     Ok(home.join(".bsk"))
 }
 
 /// Ensure `~/.bsk` (or `$BSK_HOME`) exists, creating it with restrictive
-/// permissions on Unix (`chmod 0700`). Returns the absolute path.
+/// permissions on Unix (`chmod 0700`). Returns the resolved path.
 pub fn ensure_bsk_home() -> Result<PathBuf> {
     let home = bsk_home()?;
+    prepare_home(&home).with_context(|| {
+        let source = if env::var(BSK_HOME_ENV).is_ok_and(|value| !value.is_empty()) {
+            "BSK_HOME"
+        } else {
+            "platform home lookup"
+        };
+        format!(
+            "cannot prepare bsk home {} (from {source}); {BSK_HOME_HINT}",
+            home.display()
+        )
+    })?;
+    Ok(home)
+}
+
+fn prepare_home(home: &Path) -> Result<()> {
     if !home.exists() {
-        std::fs::create_dir_all(&home)
+        std::fs::create_dir_all(home)
             .with_context(|| format!("create bsk home {}", home.display()))?;
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&home, perms)
+        std::fs::set_permissions(home, perms)
             .with_context(|| format!("chmod 0700 {}", home.display()))?;
     }
-    ensure_run_dir(&home)?;
-    Ok(home)
+    ensure_run_dir(home)
 }
 
 fn ensure_run_dir(home: &Path) -> Result<()> {
@@ -64,7 +83,8 @@ fn ensure_run_dir(home: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&run, perms)?;
+        std::fs::set_permissions(&run, perms)
+            .with_context(|| format!("chmod 0700 {}", run.display()))?;
     }
     Ok(())
 }

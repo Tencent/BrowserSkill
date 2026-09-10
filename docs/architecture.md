@@ -29,8 +29,11 @@ flowchart TB
 ### bsk CLI (`crates/bsk-cli`)
 
 - Parses verb-noun subcommands (`bsk session start`, `bsk click`, …).
-- On first use, **auto-spawns** the daemon if `~/.bsk/daemon.lock` is absent or stale.
-- Speaks JSON Lines over `~/.bsk/daemon.sock` (Unix) or a named pipe (Windows).
+- Uses IPC to discover a running daemon. Automatically starts one only when
+  discovery or its listener is absent, unless `BSK_AUTO_START=0` disables implicit
+  startup. See [sandboxed agent setup](sandboxed-agents.md) for host-managed daemons.
+- Speaks JSON Lines over `$BSK_HOME/run/daemon.sock` (Unix) or a named pipe (Windows);
+  the default home is `~/.bsk`.
 - Renders human-readable output by default; `--json` emits structured responses.
 
 Key modules:

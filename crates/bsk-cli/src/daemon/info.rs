@@ -106,7 +106,16 @@ pub fn write_to_path(info: &DaemonInfo, final_path: &Path) -> Result<()> {
 /// callers can distinguish "no daemon running" from "I/O error".
 pub fn read() -> Result<Option<DaemonInfo>> {
     let p = paths::info_path()?;
-    read_from_path(&p)
+    read_from_path(&p).map_err(|err| {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            err.context(paths::BSK_HOME_HINT)
+        } else {
+            err
+        }
+    })
 }
 
 pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {

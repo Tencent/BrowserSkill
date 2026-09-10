@@ -36,6 +36,11 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 
 ## 快速开始
 
+如果 Agent 沙盒会在每条命令结束后回收后台进程，请先阅读
+[沙盒环境配置说明](docs/sandboxed-agents.md)：在宿主侧保持 daemon 存活，
+沙盒内通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。
+普通本地环境仍默认自动启动，无需额外配置。
+
 <details open>
 <summary><b>让 Agent 帮你安装（推荐）</b></summary>
 

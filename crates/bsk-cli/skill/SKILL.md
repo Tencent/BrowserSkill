@@ -29,7 +29,23 @@ Every browser task owns a bounded session:
 Do not rely on the idle timeout for cleanup. Stop the session as soon as the goal is met unless the
 user explicitly asks to keep it open. Stopping also returns borrowed tabs.
 
-Any `bsk` command auto-starts the background services it needs; never manage the daemon by hand.
+By default, browser commands auto-start the daemon when needed. Keep the shared daemon running;
+task cleanup is `bsk session stop`, not `bsk daemon stop` or `restart`.
+
+If the agent environment kills background children when each shell command ends (as reported for
+Linux WorkBuddy), arrange a persistent daemon outside that per-command sandbox first. The user
+can run `BSK_HOME=/absolute/shared/bsk bsk daemon start` in a normal host terminal. A host-managed
+background task can instead run `bsk daemon start --foreground` with the same `BSK_HOME`, using
+the host's approved execution path. Do not disable sandbox protection for browser task commands.
+
+In that environment, pass `BSK_HOME=/absolute/shared/bsk BSK_AUTO_START=0` to **every** `bsk`
+command. Replace the example path with one dedicated directory that both sides can access,
+including its IPC socket; an `export` in one shell tool call may not persist to the next. If the
+daemon is unavailable, ask for it to be started in the owning host environment; do not loop on
+auto-start, guess a home directory, delete runtime files, or restart the shared daemon. A doctor
+warning about local process identity does not prevent session commands over working IPC.
+See the [sandbox setup guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md).
+
 When multiple browsers are connected, use `bsk browsers` and start with
 `bsk session start --browser <id-or-label>`. Add `--no-focus` to that same start command when the
 Agent Window does not need to interrupt the user's current work; it is not a flag on other commands.
