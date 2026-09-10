@@ -330,6 +330,49 @@ async function resolveVisualRegionNow(
   return { crop: finalRegion.crop, viewport, dpr: topDpr };
 }
 
+/** Check identity only: repainting and post-capture layout changes are allowed. */
+async function verifyCapturedTarget(
+  cdp: CdpRunner,
+  candidate: VisualCandidate,
+  signal?: AbortSignal,
+): Promise<RpcError | null> {
+  try {
+    let frame = candidate.framePath;
+    let anchor = candidate.backendNodeId;
+    // The path was validated before capture; never rebuild it from the current page.
+    while (frame) {
+      const verified = await resolveVerifiedNode(cdp, frame.document, anchor, signal);
+      if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
+      await sendToCdpTarget(cdp, frame.document.target, "Runtime.releaseObjectGroup", {
+        objectGroup: verified.objectGroup,
+      }).catch(() => {});
+      throwIfAborted(signal);
+      if (frame.parent) {
+        const owner = await sendToCdpTarget<{ backendNodeId?: number }>(
+          cdp,
+          frame.parent.frame.document.target,
+          "DOM.getFrameOwner",
+          { frameId: frame.document.frameId },
+        );
+        throwIfAborted(signal);
+        if (owner.backendNodeId !== frame.parent.ownerBackendNodeId)
+          return stale("visual frame owner changed");
+        anchor = frame.parent.ownerBackendNodeId;
+      }
+      frame = frame.parent?.frame;
+    }
+    throwIfAborted(signal);
+    return cdp.getAttachmentId?.(candidate.document.target.tabId) ===
+      candidate.document.attachmentId
+      ? null
+      : stale("visual attachment changed");
+  } catch (error) {
+    throwIfAborted(signal);
+    if (isAbortError(error)) throw error;
+    return stale("visual identity unavailable after capture");
+  }
+}
+
 /** One target only. No frame discovery, scrolling, AX, or snapshot recapture. */
 export async function captureVisualScreenshot(
   cdp: CdpRunner,
@@ -337,12 +380,21 @@ export async function captureVisualScreenshot(
   signal?: AbortSignal,
 ): Promise<{ image_base64: string; width: number; height: number } | RpcError> {
   try {
-    const region = await resolveVisualRegionNow(cdp, candidate, signal);
+    let region = await resolveVisualRegionNow(cdp, candidate, signal);
     if ("code" in region) return region;
-    const clip = screenshotPageRect(region.crop, region.viewport);
-    if (!clip) return stale("invalid screenshot coordinates");
     let scale = visualScreenshotScale(region.crop.width, region.crop.height, region.dpr);
     for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) {
+        // A new raster attempt needs fresh geometry, not the previous crop/cache.
+        region = await resolveVisualRegionNow(cdp, candidate, signal);
+        if ("code" in region) return region;
+        scale = Math.min(
+          scale,
+          visualScreenshotScale(region.crop.width, region.crop.height, region.dpr),
+        );
+      }
+      const clip = screenshotPageRect(region.crop, region.viewport);
+      if (!clip) return stale("invalid screenshot coordinates");
       throwIfAborted(signal);
       if (
         cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
@@ -354,6 +406,12 @@ export async function captureVisualScreenshot(
         { format: "png", captureBeyondViewport: false, clip: { ...clip.rect, scale } },
       );
       throwIfAborted(signal);
+      if (
+        cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
+      )
+        return stale("visual attachment changed");
+      const identityError = await verifyCapturedTarget(cdp, candidate, signal);
+      if (identityError) return identityError;
       const dims = shot.data ? parsePngDimensions(shot.data) : null;
       if (!dims)
         return rpcError(

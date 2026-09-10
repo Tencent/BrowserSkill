@@ -87,6 +87,10 @@ function fixture(child = false, oopif = false) {
   const childRows = [row(12, "canvas"), row(11, "html", rect(0, 0, 200, 100))];
   let calls = 0;
   const control = {
+    attachmentId: "a",
+    detached: false,
+    failIdentity: false,
+    onShot: (_attempt: number) => {},
     wrongOwner: false,
     rootChanged: false,
     failRead: false,
@@ -100,10 +104,12 @@ function fixture(child = false, oopif = false) {
       if (method === "DOM.getFrameOwner") return { backendNodeId: control.wrongOwner ? 999 : 2 };
       if (method === "Page.createIsolatedWorld")
         return { executionContextId: params.frameId === "child" ? 11 : 1 };
+      if (method === "DOM.resolveNode" && control.failIdentity) throw new Error("target gone");
       if (method === "DOM.resolveNode")
         return { object: { objectId: String(params.backendNodeId) } };
       if (method === "Runtime.callFunctionOn") {
         const isChild = params.objectId === "12";
+        if (control.detached) return { result: { deepSerializedValue: { type: "null" } } };
         if (!(params.functionDeclaration as string).includes("styleNames"))
           return {
             result: {
@@ -142,8 +148,11 @@ function fixture(child = false, oopif = false) {
         };
       if (method === "DOM.getBoxModel")
         return { model: { content: [100, 200, 500, 200, 500, 400, 100, 400] } };
-      if (method === "Page.captureScreenshot")
-        return { data: control.shots[Math.min(calls++, control.shots.length - 1)] };
+      if (method === "Page.captureScreenshot") {
+        const data = control.shots[Math.min(calls++, control.shots.length - 1)];
+        control.onShot(calls);
+        return { data };
+      }
       throw new Error(`unexpected ${method} ${target.sessionId}`);
     },
   );
@@ -151,7 +160,7 @@ function fixture(child = false, oopif = false) {
     send: ((tabId, method, params) =>
       send({ tabId }, method, params as Record<string, unknown>)) as CdpRunner["send"],
     sendToTarget: send as unknown as CdpRunner["sendToTarget"],
-    getAttachmentId: () => "a",
+    getAttachmentId: () => control.attachmentId,
     getFrameGraph: vi.fn(async () => {
       throw new Error("whole page discovery forbidden");
     }),
@@ -170,8 +179,8 @@ describe("visual screenshot", () => {
     expect(result).toMatchObject({ width: child ? 200 : 100, height: child ? 80 : 40 });
     expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
     const names = f.send.mock.calls.map((c) => c[1]);
-    expect(names.filter((n) => n === "DOM.getFrameOwner")).toHaveLength(child ? 1 : 0);
-    expect(names.filter((n) => n === "DOM.resolveNode")).toHaveLength(child ? 2 : 1);
+    expect(names.filter((n) => n === "DOM.getFrameOwner")).toHaveLength(child ? 2 : 0);
+    expect(names.filter((n) => n === "DOM.resolveNode")).toHaveLength(child ? 4 : 2);
     expect(names.some((n) => /scroll|DOMSnapshot|getFrameTree|Accessibility/.test(n))).toBe(false);
     expect(f.send.mock.calls.find((c) => c[1] === "Page.captureScreenshot")?.[2]).toMatchObject({
       clip: { ...f.candidate.region.crop, scale: 1 },
@@ -236,7 +245,7 @@ describe("visual screenshot", () => {
       width: 40,
       height: 20,
     });
-    expect(f.send.mock.calls.filter((c) => c[1] === "DOM.getFrameOwner")).toHaveLength(2);
+    expect(f.send.mock.calls.filter((c) => c[1] === "DOM.getFrameOwner")).toHaveLength(4);
     expect(f.send.mock.calls.find((c) => c[1] === "Page.captureScreenshot")?.[2]).toMatchObject({
       clip: crop,
     });
@@ -349,6 +358,75 @@ describe("visual screenshot", () => {
       data: { reason: "visual_pixel_budget_exceeded" },
     });
     expect(fail.send.mock.calls.filter((c) => c[1] === "Page.captureScreenshot")).toHaveLength(2);
+  });
+  it.each([
+    "attachment",
+    "root",
+    "anchor",
+    "owner",
+    "unavailable",
+    "cancel",
+  ])("rejects %s changes during capture", async (change) => {
+    const f = fixture(true, true);
+    f.control.onShot = () => {
+      if (change === "attachment") f.control.attachmentId = "new";
+      if (change === "root") f.control.rootChanged = true;
+      if (change === "anchor") f.control.detached = true;
+      if (change === "owner") f.control.wrongOwner = true;
+      if (change === "unavailable") f.control.failIdentity = true;
+      if (change === "cancel") f.controller.abort();
+    };
+    const result = await captureVisualScreenshot(f.cdp, f.candidate, f.controller.signal);
+    expect(result).toMatchObject(
+      change === "cancel" ? { code: "cancelled" } : { data: { reason: "visual_target_changed" } },
+    );
+    expect(f.send.mock.calls.filter((c) => c[1] === "Page.captureScreenshot")).toHaveLength(1);
+  });
+  it("accepts post-capture layout and style updates without rereading geometry", async () => {
+    const f = fixture();
+    f.control.onShot = () => {
+      f.topRows[0].box.x += 100;
+      f.topRows[0].styles.opacity = "0.5";
+      f.control.failRead = true;
+    };
+    expect(await captureVisualScreenshot(f.cdp, f.candidate)).toMatchObject({
+      width: 100,
+      height: 40,
+    });
+    const after = f.send.mock.calls.slice(
+      f.send.mock.calls.findIndex((c) => c[1] === "Page.captureScreenshot") + 1,
+    );
+    expect(after.filter((c) => c[1] === "DOM.resolveNode")).toHaveLength(1);
+    expect(
+      after.some(
+        (c) =>
+          c[1] === "Page.getLayoutMetrics" ||
+          c[1] === "DOM.getBoxModel" ||
+          String(c[2]?.functionDeclaration).includes("styleNames"),
+      ),
+    ).toBe(false);
+  });
+  it("remeasures geometry before a pixel-budget retry", async () => {
+    const f = fixture();
+    f.control.shots = [png(3000, 3000), png(100, 40)];
+    f.control.onShot = () => {
+      f.topRows[0].box.x += 100;
+    };
+    expect(await captureVisualScreenshot(f.cdp, f.candidate)).toMatchObject({
+      data: { reason: "visual_target_changed" },
+    });
+    expect(f.send.mock.calls.filter((c) => c[1] === "Page.captureScreenshot")).toHaveLength(1);
+  });
+  it("also checks identity after the second raster attempt", async () => {
+    const f = fixture();
+    f.control.shots = [png(3000, 3000), png(100, 40)];
+    f.control.onShot = (attempt) => {
+      if (attempt === 2) f.control.rootChanged = true;
+    };
+    expect(await captureVisualScreenshot(f.cdp, f.candidate)).toMatchObject({
+      data: { reason: "visual_target_changed" },
+    });
+    expect(f.send.mock.calls.filter((c) => c[1] === "Page.captureScreenshot")).toHaveLength(2);
   });
   it("rejects invalid PNG without guessing dimensions", async () => {
     const f = fixture();
