@@ -26,6 +26,16 @@ pub(crate) struct VerifiedDaemon {
     pub client: Client,
 }
 
+#[derive(Debug, thiserror::Error)]
+enum DiscoveryRace {
+    #[error(
+        "daemon.json pid {expected} does not match IPC daemon pid {actual}; retry after daemon startup completes"
+    )]
+    PidMismatch { expected: u32, actual: u32 },
+    #[error("daemon discovery changed during verification; retry after daemon startup completes")]
+    Changed,
+}
+
 impl VerifiedDaemon {
     /// File/RPC PID agreement does not authorize signaling that number in
     /// this namespace. Check the kernel's view of the connected peer as well.
@@ -65,12 +75,19 @@ pub(crate) async fn probe_async(timeout: Duration, params: StatusParams) -> Resu
             };
             let result = query(&info, &params, timeout).await;
             let unchanged = super::info::read()?.as_ref() == Some(&info);
-            let mismatch = result.as_ref().ok().and_then(|reply| reply.as_ref())
+            let mismatch = result
+                .as_ref()
+                .ok()
+                .and_then(|reply| reply.as_ref())
                 .filter(|(_, status)| status.pid != info.pid)
                 .map(|(_, status)| status.pid);
             if unchanged && mismatch.is_none() {
                 return match result? {
-                    Some((client, status)) => Ok(Probe::Ready(Box::new(VerifiedDaemon { info, status, client }))),
+                    Some((client, status)) => Ok(Probe::Ready(Box::new(VerifiedDaemon {
+                        info,
+                        status,
+                        client,
+                    }))),
                     None => Ok(Probe::Absent(Some(info))),
                 };
             }
@@ -81,17 +98,20 @@ pub(crate) async fn probe_async(timeout: Duration, params: StatusParams) -> Resu
                 continue;
             }
             if let Some(actual_pid) = mismatch {
-                anyhow::bail!(
-                    "daemon.json pid {} does not match IPC daemon pid {actual_pid}; retry after daemon startup completes",
-                    info.pid
-                );
+                return Err(DiscoveryRace::PidMismatch {
+                    expected: info.pid,
+                    actual: actual_pid,
+                }
+                .into());
             }
-            anyhow::bail!("daemon discovery changed during verification; retry after daemon startup completes");
+            return Err(DiscoveryRace::Changed.into());
         }
         unreachable!("the final attempt always returns")
     })
     .await
-    .with_context(|| format!("daemon IPC probe timed out after {timeout:?}; existing daemon may be unresponsive"))?
+    .with_context(|| {
+        format!("daemon IPC probe timed out after {timeout:?}; existing daemon may be unresponsive")
+    })?
 }
 
 async fn query(
@@ -127,21 +147,41 @@ fn endpoint_absent(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Wait only for a not-yet-published/listening endpoint. A blocked or invalid
-/// endpoint is an error, not permission to spawn another daemon.
+/// After spawning, tolerate timeouts and discovery races until the caller's
+/// deadline. This only probes: it never authorizes another spawn. Permission
+/// and protocol errors remain terminal, just as they are during discovery.
 pub(crate) fn wait_for_ready(timeout: Duration) -> Result<Box<VerifiedDaemon>> {
     let deadline = std::time::Instant::now() + timeout;
+    let mut last_error = None;
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        anyhow::ensure!(
-            !remaining.is_zero(),
-            "daemon failed to become ready within {timeout:?}; check `bsk logs`"
-        );
-        match probe(remaining.min(PROBE_TIMEOUT))? {
-            Probe::Ready(daemon) => return Ok(daemon),
-            Probe::Absent(_) => std::thread::sleep(Duration::from_millis(25).min(remaining)),
+        if remaining.is_zero() {
+            let message =
+                format!("daemon failed to become ready within {timeout:?}; check `bsk logs`");
+            return Err(match last_error {
+                Some(err) => anyhow::Error::context(err, message),
+                None => anyhow::anyhow!(message),
+            });
         }
+        match probe(remaining.min(PROBE_TIMEOUT)) {
+            Ok(Probe::Ready(daemon)) => return Ok(daemon),
+            Ok(Probe::Absent(_)) => {}
+            Err(err) if retryable_during_startup(&err) => last_error = Some(err),
+            Err(err) => return Err(err),
+        }
+        std::thread::sleep(
+            Duration::from_millis(25)
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
     }
+}
+
+fn retryable_during_startup(err: &anyhow::Error) -> bool {
+    err.is::<DiscoveryRace>()
+        || err.is::<tokio::time::error::Elapsed>()
+        || err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|err| err.kind() == ErrorKind::TimedOut)
 }
 
 #[cfg(test)]
@@ -165,4 +205,33 @@ mod tests {
             assert!(endpoint_absent(&err));
         }
     }
+
+    #[test]
+    fn startup_retries_only_timeouts_and_discovery_races() {
+        for err in [
+            anyhow::Error::new(DiscoveryRace::Changed),
+            DiscoveryRace::PidMismatch {
+                expected: 1,
+                actual: 2,
+            }
+            .into(),
+            std::io::Error::from(ErrorKind::TimedOut).into(),
+        ] {
+            assert!(retryable_during_startup(&err.context("probe")));
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert!(!retryable_during_startup(
+                &std::io::Error::from(kind).into()
+            ));
+        }
+        assert!(!retryable_during_startup(&anyhow::anyhow!("timed out")));
+    }
 }
+
+#[cfg(all(test, unix))]
+#[path = "probe_tests.rs"]
+mod readiness_tests;

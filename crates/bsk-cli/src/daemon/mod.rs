@@ -17,6 +17,9 @@ pub mod start;
 pub mod state;
 pub mod ws;
 
+#[cfg(test)]
+mod test_support;
+
 pub use start::{DaemonConfig, run_foreground};
 pub use state::{DaemonHandle, DaemonState};
 

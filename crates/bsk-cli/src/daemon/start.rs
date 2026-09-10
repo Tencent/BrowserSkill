@@ -151,6 +151,7 @@ pub fn run_stop() -> Result<()> {
 
 /// Stop with the same checks for explicit management and CLI self-update.
 /// The return value tells the updater whether it should restart a daemon.
+/// Observed replacement instances are errors, so update/restart must abort.
 pub(crate) fn stop_if_running() -> Result<bool> {
     let daemon = match probe::probe(Duration::from_secs(2))? {
         Probe::Ready(daemon) => daemon,
@@ -207,7 +208,11 @@ fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Re
             Ok(_lock) => {
                 // Normal shutdown removes its own metadata. A forced exit
                 // leaves it behind; only remove that exact instance's record.
-                if daemon_info::read()?.as_ref() == Some(expected) {
+                if let Some(current) = daemon_info::read()? {
+                    anyhow::ensure!(
+                        &current == expected,
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
                     match probe::probe(PROBE_TIMEOUT)? {
                         Probe::Absent(Some(info)) if &info == expected => daemon_info::remove()?,
                         _ => anyhow::bail!(
@@ -222,8 +227,11 @@ fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Re
                     .as_ref()
                     .is_some_and(|info| info != expected)
                 {
-                    // A replacement acquired the lock; never remove its files.
-                    return Ok(true);
+                    // The old instance exited, but update/restart must not
+                    // treat a replacement still running as a successful stop.
+                    anyhow::bail!(
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
                 }
             }
             Err(err) => return Err(err.context("check daemon shutdown lock")),
@@ -1063,6 +1071,38 @@ fn send_kill(_pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_rejects_replacement_metadata_with_or_without_a_held_lock() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::stopping_rejects_replacement_metadata_with_or_without_a_held_lock"
+            ),
+            || {
+                let expected = daemon_info::DaemonInfo::now(
+                    123,
+                    paths::bsk_home().unwrap().join("unused.sock"),
+                    12345,
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let mut replacement = expected.clone();
+                replacement.pid += 1;
+                daemon_info::write(&replacement).unwrap();
+                for held in [true, false] {
+                    let _lock = held.then(|| lockfile::acquire().unwrap());
+                    let error = wait_for_stopped(&expected, Duration::from_secs(1)).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("daemon instance changed while stopping")
+                    );
+                    assert_eq!(daemon_info::read().unwrap(), Some(replacement.clone()));
+                    assert!(paths::lock_path().unwrap().exists());
+                }
+            },
+        );
+    }
 
     #[test]
     fn format_duration_round_trips_seconds_and_millis() {
