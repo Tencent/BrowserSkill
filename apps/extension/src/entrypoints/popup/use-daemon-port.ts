@@ -103,6 +103,7 @@ export function useDaemonPort() {
   }, []);
 
   return {
+    savedPort: state.savedPort,
     draft,
     setDraft,
     commit,

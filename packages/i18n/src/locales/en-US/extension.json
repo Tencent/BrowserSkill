@@ -27,7 +27,7 @@
     "controlHintsToggleHint": "Show the status pill and orange glow while the Agent controls a page.",
     "controlHintsInfoLabel": "About control hints",
     "daemonPortLabel": "Connection port",
-    "daemonPortHint": "Connect to the local daemon on this port. Saving a change ends current sessions and reconnects if the connection is enabled.",
+    "daemonPortHint": "Connect to the local daemon on this port. Start the daemon and have it listen on this port first. This setting only changes the extension's connection address, not the local CLI configuration. Saving a change ends current sessions and reconnects if the connection is enabled.",
     "daemonPortInfoLabel": "About connection port",
     "daemonPortInvalid": "Enter a port between 1 and 65535.",
     "daemonPortSave": "Save port",

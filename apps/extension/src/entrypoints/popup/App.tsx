@@ -8,6 +8,7 @@ import {
   RiInformationLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
@@ -43,6 +44,7 @@ export function App() {
   const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
   const {
+    savedPort: daemonPort,
     draft: daemonPortDraft,
     setDraft: setDaemonPortDraft,
     commit: commitDaemonPort,
@@ -322,12 +324,18 @@ export function App() {
                 data-slot="popup-daemon-port-input"
               />
             </div>
-            <div className="mt-2 flex justify-end">
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <code
+                className="min-w-0 break-all text-[11px] text-muted-foreground"
+                data-slot="popup-daemon-address"
+              >
+                {daemonPort === null ? "—" : resolveDaemonWsUrl(daemonPort)}
+              </code>
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                className="h-7 px-2 text-xs"
+                className="h-7 shrink-0 px-2 text-xs"
                 disabled={!daemonPortLoaded || daemonPortSaving || !daemonPortDirty}
                 onClick={() => void commitDaemonPort()}
               >

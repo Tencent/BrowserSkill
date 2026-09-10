@@ -27,7 +27,7 @@
     "controlHintsToggleHint": "에이전트가 페이지를 제어하는 동안 상태 표시와 주황색 테두리를 표시합니다.",
     "controlHintsInfoLabel": "제어 표시에 관하여",
     "daemonPortLabel": "연결 포트",
-    "daemonPortHint": "이 포트를 통해 로컬 daemon에 연결합니다. 변경 사항을 저장하면 현재 세션이 종료되며, 연결이 활성화되어 있으면 다시 연결합니다.",
+    "daemonPortHint": "이 포트를 통해 로컬 daemon에 연결합니다. 먼저 daemon을 시작하고 이 포트에서 수신하도록 설정하세요. 이 설정은 확장 프로그램의 연결 주소만 변경하며 로컬 CLI 설정은 변경하지 않습니다. 변경 사항을 저장하면 현재 세션이 종료되며, 연결이 활성화되어 있으면 다시 연결합니다.",
     "daemonPortInfoLabel": "연결 포트 안내",
     "daemonPortInvalid": "1~65535 사이의 포트 번호를 입력하세요.",
     "daemonPortSave": "포트 저장",

@@ -575,7 +575,7 @@ describe("daemon port input", () => {
     const info = await screen.findByRole("button", { name: "连接端口说明" });
     expect(info).toBeTruthy();
     const tooltip = screen.getByText(
-      "通过此端口连接本机 daemon。保存修改会结束当前会话，并在连接开关开启时重新连接。",
+      "通过此端口连接本机 daemon，请先启动 daemon 并让其监听此端口。此设置仅更改扩展的连接地址，不会修改本地 CLI 配置。保存修改会结束当前会话，并在连接开关开启时重新连接。",
     );
     expect(tooltip.getAttribute("role")).toBe("tooltip");
     expect(tooltip.className).toContain("opacity-0");
