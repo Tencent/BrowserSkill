@@ -17,8 +17,11 @@ fn command(home: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(bsk_bin());
     cmd.args(args)
         .env("BSK_HOME", home)
+        .env("HOME", home)
+        .env_remove("BSK_AUTO_START")
         .env("BSK_AUTO_UPDATE", "off")
         .env("BSK_BROWSER_WAIT_MS", "0")
+        .env("BSK_DOCTOR_BROWSER_WAIT_MS", "0")
         .env("RUST_LOG", "warn");
     cmd
 }
@@ -125,4 +128,127 @@ fn ensure_daemon_idempotent_when_already_running() {
     // Clean up.
     let _ = command(&home, &["daemon", "stop"]).output();
     assert!(wait_for_pid_exit(pid_before, Duration::from_secs(5)));
+}
+
+#[test]
+fn disabled_auto_start_leaves_missing_and_stale_discovery_alone() {
+    for stale in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("bsk");
+        let info_path = home.join("daemon.json");
+        if stale {
+            std::fs::create_dir(&home).unwrap();
+            let sock = home.join("daemon.sock");
+            // Leave a socket file with no listener, as after a forced exit.
+            drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+            let info = bsk::daemon::info::DaemonInfo::now(0x3fff_fffe, sock, 0, "0.2.1");
+            bsk::daemon::info::write_to_path(&info, &info_path).unwrap();
+        }
+        let original = std::fs::read(&info_path).ok();
+        for args in [vec!["--json", "status"], vec!["--json", "session", "start"]] {
+            let out = command(&home, &args)
+                .env("BSK_AUTO_START", "0")
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let error = String::from_utf8_lossy(&out.stdout);
+            assert!(error.contains("BSK_AUTO_START=0"), "{error}");
+            assert!(error.contains("owning host environment"), "{error}");
+            assert_eq!(std::fs::read(&info_path).ok(), original);
+            assert!(!home.join("daemon.lock").exists());
+        }
+        if !stale {
+            assert!(!home.exists(), "browser commands must not create a home");
+        }
+
+        let out = command(&home, &["--json", "doctor"])
+            .env("BSK_AUTO_START", "0")
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let checks: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+        let daemon = checks
+            .iter()
+            .find(|c| c["name"] == "daemon running")
+            .unwrap();
+        assert_eq!(daemon["status"], "fail");
+        assert!(
+            daemon["hint"]
+                .as_str()
+                .unwrap()
+                .contains("BSK_AUTO_START=0")
+        );
+        let identity = checks
+            .iter()
+            .find(|c| c["name"] == "daemon local process identity")
+            .unwrap();
+        assert_eq!(identity["status"], "na");
+        assert_eq!(std::fs::read(&info_path).ok(), original);
+        assert!(!home.join("daemon.lock").exists());
+        if stale {
+            assert!(home.join("daemon.sock").exists());
+        }
+    }
+}
+
+#[test]
+fn disabled_auto_start_allows_explicit_start_and_reuses_daemon_across_commands() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path().join("bsk");
+    let _cleanup = StopOnDrop(home.clone());
+    let out = command(
+        &home,
+        &["daemon", "start", "--port", "0", "--daemon-idle", "60s"],
+    )
+    .env("BSK_AUTO_START", "0")
+    .output()
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let original = std::fs::read(home.join("daemon.json")).unwrap();
+    let info: bsk::daemon::info::DaemonInfo = serde_json::from_slice(&original).unwrap();
+    for _ in 0..2 {
+        let out = command(&home, &["--json", "status"])
+            .env("BSK_AUTO_START", "0")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let status: bsk_protocol::StatusResult = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(status.pid, info.pid);
+    }
+    let doctor = command(&home, &["--json", "doctor"])
+        .env("BSK_AUTO_START", "0")
+        .output()
+        .unwrap();
+    let checks: Vec<serde_json::Value> = serde_json::from_slice(&doctor.stdout).unwrap();
+    let identity = checks
+        .iter()
+        .find(|c| c["name"] == "daemon local process identity")
+        .unwrap();
+    assert_eq!(identity["status"], "ok");
+    assert_eq!(std::fs::read(home.join("daemon.json")).unwrap(), original);
+
+    let stop = command(&home, &["daemon", "stop"])
+        .env("BSK_AUTO_START", "0")
+        .output()
+        .unwrap();
+    assert!(stop.status.success());
+    assert!(!home.join("daemon.json").exists());
+    let status = command(&home, &["--json", "status"])
+        .env("BSK_AUTO_START", "0")
+        .output()
+        .unwrap();
+    assert!(!status.status.success());
+    assert!(String::from_utf8_lossy(&status.stdout).contains("BSK_AUTO_START=0"));
+    assert!(
+        !home.join("daemon.json").exists(),
+        "must not replace the stopped host daemon"
+    );
 }

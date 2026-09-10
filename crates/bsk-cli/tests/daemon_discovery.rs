@@ -23,7 +23,9 @@ fn command(home: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsk"));
     cmd.args(args)
         .env("BSK_HOME", home)
-        .env("BSK_AUTO_UPDATE", "0")
+        .env("HOME", home)
+        .env_remove("BSK_AUTO_START")
+        .env("BSK_AUTO_UPDATE", "off")
         .env("BSK_BROWSER_WAIT_MS", "0")
         .env("BSK_DOCTOR_BROWSER_WAIT_MS", "0")
         .env("RUST_LOG", "warn");
@@ -165,15 +167,38 @@ fn discovery_accepts_ipc_without_local_pid_but_management_refuses_it() {
     let original = daemon.metadata();
     success(&run(daemon.home(), &["--json", "status"]));
     success(&run(daemon.home(), &["daemon", "start"]));
-    let doctor = run(daemon.home(), &["--json", "doctor"]);
-    let checks: Vec<serde_json::Value> = serde_json::from_slice(&doctor.stdout).unwrap();
-    assert_eq!(
-        checks
+    for auto_start in ["0", "1"] {
+        success(
+            &command(daemon.home(), &["--json", "status"])
+                .env("BSK_AUTO_START", auto_start)
+                .output()
+                .unwrap(),
+        );
+        let doctor = command(daemon.home(), &["--json", "doctor"])
+            .env("BSK_AUTO_START", auto_start)
+            .output()
+            .unwrap();
+        let checks: Vec<serde_json::Value> = serde_json::from_slice(&doctor.stdout).unwrap();
+        assert_eq!(
+            checks
+                .iter()
+                .find(|c| c["name"] == "daemon running")
+                .unwrap()["status"],
+            "ok"
+        );
+        let identity = checks
             .iter()
-            .find(|c| c["name"] == "daemon running")
-            .unwrap()["ok"],
-        true
-    );
+            .find(|c| c["name"] == "daemon local process identity")
+            .unwrap();
+        assert_eq!(identity["status"], "warn");
+        assert_eq!(identity["ok"], true);
+        assert!(
+            identity["hint"]
+                .as_str()
+                .unwrap()
+                .contains("owning host environment")
+        );
+    }
     for args in [["daemon", "stop"], ["daemon", "restart"]] {
         let out = run(daemon.home(), &args);
         assert!(!out.status.success());
@@ -204,10 +229,20 @@ fn unresponsive_endpoint_is_bounded_and_does_not_spawn_or_clean_up() {
     let daemon = MockDaemon::new(FOREIGN_PID, |_, _| None);
     let original = daemon.metadata();
     let start = Instant::now();
-    let out = run(daemon.home(), &["--json", "status"]);
-    assert!(!out.status.success());
+    for auto_start in ["0", "1"] {
+        let out = command(daemon.home(), &["--json", "status"])
+            .env("BSK_AUTO_START", auto_start)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let error = String::from_utf8_lossy(&out.stdout);
+        assert!(error.contains("timed out"), "{error}");
+        assert!(
+            !error.contains("automatic daemon startup is disabled"),
+            "{error}"
+        );
+    }
     assert!(start.elapsed() < Duration::from_secs(3));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("timed out"));
     assert_eq!(daemon.metadata(), original);
     assert!(!daemon.home().join("daemon.lock").exists());
 }
@@ -366,13 +401,24 @@ fn host_daemon_is_usable_but_not_signalable_from_a_child_pid_namespace() {
             .arg(env!("CARGO_BIN_EXE_bsk"))
             .args(args)
             .env("BSK_HOME", temp.path())
-            .env("BSK_AUTO_UPDATE", "0")
+            .env("HOME", temp.path())
+            .env("BSK_AUTO_START", "0")
+            .env("BSK_AUTO_UPDATE", "off")
             .env("BSK_BROWSER_WAIT_MS", "0")
+            .env("BSK_DOCTOR_BROWSER_WAIT_MS", "0")
             .output()
             .unwrap()
     };
     success(&inside(&["--json", "status"]));
     success(&inside(&["daemon", "start"]));
+    let doctor = inside(&["--json", "doctor"]);
+    let checks: Vec<serde_json::Value> = serde_json::from_slice(&doctor.stdout).unwrap();
+    let identity = checks
+        .iter()
+        .find(|c| c["name"] == "daemon local process identity")
+        .unwrap();
+    assert_eq!(identity["status"], "warn");
+    assert_eq!(identity["ok"], true);
     let out = inside(&["daemon", "stop"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot verify local daemon process"));
@@ -381,6 +427,10 @@ fn host_daemon_is_usable_but_not_signalable_from_a_child_pid_namespace() {
         serde_json::from_slice(&std::fs::read(temp.path().join("daemon.json")).unwrap()).unwrap();
     assert_eq!(after, original);
     success(&run(temp.path(), &["daemon", "stop"]));
+    let stopped = inside(&["--json", "status"]);
+    assert!(!stopped.status.success());
+    assert!(String::from_utf8_lossy(&stopped.stdout).contains("BSK_AUTO_START=0"));
+    assert!(!temp.path().join("daemon.json").exists());
 }
 
 struct ManagedChild(Child);

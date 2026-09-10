@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::cli::browser_wait::{
     browser_query_ipc_timeout, doctor_browser_connect_wait, wait_for_browser_ms,
 };
-use crate::cli::ensure_daemon::ensure_daemon;
+use crate::cli::ensure_daemon::{AUTO_START_DISABLED_HINT, auto_start_enabled, ensure_daemon};
 use crate::cli::status::Output;
 use crate::daemon::info::DaemonInfo;
 use crate::daemon::paths;
@@ -126,7 +126,7 @@ pub fn has_failures(checks: &[CheckResult]) -> bool {
 fn resolve_daemon_state(output: Output) -> DaemonState {
     let mut state = current_state(Duration::ZERO);
 
-    if matches!(state, DaemonState::Missing | DaemonState::NoListener(_)) {
+    if matches!(state, DaemonState::Missing | DaemonState::NoListener(_)) && auto_start_enabled() {
         if let Err(err) = ensure_daemon() {
             return DaemonState::ProbeError(format!("{err:#}"));
         }
@@ -152,7 +152,7 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
 
 fn needs_browser_wait(state: &DaemonState) -> bool {
     match state {
-        DaemonState::Verified { status } => status.browsers.is_empty(),
+        DaemonState::Verified { status, .. } => status.browsers.is_empty(),
         _ => false,
     }
 }
@@ -163,13 +163,16 @@ enum DaemonState {
     Missing,
     NoListener(DaemonInfo),
     ProbeError(String),
-    Verified { status: StatusResult },
+    Verified {
+        status: StatusResult,
+        local_identity_error: Option<String>,
+    },
 }
 
 impl DaemonState {
     fn status(&self) -> Option<&StatusResult> {
         match self {
-            DaemonState::Verified { status } => Some(status),
+            DaemonState::Verified { status, .. } => Some(status),
             _ => None,
         }
     }
@@ -180,6 +183,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_home_writable(),
         check_skill_up_to_date(),
         check_daemon_running(&state),
+        check_daemon_management(&state),
         check_version_compatible(state.status()),
         check_extension_connected(state.status()),
         check_browsers_protocol_compatible(state.status()),
@@ -193,6 +197,10 @@ fn current_state(browser_wait: Duration) -> DaemonState {
     let timeout = browser_query_ipc_timeout(browser_wait, Duration::from_secs(2));
     match probe::probe_with_params(timeout, params) {
         Ok(Probe::Ready(daemon)) => DaemonState::Verified {
+            local_identity_error: daemon
+                .require_local_pid()
+                .err()
+                .map(|err| format!("{err:#}")),
             status: daemon.status,
         },
         Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
@@ -205,11 +213,7 @@ fn check_home_writable() -> CheckResult {
     let name = "bsk home writable";
     match paths::ensure_bsk_home() {
         Ok(home) => CheckResult::ok(name, home.display().to_string()),
-        Err(err) => CheckResult::fail(
-            name,
-            format!("{err:#}"),
-            "ensure $HOME or $BSK_HOME is writable",
-        ),
+        Err(err) => CheckResult::fail(name, format!("{err:#}"), paths::BSK_HOME_HINT),
     }
 }
 
@@ -297,7 +301,11 @@ fn check_daemon_running(state: &DaemonState) -> CheckResult {
         DaemonState::Missing => CheckResult::fail(
             name,
             "daemon.json not found",
-            "run `bsk daemon start` or any `bsk` command (daemon is auto-spawned)",
+            if auto_start_enabled() {
+                "run `bsk daemon start` or any `bsk` command (daemon is auto-spawned)"
+            } else {
+                AUTO_START_DISABLED_HINT
+            },
         ),
         DaemonState::NoListener(info) => CheckResult::fail(
             name,
@@ -306,13 +314,35 @@ fn check_daemon_running(state: &DaemonState) -> CheckResult {
                 info.sock_path.display(),
                 info.pid
             ),
-            "run `bsk daemon start`; check `bsk logs` if startup fails",
+            if auto_start_enabled() {
+                "run `bsk daemon start`; check `bsk logs` if startup fails"
+            } else {
+                AUTO_START_DISABLED_HINT
+            },
         ),
         DaemonState::ProbeError(err) => CheckResult::fail(
             name,
             err.clone(),
             "check daemon IPC permissions and `bsk logs`; keep existing runtime files",
         ),
+    }
+}
+
+fn check_daemon_management(state: &DaemonState) -> CheckResult {
+    let name = "daemon local process identity";
+    match state {
+        DaemonState::Verified {
+            local_identity_error: Some(err),
+            ..
+        } => CheckResult::warn(
+            name,
+            format!("IPC is available, but local process identity is unverified: {err}"),
+            "the daemon may be in another PID namespace, or IPC peer identity may be unavailable; browser commands can use IPC; run daemon management commands in the owning host environment",
+        ),
+        DaemonState::Verified { .. } => {
+            CheckResult::ok(name, "IPC peer PID matches daemon identity")
+        }
+        _ => CheckResult::na(name, "daemon IPC is unavailable"),
     }
 }
 
@@ -488,6 +518,20 @@ mod m2_tests {
             sessions: Vec::new(),
             version_skew_browsers: skew,
         }
+    }
+
+    #[test]
+    fn unverified_local_identity_warns_without_failing_usable_ipc() {
+        let state = DaemonState::Verified {
+            status: fake_status(Vec::new(), Vec::new()),
+            local_identity_error: Some("peer identity is unavailable".into()),
+        };
+        let running = check_daemon_running(&state);
+        let management = check_daemon_management(&state);
+        assert_eq!(running.status, CheckStatus::Ok);
+        assert_eq!(management.status, CheckStatus::Warning);
+        assert!(management.detail.contains("IPC is available"));
+        assert!(!has_failures(&[running, management]));
     }
 
     #[test]
