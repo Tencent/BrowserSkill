@@ -92,6 +92,9 @@ jobs:
       - name: Compile extension TypeScript
         run: pnpm --filter @browser-skill/extension compile
 
+      - name: Run localization tests
+        run: pnpm --filter @browser-skill/i18n test
+
       - name: Run extension tests
         run: pnpm ext:test
 

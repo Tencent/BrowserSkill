@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "bsk CLI를 통해 AI 에이전트가 로그인된 브라우저를 제어할 수 있습니다"
+  }
+}
