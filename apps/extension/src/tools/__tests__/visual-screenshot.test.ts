@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
+import { handleClick } from "../interaction";
 import { handleScreenshot } from "../observation";
 import type { CdpRunner } from "../shared";
+import { consumeVisualCapture, issueVisualCapture } from "../visual-capture";
 import { captureVisualScreenshot, visualScreenshotScale } from "../visual-screenshot";
 import type { VisualCandidate, VisualFramePath } from "../vom/visual-discovery";
 
@@ -100,7 +102,11 @@ function fixture(child = false, oopif = false) {
   };
   const controller = new AbortController();
   const send = vi.fn(
-    async (target: CdpTarget, method: string, params: Record<string, unknown> = {}) => {
+    async (
+      target: CdpTarget,
+      method: string,
+      params: Record<string, unknown> = {},
+    ): Promise<Record<string, unknown>> => {
       if (method === "DOM.getFrameOwner") return { backendNodeId: control.wrongOwner ? 999 : 2 };
       if (method === "Page.createIsolatedWorld")
         return { executionContextId: params.frameId === "child" ? 11 : 1 };
@@ -382,7 +388,7 @@ describe("visual screenshot", () => {
     );
     expect(f.send.mock.calls.filter((c) => c[1] === "Page.captureScreenshot")).toHaveLength(1);
   });
-  it("accepts post-capture layout and style updates without rereading geometry", async () => {
+  it("keeps the image viewable when post-capture mapping reads fail", async () => {
     const f = fixture();
     f.control.onShot = () => {
       f.topRows[0].box.x += 100;
@@ -392,11 +398,12 @@ describe("visual screenshot", () => {
     expect(await captureVisualScreenshot(f.cdp, f.candidate)).toMatchObject({
       width: 100,
       height: 40,
+      capture_unavailable: expect.any(String),
     });
     const after = f.send.mock.calls.slice(
       f.send.mock.calls.findIndex((c) => c[1] === "Page.captureScreenshot") + 1,
     );
-    expect(after.filter((c) => c[1] === "DOM.resolveNode")).toHaveLength(1);
+    expect(after.filter((c) => c[1] === "DOM.resolveNode")).toHaveLength(2);
     expect(
       after.some(
         (c) =>
@@ -404,7 +411,7 @@ describe("visual screenshot", () => {
           c[1] === "DOM.getBoxModel" ||
           String(c[2]?.functionDeclaration).includes("styleNames"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
   it("remeasures geometry before a pixel-budget retry", async () => {
     const f = fixture();
@@ -457,4 +464,218 @@ describe("visual screenshot", () => {
     expect(result).toMatchObject({ width: 100, height: 40, format: "png" });
     expect(sendToTab).toHaveBeenCalledTimes(2);
   });
+});
+
+async function pointFixture(child = false, oopif = false) {
+  const f = fixture(child, oopif);
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => 100,
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  const ctx = await manager.start("point");
+  ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
+  const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
+  const tabsApi = { get: async () => tab, query: async () => [tab] };
+  const bypassOverlay = vi.fn(async (_tab: number, _enabled: boolean) => {});
+  const original = f.send.getMockImplementation()!;
+  const input: Record<string, unknown>[] = [];
+  const hitPoints: number[][] = [];
+  const control = { hit: true, onMove: () => {}, failPress: false };
+  f.send.mockImplementation(async (target, method, params = {}) => {
+    if (
+      method === "Runtime.callFunctionOn" &&
+      String(params.functionDeclaration).includes("elementFromPoint")
+    ) {
+      hitPoints.push((params.arguments as { value: number }[]).map((a) => a.value));
+      return { result: { value: control.hit } };
+    }
+    if (method === "Input.dispatchMouseEvent") {
+      input.push(params);
+      if (params.type === "mouseMoved") control.onMove();
+      if (params.type === "mousePressed" && control.failPress) throw new Error("transport lost");
+      return {};
+    }
+    return original(target, method, params);
+  });
+  const shot = await handleScreenshot(
+    manager,
+    { session_id: "point", ref: "e1" },
+    {
+      cdp: f.cdp,
+      tabsApi,
+      captureApi: { ...tabsApi, captureVisibleTab: vi.fn() },
+      sendToTab: vi.fn(async () => ({})),
+    },
+  );
+  expect(shot).toHaveProperty("capture_id");
+  const params = {
+    session_id: "point",
+    ref: "e1",
+    capture_id: (shot as { capture_id: string }).capture_id,
+    image_x: child ? 100 : 50,
+    image_y: child ? 40 : 20,
+  };
+  return {
+    ...f,
+    manager,
+    ctx,
+    params,
+    input,
+    hitPoints,
+    pointControl: control,
+    deps: { cdp: f.cdp, tabsApi, bypassOverlay },
+    shot,
+  };
+}
+
+it.each([
+  [false, false],
+  [true, false],
+  [true, true],
+])("clicks only the captured Canvas through the frame path child=%s oopif=%s", async (child, oopif) => {
+  const f = await pointFixture(child, oopif);
+  const result = await handleClick(f.manager, f.params, f.deps);
+  expect(result).toMatchObject({ x: child ? 220 : 60, y: child ? 280 : 40 });
+  expect(f.hitPoints.at(-1)).toEqual([60, 40]);
+  expect(f.input.map((e) => e.type)).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+  expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+  const count = f.input.length;
+  expect(await handleClick(f.manager, f.params, f.deps)).toHaveProperty(
+    "data.reason",
+    "visual_capture_stale",
+  );
+  expect(f.input).toHaveLength(count);
+  expect(f.deps.bypassOverlay.mock.calls).toEqual([
+    [4, true],
+    [4, false],
+  ]);
+});
+
+it.each([
+  "replace",
+  "geometry",
+  "occluded",
+  "expired",
+  "wrong-ref",
+  "wrong-session",
+])("rejects unusable captures before moving: %s", async (kind) => {
+  const f = await pointFixture();
+  if (kind === "replace")
+    f.ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
+  if (kind === "geometry") f.topRows[0].box.x += 10;
+  if (kind === "occluded") f.pointControl.hit = false;
+  if (kind === "wrong-ref") f.params.ref = "e2";
+  if (kind === "wrong-session") f.params.session_id = "other";
+  const now = Date.now();
+  const clock =
+    kind === "expired" ? vi.spyOn(Date, "now").mockReturnValue(now + 120001) : undefined;
+  try {
+    expect(await handleClick(f.manager, f.params, f.deps)).toHaveProperty("code");
+    expect(f.input).toHaveLength(0);
+  } finally {
+    clock?.mockRestore();
+  }
+});
+
+it.each([
+  "geometry",
+  "occluded",
+  "cancel",
+  "press-failed",
+])("does not silently replay after %s during click", async (kind) => {
+  const f = await pointFixture();
+  const controller = new AbortController();
+  f.pointControl.onMove = () => {
+    if (kind === "geometry") f.topRows[0].box.x += 10;
+    if (kind === "occluded") f.pointControl.hit = false;
+    if (kind === "cancel") controller.abort();
+  };
+  f.pointControl.failPress = kind === "press-failed";
+  const result = await handleClick(f.manager, f.params, { ...f.deps, signal: controller.signal });
+  expect(result).toHaveProperty("data.effect_state", kind === "press-failed" ? "unknown" : "none");
+  expect(f.input.map((e) => e.type)).toEqual(
+    kind === "press-failed" ? ["mouseMoved", "mousePressed", "mouseReleased"] : ["mouseMoved"],
+  );
+  expect(await handleClick(f.manager, f.params, f.deps)).toHaveProperty(
+    "data.reason",
+    "visual_capture_stale",
+  );
+});
+
+it("dispatches two complete clicks with modifiers for a double-click", async () => {
+  const f = await pointFixture();
+  expect(
+    await handleClick(f.manager, { ...f.params, click_count: 2, modifiers: ["shift"] }, f.deps),
+  ).not.toHaveProperty("code");
+  expect(f.input.map((e) => [e.type, e.clickCount])).toEqual([
+    ["mouseMoved", undefined],
+    ["mousePressed", 1],
+    ["mouseReleased", 1],
+    ["mousePressed", 2],
+    ["mouseReleased", 2],
+  ]);
+  expect(f.input.every((e) => e.modifiers === 8)).toBe(true);
+});
+
+it("returns a viewable image without a click capture when the mapping changes during capture", async () => {
+  const f = fixture();
+  f.control.onShot = () => {
+    f.topRows[0].box.x += 1;
+  };
+  const shot = await captureVisualScreenshot(f.cdp, f.candidate);
+  expect(shot).toMatchObject({ width: 100, height: 40, capture_unavailable: expect.any(String) });
+  expect(shot).not.toHaveProperty("mapping");
+});
+
+it("bounds capture storage and invalidates superseded images without retaining pixels", async () => {
+  const f = await pointFixture();
+  const shot = await captureVisualScreenshot(f.cdp, f.candidate);
+  if ("code" in shot || !shot.mapping) throw new Error("expected mapping");
+  f.ctx.refStore.replace(
+    Array.from(
+      { length: 33 },
+      (_, i) => [`e${i + 1}`, { kind: "visual-region" as const, candidate: f.candidate }] as const,
+    ),
+  );
+  const ids: string[] = [];
+  for (let i = 1; i <= 33; i++) {
+    const entry = f.ctx.refStore.resolveEntry(`e${i}`)!;
+    if (entry.kind !== "visual-region") throw new Error("expected visual");
+    ids.push(issueVisualCapture(f.ctx.refStore, `e${i}`, entry, shot.mapping, 100, 40)!);
+  }
+  const request = (ref: string, id: string) =>
+    consumeVisualCapture(f.ctx.refStore, 4, {
+      session_id: "point",
+      ref,
+      capture_id: id,
+      image_x: 50,
+      image_y: 20,
+    });
+  expect(request("e1", ids[0])).toHaveProperty("code");
+  expect(request("e2", ids[1])).toHaveProperty("point", { x: 60, y: 40 });
+  const entry = f.ctx.refStore.resolveEntry("e33")!;
+  if (entry.kind !== "visual-region") throw new Error("expected visual");
+  const newest = issueVisualCapture(f.ctx.refStore, "e33", entry, shot.mapping, 100, 40)!;
+  expect(request("e33", ids[32])).toHaveProperty("code");
+  expect(request("e33", newest)).toHaveProperty("point");
+  f.ctx.refStore.clear();
+  expect(issueVisualCapture(f.ctx.refStore, "e33", entry, shot.mapping, 100, 40)).toBeUndefined();
+});
+
+it.each([
+  [-1, 0],
+  [100, 0],
+  [0, 40],
+  [NaN, 0],
+  [0, Infinity],
+])("rejects invalid PNG point %s,%s without consuming its capture", async (x, y) => {
+  const f = await pointFixture();
+  expect(
+    await handleClick(f.manager, { ...f.params, image_x: x, image_y: y }, f.deps),
+  ).toHaveProperty("code", "invalid_params");
+  expect(f.input).toHaveLength(0);
+  expect(await handleClick(f.manager, f.params, f.deps)).not.toHaveProperty("code");
 });

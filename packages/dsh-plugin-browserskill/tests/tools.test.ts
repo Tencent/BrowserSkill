@@ -1000,7 +1000,15 @@ describe("inspect.screenshot", () => {
     const path = pngFile();
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),
-      screenshot: { tab_id: 7, width: 800, height: 600, format: "png", path, byte_size: 8 },
+      screenshot: {
+        tab_id: 7,
+        width: 800,
+        height: 600,
+        format: "png",
+        path,
+        byte_size: 8,
+        capture_id: "capture-1",
+      },
     });
     await startSession(tools);
     const screenshot = tools.get("inspect.screenshot");
@@ -1009,10 +1017,12 @@ describe("inspect.screenshot", () => {
       image?: unknown;
     };
     expect(value.path).toBe(path);
+    expect(value).toHaveProperty("captureId", "capture-1");
     expect(value.image).toBeUndefined();
     expect(calls[1].args.slice(0, 3)).toEqual(["screenshot", "--session", "s1"]);
     expect(calls[1].args).toContain("--ref");
     const rendered = screenshot?.output.render({ session: "s1" }, value as never);
+    expect(JSON.stringify(rendered)).toContain("captureId=capture-1");
     expect(rendered?.every((block) => block.type === "text")).toBe(true);
   });
 
@@ -1498,4 +1508,32 @@ it("inspect.observe forwards continuation cursors and exposes the next cursor", 
     "100",
   ]);
   expect(value).toMatchObject({ nextCursor: "page-three", truncated: true });
+});
+
+it("forwards screenshot-bound Canvas coordinates to click", async () => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    click: { tab_id: 7, x: 40, y: 50 },
+  });
+  await startSession(tools);
+  await tools
+    .get("interact.click")!
+    .execute(
+      { target: "e1", captureId: "capture", imageX: 20, imageY: 30, modifiers: ["shift"] },
+      makeExec(),
+    );
+  expect(calls.at(-1)!.args).toEqual([
+    "click",
+    "--session",
+    "s1",
+    "--capture",
+    "capture",
+    "--image-x",
+    "20",
+    "--image-y",
+    "30",
+    "--modifiers",
+    "shift",
+    "e1",
+  ]);
 });

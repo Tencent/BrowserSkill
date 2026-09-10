@@ -343,6 +343,9 @@ async fn click_round_trips_ref_and_modifiers() {
         }
         let p: ClickParams = serde_json::from_value(params).unwrap();
         assert_eq!(p.ref_.as_deref(), Some("@e3"));
+        assert_eq!(p.capture_id.as_deref(), Some("capture-test"));
+        assert_eq!(p.image_x, Some(12.5));
+        assert_eq!(p.image_y, Some(34.0));
         assert_eq!(p.button, Some(MouseButton::Right));
         assert_eq!(
             p.modifiers,
@@ -366,6 +369,9 @@ async fn click_round_trips_ref_and_modifiers() {
         &sock,
         Method::ToolClick,
         ClickParams {
+            capture_id: Some("capture-test".into()),
+            image_x: Some(12.5),
+            image_y: Some(34.0),
             session_id,
             ref_: Some("@e3".into()),
             selector: None,
@@ -734,6 +740,9 @@ async fn m7_tools_propagate_extension_errors() {
         &sock,
         Method::ToolClick,
         ClickParams {
+            capture_id: None,
+            image_x: None,
+            image_y: None,
             session_id: session_id.clone(),
             ref_: Some("@e1".into()),
             selector: None,

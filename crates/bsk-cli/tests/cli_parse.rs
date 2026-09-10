@@ -715,3 +715,35 @@ fn rejects_invalid_wheel_numbers_and_timeouts() {
         assert!(Cli::try_parse_from(argv).is_err());
     }
 }
+
+#[test]
+fn canvas_click_requires_complete_capture_coordinates() {
+    let cli = parse(&[
+        "bsk",
+        "click",
+        "e1",
+        "--session",
+        "test",
+        "--capture",
+        "image",
+        "--image-x",
+        "12.5",
+        "--image-y",
+        "20",
+    ]);
+    let Command::Click(args) = cli.command else {
+        panic!("expected click")
+    };
+    assert_eq!(args.capture_id.as_deref(), Some("image"));
+    assert_eq!(args.image_x, Some(12.5));
+    assert_eq!(args.image_y, Some(20.0));
+    for extra in [
+        vec!["--capture", "image"],
+        vec!["--image-x", "12"],
+        vec!["--capture", "image", "--image-x", "12"],
+    ] {
+        let mut argv = vec!["bsk", "click", "e1", "--session", "test"];
+        argv.extend(extra);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+}

@@ -25,6 +25,9 @@ export type RpcErrorReason =
   | "element_not_visible"
   | "ref_not_found"
   | "ref_kind_unsupported"
+  | "visual_capture_stale"
+  | "visual_capture_invalid"
+  | "visual_coordinate_invalid"
   | "visual_target_changed"
   | "visual_pixel_budget_exceeded"
   | "selector_not_found"
@@ -320,6 +323,8 @@ export interface ScreenshotParams {
 }
 
 export interface ScreenshotResult {
+  capture_id?: string;
+  capture_unavailable?: string;
   image_base64: string;
   width: number;
   height: number;
@@ -440,6 +445,9 @@ export type MouseButton = "left" | "middle" | "right";
 export type KeyModifier = "alt" | "ctrl" | "meta" | "shift";
 
 export interface ClickParams {
+  capture_id?: string;
+  image_x?: number;
+  image_y?: number;
   session_id: string;
   ref?: string;
   selector?: string;

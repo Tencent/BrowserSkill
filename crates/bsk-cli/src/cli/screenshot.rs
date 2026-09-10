@@ -60,7 +60,7 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
         .map_err(CliError::Local)?;
     match format {
         Format::Json => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "tab_id": reply.tab_id,
                 "width": reply.width,
                 "height": reply.height,
@@ -68,6 +68,12 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
                 "path": out_path.to_string_lossy(),
                 "byte_size": bytes.len(),
             });
+            if let Some(id) = &reply.capture_id {
+                json["capture_id"] = serde_json::json!(id);
+            }
+            if let Some(reason) = &reply.capture_unavailable {
+                json["capture_unavailable"] = serde_json::json!(reason);
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json)
@@ -76,6 +82,15 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
         }
         Format::Human => {
             println!("{}", out_path.display());
+            if let Some(id) = &reply.capture_id {
+                println!(
+                    "capture: {id} ({}x{} original PNG pixels; single use)",
+                    reply.width, reply.height
+                );
+            }
+            if let Some(reason) = &reply.capture_unavailable {
+                println!("capture unavailable: {reason}");
+            }
             print_dialog_summaries(&reply.dialogs);
         }
     }

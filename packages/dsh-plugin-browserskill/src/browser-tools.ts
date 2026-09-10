@@ -190,7 +190,16 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       tabId: TAB_ID_PARAM,
       target: TARGET_PARAM,
       button: { type: "string", enum: ["left", "middle", "right"], description: "Click button." },
-      clickCount: { type: "integer", description: "Click count." },
+      clickCount: { type: "integer", description: "Click count; Canvas accepts 1 or 2." },
+      captureId: { type: "string", description: "Single-use Canvas screenshot capture for click." },
+      imageX: {
+        type: "number",
+        description: "Click X in original PNG pixels; requires captureId/imageY.",
+      },
+      imageY: {
+        type: "number",
+        description: "Click Y in original PNG pixels; requires captureId/imageX.",
+      },
       value: { type: "string", description: "Text for fill." },
       noClear: { type: "boolean", description: "Append instead of clearing for fill." },
       modifiers: {

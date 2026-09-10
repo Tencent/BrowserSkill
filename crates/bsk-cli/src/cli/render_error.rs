@@ -250,6 +250,22 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::NotFound, "visual_capture_stale") => RenderInfo {
+            summary: "Canvas screenshot capture is no longer usable",
+            hint: Some(
+                "run `bsk observe`, screenshot the current Canvas ref, and use its new capture_id",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, "visual_capture_invalid" | "visual_coordinate_invalid") => {
+            RenderInfo {
+                summary: "invalid screenshot-bound Canvas click",
+                hint: Some(
+                    "provide a visual ref, --capture, --image-x and --image-y in the original PNG dimensions",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
         (ErrorCode::NotFound, reason::VISUAL_TARGET_CHANGED) => RenderInfo {
             summary: "visual target needs a fresh observation",
             hint: Some(

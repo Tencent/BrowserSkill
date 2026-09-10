@@ -226,6 +226,12 @@ pub struct ScreenshotParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotResult {
+    /// Single-use visual point-click capture, in the original PNG coordinate space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    /// Image remains viewable but cannot authorize a point click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_unavailable: Option<String>,
     /// Base64-encoded PNG payload (no `data:` prefix).
     pub image_base64: String,
     /// Pixel width parsed from the PNG IHDR. May be `0` when parsing
@@ -319,6 +325,8 @@ mod tests {
     #[test]
     fn screenshot_result_round_trips_with_image_fields() {
         let r = ScreenshotResult {
+            capture_id: None,
+            capture_unavailable: None,
             image_base64: "iVBORw0KGgo=".into(),
             width: 800,
             height: 600,
