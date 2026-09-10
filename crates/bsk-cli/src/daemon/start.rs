@@ -18,13 +18,14 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use bsk_protocol::{Method, StatusParams, StatusResult};
+use bsk_protocol::StatusResult;
 use tracing::{debug, info, warn};
 
 use crate::cli::daemon::StartArgs;
 use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
+    probe::{self, PROBE_TIMEOUT, Probe},
     sessions::{StopSessionError, forget_session, stop_session},
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
@@ -119,7 +120,8 @@ pub fn run_start(args: StartArgs) -> Result<()> {
         return run_foreground(cfg);
     }
 
-    if let Some(status) = verified_existing_daemon()? {
+    if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
+        let status = daemon.status;
         validate_existing_start(&args, &status)?;
         info!(
             pid = status.pid,
@@ -131,74 +133,114 @@ pub fn run_start(args: StartArgs) -> Result<()> {
 
     // Parent: spawn ourselves detached and wait for ready.
     spawn_detached(&args)?;
-    wait_for_ready(Duration::from_secs(3), args.port.filter(|port| *port != 0))?;
+    let daemon = probe::wait_for_ready(Duration::from_secs(3))?;
+    if let Some(port) = args.port.filter(|port| *port != 0) {
+        anyhow::ensure!(
+            daemon.status.ws_port == port,
+            "daemon started on ws port {}, expected {port}",
+            daemon.status.ws_port
+        );
+    }
     Ok(())
 }
 
 /// `bsk daemon stop` entrypoint.
 pub fn run_stop() -> Result<()> {
-    let info = match daemon_info::read()? {
-        Some(info) => info,
-        None => {
-            info!("no daemon.json present — nothing to stop");
-            return Ok(());
+    stop_if_running().map(|_| ())
+}
+
+/// Stop with the same checks for explicit management and CLI self-update.
+/// The return value tells the updater whether it should restart a daemon.
+/// Observed replacement instances are errors, so update/restart must abort.
+pub(crate) fn stop_if_running() -> Result<bool> {
+    let daemon = match probe::probe(Duration::from_secs(2))? {
+        Probe::Ready(daemon) => daemon,
+        Probe::Absent(None) => return Ok(false),
+        Probe::Absent(Some(expected)) => {
+            // A missing PID cannot authorize cleanup across namespaces. The
+            // lock excludes a live daemon, including one still starting up.
+            let _lock =
+                lockfile::acquire().context("verify daemon is not running before cleanup")?;
+            anyhow::ensure!(
+                daemon_info::read()?.as_ref() == Some(&expected),
+                "daemon discovery changed during stop; retry"
+            );
+            anyhow::ensure!(
+                !lockfile::pid_alive(expected.pid),
+                "could not verify daemon identity for pid {}; refusing to stop",
+                expected.pid
+            );
+            match probe::probe(PROBE_TIMEOUT)? {
+                Probe::Absent(Some(current)) if current == expected => daemon_info::remove()?,
+                _ => anyhow::bail!("daemon became reachable during cleanup; retry stop"),
+            }
+            return Ok(false);
         }
     };
-
-    if !lockfile::pid_alive(info.pid) {
-        info!(
-            pid = info.pid,
-            "daemon.json points to a dead pid — cleaning up"
-        );
-        let _ = daemon_info::remove();
-        return Ok(());
+    let pid = daemon.require_local_pid()?;
+    send_term(pid)?;
+    if wait_for_stopped(&daemon.info, Duration::from_secs(5))? {
+        info!(pid, "daemon stopped");
+        return Ok(true);
     }
 
-    match confirm_daemon(&info, Duration::from_secs(2)) {
-        Ok(status) if status.pid == info.pid => {}
-        Ok(status) => {
-            warn!(
-                expected_pid = info.pid,
-                actual_pid = status.pid,
-                "daemon.json does not match IPC daemon; refusing to stop"
-            );
-            return Err(anyhow::anyhow!(
-                "daemon.json pid {} does not match IPC daemon pid {}; refusing to stop",
-                info.pid,
-                status.pid
-            ));
+    // Revalidate before escalation: a PID may have been reused, or a
+    // replacement daemon may already own the endpoint.
+    match probe::probe(Duration::from_secs(2))? {
+        Probe::Ready(current) if current.info == daemon.info => {
+            let pid = current.require_local_pid()?;
+            warn!(pid, "daemon did not exit within 5s; sending KILL");
+            send_kill(pid)?;
         }
-        Err(err) => {
-            warn!(
-                pid = info.pid,
-                ?err,
-                "daemon.json pid is alive but IPC validation failed; refusing to stop"
-            );
-            return Err(anyhow::anyhow!(
-                "could not verify daemon identity for pid {}; refusing to stop: {err:#}",
-                info.pid
-            ));
-        }
+        _ => anyhow::bail!("daemon identity changed while stopping; refusing to send KILL"),
     }
+    anyhow::ensure!(
+        wait_for_stopped(&daemon.info, Duration::from_secs(5))?,
+        "daemon did not release its lock after KILL"
+    );
+    Ok(true)
+}
 
-    send_term(info.pid)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if !lockfile::pid_alive(info.pid) {
-            let _ = daemon_info::remove();
-            info!(pid = info.pid, "daemon stopped");
-            return Ok(());
+fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match lockfile::acquire() {
+            Ok(_lock) => {
+                // Normal shutdown removes its own metadata. A forced exit
+                // leaves it behind; only remove that exact instance's record.
+                if let Some(current) = daemon_info::read()? {
+                    anyhow::ensure!(
+                        &current == expected,
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
+                    match probe::probe(PROBE_TIMEOUT)? {
+                        Probe::Absent(Some(info)) if &info == expected => daemon_info::remove()?,
+                        _ => anyhow::bail!(
+                            "daemon endpoint still active after lock release; refusing cleanup"
+                        ),
+                    }
+                }
+                return Ok(true);
+            }
+            Err(err) if err.is::<lockfile::AlreadyLocked>() => {
+                if daemon_info::read()?
+                    .as_ref()
+                    .is_some_and(|info| info != expected)
+                {
+                    // The old instance exited, but update/restart must not
+                    // treat a replacement still running as a successful stop.
+                    anyhow::bail!(
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
+                }
+            }
+            Err(err) => return Err(err.context("check daemon shutdown lock")),
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    warn!(
-        pid = info.pid,
-        "daemon did not exit within 5s; sending KILL"
-    );
-    let _ = send_kill(info.pid);
-    let _ = daemon_info::remove();
-    Ok(())
 }
 
 /// Run the daemon in the foreground of the current process: acquire
@@ -963,16 +1005,6 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-fn verified_existing_daemon() -> Result<Option<StatusResult>> {
-    let Some(info) = daemon_info::read_valid()? else {
-        return Ok(None);
-    };
-    match confirm_daemon(&info, Duration::from_millis(500)) {
-        Ok(status) if status.pid == info.pid => Ok(Some(status)),
-        Ok(_) | Err(_) => Ok(None),
-    }
-}
-
 fn validate_existing_start(args: &StartArgs, status: &StatusResult) -> Result<()> {
     if let Some(port) = args.port
         && status.ws_port != port
@@ -988,67 +1020,6 @@ fn validate_existing_start(args: &StartArgs, status: &StatusResult) -> Result<()
         ));
     }
     Ok(())
-}
-
-fn wait_for_ready(timeout: Duration, expected_port: Option<u16>) -> Result<()> {
-    let info_path = paths::info_path()?;
-    let deadline = Instant::now() + timeout;
-    let _ = info_path;
-    loop {
-        if let Some(info) = daemon_info::read_valid()? {
-            match confirm_daemon(&info, Duration::from_millis(500)) {
-                Ok(status) if status.pid == info.pid => {
-                    if let Some(port) = expected_port
-                        && status.ws_port != port
-                    {
-                        return Err(anyhow::anyhow!(
-                            "daemon started on ws port {}, expected {port}",
-                            status.ws_port
-                        ));
-                    }
-                    tracing::debug!(?info, "daemon ready");
-                    return Ok(());
-                }
-                Ok(status) => {
-                    tracing::debug!(
-                        expected_pid = info.pid,
-                        actual_pid = status.pid,
-                        "daemon.json did not match IPC status yet"
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(?err, "daemon IPC not ready yet");
-                }
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow::anyhow!(
-                "daemon failed to start within {:?} (no valid daemon.json)",
-                timeout
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn confirm_daemon(info: &daemon_info::DaemonInfo, timeout: Duration) -> Result<StatusResult> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for daemon verification")?;
-    rt.block_on(async {
-        let mut client = crate::ipc_client::Client::connect_path(info.sock_path.clone()).await?;
-        let outcome = client
-            .call::<_, StatusResult>(Method::SystemStatus, &StatusParams::default(), timeout)
-            .await?;
-        outcome.map_err(|err| {
-            anyhow::anyhow!(
-                "daemon verification RPC failed: {} ({:?})",
-                err.message,
-                err.code
-            )
-        })
-    })
 }
 
 #[cfg(unix)]
@@ -1100,6 +1071,38 @@ fn send_kill(_pid: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_rejects_replacement_metadata_with_or_without_a_held_lock() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::stopping_rejects_replacement_metadata_with_or_without_a_held_lock"
+            ),
+            || {
+                let expected = daemon_info::DaemonInfo::now(
+                    123,
+                    paths::bsk_home().unwrap().join("unused.sock"),
+                    12345,
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let mut replacement = expected.clone();
+                replacement.pid += 1;
+                daemon_info::write(&replacement).unwrap();
+                for held in [true, false] {
+                    let _lock = held.then(|| lockfile::acquire().unwrap());
+                    let error = wait_for_stopped(&expected, Duration::from_secs(1)).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("daemon instance changed while stopping")
+                    );
+                    assert_eq!(daemon_info::read().unwrap(), Some(replacement.clone()));
+                    assert!(paths::lock_path().unwrap().exists());
+                }
+            },
+        );
+    }
 
     #[test]
     fn format_duration_round_trips_seconds_and_millis() {

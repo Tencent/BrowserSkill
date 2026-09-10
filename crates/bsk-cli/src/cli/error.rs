@@ -51,7 +51,7 @@ pub enum CliError {
 
     /// Local transport / setup failure (e.g. couldn't reach the
     /// daemon, JSON encode failed). Maps to exit code 2.
-    #[error(transparent)]
+    #[error("{0:#}")]
     Local(#[from] Error),
 }
 

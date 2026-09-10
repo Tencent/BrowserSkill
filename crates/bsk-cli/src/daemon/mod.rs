@@ -9,12 +9,16 @@ pub mod info;
 pub mod ipc;
 pub mod lockfile;
 pub mod paths;
+pub(crate) mod probe;
 pub mod queue;
 pub mod session_interrupt;
 pub mod sessions;
 pub mod start;
 pub mod state;
 pub mod ws;
+
+#[cfg(test)]
+mod test_support;
 
 pub use start::{DaemonConfig, run_foreground};
 pub use state::{DaemonHandle, DaemonState};
