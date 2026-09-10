@@ -1478,3 +1478,24 @@ describe("wheel action", () => {
     expect(calls).toHaveLength(1);
   });
 });
+
+it("inspect.observe forwards continuation cursors and exposes the next cursor", async () => {
+  const { tools, calls } = setup({
+    "session start": { session_id: "s1", agent_window_id: 100 },
+    observe: { ...SNAPSHOT_REPLY, truncated: true, next_cursor: "page-three" },
+  });
+  await startSession(tools);
+  const value = await tools
+    .get("inspect.observe")
+    ?.execute({ cursor: "page-two", maxTokens: 100 }, makeExec());
+  expect(calls.at(-1)?.args).toEqual([
+    "observe",
+    "--session",
+    "s1",
+    "--cursor",
+    "page-two",
+    "--max-tokens",
+    "100",
+  ]);
+  expect(value).toMatchObject({ nextCursor: "page-three", truncated: true });
+});

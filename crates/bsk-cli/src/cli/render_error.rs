@@ -270,8 +270,8 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             exit_code: base.exit_code,
         },
         (ErrorCode::NotFound, reason::REF_NOT_FOUND) => RenderInfo {
-            summary: "snapshot ref was not found for this tab",
-            hint: Some("rerun `bsk snapshot` for the current tab and use one of the returned refs"),
+            summary: "observation ref was not found for this tab",
+            hint: Some("rerun `bsk observe` for the current tab and use one of the returned refs"),
             exit_code: base.exit_code,
         },
         (ErrorCode::NotFound, reason::SELECTOR_NOT_FOUND) => RenderInfo {
@@ -709,8 +709,8 @@ mod tests {
     fn ref_not_found_overrides_not_found_copy() {
         let data = serde_json::json!({ "reason": reason::REF_NOT_FOUND });
         let info = info_for_error(ErrorCode::NotFound, Some(&data));
-        assert_eq!(info.summary, "snapshot ref was not found for this tab");
-        assert!(info.hint.unwrap().contains("bsk snapshot"));
+        assert_eq!(info.summary, "observation ref was not found for this tab");
+        assert!(info.hint.unwrap().contains("bsk observe"));
     }
 
     #[test]

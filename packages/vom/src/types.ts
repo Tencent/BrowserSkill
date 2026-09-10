@@ -19,6 +19,8 @@ export type LayerKind = "page" | "modal" | "mask";
  * before constructing these nodes.
  */
 export interface VomNode {
+  /** Internal render-only visual entry; never a DOM action target. */
+  visualKey?: number;
   id: number;
   parentId: number | null;
   backendNodeId?: number;
@@ -54,7 +56,19 @@ export interface VomNode {
   insideNative?: boolean;
 }
 
+export interface VisualEntry {
+  /** Exact retained Canvas node, distinct from the next sibling insertion point. */
+  sourceId?: number;
+  fallbackContext?: string;
+  key: number;
+  parentId: number | null;
+  beforeId?: number;
+  label?: string;
+  frameId: string;
+}
+
 export interface VomScene {
+  visuals?: VisualEntry[];
   viewport: Viewport;
   nodes: VomNode[];
   /** Root document whose paint order defines page-level blocking layers. */
@@ -97,6 +111,7 @@ export interface VomRef {
 }
 
 export interface RenderedRef extends VomRef {
+  visualKey?: number;
   role?: string;
   name?: string;
   ctx?: string;

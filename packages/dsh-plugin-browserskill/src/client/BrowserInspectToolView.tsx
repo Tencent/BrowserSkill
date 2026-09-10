@@ -84,6 +84,7 @@ interface InspectArgs {
   tabId?: unknown;
   maxDepth?: unknown;
   maxTokens?: unknown;
+  cursor?: unknown;
   ref?: unknown;
   maxBytes?: unknown;
   since?: unknown;
@@ -105,6 +106,8 @@ function commandOf(argsRaw: string, callId: string): { command: string; title: s
     parts.push(
       typeof args.session === "string" && args.session !== "" ? args.session : "(current)",
     );
+    if (action === "observe" && typeof args.cursor === "string")
+      parts.push("--cursor", args.cursor);
     if (action === "observe" || action === "snapshot") {
       appendNumber(parts, "--max-depth", args.maxDepth);
       appendNumber(parts, "--max-tokens", args.maxTokens);

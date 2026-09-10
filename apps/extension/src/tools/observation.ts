@@ -1,5 +1,13 @@
 import { parsePngDimensions } from "./png";
 import { captureVisualScreenshot } from "./visual-screenshot";
+import { deduplicateVisualCandidates } from "./vom/visual-dedup";
+import { discoverVisualCandidates } from "./vom/visual-discovery";
+import {
+  clearObservationContinuation,
+  type ObservationOutput,
+  prepareVisualObservation,
+  publishObservationPage,
+} from "./vom/visual-observation";
 
 export { parsePngDimensions } from "./png";
 
@@ -864,6 +872,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
@@ -874,11 +883,13 @@ export async function captureVomObservation(
   tabId: number,
   url: string | undefined,
   options: CaptureVomObservationOptions = {},
-): Promise<CaptureVomObservationResult> {
+): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   throwIfAborted(options.signal, "observation");
   await cdp.ensureAttachedToUrl?.(tabId, url);
   throwIfAborted(options.signal, "observation");
-  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url);
+  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url, {
+    includeVisualFacts: options.includeVisualFacts,
+  });
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
   throwIfAborted(options.signal, "observation");
   const semanticGraph = buildSemanticGraph({
@@ -897,11 +908,10 @@ export async function captureVomObservation(
     options,
   );
   throwIfAborted(options.signal, "observation");
-  const scene = projectSemanticGraph(
-    normalizeSemanticStructure(
-      resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
-    ),
+  const structured = normalizeSemanticStructure(
+    resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
   );
+  const scene = projectSemanticGraph(structured);
   const decoratedScene = attachCapturedSceneAnnotations(
     scene,
     normalizedDocuments,
@@ -934,6 +944,39 @@ export async function captureVomObservation(
     notices.push(
       "@warning document identity unverified: some retained documents could not be checked for changes during capture.",
     );
+  if (options.includeVisualFacts) {
+    const discovery = await deduplicateVisualCandidates(
+      await discoverVisualCandidates(facts, options.signal),
+      options.signal,
+    );
+    const identities = new Map(
+      facts.documents.flatMap((doc) =>
+        doc.identity ? [[doc.frame.frameId, doc.identity] as const] : [],
+      ),
+    );
+    const visualOutput = prepareVisualObservation(
+      decoratedScene,
+      structured,
+      discovery,
+      identities,
+      captured.rootFrameId ?? "root",
+      notices,
+      options,
+    );
+    return {
+      ...projectRecordSafeObservation({
+        rootFrameId: captured.rootFrameId ?? "root",
+        frameDocuments: normalizedDocuments,
+        rendered: { text: "", refs: [], truncated: false },
+        surfaceProbes: hoverProbes.surfaceProbes,
+        hoverProbe: {
+          performed: hoverProbes.performed,
+          revealedContent: hoverProbes.revealedContent,
+        },
+      }),
+      visualOutput,
+    };
+  }
   const captureNotice = notices.join("\n");
   const rendered = renderVom(decoratedScene, {
     maxDepth: options.maxDepth,
@@ -989,7 +1032,29 @@ async function handleVomObservation(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
+    const cursor = toolName === "observe" ? (params as ObserveParams).cursor : undefined;
+    if (cursor) {
+      if (
+        params.max_depth !== undefined ||
+        (params as ObserveParams).probe_hover ||
+        (params as ObserveParams).debug_surfaces
+      )
+        return {
+          code: "invalid_params",
+          message: "cursor cannot change depth or request hover/debug probes",
+        };
+      const page = await publishObservationPage(
+        ctx.refStore,
+        deps.cdp,
+        target.tabId,
+        { cursor, maxTokens: params.max_tokens },
+        signal,
+      );
+      return isRpcError(page) ? page : attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
+    }
+    clearObservationContinuation(ctx.refStore);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
@@ -998,6 +1063,40 @@ async function handleVomObservation(
       signal,
     });
     throwIfAborted(signal, toolName);
+    if (observation.visualOutput) {
+      const page = await publishObservationPage(
+        ctx.refStore,
+        deps.cdp,
+        target.tabId,
+        { output: observation.visualOutput },
+        signal,
+      );
+      if (isRpcError(page)) return page;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        ...page,
+        ...(observation.hoverProbe?.performed
+          ? {
+              hover_probe: {
+                performed: true,
+                revealed_content: observation.hoverProbe.revealedContent,
+              },
+            }
+          : {}),
+        ...((params as ObserveParams).debug_surfaces
+          ? {
+              debug: {
+                surface_probes: (observation.surfaceProbes ?? []).map((probe) => ({
+                  trigger_backend_node_id: probe.triggerBackendNodeId,
+                  trigger_action: probe.triggerAction,
+                  sub_items: probe.subItems,
+                  ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
+                  ...(probe.confidence ? { confidence: probe.confidence } : {}),
+                })),
+              },
+            }
+          : {}),
+      });
+    }
     const targetByFrameId = new Map(
       observation.frames.map((frame) => [frame.frameId, frame.target]),
     );
@@ -1044,6 +1143,7 @@ async function handleVomObservation(
         : {}),
     });
   } catch (err) {
+    clearObservationContinuation(ctx.refStore);
     if (isAbortError(err)) return cancelled(toolName);
     return {
       code: "cdp_failed",

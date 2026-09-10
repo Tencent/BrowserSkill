@@ -496,6 +496,14 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         description,
         parameters: {
           session: SESSION_PARAM,
+          ...(kind === "observe"
+            ? {
+                cursor: {
+                  type: "string" as const,
+                  description: "Continue omitted content; previous page refs expire.",
+                },
+              }
+            : {}),
           maxDepth: { type: "integer", description: "Cap on tree depth before truncating." },
           maxTokens: {
             type: "integer",
@@ -512,6 +520,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               text: { type: "string", required: true },
               refCount: { type: "integer", required: true },
               truncated: { type: "boolean", required: true },
+              nextCursor: { type: "string" },
             },
           },
           render: (_args, value) => [
@@ -519,7 +528,10 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               type: "text",
               text:
                 value.text.length > 0
-                  ? value.text + (value.truncated ? "\n(truncated — re-run with looser caps)" : "")
+                  ? value.text +
+                    (value.truncated && !value.nextCursor
+                      ? "\n(truncated — re-run with looser caps)"
+                      : "")
                   : "(empty observation — page may still be loading)",
             },
           ],
@@ -528,6 +540,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         async execute(args, exec) {
           const sessionId = registry.resolve(args.session, name);
           const cmdArgs = [kind, "--session", sessionId];
+          if (kind === "observe" && args.cursor !== undefined)
+            cmdArgs.push("--cursor", String(args.cursor));
           if (args.maxDepth !== undefined) cmdArgs.push("--max-depth", String(args.maxDepth));
           if (args.maxTokens !== undefined) cmdArgs.push("--max-tokens", String(args.maxTokens));
           const reply = (await runBsk(deps, exec, cmdArgs, kind, sessionId)) as {
@@ -535,6 +549,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             ref_count: number;
             tab_id: number;
             truncated?: boolean;
+            next_cursor?: string;
           };
           return {
             session: sessionId,
@@ -542,6 +557,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             text: reply.text,
             refCount: reply.ref_count,
             truncated: reply.truncated ?? false,
+            ...(reply.next_cursor ? { nextCursor: reply.next_cursor } : {}),
           };
         },
         presentCall: (args) => ({
