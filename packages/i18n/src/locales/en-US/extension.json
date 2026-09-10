@@ -99,5 +99,46 @@
   "recordOverlay": {
     "recording": "Recording your actions",
     "finish": "Finish"
+  },
+  "longScreenshot": {
+    "title": "Full-page screenshot",
+    "cardDesc": "Capture a whole page, preview and save it",
+    "description": "Automatically scroll the current page and stitch the captures into one crisp PNG.",
+    "hint": "For ordinary webpages. Captures the entire page vertically at the current window width.",
+    "start": "Start capture",
+    "cancel": "Cancel",
+    "cancelling": "Cancelling and restoring page…",
+    "cancelled": "Capture cancelled. Your scroll position has been restored.",
+    "preview": "Open preview",
+    "download": "Download PNG",
+    "runningHint": "Keep this tab open without scrolling or switching tabs. You can close this popup. Press Esc to cancel.",
+    "pageProgress": "Creating full-page screenshot…",
+    "zoom": "Preview zoom",
+    "fit": "Fit width",
+    "loading": "Loading preview…",
+    "previewHint": "Your original scroll position has been restored. Previews are stored temporarily on this device; download images you want to keep.",
+    "imageAlt": "Full-page screenshot of {{title}}",
+    "missingTitle": "Screenshot unavailable",
+    "missingDescription": "This preview may have expired or been removed. Return to the webpage and capture it again from Quick actions.",
+    "downloadError": "Could not start the download. Please try again.",
+    "phase": {
+      "preparing": "Loading page content",
+      "capturing": "Capturing page",
+      "saving": "Creating PNG",
+      "complete": "Screenshot ready",
+      "cancelled": "Cancelled",
+      "error": "Capture incomplete"
+    },
+    "errors": {
+      "unsupported": "This page does not support full-page capture. Use an ordinary HTTP or HTTPS webpage.",
+      "unavailable": "Could not access the page. Refresh it and try again. Browser pages and extension stores are not supported.",
+      "busy": "Another task is using this page, or a capture is already running. Wait for it to finish.",
+      "changed": "The page changed during capture. Keep the tab, window size and page content stable, then try again.",
+      "tooLarge": "The page exceeds the image size limit. Reduce the browser page zoom and try again.",
+      "timeout": "Loading or capturing took too long. Capture stopped and the page was restored.",
+      "captureFailed": "Could not complete the screenshot. The page was restored. Please try again.",
+      "saveFailed": "Local storage is full or unavailable. Free up some space and try again.",
+      "interrupted": "Capture was interrupted. No complete image was created. Return to the original page and try again."
+    }
   }
 }

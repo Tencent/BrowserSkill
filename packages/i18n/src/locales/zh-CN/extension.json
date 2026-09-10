@@ -99,5 +99,46 @@
   "recordOverlay": {
     "recording": "正在录制你的操作",
     "finish": "结束"
+  },
+  "longScreenshot": {
+    "title": "长截图",
+    "cardDesc": "从网页顶部截到底部，预览并保存长图",
+    "description": "自动滚动当前网页，将各段截图拼成一张清晰的 PNG 长图。",
+    "hint": "适用于普通网页。截图范围为当前窗口宽度内的整页内容。",
+    "start": "开始截图",
+    "cancel": "取消",
+    "cancelling": "正在取消并恢复页面…",
+    "cancelled": "截图已取消，页面位置已恢复。",
+    "preview": "打开预览",
+    "download": "下载 PNG",
+    "runningHint": "请保持当前标签页打开，避免滚动或切换页面。可以关闭此弹窗，按 Esc 取消。",
+    "pageProgress": "正在制作长截图…",
+    "zoom": "预览缩放",
+    "fit": "适合宽度",
+    "loading": "正在加载预览…",
+    "previewHint": "已恢复原页面位置。预览暂存在本机，请下载保存需要保留的图片。",
+    "imageAlt": "{{title}} 的完整网页截图",
+    "missingTitle": "截图暂不可用",
+    "missingDescription": "预览可能已过期或被清理。请回到网页，通过快捷功能重新截图。",
+    "downloadError": "未能开始下载，请重试。",
+    "phase": {
+      "preparing": "正在加载整页内容",
+      "capturing": "正在采集长图",
+      "saving": "正在生成 PNG",
+      "complete": "长截图已完成",
+      "cancelled": "已取消",
+      "error": "截图未完成"
+    },
+    "errors": {
+      "unsupported": "此页面不支持整页截图。请在普通 HTTP 或 HTTPS 网页上使用。",
+      "unavailable": "无法读取页面。请刷新网页后重试；浏览器内置页面和扩展商店页面不支持此功能。",
+      "busy": "页面正在被其他任务使用，或已有截图任务。请等待任务结束后重试。",
+      "changed": "页面在截图中发生了变化。请保持标签页、窗口大小和页面内容稳定后重试。",
+      "tooLarge": "页面超出长图尺寸上限，已停止截图。请缩小浏览器页面缩放比例后重试。",
+      "timeout": "页面加载或截图耗时过长，已停止并恢复页面。",
+      "captureFailed": "未能完成截图，页面已恢复。请稍后重试。",
+      "saveFailed": "本机存储空间不足或不可用，无法保存预览。请释放空间后重试。",
+      "interrupted": "截图已中断，未生成完整图片。请回到原页面重试。"
+    }
   }
 }
