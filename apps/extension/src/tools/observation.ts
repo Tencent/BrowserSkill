@@ -1,3 +1,4 @@
+import type { CapturedSceneInput } from "./vom/facts";
 // Observation handlers — `tool.snapshot`, `tool.get_html`, `tool.screenshot`,
 // and semantic `tool.observe` (design §7). Each handler resolves the target
 // tab (defaulting to the Agent Window's active tab when omitted) and
@@ -17,7 +18,7 @@ import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
-  withOverlaysHiddenForCapture,
+  withExtensionOverlayHidden,
 } from "@/lib/capture-suppress-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
@@ -34,6 +35,7 @@ import type {
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
+import { screenshotPageRect } from "./geometry/coordinate-types";
 import {
   type ChromeTabsApi,
   enforceToolTargetScope,
@@ -47,13 +49,10 @@ import {
   type ToolEffect,
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
-import {
-  type CapturedNode,
-  type CapturedViewModel,
-  captureViewModel,
-  collectOverlayExcludedBackendIds,
-} from "./vom/capture";
-import { type CapturedFrameDocument, captureFrameData } from "./vom/frame-capture";
+import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
+import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
+import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
+import { withOverlayBypass } from "./vom/hover-perception";
 import { probeTooltipNames } from "./vom/name-enrichment";
 import {
   type CaptureVomObservationResult,
@@ -194,15 +193,14 @@ async function captureElementScreenshot(
   if (isRpcError(geometry)) return geometry;
   if (signal?.aborted) return cancelled("screenshot");
   const rect = geometry.topBounds;
+  const clip = screenshotPageRect(rect, geometry.topViewport);
+  if (!clip) return { code: "cdp_failed", message: "invalid screenshot coordinate space" };
 
   try {
     const shot = await cdp.send<{ data?: string }>(tabId, "Page.captureScreenshot", {
       format: "png",
       clip: {
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
+        ...clip.rect,
         scale: 1,
       },
     });
@@ -321,7 +319,7 @@ export async function handleScreenshot(
       tabId: target.tabId,
       ...(node.cdpSessionId ? { sessionId: node.cdpSessionId } : {}),
     };
-    const captured = await withOverlaysHiddenForCapture(
+    const captured = await withExtensionOverlayHidden(
       target.tabId,
       () =>
         captureElementScreenshot(
@@ -353,7 +351,7 @@ export async function handleScreenshot(
     );
   }
 
-  const captured = await withOverlaysHiddenForCapture(
+  const captured = await withExtensionOverlayHidden(
     target.tabId,
     () => captureFullTabPng(deps, ctx, target, signal),
     deps.sendToTab,
@@ -525,8 +523,11 @@ function buildActiveScopeBlocks(nodes: VomNode[], signals: VomNodeDomSignals): A
   return blocks;
 }
 
-function buildConditionalSurfaces(nodes: VomNode[], captured: CapturedViewModel): CondSurface[] {
-  const probes = captured.surfaceProbes ?? [];
+function buildConditionalSurfaces(
+  nodes: VomNode[],
+  captured: CapturedSceneInput,
+  probes: CapturedSurfaceProbe[],
+): CondSurface[] {
   if (probes.length === 0) return [];
 
   const surfaces: CondSurface[] = [];
@@ -649,165 +650,14 @@ function findSurfaceNodeByPoint(
 export interface BuildVomSceneOptions {
   pageUrl?: string;
   supplementalNames?: ReadonlyMap<string, string>;
+  surfaceProbes?: CapturedSurfaceProbe[];
 }
 
 export type VomFrameDocument = CapturedFrameDocument<CdpAxNode>;
 
-function legacyFrameDocuments(
-  axNodes: CdpAxNode[],
-  captured: CapturedViewModel,
-  pageUrl?: string,
-  rootTarget: VomFrameDocument["target"] = { tabId: 0 },
-): VomFrameDocument[] {
-  const rootFrameId = captured.rootFrameId ?? "root";
-  const documents: VomFrameDocument[] = [
-    {
-      frameId: rootFrameId,
-      contextScopeId: rootFrameId,
-      target: rootTarget,
-      ...(pageUrl ? { url: pageUrl } : {}),
-      axNodes: [],
-      domNodes: captured.nodes.map((node) => ({ ...node, frameId: node.frameId ?? rootFrameId })),
-    },
-  ];
-  const pending = [...captured.iframeNodes.entries()];
-  let progress = true;
-  let nextSyntheticFrame = 1;
-  while (pending.length > 0 && progress) {
-    progress = false;
-    for (let index = pending.length - 1; index >= 0; index -= 1) {
-      const [ownerBackendNodeId, domNodes] = pending[index];
-      const parent = documents.find((document) =>
-        document.domNodes.some((node) => node.backendNodeId === ownerBackendNodeId),
-      );
-      if (!parent) continue;
-      const frameId =
-        domNodes.find((node) => node.frameId)?.frameId ?? `legacy-frame-${nextSyntheticFrame++}`;
-      documents.push({
-        frameId,
-        parentFrameId: parent.frameId,
-        ownerBackendNodeId,
-        contextScopeId: frameId,
-        target: parent.target,
-        axNodes: [],
-        domNodes: domNodes.map((node) => ({ ...node, frameId: node.frameId ?? frameId })),
-      });
-      pending.splice(index, 1);
-      progress = true;
-    }
-  }
-
-  const documentByFrameId = new Map(documents.map((document) => [document.frameId, document]));
-  const backendFrame = new Map<number, string>();
-  const childFrameByOwner = new Map<number, string>();
-  for (const document of documents) {
-    if (document.ownerBackendNodeId !== undefined) {
-      childFrameByOwner.set(document.ownerBackendNodeId, document.frameId);
-    }
-    for (const node of document.domNodes) backendFrame.set(node.backendNodeId, document.frameId);
-  }
-  const axById = new Map(axNodes.map((node) => [node.nodeId, node]));
-  const ownership = new Map<string, string>();
-  const resolving = new Set<string>();
-  const frameForAx = (node: CdpAxNode): string => {
-    const cached = ownership.get(node.nodeId);
-    if (cached) return cached;
-    let frameId: string | undefined;
-    if (node.frameId && documentByFrameId.has(node.frameId)) frameId = node.frameId;
-    if (!frameId && typeof node.backendDOMNodeId === "number") {
-      frameId = backendFrame.get(node.backendDOMNodeId);
-    }
-    if (!frameId && node.parentId && !resolving.has(node.nodeId)) {
-      const parent = axById.get(node.parentId);
-      if (parent) {
-        frameId =
-          typeof parent.backendDOMNodeId === "number"
-            ? childFrameByOwner.get(parent.backendDOMNodeId)
-            : undefined;
-        if (!frameId) {
-          resolving.add(node.nodeId);
-          frameId = frameForAx(parent);
-          resolving.delete(node.nodeId);
-        }
-      }
-    }
-    frameId ??= rootFrameId;
-    ownership.set(node.nodeId, frameId);
-    return frameId;
-  };
-  for (const node of axNodes) frameForAx(node);
-  for (const node of axNodes) {
-    const frameId = ownership.get(node.nodeId) ?? rootFrameId;
-    const document = documentByFrameId.get(frameId) ?? documents[0];
-    document.axNodes.push({
-      ...node,
-      frameId,
-      ...(node.parentId && ownership.get(node.parentId) === frameId
-        ? { parentId: node.parentId }
-        : { parentId: undefined }),
-      ...(node.childIds
-        ? { childIds: node.childIds.filter((childId) => ownership.get(childId) === frameId) }
-        : {}),
-    });
-  }
-  return documents;
-}
-
-function withLegacyBackendIds(scene: VomScene): VomScene {
-  const used = new Set<number>();
-  const idMap = new Map<number, number>();
-  let nextVirtualId = -1;
-  for (const node of scene.nodes) {
-    const preferred = node.backendNodeId;
-    const id = preferred !== undefined && !used.has(preferred) ? preferred : nextVirtualId--;
-    used.add(id);
-    idMap.set(node.id, id);
-  }
-  return {
-    ...scene,
-    nodes: scene.nodes.map((node) => ({
-      ...node,
-      id: idMap.get(node.id) as number,
-      parentId: node.parentId === null ? null : (idMap.get(node.parentId) ?? null),
-      ...(node.domParentId !== undefined
-        ? { domParentId: node.domParentId === null ? null : (idMap.get(node.domParentId) ?? null) }
-        : {}),
-      ...(node.domAncestorIds
-        ? { domAncestorIds: node.domAncestorIds.flatMap((id) => idMap.get(id) ?? []) }
-        : {}),
-    })),
-    ...(scene.surfaces
-      ? {
-          surfaces: scene.surfaces.map((surface) => ({
-            ...surface,
-            triggerId: idMap.get(surface.triggerId) ?? surface.triggerId,
-          })),
-        }
-      : {}),
-    ...(scene.activeScopeBlocks
-      ? {
-          activeScopeBlocks: scene.activeScopeBlocks.map((block) => ({
-            ...block,
-            triggerId: idMap.get(block.triggerId) ?? block.triggerId,
-          })),
-        }
-      : {}),
-  };
-}
-
-export function buildVomScene(
-  axNodes: CdpAxNode[],
-  captured: CapturedViewModel,
-  options: BuildVomSceneOptions = {},
-): VomScene {
-  return withLegacyBackendIds(
-    buildFrameVomScene(legacyFrameDocuments(axNodes, captured, options.pageUrl), captured, options),
-  );
-}
-
 export function buildFrameVomScene(
   documents: VomFrameDocument[],
-  captured: CapturedViewModel,
+  captured: CapturedSceneInput,
   options: BuildVomSceneOptions = {},
 ): VomScene {
   const scene = buildSemanticVomScene({
@@ -817,18 +667,19 @@ export function buildFrameVomScene(
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
     supplementalNames: options.supplementalNames,
   });
-  return attachCapturedSceneAnnotations(scene, documents, captured);
+  return attachCapturedSceneAnnotations(scene, documents, captured, options.surfaceProbes ?? []);
 }
 
 function attachCapturedSceneAnnotations(
   scene: VomScene,
   documents: VomFrameDocument[],
-  captured: CapturedViewModel,
+  captured: CapturedSceneInput,
+  surfaceProbes: CapturedSurfaceProbe[],
 ): VomScene {
   const rootDocument = documents.find((document) => document.frameId === scene.rootFrameId);
   const signals = capturedOnlySignals(rootDocument?.domNodes ?? captured.nodes);
   const activeScopeBlocks = buildActiveScopeBlocks(scene.nodes, signals);
-  const surfaces = buildConditionalSurfaces(scene.nodes, captured);
+  const surfaces = buildConditionalSurfaces(scene.nodes, captured, surfaceProbes);
   return {
     ...scene,
     ...(surfaces.length > 0 ? { surfaces } : {}),
@@ -972,53 +823,60 @@ export async function handleGetHtml(
   }
 }
 
-function emptyCapturedViewModel(viewport = { width: 0, height: 0 }): CapturedViewModel {
-  return { viewport, nodes: [], iframeNodes: new Map(), excludedBackendNodeIds: new Set() };
+export interface HoverProbeOutcome {
+  /** Whether any active hover was dispatched during this observation. */
+  performed: boolean;
+  /**
+   * Whether hovering surfaced content absent from the static snapshot. Cached
+   * tooltip names count, so this may over-report on repeat observations — it
+   * errs towards telling the caller the snapshot is less fresh than it looks.
+   */
+  revealedContent: boolean;
+  surfaceProbes: CapturedSurfaceProbe[];
+  tooltipNames: Map<string, string>;
 }
 
-interface LayoutMetricsViewportReply {
-  cssLayoutViewport?: { clientWidth?: number; clientHeight?: number };
-  layoutViewport?: { clientWidth?: number; clientHeight?: number };
-}
+const NO_HOVER_PROBES: HoverProbeOutcome = {
+  performed: false,
+  revealedContent: false,
+  surfaceProbes: [],
+  tooltipNames: new Map(),
+};
 
-async function fallbackCapturedViewModel(
+/**
+ * Runs both active-hover chains back to back.
+ *
+ * Ordering matters: this happens after DOM *and* accessibility capture so a
+ * hover that opens a menu cannot leave one half of the observation describing
+ * the page before the change and the other half after it. Sharing one overlay
+ * bypass span also means the agent overlay toggles once per observation
+ * instead of once per chain.
+ */
+async function runHoverProbes(
   cdp: CdpRunner,
   tabId: number,
-  signal?: AbortSignal,
-): Promise<CapturedViewModel> {
-  throwIfAborted(signal, "observation");
-  let viewport = { width: 0, height: 0 };
-  try {
-    const metrics = await cdp.send<LayoutMetricsViewportReply>(tabId, "Page.getLayoutMetrics", {});
-    throwIfAborted(signal, "observation");
-    const source = metrics.cssLayoutViewport ?? metrics.layoutViewport ?? {};
-    viewport = {
-      width: source.clientWidth ?? 0,
-      height: source.clientHeight ?? 0,
-    };
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-  }
-  const excludedBackendNodeIds = await collectOverlayExcludedBackendIds(cdp, tabId, signal);
-  throwIfAborted(signal, "observation");
-  return { ...emptyCapturedViewModel(viewport), excludedBackendNodeIds };
-}
-
-async function captureForVom(
-  cdp: CdpRunner,
-  tabId: number,
+  captured: CapturedSceneInput,
+  documents: VomFrameDocument[],
+  staticSemantics: ReturnType<typeof resolveSemanticGraph>,
   options: CaptureVomObservationOptions,
-): Promise<CapturedViewModel> {
-  try {
-    return await captureViewModel(cdp, tabId, {
-      conditionalSurfaceProbe: options.conditionalSurfaceProbe ?? false,
-      hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
+): Promise<HoverProbeOutcome> {
+  if (!options.conditionalSurfaceProbe) return NO_HOVER_PROBES;
+
+  return withOverlayBypass(options.hoverProbeBypassOverlay, tabId, async () => {
+    const surfaceProbes = await probeHoverSurfaces(cdp, tabId, captured.nodes, {
       signal: options.signal,
     });
-  } catch (error) {
-    if (isAbortError(error)) throw error;
-    return fallbackCapturedViewModel(cdp, tabId, options.signal);
-  }
+    throwIfAborted(options.signal, "observation");
+    const tooltipNames = await probeTooltipNames(cdp, tabId, documents, staticSemantics, {
+      signal: options.signal,
+    });
+    return {
+      performed: true,
+      revealedContent: surfaceProbes.length > 0 || tooltipNames.size > 0,
+      surfaceProbes,
+      tooltipNames,
+    };
+  });
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
@@ -1036,14 +894,9 @@ export async function captureVomObservation(
   throwIfAborted(options.signal, "observation");
   await cdp.ensureAttachedToUrl?.(tabId, url);
   throwIfAborted(options.signal, "observation");
-  const captured = await captureForVom(cdp, tabId, options);
+  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url);
+  const { captured, documents: normalizedDocuments } = semanticCapture(facts);
   throwIfAborted(options.signal, "observation");
-  const documents = await captureFrameData<CdpAxNode>(cdp, tabId, captured, options.signal);
-  throwIfAborted(options.signal, "observation");
-  const normalizedDocuments =
-    documents.length === 1 && captured.iframeNodes.size > 0
-      ? legacyFrameDocuments(documents[0].axNodes, captured, url, documents[0].target)
-      : documents;
   const semanticGraph = buildSemanticGraph({
     documents: normalizedDocuments,
     viewport: captured.viewport,
@@ -1051,31 +904,73 @@ export async function captureVomObservation(
     excludedBackendNodeIds: captured.excludedBackendNodeIds,
   });
   const staticSemantics = resolveSemanticGraph(semanticGraph, { identifierFallback: false });
-  const tooltipNames = options.conditionalSurfaceProbe
-    ? await probeTooltipNames(cdp, tabId, normalizedDocuments, staticSemantics, {
-        signal: options.signal,
-        hoverProbeBypassOverlay: options.hoverProbeBypassOverlay,
-      })
-    : new Map<string, string>();
+  const hoverProbes = await runHoverProbes(
+    cdp,
+    tabId,
+    captured,
+    normalizedDocuments,
+    staticSemantics,
+    options,
+  );
   throwIfAborted(options.signal, "observation");
   const scene = projectSemanticGraph(
     normalizeSemanticStructure(
-      resolveSemanticGraph(semanticGraph, { supplementalNames: tooltipNames }),
+      resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
     ),
   );
-  const decoratedScene = attachCapturedSceneAnnotations(scene, normalizedDocuments, captured);
+  const decoratedScene = attachCapturedSceneAnnotations(
+    scene,
+    normalizedDocuments,
+    captured,
+    hoverProbes.surfaceProbes,
+  );
+  // Reserve space using the renderer's character-based token estimate. Like VOM
+  // headers, this integrity notice remains visible even under a tiny token budget.
+  const notices: string[] = [];
+  if (facts.issues.some((issue) => issue.stage === "geometry"))
+    notices.push(
+      "@warning geometry incomplete: some page or frame content has no top-level coordinates.",
+    );
+  const incompleteStages = ["dom", "ax", "forms", "ownership"].filter((stage) =>
+    facts.issues.some((issue) => issue.stage === stage),
+  );
+  if (incompleteStages.length)
+    notices.push(
+      `@warning observation incomplete: some ${incompleteStages.join(", ")} data is unavailable or omitted.`,
+    );
+  if (
+    facts.issues.some(
+      (issue) => issue.stage === "identity" && issue.reason !== "identity-unverified",
+    )
+  )
+    notices.push(
+      "@warning observation incomplete: some documents were omitted because their identity changed or could not be revalidated.",
+    );
+  if (facts.issues.some((issue) => issue.reason === "identity-unverified"))
+    notices.push(
+      "@warning document identity unverified: some retained documents could not be checked for changes during capture.",
+    );
+  const captureNotice = notices.join("\n");
   const rendered = renderVom(decoratedScene, {
     maxDepth: options.maxDepth,
-    maxTokens: options.maxTokens,
+    maxTokens:
+      !captureNotice || options.maxTokens === undefined
+        ? options.maxTokens
+        : Math.max(0, options.maxTokens - Math.ceil((captureNotice.length + 1) / 4)),
     redactValues: options.redactValues,
     activeRegionPolicy: options.activeRegionPolicy,
   });
+  if (captureNotice) rendered.text += `\n${captureNotice}`;
   throwIfAborted(options.signal, "observation");
   return projectRecordSafeObservation({
     rootFrameId: captured.rootFrameId ?? normalizedDocuments[0]?.frameId ?? "root",
     frameDocuments: normalizedDocuments,
     rendered,
-    surfaceProbes: captured.surfaceProbes,
+    surfaceProbes: hoverProbes.surfaceProbes,
+    hoverProbe: {
+      performed: hoverProbes.performed,
+      revealedContent: hoverProbes.revealedContent,
+    },
   });
 }
 
@@ -1141,6 +1036,14 @@ async function handleVomObservation(
       ref_count: observation.refs.length,
       tab_id: target.tabId,
       truncated: observation.truncated,
+      ...(toolName === "observe" && observation.hoverProbe?.performed
+        ? {
+            hover_probe: {
+              performed: true,
+              revealed_content: observation.hoverProbe.revealedContent,
+            },
+          }
+        : {}),
       ...(toolName === "observe" && (params as ObserveParams).debug_surfaces
         ? {
             debug: {
@@ -1179,5 +1082,13 @@ export async function handleObserve(
   deps: SnapshotDeps = getDefaultDeps(),
   signal?: AbortSignal,
 ): Promise<ObserveResult | RpcError> {
-  return handleVomObservation(manager, params, "observe", "transient_input", true, deps, signal);
+  return handleVomObservation(
+    manager,
+    params,
+    "observe",
+    "transient_input",
+    params.probe_hover === true,
+    deps,
+    signal,
+  );
 }

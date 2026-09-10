@@ -45,6 +45,7 @@ console = { workspace = true }
 dialoguer = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
+tempfile = { workspace = true }
 rand = { workspace = true }
 uuid = { workspace = true }
 bsk-protocol = { workspace = true }
@@ -53,6 +54,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 zip = { workspace = true }
 sha2 = { workspace = true }
+base64 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
@@ -63,10 +65,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }

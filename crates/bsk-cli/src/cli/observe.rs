@@ -33,6 +33,12 @@ pub struct ObserveArgs {
     /// Include conditional surface probe diagnostics in JSON output.
     #[arg(long = "debug-surfaces")]
     pub debug_surfaces: bool,
+
+    /// Actively hover page controls to reveal hover-only menus and tooltips.
+    /// Costs seconds of wall clock and touches the live page, so it is off
+    /// unless a static observation looks like it is missing hover content.
+    #[arg(long = "probe-hover")]
+    pub probe_hover: bool,
 }
 
 pub fn dispatch(args: ObserveArgs, format: Format) -> Result<(), CliError> {
@@ -47,6 +53,7 @@ fn run(sock: PathBuf, args: ObserveArgs, format: Format) -> Result<(), CliError>
         max_depth: args.max_depth,
         max_tokens: args.max_tokens,
         debug_surfaces: args.debug_surfaces,
+        probe_hover: args.probe_hover,
     };
     let reply: ObserveResult = call(sock, params)?;
     match format {

@@ -1,9 +1,9 @@
 /**
- * Wire protocol and background-side helper for hiding the extension's
- * in-page overlay while a screenshot is captured, so captured frames only
- * contain the page itself.
+ * Wire protocol and background-side helper for temporarily excluding the
+ * extension's in-page overlay. Screenshots use it to avoid captured chrome;
+ * coordinate-driven native input uses it so Chrome hit-tests the page.
  *
- * The background wraps every capture in `withOverlaysHiddenForCapture`,
+ * The background wraps each bounded operation in `withExtensionOverlayHidden`,
  * which sends `begin` (the content script hides the overlay host and only
  * acks once the compositor has produced an overlay-free frame) and always
  * follows up with `end`, even when the capture throws. Tabs without the
@@ -46,7 +46,7 @@ const defaultSendToTab: CaptureSuppressSendToTab = (tabId, message) =>
  * (or any other `begin` failure) simply skips suppression — there is no
  * overlay to hide in that tab.
  */
-export async function withOverlaysHiddenForCapture<T>(
+export async function withExtensionOverlayHidden<T>(
   tabId: number,
   fn: () => Promise<T>,
   sendToTab: CaptureSuppressSendToTab = defaultSendToTab,

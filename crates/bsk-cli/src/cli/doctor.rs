@@ -24,17 +24,15 @@ const EXTENSION_STORE_URL_EDGE: &str = "https://microsoftedge.microsoft.com/addo
 /// Store listings highlighted in repair hints, in the order they appear.
 const EXTENSION_STORE_URLS: [&str; 2] = [EXTENSION_STORE_URL, EXTENSION_STORE_URL_EDGE];
 
-/// Status of a single doctor check. `Ok` / `Fail` are the legacy two
-/// states; `NotApplicable` (review M2) is reported as "N/A" in human
-/// output and as `"status": "na"` in `--json` output, so a check that
-/// has nothing to compare against (e.g. browsers protocol-compat with
-/// zero connected browsers) does not falsely report green.
+/// A warning needs attention but does not fail the overall health check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     #[default]
     Ok,
     Fail,
+    #[serde(rename = "warn")]
+    Warning,
     /// The check could not run because its precondition is absent.
     /// Treated as informational and never flips an exit code.
     #[serde(rename = "na")]
@@ -44,21 +42,14 @@ pub enum CheckStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckResult {
     pub name: String,
-    /// Pre-M2 boolean status, retained for backwards-compatible JSON
-    /// consumers. `true` means the check passed or was not applicable
-    /// (i.e. nothing flips the overall doctor verdict red); `false`
-    /// means the check actively failed. New consumers should read the
-    /// `status` field below for the tri-state (`ok` / `fail` / `na`)
-    /// distinction — the legacy boolean intentionally collapses
-    /// `ok` and `na` so a doctor run that includes an N/A check does
-    /// not regress for callers that still consult `ok` only.
+    /// Backwards-compatible verdict: only a failure is false. Read `status`
+    /// to distinguish a warning or a check that is not applicable.
     pub ok: bool,
-    /// Tri-state status (review M2): `ok` / `fail` / `na`.
+    /// `ok`, `fail`, `warn`, or `na`.
     #[serde(default)]
     pub status: CheckStatus,
     pub detail: String,
-    /// User-facing repair hint (only meaningful when `status` is
-    /// `Fail`).
+    /// Actionable guidance for a failure or warning.
     pub hint: Option<String>,
 }
 
@@ -78,6 +69,16 @@ impl CheckResult {
             name: name.into(),
             ok: false,
             status: CheckStatus::Fail,
+            detail: detail.into(),
+            hint: Some(hint.into()),
+        }
+    }
+
+    fn warn(name: impl Into<String>, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ok: true,
+            status: CheckStatus::Warning,
             detail: detail.into(),
             hint: Some(hint.into()),
         }
@@ -111,7 +112,7 @@ pub fn run(output: Output) -> Result<Vec<CheckResult>> {
 }
 
 /// Whether the rendered doctor report contains an active failure.
-/// `NotApplicable` remains informational and must not change the exit code.
+/// Warnings and `NotApplicable` remain informational and do not change the exit code.
 pub fn has_failures(checks: &[CheckResult]) -> bool {
     checks.iter().any(|check| check.status == CheckStatus::Fail)
 }
@@ -247,41 +248,61 @@ fn check_skill_up_to_date() -> CheckResult {
     };
     let report = crate::skill_install::sync::sync_installed_skills(&home);
 
+    skill_check_from_report(&report)
+}
+
+fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> CheckResult {
+    let name = "agent skill up to date";
+    let mut details = Vec::new();
+    for (label, harnesses) in [
+        ("synced", &report.updated),
+        ("up to date", &report.up_to_date),
+        (
+            "custom skill preserved (automatic updates disabled) in",
+            &report.protected,
+        ),
+        ("busy, sync deferred in", &report.busy),
+    ] {
+        if !harnesses.is_empty() {
+            let names = harnesses
+                .iter()
+                .map(|h| h.cli_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            details.push(format!("{label}: {names}"));
+        }
+    }
+    let mut hints = Vec::new();
+    for (harness, reason) in &report.paused {
+        let id = harness.cli_name();
+        details.push(format!(
+            "automatic updates paused for {id}: {}; content preserved",
+            reason.description()
+        ));
+        hints.push(format!(
+            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-SKILL.md> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+        ));
+    }
+    for (harness, message) in &report.errors {
+        details.push(format!("sync failed for {}: {message}", harness.cli_name()));
+    }
+    let detail = details.join("; ");
+
     if !report.errors.is_empty() {
-        let detail = report
-            .errors
-            .iter()
-            .map(|(h, msg)| format!("{}: {msg}", h.cli_name()))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return CheckResult::fail(
-            name,
-            detail,
-            "re-run `bsk install-skill --force --harness <id>` for the failing harness",
+        hints.insert(
+            0,
+            "check filesystem access for the failing harness, then re-run `bsk doctor`".into(),
         );
+        CheckResult::fail(name, detail, hints.join("; "))
+    } else if !report.paused.is_empty() {
+        CheckResult::warn(name, detail, hints.join("; "))
+    } else if !report.updated.is_empty() || !report.up_to_date.is_empty() {
+        CheckResult::ok(name, detail)
+    } else if !details.is_empty() {
+        CheckResult::na(name, detail)
+    } else {
+        CheckResult::na(name, "no agent skill installed")
     }
-
-    if !report.updated.is_empty() {
-        let names = report
-            .updated
-            .iter()
-            .map(|h| h.cli_name())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return CheckResult::ok(
-            name,
-            format!("synced {} harness(es): {names}", report.updated.len()),
-        );
-    }
-
-    if !report.up_to_date.is_empty() {
-        return CheckResult::ok(
-            name,
-            format!("up to date in {} harness(es)", report.up_to_date.len()),
-        );
-    }
-
-    CheckResult::na(name, "no agent skill installed")
 }
 
 fn check_daemon_running(state: &DaemonState) -> CheckResult {
@@ -351,10 +372,10 @@ fn check_version_compatible(status: Option<&StatusResult>) -> CheckResult {
     }
 }
 
-/// `bsk doctor` check: every connected browser should use the same
-/// protocol version as the daemon. Minor protocol drift is accepted by
-/// the daemon but flagged here so the user can see who needs updating
-/// (M10.4).
+/// `bsk doctor` check: connected browsers should speak a protocol the
+/// daemon accepts. A different protocol string is still a live
+/// connection — report Ok so agents keep working. The detail is an
+/// upgrade reminder, not a blocker.
 ///
 /// Review M2 (round-1 minor): when no browsers are connected, the
 /// check has nothing to compare against, so it now reports
@@ -396,13 +417,12 @@ fn check_browsers_protocol_compatible(status: Option<&StatusResult>) -> CheckRes
         })
         .collect::<Vec<_>>()
         .join(", ");
-    CheckResult::fail(
+    CheckResult::ok(
         name,
         format!(
-            "{} browser(s) have protocol minor drift from the daemon: {stale}",
+            "{} browser(s) report a different protocol version (still usable — continue, and upgrade soon): {stale}",
             status.version_skew_browsers.len()
         ),
-        "upgrade the browser-skill extension or bsk CLI so both sides use the same protocol version",
     )
 }
 
@@ -457,10 +477,13 @@ fn render_human(checks: &[CheckResult]) {
         let mark = match c.status {
             CheckStatus::Ok => "ok  ",
             CheckStatus::Fail => "FAIL",
+            CheckStatus::Warning => "WARN",
             CheckStatus::NotApplicable => "N/A ",
         };
         let detail = match (&c.hint, c.status) {
-            (Some(h), CheckStatus::Fail) => format!("{} — hint: {}", c.detail, style_hint(h)),
+            (Some(h), CheckStatus::Fail | CheckStatus::Warning) => {
+                format!("{} — hint: {}", c.detail, style_hint(h))
+            }
             _ => c.detail.clone(),
         };
         let name = &c.name;
@@ -495,6 +518,138 @@ mod m2_tests {
             sessions: Vec::new(),
             version_skew_browsers: skew,
         }
+    }
+
+    #[test]
+    fn skill_check_reports_protected_harnesses_with_managed_results() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        for updated in [true, false] {
+            let mut report = SyncReport {
+                protected: vec![HarnessId::Cursor],
+                ..Default::default()
+            };
+            if updated {
+                report.updated.push(HarnessId::ClaudeCode);
+            } else {
+                report.up_to_date.push(HarnessId::ClaudeCode);
+            }
+            let check = skill_check_from_report(&report);
+            assert_eq!(check.status, CheckStatus::Ok);
+            assert!(check.detail.contains("claude-code"));
+            assert!(
+                check
+                    .detail
+                    .contains("preserved (automatic updates disabled) in: cursor")
+            );
+            let json = serde_json::to_value(&check).unwrap();
+            assert_eq!(json["status"], "ok");
+            assert!(
+                json["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("preserved (automatic updates disabled) in: cursor")
+            );
+        }
+    }
+
+    #[test]
+    fn skill_check_keeps_all_outcomes_when_another_harness_fails() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        let check = skill_check_from_report(&SyncReport {
+            updated: vec![HarnessId::ClaudeCode],
+            up_to_date: vec![HarnessId::PiAgent],
+            protected: vec![HarnessId::Cursor],
+            busy: vec![HarnessId::Hermes],
+            errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
+            paused: Vec::new(),
+        });
+        assert_eq!(check.status, CheckStatus::Fail);
+        for text in [
+            "synced: claude-code",
+            "up to date: pi",
+            "preserved (automatic updates disabled) in: cursor",
+            "sync deferred in: hermes",
+            "workbuddy: permission denied",
+        ] {
+            assert!(check.detail.contains(text), "{}", check.detail);
+        }
+        assert!(!check.hint.unwrap().contains("--force"));
+    }
+
+    #[test]
+    fn paused_skills_warn_with_actions_even_alongside_successful_updates() {
+        use crate::skill_install::{
+            HarnessId,
+            sync::{PauseReason, SyncReport},
+        };
+        for reason in [
+            PauseReason::Untracked,
+            PauseReason::MissingBaseline,
+            PauseReason::LocalChanges,
+            PauseReason::InvalidMarker,
+        ] {
+            for updated in [false, true] {
+                let mut report = SyncReport {
+                    paused: vec![(HarnessId::Cursor, reason)],
+                    ..Default::default()
+                };
+                if updated {
+                    report.updated.push(HarnessId::ClaudeCode);
+                }
+                let check = skill_check_from_report(&report);
+                assert_eq!(check.status, CheckStatus::Warning);
+                assert!(check.detail.contains("automatic updates paused for cursor"));
+                assert!(check.detail.contains(reason.description()));
+                if updated {
+                    assert!(check.detail.contains("synced: claude-code"));
+                }
+                assert!(!has_failures(std::slice::from_ref(&check)));
+                let json = serde_json::to_value(&check).unwrap();
+                assert_eq!(json["status"], "warn");
+                assert_eq!(json["ok"], true);
+                let hint = json["hint"].as_str().unwrap();
+                assert!(hint.contains("--harness cursor --source <existing-SKILL.md> --force"));
+                assert!(hint.contains("--harness cursor --force"));
+                assert!(hint.contains("overwrites existing instructions"));
+                // An I/O failure takes precedence without hiding paused installations.
+                report
+                    .errors
+                    .push((HarnessId::PiAgent, "permission denied".into()));
+                let failed = skill_check_from_report(&report);
+                assert_eq!(failed.status, CheckStatus::Fail);
+                assert!(
+                    failed
+                        .detail
+                        .contains("automatic updates paused for cursor")
+                );
+                assert!(failed.hint.as_ref().unwrap().contains("--harness cursor"));
+                assert!(has_failures(&[failed]));
+            }
+        }
+    }
+
+    #[test]
+    fn protected_or_busy_skills_are_informational() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        for report in [
+            SyncReport {
+                protected: vec![HarnessId::Cursor],
+                ..Default::default()
+            },
+            SyncReport {
+                busy: vec![HarnessId::Cursor],
+                ..Default::default()
+            },
+        ] {
+            let check = skill_check_from_report(&report);
+            assert_eq!(check.status, CheckStatus::NotApplicable);
+            assert!(check.detail.contains("cursor"));
+            assert!(!has_failures(std::slice::from_ref(&check)));
+            assert_eq!(serde_json::to_value(&check).unwrap()["status"], "na");
+        }
+        let empty = skill_check_from_report(&SyncReport::default());
+        assert_eq!(empty.status, CheckStatus::NotApplicable);
+        assert_eq!(empty.detail, "no agent skill installed");
     }
 
     #[test]
@@ -581,7 +736,7 @@ mod m2_tests {
     }
 
     #[test]
-    fn browsers_check_reports_fail_when_skew_present() {
+    fn browsers_check_reports_ok_when_skew_present() {
         let status = fake_status(
             vec![BrowserStatusEntry {
                 instance_id: "alpha".into(),
@@ -605,9 +760,17 @@ mod m2_tests {
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Ok);
         assert!(check.detail.contains("alpha"));
-        assert!(check.hint.is_some());
+        assert!(
+            check
+                .detail
+                .contains("still usable — continue, and upgrade soon")
+        );
+        assert!(
+            check.hint.is_none(),
+            "a protocol-version note must not hint to stop"
+        );
     }
 
     #[test]
@@ -635,7 +798,7 @@ mod m2_tests {
             }],
         );
         let check = check_browsers_protocol_compatible(Some(&status));
-        assert_eq!(check.status, CheckStatus::Fail);
+        assert_eq!(check.status, CheckStatus::Ok);
         assert!(
             check
                 .detail

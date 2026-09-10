@@ -298,6 +298,34 @@ describe("renderVom single-layer page", () => {
     expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 4 }]);
   });
 
+  it("renders through deeply nested transparent wrappers without exhausting the call stack", () => {
+    const wrapperCount = 10_000;
+    const nodes = [node({ id: 1, role: "RootWebArea", name: "Doc" })];
+    for (let index = 0; index < wrapperCount; index += 1) {
+      nodes.push(
+        node({
+          id: index + 2,
+          parentId: index + 1,
+          role: "generic",
+        }),
+      );
+    }
+    nodes.push(
+      node({
+        id: wrapperCount + 2,
+        parentId: wrapperCount + 1,
+        role: "button",
+        name: "Deep action",
+        tag: "button",
+      }),
+    );
+
+    const out = renderVom(scene(nodes));
+
+    expect(out.text).toContain('@e1 button "Deep action"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: wrapperCount + 2 }]);
+  });
+
   it("truncates when maxTokens is exceeded while keeping refs in sync with rendered text", () => {
     const out = renderVom(
       scene([
@@ -785,6 +813,55 @@ describe("renderVom single-layer page", () => {
     expect(out.text).not.toContain("北京市小客车指标调控管理信息系统]");
   });
 
+  it("derives duplicate-label context from indexed DOM ancestry without semantic proximity", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc", contextScopeId: "root" }),
+        node({
+          id: 3,
+          parentId: 1,
+          role: "button",
+          name: "View",
+          tag: "button",
+          domParentId: 2,
+          domAncestorIds: [2, 1],
+          contextScopeId: "root",
+        }),
+        node({
+          id: 5,
+          parentId: 1,
+          role: "button",
+          name: "View",
+          tag: "button",
+          domParentId: 4,
+          domAncestorIds: [4, 1],
+          contextScopeId: "root",
+        }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "group",
+          name: "Project Alpha",
+          domParentId: 1,
+          domAncestorIds: [1],
+          contextScopeId: "root",
+        }),
+        node({
+          id: 4,
+          parentId: 1,
+          role: "group",
+          name: "Project Beta",
+          domParentId: 1,
+          domAncestorIds: [1],
+          contextScopeId: "root",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "View" [ctx: Project Alpha]');
+    expect(out.text).toContain('@e2 button "View" [ctx: Project Beta]');
+  });
+
   it("does not add low-value root context to duplicated brand links", () => {
     const out = renderVom(
       scene([
@@ -833,6 +910,34 @@ describe("renderVom single-layer page", () => {
 });
 
 describe("renderVom double-layer page", () => {
+  it("collects blocking-layer descendants even when children precede parents in source order", () => {
+    const out = renderVom(
+      scene([
+        node({ id: 1, role: "RootWebArea", name: "Doc" }),
+        node({
+          id: 3,
+          parentId: 2,
+          role: "button",
+          name: "Close",
+          tag: "button",
+          paintOrder: 0,
+        }),
+        node({
+          id: 2,
+          parentId: 1,
+          role: "dialog",
+          name: "Modal",
+          rect: { x: 0, y: 0, w: 1280, h: 720 },
+          paintOrder: 10,
+          position: "fixed",
+        }),
+      ]),
+    );
+
+    expect(out.text).toContain('@e1 button "Close"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 3 }]);
+  });
+
   it("renders a blocking modal first and folds the base page into an occluded summary", () => {
     const out = renderVom(
       scene([

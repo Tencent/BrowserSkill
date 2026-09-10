@@ -129,6 +129,28 @@ Use <kbd>Space</kbd> to select the Agent harness you want to install into, then
 press <kbd>Enter</kbd> to install the skill. Run `bsk install-skill --list` to see
 internal variants and install paths.
 
+To install your own instructions, use `bsk install-skill --harness cursor --source ./SKILL.md`.
+An explicit `--source` stays custom even if its contents match the bundled skill.
+Existing installations are skipped unless you add `--force`.
+
+Daemon startup, `session start`, and `doctor` automatically update managed skills
+only when their contents still match the last installed version. Local edits are
+preserved and automatic updates pause. An older installation without a content
+baseline is enrolled automatically only if it exactly matches the current bundled
+skill; this writes the source marker without rewriting `SKILL.md`. Explicit custom
+installations stay custom even when their contents match.
+
+For differing historical files, local edits, or an unrecognized source marker,
+`doctor` shows `WARN` with the reason and recovery options. These warnings do not
+make the health check fail (`--json` reports `status: "warn"` and `ok: true`).
+A concurrent install or sync is reported as deferred and retried on a later pass.
+
+To keep your current instructions as an explicit customization, run
+`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`, replacing
+`<existing-SKILL.md>` with the path to your existing file. To restore the bundled
+skill and resume automatic updates, run `bsk install-skill --harness cursor --force`
+without `--source`. This second command overwrites the existing instructions.
+
 Other shell-capable agent harnesses are supported too. Copy
 [`skill/SKILL.md`](skill/SKILL.md) into your harness's skills directory as
 `browser-skill/SKILL.md` to install the skill manually. DeepSeek Harness uses a
@@ -147,20 +169,26 @@ Start a new Agent session and write a prompt that needs the browser, for example
 Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?
 BrowserSkill ships a first-class dsh plugin on npm as
 [`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin).
-It injects native `browser_*` tools (no shelling out to `bsk`) and a live Web UI
-overlay of each Agent Window.
+It gives the agent native `browser_*` tools and a live view of its browser sessions
+in the Web UI. The plugin runs `bsk` on the agent's behalf.
 
-Add it to a dsh profile, then start that profile:
+Install the `bsk` CLI and connect the browser extension first. Then add the plugin
+to a dsh profile and start it (replace `web` with your profile name):
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-The plugin carries its own copy of the skill, so `bsk install-skill` is not needed
-for dsh — but the `bsk` CLI and the browser extension are still prerequisites. See
-the [plugin README](packages/dsh-plugin-browserskill/README.md) for the tool list,
-configuration, and the observation overlay.
+The plugin includes the `browser-skill` skill, so `bsk install-skill` is not needed
+for dsh. Installed plugins do not update automatically. To upgrade this plugin:
+
+```sh
+dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+```
+
+Restart the profile after upgrading. See the
+[plugin README](packages/dsh-plugin-browserskill/README.md) for usage and configuration.
 
 ## How It Works
 
@@ -200,6 +228,9 @@ through the [plugin](#deepseek-harness-plugin): the agent calls injected
 `browser_*` tools, and the plugin invokes `bsk` on its behalf.
 
 ## For Developers
+
+The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol
+and plugin entry points, visible bounds and interruption behavior.
 
 The repository is a Cargo + pnpm workspace:
 

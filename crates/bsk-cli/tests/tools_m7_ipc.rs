@@ -1,5 +1,4 @@
-//! M7 integration: drive the 7 new tool RPCs (navigate /
-//! navigate_back / navigate_forward / reload / click / fill / press)
+//! M7 integration: drive interaction and navigation tool RPCs
 //! through the IPC + per-session queue + fake extension and assert
 //! the wire shapes line up. The extension stub mirrors each method's
 //! `*Result` so we exercise the daemon's serialise → forward →
@@ -13,11 +12,13 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::{HandshakeParams, HandshakeResult};
 use bsk_protocol::tools::{
-    ClickParams, ClickResult, FillParams, FillResult, KeyModifier, MouseButton, NavigateBackParams,
-    NavigateBackResult, NavigateForwardParams, NavigateForwardResult, NavigateParams,
-    NavigateResult, PressParams, PressResult, ReloadParams, ReloadResult, SelectParams,
-    SelectResult, SessionStartParams, SessionStartResult, WaitUntil,
+    BlurParams, BlurResult, ClickParams, ClickResult, FillParams, FillResult, FocusParams,
+    FocusResult, KeyModifier, MouseButton, NavigateBackParams, NavigateBackResult,
+    NavigateForwardParams, NavigateForwardResult, NavigateParams, NavigateResult, PressParams,
+    PressResult, ReloadParams, ReloadResult, SelectParams, SelectResult, SessionStartParams,
+    SessionStartResult, WaitUntil, WheelParams, WheelResult,
 };
+use bsk_protocol::tools::{ScrollToParams, ScrollToResult};
 use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
 };
@@ -383,6 +384,137 @@ async fn click_round_trips_ref_and_modifiers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn focus_round_trips_verified_state() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolFocus);
+        let params = req.params.clone().unwrap();
+        let p: FocusParams = serde_json::from_value(params).unwrap();
+        assert_eq!(p.ref_.as_deref(), Some("@e3"));
+        ResponseBody::Ok(
+            serde_json::to_value(FocusResult {
+                tab_id: 9,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                focused: true,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: FocusResult = ipc_tool_call(
+        &sock,
+        Method::ToolFocus,
+        FocusParams {
+            session_id,
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("focus ok");
+    assert!(result.focused);
+    assert_eq!(result.used_ref.as_deref(), Some("e3"));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blur_round_trips_previous_focus_state() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolBlur);
+        let params = req.params.clone().unwrap();
+        let p: BlurParams = serde_json::from_value(params).unwrap();
+        assert_eq!(p.selector.as_deref(), Some("#search"));
+        ResponseBody::Ok(
+            serde_json::to_value(BlurResult {
+                tab_id: 9,
+                used_ref: None,
+                used_selector: Some("#search".into()),
+                was_focused: true,
+                focused: false,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: BlurResult = ipc_tool_call(
+        &sock,
+        Method::ToolBlur,
+        BlurParams {
+            session_id,
+            ref_: None,
+            selector: Some("#search".into()),
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("blur ok");
+    assert!(result.was_focused);
+    assert!(!result.focused);
+    assert_eq!(result.used_selector.as_deref(), Some("#search"));
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scroll_to_round_trips_visible_bounds() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolScrollTo);
+        let params = req.params.clone().unwrap();
+        let parsed: ScrollToParams = serde_json::from_value(params).unwrap();
+        assert_eq!(parsed.ref_.as_deref(), Some("@e3"));
+        ResponseBody::Ok(
+            serde_json::to_value(ScrollToResult {
+                tab_id: 9,
+                used_ref: Some("e3".into()),
+                used_selector: None,
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 40.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: ScrollToResult = ipc_tool_call(
+        &sock,
+        Method::ToolScrollTo,
+        ScrollToParams {
+            session_id,
+            ref_: Some("@e3".into()),
+            selector: None,
+            tab_id: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("scroll-to ok");
+    assert_eq!(result.used_ref.as_deref(), Some("e3"));
+    assert_eq!(result.width, 100.0);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fill_round_trips_clear_before_default() {
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;
@@ -667,5 +799,54 @@ async fn m7_tools_propagate_extension_errors() {
     .unwrap_err();
     assert_eq!(select.code, ErrorCode::CdpFailed);
 
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wheel_round_trips_native_deltas_and_point() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+
+    run_extension(ws, |req| {
+        assert_eq!(req.method, Method::ToolWheel);
+        let params: WheelParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
+        assert_eq!(params.selector.as_deref(), Some("#panel"));
+        assert_eq!(params.delta_x, 10.0);
+        assert_eq!(params.delta_y, 600.0);
+        ResponseBody::Ok(
+            serde_json::to_value(WheelResult {
+                tab_id: 9,
+                used_ref: None,
+                used_selector: Some("#panel".into()),
+                x: 320.0,
+                y: 240.0,
+                delta_x: 10.0,
+                delta_y: 600.0,
+                dialogs: vec![],
+            })
+            .unwrap(),
+        )
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let result: WheelResult = ipc_tool_call(
+        &sock,
+        Method::ToolWheel,
+        WheelParams {
+            session_id,
+            ref_: None,
+            selector: Some("#panel".into()),
+            tab_id: None,
+            delta_x: 10.0,
+            delta_y: 600.0,
+            modifiers: None,
+            timeout_ms: Some(5_000),
+        },
+    )
+    .await
+    .expect("wheel ok");
+    assert_eq!(result.used_selector.as_deref(), Some("#panel"));
+    assert_eq!((result.delta_x, result.delta_y), (10.0, 600.0));
     handle.shutdown().await;
 }

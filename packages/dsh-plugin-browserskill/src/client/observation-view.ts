@@ -6,7 +6,7 @@
  * without duplicating hooks.
  */
 
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { SessionObservation } from "../observation";
 import type { ObservationClientStore, OverlaySnapshot } from "./observation-store";
 
@@ -112,6 +112,49 @@ export function useObservationView(
     onTogglePin,
     now,
   };
+}
+
+/** A mounted metadata watcher is not necessarily a visible screenshot viewer. */
+export function useThumbnailObservation(store: ObservationClientStore, enabled: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!enabled || element === null) return;
+    // A portal uses its PiP document's visibility, independently of the main tab.
+    const doc = element.ownerDocument;
+    const Observer = doc.defaultView?.IntersectionObserver;
+    let active = true;
+    let intersecting = Observer === undefined;
+    let release: (() => void) | undefined;
+    const update = () => {
+      if (!active) return;
+      const visible = intersecting && doc.visibilityState !== "hidden";
+      if (visible && release === undefined) release = store.watchThumbnails();
+      else if (!visible && release !== undefined) {
+        release();
+        release = undefined;
+      }
+    };
+    const observer =
+      Observer === undefined
+        ? undefined
+        : new Observer((entries) => {
+            intersecting = entries.some(
+              (entry) => entry.target === element && entry.isIntersecting,
+            );
+            update();
+          });
+    observer?.observe(element);
+    doc.addEventListener("visibilitychange", update);
+    update();
+    return () => {
+      active = false;
+      observer?.disconnect();
+      doc.removeEventListener("visibilitychange", update);
+      release?.();
+    };
+  }, [store, enabled]);
+  return ref;
 }
 
 export interface PipHandle {

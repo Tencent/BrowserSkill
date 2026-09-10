@@ -542,6 +542,13 @@ fn run_skill_sync_for_session_start(format: Format) {
         for harness in &report.updated {
             eprintln!("≈ skill updated for {}", harness.cli_name());
         }
+        for (harness, reason) in &report.paused {
+            eprintln!(
+                "! skill auto-update paused for {}: {}; run `bsk doctor` for options",
+                harness.cli_name(),
+                reason.description()
+            );
+        }
     }
     for (harness, msg) in &report.errors {
         tracing::warn!(harness = harness.cli_name(), error = %msg, "skill sync failed");

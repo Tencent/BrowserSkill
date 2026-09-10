@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WheelParams",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "delta_x": {
+      "description": "Native CDP wheel input in CSS pixels. Positive X means right. Not measured displacement.",
+      "default": 0.0,
+      "type": "number",
+      "format": "double"
+    },
+    "delta_y": {
+      "description": "Native CDP wheel input in CSS pixels. Positive Y means down. Defaults to zero.",
+      "default": 0.0,
+      "type": "number",
+      "format": "double"
+    },
+    "modifiers": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      }
+    },
+    "ref": {
+      "description": "Optional `@e<N>` ref used as the wheel event's hit-test point. Mutually exclusive with `selector`. When neither is supplied, the event is dispatched at the viewport centre.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  },
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    }
+  }
+}

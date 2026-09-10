@@ -113,6 +113,24 @@ bsk install-skill
 
 用 <kbd>Space</kbd> 选择需要安装的 Agent harness，然后按 <kbd>Enter</kbd> 安装 skill。运行 `bsk install-skill --list` 可查看 internal 变体及安装路径。
 
+安装自定义指令可运行 `bsk install-skill --harness cursor --source ./SKILL.md`。
+显式指定 `--source` 的安装始终视为自定义，即使内容与内置 skill 相同。
+已有安装默认跳过，添加 `--force` 才会覆盖。
+
+daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只有文件内容仍与
+上次安装或同步时的内容一致，才继续自动更新。检测到本地编辑时会保留文件并暂停更新。
+没有内容基线的历史安装，只有与当前内置 skill 字节级一致时才自动纳入管理；此时只补齐
+来源标记，不重写 `SKILL.md`。明确的自定义安装即使内容相同，也不会被自动纳入管理。
+
+对于内容不同的历史文件、本地编辑或无法识别的来源标记，`doctor` 会显示 `WARN`，
+说明暂停原因及恢复方法。这类警告不会让健康检查失败（`--json` 中为 `status: "warn"`、
+`ok: true`）。其他安装或同步正在进行时，本次同步会推迟到后续再试。
+
+如需将当前指令保留为明确的自定义安装，运行
+`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`，将
+`<existing-SKILL.md>` 替换为现有文件路径。如需恢复内置 skill 并重新启用自动更新，运行
+`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖现有指令。
+
 其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。DeepSeek Harness 走独立插件，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
 
 </details>
@@ -125,16 +143,22 @@ bsk install-skill
 
 ## DeepSeek Harness 插件
 
-在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它会注入原生 `browser_*` 工具（无需再通过 Shell 调用 `bsk`），并在 Web UI 中实时观察每个 Agent Window。
+在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它为 Agent 提供原生 `browser_*` 工具，由插件代为调用 `bsk`，并在 Web UI 中实时展示浏览器会话。
 
-把它装进某个 dsh profile，然后启动该 profile：
+先安装 `bsk` CLI 并连接浏览器扩展，再将插件装进 dsh profile 并启动（将 `web` 替换为你的 profile 名称）：
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-插件自带 skill，所以在 dsh 下无需执行 `bsk install-skill`；但 `bsk` CLI 和浏览器扩展仍是前置条件。工具清单、配置项与观察浮层见[插件 README](packages/dsh-plugin-browserskill/README.md)。
+插件自带 `browser-skill` skill，所以在 dsh 下无需执行 `bsk install-skill`。已安装的插件不会自动更新；升级此插件请运行：
+
+```sh
+dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
+```
+
+升级后重启该 profile。用法与配置见[插件 README](packages/dsh-plugin-browserskill/README.md)。
 
 ## 工作原理
 
@@ -170,6 +194,8 @@ flowchart TB
 Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
 
 ## 面向开发者
+
+[scroll-to 原语说明](docs/scroll-to.md)介绍 CLI、协议和插件入口，以及可见区域、错误和中断语义。
 
 本仓库是 Cargo + pnpm workspace：
 

@@ -122,8 +122,8 @@ describe("App", () => {
 
     expect(screen.queryByText(/^扩展 v/)).toBeNull();
     expect(screen.queryByText(/^daemon v/)).toBeNull();
-    expect(screen.getByTitle("扩展版本").textContent).toBe(EXTENSION_VERSION);
-    expect(screen.getByTitle("bsk 版本").textContent).toBe(mockDaemonVersion);
+    expect(screen.getByTitle("扩展版本").textContent).toBe(`Ext ${EXTENSION_VERSION}`);
+    expect(screen.getByTitle("bsk 版本").textContent).toBe(`CLI ${mockDaemonVersion}`);
     expect(screen.getByText("03c3e47f")).toBeTruthy();
 
     const copyButton = screen.getByRole("button", { name: "复制实例 ID" });
@@ -246,6 +246,41 @@ describe("App", () => {
     const copyButton = screen.getByRole("button", { name: "复制录制指令" });
     expect(copyButton.getAttribute("disabled")).not.toBeNull();
     expect(screen.getByText("连接后可用")).toBeTruthy();
+  });
+
+  it("treats protocol drift as still connected and prompts an upgrade", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "version_skew",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("已连接")).toBeTruthy();
+    expect(screen.getByText("可升级")).toBeTruthy();
+    expect(screen.queryByText("协议不一致")).toBeNull();
+    expect(screen.queryByText("Action needed")).toBeNull();
+    expect(screen.queryByText("兼容")).toBeNull();
+    const warning = screen.getByText(/协议版本不同，请及时升级/);
+    expect(warning.textContent).toContain("CLI 协议");
+    expect(warning.textContent).toContain("扩展协议");
+
+    openRecordView();
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+    fireEvent.click(copyButton);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
   });
 });
 

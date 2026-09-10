@@ -225,11 +225,15 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             .with_context(|| format!("bind IPC endpoint {}", sock_path.display()))?;
 
         let state = Arc::new(DaemonState::new(cfg.clone()));
+        state
+            .transfers
+            .initialize()
+            .context("initialize transfer staging")?;
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
         // Fired by the update check task after a successful auto-update:
-        // the replacement daemon has already been spawned, so this
-        // process should shut down and let it take over.
+        // the replacement daemon (or Windows update helper) is ready, so
+        // this process should shut down and let it take over.
         let restart_notify = Arc::new(tokio::sync::Notify::new());
         let update_check_task =
             spawn_update_check_task(Arc::clone(&state), Arc::clone(&restart_notify));
@@ -274,6 +278,10 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
                 Ok(Some(report)) => {
                     for harness in &report.updated {
                         info!(harness = harness.cli_name(), "skill synced");
+                    }
+                    for (harness, reason) in &report.paused {
+                        warn!(harness = harness.cli_name(), reason = reason.description(),
+                            "skill auto-update paused; content preserved; run `bsk doctor` for options");
                     }
                     for (harness, msg) in &report.errors {
                         warn!(harness = harness.cli_name(), error = %msg, "skill sync failed");
@@ -448,6 +456,7 @@ pub(crate) fn spawn_browser_liveness_reaper(
                     for s in state.sessions.purge_browser(&client.id) {
                         state.tool_queues.remove(&s.id);
                         state.session_interrupts.drop_session(&s.id);
+                        state.transfers.release_session(&s.id.0);
                         debug!(session = %s.id, "purged session on browser liveness timeout");
                     }
                 }
@@ -485,7 +494,10 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 )
                 .await
                 {
-                    Ok(_) => info!(session = %session_id, "idle session stopped"),
+                    Ok(_) => {
+                        state.transfers.release_session(&session_id.0);
+                        info!(session = %session_id, "idle session stopped");
+                    }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
                         debug!(session = %session_id, "idle session still active; retrying later");
                     }
@@ -496,6 +508,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                             &state.session_interrupts,
                             &session_id,
                         );
+                        state.transfers.release_session(&session_id.0);
                     }
                     Err(err) => {
                         warn!(session = %session_id, error = %err, "failed to stop idle session");
@@ -530,8 +543,8 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 /// task spawns the replacement daemon (see
 /// [`DAEMON_REPLACEMENT_WAIT_ENV`]) and fires `restart` so this process
 /// shuts down and the new version takes over; on Windows the
-/// replacement can only be staged, so it just logs that a restart is
-/// needed.
+/// helper waits for this process to exit, replaces the binary, and starts
+/// the new daemon with the same configuration.
 pub(crate) fn spawn_update_check_task(
     state: Arc<DaemonState>,
     restart: Arc<tokio::sync::Notify>,
@@ -596,7 +609,11 @@ pub(crate) fn spawn_update_check_task(
                         |candidate| {
                             let target =
                                 exe_path.as_deref().context("current executable unknown")?;
-                            update::self_install_candidate(candidate, target)
+                            update::self_install_candidate(
+                                candidate,
+                                target,
+                                &restart_start_args(&state.config),
+                            )
                         },
                     )
                 })
@@ -626,10 +643,11 @@ pub(crate) fn spawn_update_check_task(
                     sessions,
                     "auto-update postponed: agent session(s) active; will retry on the next tick"
                 ),
-                update::AutoUpdateOutcome::Staged { latest } => warn!(
-                    %latest,
-                    "auto-update staged the new binary but cannot replace the running daemon in place; restart the daemon (or terminal) to finish the upgrade"
-                ),
+                update::AutoUpdateOutcome::Staged { latest } => {
+                    info!(%latest, "update helper ready; exiting so it can replace and restart the daemon");
+                    restart.notify_one();
+                    return;
+                }
                 update::AutoUpdateOutcome::Replaced { latest } => {
                     info!(
                         current = env!("CARGO_PKG_VERSION"),

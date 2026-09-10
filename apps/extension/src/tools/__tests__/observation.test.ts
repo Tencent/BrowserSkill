@@ -4,9 +4,9 @@ import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-sup
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "@/lib/overlay-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
+import type { BuildVomSceneOptions, VomFrameDocument } from "../observation";
 import {
   buildFrameVomScene,
-  buildVomScene,
   type CdpAxNode,
   captureVomObservation,
   handleGetHtml,
@@ -17,7 +17,35 @@ import {
   type ScreenshotDeps,
   stripDataUrlPrefix,
 } from "../observation";
-import type { CapturedNode, CapturedViewModel } from "../vom/capture";
+import type { CapturedNode, CapturedSceneInput } from "../vom/facts";
+
+interface SceneFixture extends CapturedSceneInput {
+  documents?: VomFrameDocument[];
+}
+
+// Only supplies the common root fixture; child documents declare their own ownership.
+function buildTestScene(
+  axNodes: CdpAxNode[],
+  captured: SceneFixture,
+  options: BuildVomSceneOptions = {},
+) {
+  const rootFrameId = captured.rootFrameId ?? "root";
+  return buildFrameVomScene(
+    [
+      {
+        frameId: rootFrameId,
+        contextScopeId: rootFrameId,
+        target: { tabId: 7 },
+        url: options.pageUrl,
+        domNodes: captured.nodes,
+        axNodes,
+      },
+      ...(captured.documents ?? []),
+    ],
+    captured,
+    options,
+  );
+}
 
 function fakeAgentWindow(ids: number[]) {
   let i = 0;
@@ -28,7 +56,7 @@ function fakeAgentWindow(ids: number[]) {
       return id;
     }),
     remove: vi.fn(async () => {}),
-    ensureActiveTab: vi.fn(async () => {}),
+    ensureActiveTab: vi.fn(async () => 1),
   };
 }
 
@@ -65,7 +93,11 @@ function makeFakeCdp(handlers: Record<string, (params?: object) => unknown>) {
     sent.push({ method, params });
     const handler = handlers[method];
     if (!handler && method === "Page.getLayoutMetrics") {
-      return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      return {
+        visualViewport: { clientWidth: 1000 },
+        cssVisualViewport: { clientWidth: 1000 },
+        cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 },
+      };
     }
     if (!handler) throw new Error(`unexpected CDP call ${method}`);
     return handler(params);
@@ -266,7 +298,15 @@ describe("handleScreenshot", () => {
     expect(sent.find((c) => c.method === "Page.captureScreenshot")).toBeUndefined();
   });
 
-  it("captures a clipped PNG when ref is given", async () => {
+  it.each([
+    { zoom: 1, scroll: 0, expected: { x: 10, y: 20, width: 100, height: 40 } },
+    { zoom: 0.9, scroll: 100, expected: { x: 9, y: 108, width: 90, height: 36 } },
+    { zoom: 1.25, scroll: 100, expected: { x: 12.5, y: 150, width: 125, height: 50 } },
+  ])("captures a ref in page DIP at zoom $zoom and scroll $scroll", async ({
+    zoom,
+    scroll,
+    expected,
+  }) => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
     ctx.refStore.set("e5", 999, { tabId: 7 });
@@ -274,6 +314,10 @@ describe("handleScreenshot", () => {
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
       "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+      "Page.getLayoutMetrics": () => ({
+        cssLayoutViewport: { clientWidth: 1280, clientHeight: 720, pageX: 0, pageY: scroll },
+        cssVisualViewport: { zoom },
+      }),
     });
     const captureVisibleTab = vi.fn();
     const res = await handleScreenshot(
@@ -297,7 +341,8 @@ describe("handleScreenshot", () => {
         clip?: { x: number; y: number; width: number; height: number };
       }
     )?.clip;
-    expect(clip).toMatchObject({ x: 10, y: 20, width: 100, height: 40 });
+    expect(clip).toMatchObject(expected);
+    expect(sent.filter((c) => c.method === "Page.getLayoutMetrics")).toHaveLength(1);
   });
 
   it("returns not_found for unknown ref", async () => {
@@ -509,10 +554,10 @@ describe("handleScreenshot overlay suppression", () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildVomScene
+// Semantic scene fixtures
 // ---------------------------------------------------------------------------
 
-describe("buildVomScene", () => {
+describe("buildFrameVomScene", () => {
   it("merges multiple sibling and nested frames without mixing their targets", () => {
     const node = (
       backendNodeId: number,
@@ -550,25 +595,10 @@ describe("buildVomScene", () => {
       node(300, null, "nested", "body"),
       node(301, 300, "nested", "input", { placeholder: "Nested field" }),
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1200, height: 800 },
       nodes: mainNodes,
-      iframeNodes: new Map([
-        [10, firstNodes],
-        [20, secondNodes],
-        [210, nestedNodes],
-      ]),
-      frameNodes: new Map([
-        ["main", mainNodes],
-        ["first", firstNodes],
-        ["second", secondNodes],
-        ["nested", nestedNodes],
-      ]),
-      frameOwnerBackendNodeIds: new Map([
-        ["first", 10],
-        ["second", 20],
-        ["nested", 210],
-      ]),
+
       rootFrameId: "main",
       excludedBackendNodeIds: new Set(),
     };
@@ -655,6 +685,59 @@ describe("buildVomScene", () => {
     expect(nestedInput?.parentId).toBe(result.nodes.find((item) => item.backendNodeId === 210)?.id);
   });
 
+  it("excludes an overlay only in its owning document when target backend ids collide", () => {
+    const owner = (id: number): CapturedNode => ({
+      backendNodeId: id,
+      parentBackendNodeId: null,
+      frameId: "main",
+      tag: "iframe",
+      attrs: {},
+      rect: { x: id * 10, y: 0, w: 200, h: 100 },
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "auto",
+    });
+    const owners = [owner(10), owner(20)];
+    const result = buildFrameVomScene(
+      [
+        {
+          frameId: "main",
+          contextScopeId: "main",
+          target: { tabId: 7 },
+          domNodes: owners,
+          axNodes: [],
+        },
+        ...["left", "right"].map((frameId, i) => ({
+          frameId,
+          contextScopeId: frameId,
+          parentFrameId: "main",
+          ownerBackendNodeId: owners[i].backendNodeId,
+          target: { tabId: 7, sessionId: frameId },
+          excludedBackendNodeIds: new Set(i === 0 ? [7] : []),
+          domNodes: [],
+          axNodes: [
+            {
+              nodeId: "button",
+              frameId,
+              backendDOMNodeId: 7,
+              role: { type: "role", value: "button" },
+              name: { type: "computedString", value: frameId + " action" },
+            },
+          ],
+        })),
+      ],
+      {
+        nodes: owners,
+        viewport: { width: 800, height: 600 },
+        excludedBackendNodeIds: new Set(),
+      },
+    );
+    const rendered = renderVom(result);
+    expect(rendered.text).not.toContain("left action");
+    expect(rendered.text).toContain("right action");
+    expect(rendered.refs.find((ref) => ref.backendNodeId === 7)?.frameId).toBe("right");
+  });
+
   it("does not place a child document at the page root when its frame boundary is unresolved", () => {
     const childNode: CapturedNode = {
       backendNodeId: 101,
@@ -667,11 +750,10 @@ describe("buildVomScene", () => {
       position: "static",
       pointerEvents: "auto",
     };
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 800, height: 600 },
       nodes: [],
-      iframeNodes: new Map(),
-      frameNodes: new Map([["child", [childNode]]]),
+
       rootFrameId: "main",
       excludedBackendNodeIds: new Set(),
     };
@@ -733,14 +815,10 @@ describe("buildVomScene", () => {
         pointerEvents: "auto",
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 800, height: 600 },
       nodes: mainNodes,
-      iframeNodes: new Map(),
-      frameNodes: new Map([
-        ["main", mainNodes],
-        ["child", []],
-      ]),
+
       rootFrameId: "main",
       excludedBackendNodeIds: new Set(),
     };
@@ -816,9 +894,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 200,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -844,11 +921,11 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
+    const scene = buildTestScene(axNodes, captured);
     expect(scene.viewport).toEqual({ width: 1000, height: 800 });
     expect(scene.nodes[0]).toEqual(
       expect.objectContaining({
-        id: 100,
+        backendNodeId: 100,
         parentId: null,
         role: "RootWebArea",
         name: "Example",
@@ -860,14 +937,14 @@ describe("buildVomScene", () => {
     );
     expect(scene.nodes[1]).toEqual(
       expect.objectContaining({
-        id: 200,
-        parentId: 100,
+        backendNodeId: 200,
+        parentId: scene.nodes.find((node) => node.backendNodeId === 100)!.id,
         role: "button",
         name: "Submit",
         tag: "button",
         rect: { x: 20, y: 20, w: 120, h: 40 },
-        domParentId: 100,
-        domAncestorIds: [100],
+        domParentId: scene.nodes.find((node) => node.backendNodeId === 100)!.id,
+        domAncestorIds: [scene.nodes.find((node) => node.backendNodeId === 100)!.id],
         attrs: {},
       }),
     );
@@ -896,9 +973,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 300,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -934,10 +1010,10 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured, { pageUrl: "https://app.example.test/home" });
+    const scene = buildTestScene(axNodes, captured, { pageUrl: "https://app.example.test/home" });
 
-    expect(scene.nodes.find((node) => node.id === 200)?.href).toBe("docs.example.org");
-    expect(scene.nodes.find((node) => node.id === 300)?.href).toBeUndefined();
+    expect(scene.nodes.find((node) => node.backendNodeId === 200)?.href).toBe("docs.example.org");
+    expect(scene.nodes.find((node) => node.backendNodeId === 300)?.href).toBeUndefined();
   });
 
   it("uses the nearest backend AX ancestor as parentId", () => {
@@ -962,9 +1038,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 30,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 400, height: 300 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -990,10 +1065,12 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
+    const scene = buildTestScene(axNodes, captured);
 
-    expect(scene.nodes.map((node) => node.id)).toEqual([10, 30]);
-    expect(scene.nodes.find((node) => node.id === 30)?.parentId).toBe(10);
+    expect(scene.nodes.map((node) => node.backendNodeId)).toEqual([10, 30]);
+    expect(scene.nodes.find((node) => node.backendNodeId === 30)?.parentId).toBe(
+      scene.nodes.find((node) => node.backendNodeId === 10)!.id,
+    );
   });
 
   it("maps iframe sub-document controls to VomNodes", () => {
@@ -1011,7 +1088,7 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
       nodes: [
         {
@@ -1035,10 +1112,15 @@ describe("buildVomScene", () => {
           pointerEvents: "auto",
         },
       ],
-      iframeNodes: new Map([
-        [
-          20,
-          [
+      documents: [
+        {
+          frameId: "child",
+          contextScopeId: "child",
+          parentFrameId: "root",
+          ownerBackendNodeId: 20,
+          target: { tabId: 7 },
+          axNodes: [],
+          domNodes: [
             {
               backendNodeId: 101,
               parentBackendNodeId: null,
@@ -1060,26 +1142,25 @@ describe("buildVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        ],
-      ]),
+        },
+      ],
       excludedBackendNodeIds: new Set(),
     };
 
-    const iframeControls = buildVomScene(axNodes, captured).nodes.filter((node) =>
-      [101, 102].includes(node.id),
-    );
+    const scene = buildTestScene(axNodes, captured);
+    const iframeControls = scene.nodes.filter((node) => [101, 102].includes(node.backendNodeId!));
 
     expect(iframeControls).toEqual([
       expect.objectContaining({
-        id: 101,
-        parentId: 20,
+        backendNodeId: 101,
+        parentId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
         role: "textbox",
         name: "请输入手机号",
         sensitive: false,
       }),
       expect.objectContaining({
-        id: 102,
-        parentId: 20,
+        backendNodeId: 102,
+        parentId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
         role: "textbox",
         name: "密码",
         sensitive: true,
@@ -1100,11 +1181,9 @@ describe("buildVomScene", () => {
         parentId: "1",
         role: { type: "role", value: "Iframe" },
         backendDOMNodeId: 20,
-        childIds: ["3"],
       },
       {
         nodeId: "3",
-        parentId: "2",
         role: { type: "role", value: "textbox" },
         name: { type: "x", value: "输入密码" },
         value: { value: "iframe-secret" },
@@ -1112,7 +1191,7 @@ describe("buildVomScene", () => {
         properties: [{ name: "inputType", value: { value: "password" } }],
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
       nodes: [
         {
@@ -1136,10 +1215,15 @@ describe("buildVomScene", () => {
           pointerEvents: "auto",
         },
       ],
-      iframeNodes: new Map([
-        [
-          20,
-          [
+      documents: [
+        {
+          frameId: "child",
+          contextScopeId: "child",
+          parentFrameId: "root",
+          ownerBackendNodeId: 20,
+          target: { tabId: 7 },
+          axNodes: [axNodes[2]],
+          domNodes: [
             {
               backendNodeId: 102,
               parentBackendNodeId: null,
@@ -1151,25 +1235,27 @@ describe("buildVomScene", () => {
               pointerEvents: "auto",
             },
           ],
-        ],
-      ]),
+        },
+      ],
       excludedBackendNodeIds: new Set(),
     };
 
-    const passwordNodes = buildVomScene(axNodes, captured).nodes.filter(
+    const passwordNodes = buildTestScene(axNodes.slice(0, 2), captured).nodes.filter(
       (node) => node.role === "textbox" && node.name === "输入密码",
     );
 
     expect(passwordNodes).toHaveLength(1);
-    expect(passwordNodes[0]).toEqual(expect.objectContaining({ id: 202, sensitive: true }));
+    expect(passwordNodes[0]).toEqual(
+      expect.objectContaining({ backendNodeId: 202, sensitive: true }),
+    );
     expect(passwordNodes[0].value).toBeUndefined();
-    const rendered = renderVom(buildVomScene(axNodes, captured)).text;
+    const rendered = renderVom(buildTestScene(axNodes.slice(0, 2), captured)).text;
     expect(rendered).toContain('textbox "输入密码" [filled] ="•••"');
     expect(rendered).not.toContain("iframe-secret");
   });
 
   it("keeps unnamed iframe controls but skips unnamed iframe links", () => {
-    const scene = buildVomScene(
+    const scene = buildTestScene(
       [
         {
           nodeId: "1",
@@ -1208,10 +1294,15 @@ describe("buildVomScene", () => {
             pointerEvents: "auto",
           },
         ],
-        iframeNodes: new Map([
-          [
-            20,
-            [
+        documents: [
+          {
+            frameId: "child",
+            contextScopeId: "child",
+            parentFrameId: "root",
+            ownerBackendNodeId: 20,
+            target: { tabId: 7 },
+            axNodes: [],
+            domNodes: [
               {
                 backendNodeId: 201,
                 parentBackendNodeId: null,
@@ -1233,25 +1324,25 @@ describe("buildVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          ],
-        ]),
+          },
+        ],
         excludedBackendNodeIds: new Set(),
       },
     );
 
-    expect(scene.nodes.find((node) => node.id === 201)).toEqual(
+    expect(scene.nodes.find((node) => node.backendNodeId === 201)).toEqual(
       expect.objectContaining({
-        id: 201,
-        parentId: 20,
+        backendNodeId: 201,
+        parentId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
         role: "button",
       }),
     );
-    expect(scene.nodes.find((node) => node.id === 201)).not.toHaveProperty("name");
-    expect(scene.nodes.find((node) => node.id === 202)).toBeUndefined();
+    expect(scene.nodes.find((node) => node.backendNodeId === 201)).not.toHaveProperty("name");
+    expect(scene.nodes.find((node) => node.backendNodeId === 202)).toBeUndefined();
   });
 
   it("preserves captured-only iframe anchors for iframe sub-document controls", () => {
-    const scene = buildVomScene(
+    const scene = buildTestScene(
       [
         {
           nodeId: "1",
@@ -1284,10 +1375,15 @@ describe("buildVomScene", () => {
             pointerEvents: "auto",
           },
         ],
-        iframeNodes: new Map<number, CapturedNode[]>([
-          [
-            20,
-            [
+        documents: [
+          {
+            frameId: "child",
+            contextScopeId: "child",
+            parentFrameId: "root",
+            ownerBackendNodeId: 20,
+            target: { tabId: 7 },
+            axNodes: [],
+            domNodes: [
               {
                 backendNodeId: 201,
                 parentBackendNodeId: null,
@@ -1309,16 +1405,16 @@ describe("buildVomScene", () => {
                 pointerEvents: "auto",
               },
             ],
-          ],
-        ]),
+          },
+        ],
         excludedBackendNodeIds: new Set(),
       },
     );
 
-    expect(scene.nodes.find((node) => node.id === 20)).toEqual(
+    expect(scene.nodes.find((node) => node.backendNodeId === 20)).toEqual(
       expect.objectContaining({
-        id: 20,
-        parentId: 10,
+        backendNodeId: 20,
+        parentId: scene.nodes.find((node) => node.backendNodeId === 10)!.id,
         role: "Iframe",
         name: "支付验证",
       }),
@@ -1339,9 +1435,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 10,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 320, height: 240 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1362,9 +1457,9 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
+    expect(buildTestScene(axNodes, captured).nodes[0]).toEqual(
       expect.objectContaining({
-        id: 10,
+        backendNodeId: 10,
         sensitive: true,
       }),
     );
@@ -1379,9 +1474,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 10,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1398,9 +1492,9 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
+    expect(buildTestScene(axNodes, captured).nodes[0]).toEqual(
       expect.objectContaining({
-        id: 10,
+        backendNodeId: 10,
         role: "textbox",
         name: "+86",
         placeholder: "输入手机号",
@@ -1418,9 +1512,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 10,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1437,8 +1530,13 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured).nodes[0]).toEqual(
-      expect.objectContaining({ id: 10, role: "textbox", name: "Email", value: "a@b.com" }),
+    expect(buildTestScene(axNodes, captured).nodes[0]).toEqual(
+      expect.objectContaining({
+        backendNodeId: 10,
+        role: "textbox",
+        name: "Email",
+        value: "a@b.com",
+      }),
     );
   });
 
@@ -1457,9 +1555,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1497,9 +1594,9 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured).nodes.find((node) => node.id === 20)).toEqual(
-      expect.objectContaining({ role: "textbox", name: "验证码" }),
-    );
+    expect(
+      buildTestScene(axNodes, captured).nodes.find((node) => node.backendNodeId === 20),
+    ).toEqual(expect.objectContaining({ role: "textbox", name: "验证码" }));
   });
 
   it("uses preceding AX static text as a form control label", () => {
@@ -1523,9 +1620,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1542,13 +1638,13 @@ describe("buildVomScene", () => {
       ],
     };
 
-    expect(buildVomScene(axNodes, captured).nodes.find((node) => node.id === 20)).toEqual(
-      expect.objectContaining({ role: "textbox", name: "验证码", inputState: "empty" }),
-    );
+    expect(
+      buildTestScene(axNodes, captured).nodes.find((node) => node.backendNodeId === 20),
+    ).toEqual(expect.objectContaining({ role: "textbox", name: "验证码", inputState: "empty" }));
   });
 
   it("marks runtime default input values without treating them as ordinary filled input", () => {
-    const scene = buildVomScene(
+    const scene = buildTestScene(
       [
         {
           nodeId: "1",
@@ -1558,7 +1654,6 @@ describe("buildVomScene", () => {
       ],
       {
         viewport: { width: 1000, height: 800 },
-        iframeNodes: new Map(),
         excludedBackendNodeIds: new Set(),
         nodes: [
           {
@@ -1602,9 +1697,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1654,9 +1748,14 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "button", name: "close", cursor: "pointer" }),
+    const scene = buildTestScene(axNodes, captured);
+    expect(scene.nodes.find((n) => n.backendNodeId === 20)).toEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: "button",
+        name: "close",
+        cursor: "pointer",
+      }),
     );
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "close"');
@@ -1690,9 +1789,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 30,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1731,9 +1829,9 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)).toBeUndefined();
-    expect(scene.nodes.find((n) => n.id === 30)?.role).toBe("link");
+    const scene = buildTestScene(axNodes, captured);
+    expect(scene.nodes.find((n) => n.backendNodeId === 20)).toBeUndefined();
+    expect(scene.nodes.find((n) => n.backendNodeId === 30)?.role).toBe("link");
   });
 
   it("promotes only the outermost clickable in a nested pointer chain", () => {
@@ -1758,9 +1856,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 30,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1799,11 +1896,15 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 20)).toEqual(
-      expect.objectContaining({ id: 20, role: "button", attrs: { "aria-label": "收藏" } }),
+    const scene = buildTestScene(axNodes, captured);
+    expect(scene.nodes.find((n) => n.backendNodeId === 20)).toEqual(
+      expect.objectContaining({
+        backendNodeId: 20,
+        role: "button",
+        attrs: { "aria-label": "收藏" },
+      }),
     );
-    expect(scene.nodes.find((n) => n.id === 30)).toBeUndefined();
+    expect(scene.nodes.find((n) => n.backendNodeId === 30)).toBeUndefined();
     const rendered = renderVom(scene);
     expect(rendered.text).toContain('@e1 button "收藏"');
     expect(rendered.refs.map(({ ref, backendNodeId }) => ({ ref, backendNodeId }))).toEqual([
@@ -1827,9 +1928,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -1877,10 +1977,10 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
+    const scene = buildTestScene(axNodes, captured);
     expect(scene.activeScopeBlocks).toEqual([
       {
-        triggerId: 20,
+        triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
         label: "Reviews (12)",
         lines: ["Jane - ear cups are small", "Bob - great sound"],
       },
@@ -1904,39 +2004,47 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 20,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "button",
-          attrs: {},
-          rect: { x: 20, y: 20, w: 120, h: 40 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildTestScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "button",
+            attrs: {},
+            rect: { x: 20, y: 20, w: 120, h: 40 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 20, triggerAction: "hover", subItems: ["Shoes", "Bags"] },
+      {
+        triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
+        triggerAction: "hover",
+        subItems: ["Shoes", "Bags"],
+      },
     ]);
     expect(renderVom(scene).text).toContain('@e1 button "Products" [hover first: Shoes | Bags]');
   });
@@ -1957,46 +2065,50 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildTestScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
+        ],
+      },
+    );
 
     expect(renderVom(scene).text).toContain('@e1 button "image" [hover first: My profile]');
   });
@@ -2017,51 +2129,59 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
-        { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
-        { triggerBackendNodeId: 21, triggerAction: "hover", subItems: ["Settings"] },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildTestScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["My profile"] },
+          { triggerBackendNodeId: 20, triggerAction: "hover", subItems: ["Sign out"] },
+          { triggerBackendNodeId: 21, triggerAction: "hover", subItems: ["Settings"] },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 21, triggerAction: "hover", subItems: ["My profile"] },
+      {
+        triggerId: scene.nodes.find((node) => node.backendNodeId === 21)!.id,
+        triggerAction: "hover",
+        subItems: ["My profile"],
+      },
     ]);
   });
 
@@ -2081,57 +2201,65 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 21,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        {
-          triggerBackendNodeId: 20,
-          triggerPoint: { x: 915, y: 25 },
-          triggerAction: "hover",
-          subItems: ["My profile", "Sign out"],
-        },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "auto",
-        },
-        {
-          backendNodeId: 20,
-          parentBackendNodeId: 10,
-          tag: "div",
-          attrs: { class: "tg-avatar" },
-          rect: { x: 900, y: 10, w: 30, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "pointer",
-        },
-        {
-          backendNodeId: 21,
-          parentBackendNodeId: 20,
-          tag: "div",
-          attrs: { class: "tg-avatar__inner" },
-          rect: { x: 902, y: 12, w: 26, h: 26 },
-          paintOrder: 2,
-          position: "static",
-          pointerEvents: "auto",
-          cursor: "pointer",
-        },
-      ],
-    });
+    const scene = buildTestScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "auto",
+          },
+          {
+            backendNodeId: 20,
+            parentBackendNodeId: 10,
+            tag: "div",
+            attrs: { class: "tg-avatar" },
+            rect: { x: 900, y: 10, w: 30, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "pointer",
+          },
+          {
+            backendNodeId: 21,
+            parentBackendNodeId: 20,
+            tag: "div",
+            attrs: { class: "tg-avatar__inner" },
+            rect: { x: 902, y: 12, w: 26, h: 26 },
+            paintOrder: 2,
+            position: "static",
+            pointerEvents: "auto",
+            cursor: "pointer",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 20,
+            triggerPoint: { x: 915, y: 25 },
+            triggerAction: "hover",
+            subItems: ["My profile", "Sign out"],
+          },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toEqual([
-      { triggerId: 20, triggerAction: "hover", subItems: ["My profile", "Sign out"] },
+      {
+        triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
+        triggerAction: "hover",
+        subItems: ["My profile", "Sign out"],
+      },
     ]);
     expect(renderVom(scene).text).toContain(
       '@e1 button "image" [hover first: My profile | Sign out]',
@@ -2154,41 +2282,45 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 42,
       },
     ];
-    const scene = buildVomScene(axNodes, {
-      viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
-      excludedBackendNodeIds: new Set(),
-      surfaceProbes: [
-        {
-          triggerBackendNodeId: 999,
-          triggerPoint: { x: 900, y: 20 },
-          triggerAction: "hover",
-          subItems: ["My profile"],
-        },
-      ],
-      nodes: [
-        {
-          backendNodeId: 10,
-          parentBackendNodeId: null,
-          tag: "body",
-          attrs: {},
-          rect: { x: 0, y: 0, w: 1000, h: 800 },
-          paintOrder: 0,
-          position: "static",
-          pointerEvents: "auto",
-        },
-        {
-          backendNodeId: 42,
-          parentBackendNodeId: 10,
-          tag: "a",
-          attrs: {},
-          rect: { x: 860, y: 120, w: 40, h: 30 },
-          paintOrder: 1,
-          position: "static",
-          pointerEvents: "auto",
-        },
-      ],
-    });
+    const scene = buildTestScene(
+      axNodes,
+      {
+        viewport: { width: 1000, height: 800 },
+        excludedBackendNodeIds: new Set(),
+        nodes: [
+          {
+            backendNodeId: 10,
+            parentBackendNodeId: null,
+            tag: "body",
+            attrs: {},
+            rect: { x: 0, y: 0, w: 1000, h: 800 },
+            paintOrder: 0,
+            position: "static",
+            pointerEvents: "auto",
+          },
+          {
+            backendNodeId: 42,
+            parentBackendNodeId: 10,
+            tag: "a",
+            attrs: {},
+            rect: { x: 860, y: 120, w: 40, h: 30 },
+            paintOrder: 1,
+            position: "static",
+            pointerEvents: "auto",
+          },
+        ],
+      },
+      {
+        surfaceProbes: [
+          {
+            triggerBackendNodeId: 999,
+            triggerPoint: { x: 900, y: 20 },
+            triggerAction: "hover",
+            subItems: ["My profile"],
+          },
+        ],
+      },
+    );
 
     expect(scene.surfaces).toBeUndefined();
     expect(renderVom(scene).text).not.toContain("[hover first:");
@@ -2223,9 +2355,8 @@ describe("buildVomScene", () => {
         properties: [{ name: "inputType", value: { value: "credit-card" } }],
       },
     ];
-    const scene = buildVomScene(axNodes, {
+    const scene = buildTestScene(axNodes, {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -2272,7 +2403,7 @@ describe("buildVomScene", () => {
       ],
     });
 
-    expect(scene.nodes.find((node) => node.id === 20)).toEqual(
+    expect(scene.nodes.find((node) => node.backendNodeId === 20)).toEqual(
       expect.objectContaining({
         name: "Products [expanded]",
         attrs: expect.objectContaining({
@@ -2282,13 +2413,17 @@ describe("buildVomScene", () => {
       }),
     );
     expect(scene.activeScopeBlocks).toEqual([
-      { triggerId: 20, label: "Products [expanded]", lines: ["Shoes Bags"] },
+      {
+        triggerId: scene.nodes.find((node) => node.backendNodeId === 20)!.id,
+        label: "Products [expanded]",
+        lines: ["Shoes Bags"],
+      },
     ]);
-    expect(scene.nodes.find((node) => node.id === 30)?.sensitive).toBe(true);
+    expect(scene.nodes.find((node) => node.backendNodeId === 30)?.sensitive).toBe(true);
   });
 
   it("aggregates AX virtual text into unnamed structural nodes", () => {
-    const scene = buildVomScene(
+    const scene = buildTestScene(
       [
         {
           nodeId: "1",
@@ -2312,7 +2447,6 @@ describe("buildVomScene", () => {
       ],
       {
         viewport: { width: 1000, height: 800 },
-        iframeNodes: new Map(),
         excludedBackendNodeIds: new Set(),
         nodes: [
           {
@@ -2339,13 +2473,12 @@ describe("buildVomScene", () => {
       },
     );
 
-    expect(scene.nodes.find((node) => node.id === 20)?.name).toBe("Inline only text");
+    expect(scene.nodes.find((node) => node.backendNodeId === 20)?.name).toBe("Inline only text");
   });
 
   it("marks captured dialog elements as modal without AX role or aria-modal", () => {
-    const scene = buildVomScene([], {
+    const scene = buildTestScene([], {
       viewport: { width: 640, height: 480 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set(),
       nodes: [
         {
@@ -2363,7 +2496,7 @@ describe("buildVomScene", () => {
 
     expect(scene.nodes[0]).toEqual(
       expect.objectContaining({
-        id: 50,
+        backendNodeId: 50,
         modal: true,
       }),
     );
@@ -2392,9 +2525,8 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 202,
       },
     ];
-    const captured: CapturedViewModel = {
+    const captured: SceneFixture = {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set([200, 201, 202]),
       nodes: [
         {
@@ -2410,9 +2542,9 @@ describe("buildVomScene", () => {
       ],
     };
 
-    const scene = buildVomScene(axNodes, captured);
-    expect(scene.nodes.find((n) => n.id === 202)).toBeUndefined();
-    expect(scene.nodes.find((n) => n.id === 2)).toEqual(
+    const scene = buildTestScene(axNodes, captured);
+    expect(scene.nodes.find((n) => n.backendNodeId === 202)).toBeUndefined();
+    expect(scene.nodes.find((n) => n.backendNodeId === 2)).toEqual(
       expect.objectContaining({ role: "button", name: "Real Button" }),
     );
   });
@@ -2440,13 +2572,12 @@ describe("buildVomScene", () => {
         backendDOMNodeId: 203,
       },
     ];
-    const scene = buildVomScene(axNodes, {
+    const scene = buildTestScene(axNodes, {
       viewport: { width: 1000, height: 800 },
-      iframeNodes: new Map(),
       excludedBackendNodeIds: new Set([200]),
       nodes: [],
     });
-    expect(scene.nodes.find((n) => n.id === 203)).toBeUndefined();
+    expect(scene.nodes.find((n) => n.backendNodeId === 203)).toBeUndefined();
   });
 });
 
@@ -2456,7 +2587,11 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.enable") return {};
       if (method === "Accessibility.getFullAXTree") return { nodes };
       if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+        };
       }
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") throw new Error("snapshot unsupported");
@@ -2543,7 +2678,11 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.enable") return {};
       if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
       if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+        };
       }
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") {
@@ -2551,6 +2690,9 @@ describe("handleSnapshot", () => {
           strings,
           documents: [
             {
+              scrollOffsetX: 0,
+              scrollOffsetY: 0,
+              frameId: "root",
               nodes: {
                 parentIndex: [-1, 0],
                 nodeName: [i("body"), i("button")],
@@ -2606,7 +2748,113 @@ describe("handleSnapshot", () => {
     );
   });
 
-  it("enables conditional surface probing for semantic observe", async () => {
+  it("hovers the page only after the accessibility tree has been captured", async () => {
+    // Hovering can open menus and reflow the page. Probing between the DOM and
+    // AX captures would leave the two halves of one observation describing the
+    // page on either side of that change.
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const root: CdpAxNode = {
+      nodeId: "1",
+      role: { type: "role", value: "RootWebArea" },
+      name: { type: "computedString", value: "Example" },
+      backendDOMNodeId: 100,
+      childIds: ["2"],
+    };
+    const button: CdpAxNode = {
+      nodeId: "2",
+      parentId: "1",
+      role: { type: "role", value: "button" },
+      name: { type: "computedString", value: "Products" },
+      backendDOMNodeId: 200,
+    };
+    const strings = ["body", "button", "position", "static", "pointer-events", "auto", "cursor"];
+    const i = (s: string) => strings.indexOf(s);
+    const methodOrder: string[] = [];
+    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      methodOrder.push(method);
+      if (method === "Accessibility.enable") return {};
+      if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
+      if (method === "Page.getLayoutMetrics") {
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+        };
+      }
+      if (method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot") {
+        return {
+          strings,
+          documents: [
+            {
+              scrollOffsetX: 0,
+              scrollOffsetY: 0,
+              frameId: "root",
+              nodes: {
+                parentIndex: [-1, 0],
+                nodeName: [i("body"), i("button")],
+                backendNodeId: [100, 200],
+                attributes: [[], []],
+              },
+              layout: {
+                nodeIndex: [0, 1],
+                styles: [
+                  [i("static"), i("auto"), i("auto")],
+                  [i("static"), i("auto"), i("auto")],
+                ],
+                bounds: [
+                  [0, 0, 1000, 800],
+                  [20, 20, 120, 40],
+                ],
+                paintOrders: [0, 1],
+              },
+            },
+          ],
+        };
+      }
+      if (method === "Input.dispatchMouseEvent") return {};
+      if (method === "Runtime.evaluate") {
+        const expression = (params as { expression?: string } | undefined)?.expression ?? "";
+        // Report the button as a `:hover` rule target so a real hover fires.
+        if (expression.includes("document.styleSheets")) {
+          return { result: { value: [{ x: 80, y: 40 }] } };
+        }
+        return { result: { value: [] } };
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    });
+
+    const res = await handleObserve(
+      sm,
+      { session_id: "aa11", probe_hover: true },
+      {
+        cdp: {
+          send: send as unknown as <T = unknown>(
+            tabId: number,
+            method: string,
+            params?: object,
+          ) => Promise<T>,
+          trackSessionTab: vi.fn(),
+        },
+        tabsApi: {
+          get: vi.fn(
+            async (tabId: number) =>
+              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+          ),
+          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+        },
+      },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    const firstHover = methodOrder.indexOf("Input.dispatchMouseEvent");
+    expect(firstHover).toBeGreaterThan(-1);
+    expect(methodOrder.lastIndexOf("DOMSnapshot.captureSnapshot")).toBeLessThan(firstHover);
+    expect(methodOrder.lastIndexOf("Accessibility.getFullAXTree")).toBeLessThan(firstHover);
+  });
+
+  it("runs conditional surface probing only when observe opts in", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");
     const root: CdpAxNode = {
@@ -2629,7 +2877,11 @@ describe("handleSnapshot", () => {
       if (method === "Accessibility.enable") return {};
       if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
       if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+        };
       }
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") {
@@ -2637,6 +2889,9 @@ describe("handleSnapshot", () => {
           strings,
           documents: [
             {
+              scrollOffsetX: 0,
+              scrollOffsetY: 0,
+              frameId: "root",
               nodes: {
                 parentIndex: [-1, 0],
                 nodeName: [i("body"), i("button")],
@@ -2662,30 +2917,46 @@ describe("handleSnapshot", () => {
       if (method === "Runtime.evaluate") return { result: { value: [] } };
       throw new Error(`unexpected CDP method ${method}`);
     });
-    const res = await handleObserve(
+    const deps = {
+      cdp: {
+        send: send as unknown as <T = unknown>(
+          tabId: number,
+          method: string,
+          params?: object,
+        ) => Promise<T>,
+        trackSessionTab: vi.fn(),
+      },
+      tabsApi: {
+        get: vi.fn(
+          async (tabId: number) => ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
+        ),
+        query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
+      },
+    };
+
+    const withoutProbe = await handleObserve(
       sm,
       { session_id: "aa11", debug_surfaces: true },
-      {
-        cdp: {
-          send: send as unknown as <T = unknown>(
-            tabId: number,
-            method: string,
-            params?: object,
-          ) => Promise<T>,
-          trackSessionTab: vi.fn(),
-        },
-        tabsApi: {
-          get: vi.fn(
-            async (tabId: number) =>
-              ({ id: tabId, windowId: 100, active: true }) as chrome.tabs.Tab,
-          ),
-          query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
-        },
-      },
+      deps,
+    );
+    if ("code" in withoutProbe) {
+      throw new Error(`unexpected error: ${JSON.stringify(withoutProbe)}`);
+    }
+    expect(withoutProbe.hover_probe).toBeUndefined();
+    expect(send).not.toHaveBeenCalledWith(
+      4,
+      "Runtime.evaluate",
+      expect.objectContaining({ returnByValue: true }),
     );
 
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(res.debug).toEqual({ surface_probes: [] });
+    const withProbe = await handleObserve(
+      sm,
+      { session_id: "aa11", debug_surfaces: true, probe_hover: true },
+      deps,
+    );
+    if ("code" in withProbe) throw new Error(`unexpected error: ${JSON.stringify(withProbe)}`);
+    expect(withProbe.debug).toEqual({ surface_probes: [] });
+    expect(withProbe.hover_probe).toEqual({ performed: true, revealed_content: false });
     expect(send).toHaveBeenCalledWith(
       4,
       "Runtime.evaluate",
@@ -2778,7 +3049,11 @@ describe("handleSnapshot", () => {
         };
       }
       if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
+        };
       }
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") {
@@ -2885,6 +3160,9 @@ describe("handleSnapshot", () => {
       strings: S,
       documents: [
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 2],
             nodeName: [i("html"), i("body"), i("div"), i("input")],
@@ -2942,6 +3220,9 @@ describe("handleSnapshot", () => {
       strings: S,
       documents: [
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 1, 1, 1],
             nodeName: [i("html"), i("body"), i("input"), i("input"), i("input"), i("input")],
@@ -2991,10 +3272,14 @@ describe("handleSnapshot", () => {
   }
 
   const VP_METRICS = {
+    visualViewport: { clientWidth: 1000 },
+    cssVisualViewport: { clientWidth: 1000 },
     cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
   };
 
-  function makeFrameAwareDeps() {
+  function makeFrameAwareDeps(
+    ownerGeometry: "unavailable" | "available" | "clipped" = "unavailable",
+  ) {
     const strings = ["html", "body", "iframe", "button", "title", "Remote", "static", "auto"];
     const i = (value: string) => strings.indexOf(value);
     const styles = [i("static"), i("auto"), i("auto")];
@@ -3002,6 +3287,8 @@ describe("handleSnapshot", () => {
       strings,
       documents: [
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
           frameId: "main",
           nodes: {
             parentIndex: [-1, 0, 1],
@@ -3022,6 +3309,8 @@ describe("handleSnapshot", () => {
           },
         },
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
           frameId: "child",
           nodes: {
             parentIndex: [-1, 0, 1],
@@ -3074,13 +3363,33 @@ describe("handleSnapshot", () => {
     ];
     const send = vi.fn(async (_tabId: number, method: string) => {
       if (method === "Page.getLayoutMetrics") return VP_METRICS;
+      if (ownerGeometry !== "unavailable") {
+        if (method === "DOM.getBoxModel") {
+          const x = ownerGeometry === "clipped" ? 10000 : 100;
+          return { model: { content: [x, 100, x + 400, 100, x + 400, 400, x, 400] } };
+        }
+        if (method === "DOM.resolveNode") return { object: { objectId: "owner" } };
+        if (method === "Runtime.callFunctionOn")
+          return { result: { value: { width: 400, height: 300 } } };
+        if (method === "Runtime.releaseObject") return {};
+      }
       if (method === "DOMSnapshot.enable" || method === "Accessibility.enable") return {};
-      if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+      if (method === "DOMSnapshot.captureSnapshot")
+        return { ...snapshot, documents: [snapshot.documents[0]] };
       if (method === "Accessibility.getFullAXTree") return { nodes: mainAx };
       throw new Error(`unexpected root CDP method ${method}`);
     });
     const sendToTarget = vi.fn(async (_target, method: string) => {
-      if (method === "Accessibility.enable") return {};
+      if (method === "Runtime.evaluate") return { result: { value: { width: 400, height: 300 } } };
+      if (method === "Page.getLayoutMetrics" && ownerGeometry !== "unavailable")
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 400, clientHeight: 300 },
+        };
+      if (method === "Accessibility.enable" || method === "DOMSnapshot.enable") return {};
+      if (method === "DOMSnapshot.captureSnapshot")
+        return { ...snapshot, documents: [snapshot.documents[1]] };
       if (method === "Accessibility.getFullAXTree") return { nodes: childAx };
       throw new Error(`unexpected child CDP method ${method}`);
     });
@@ -3111,6 +3420,68 @@ describe("handleSnapshot", () => {
       },
     };
   }
+
+  it.each([
+    false,
+    true,
+  ])("preserves external-link hints without graph metadata (snapshot URL: %s)", async (hasSnapshotUrl) => {
+    const snapshot = {
+      strings: ["body", "a", "href", "//outside.test/docs", "https://page.test/start"],
+      documents: [
+        {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "main",
+          ...(hasSnapshotUrl ? { documentURL: 4 } : {}),
+          nodes: {
+            backendNodeId: [1, 2],
+            parentIndex: [-1, 0],
+            nodeName: [0, 1],
+            attributes: [[], [2, 3]],
+          },
+          layout: {
+            nodeIndex: [0, 1],
+            bounds: [
+              [0, 0, 1000, 800],
+              [10, 20, 100, 40],
+            ],
+          },
+        },
+      ],
+    };
+    const ax: CdpAxNode[] = [
+      {
+        nodeId: "root",
+        backendDOMNodeId: 1,
+        role: { type: "role", value: "RootWebArea" },
+        childIds: ["link"],
+      },
+      {
+        nodeId: "link",
+        parentId: "root",
+        backendDOMNodeId: 2,
+        role: { type: "role", value: "link" },
+        name: { type: "computedString", value: "Docs" },
+      },
+    ];
+    const deps = makeOverlayDeps(ax, snapshot, VP_METRICS);
+    const cdp: CdpRunner = {
+      ...deps.cdp,
+      getFrameGraph: async () => {
+        throw new Error("graph unavailable");
+      },
+    };
+    const result = await captureVomObservation(
+      cdp,
+      4,
+      hasSnapshotUrl ? undefined : "https://page.test/start",
+    );
+    expect(result.text).toContain("outside.test");
+    expect(result.text).toContain("Docs");
+    expect(
+      deps.send.mock.calls.filter(([, method]) => method === "DOMSnapshot.captureSnapshot"),
+    ).toHaveLength(1);
+  });
 
   it("exposes the frame-aware observation result for recording", async () => {
     const ax: CdpAxNode[] = [
@@ -3181,6 +3552,9 @@ describe("handleSnapshot", () => {
       strings,
       documents: [
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 1, 3],
             nodeName: [index("html"), index("body"), index("button"), index("div"), index("#text")],
@@ -3314,6 +3688,98 @@ describe("handleSnapshot", () => {
     expect(result.text).toContain("•••");
   });
 
+  it.each([
+    undefined,
+    100,
+    0,
+  ])("reports unavailable iframe geometry within the observation budget %s", async (maxTokens) => {
+    const result = await captureVomObservation(makeFrameAwareDeps().cdp, 4, "https://example.com", {
+      maxTokens,
+    });
+    expect(result.text.match(/@warning/g)).toHaveLength(2);
+    expect(result.text).toContain("document identity unverified");
+    expect(result.text).toContain("geometry incomplete");
+    expect(result.text.startsWith("@vom 1\n")).toBe(true);
+    if (maxTokens === undefined) {
+      expect(result.truncated).toBe(false);
+      expect(result.text).toContain("Frame action");
+      expect(result.matchNodes.find((node) => node.backendNodeId === 22)).toMatchObject({
+        rect: null,
+        localRect: null,
+      });
+    }
+    if (maxTokens === 100) expect(Math.ceil(result.text.length / 4)).toBeLessThanOrEqual(maxTokens);
+  });
+
+  it.each([
+    ["DOMSnapshot.captureSnapshot", "dom"],
+    ["Accessibility.getFullAXTree", "ax"],
+  ])("reports partial capture when child %s fails", async (failedMethod, stage) => {
+    const { cdp } = makeFrameAwareDeps("available");
+    const send = cdp.sendToTarget;
+    cdp.sendToTarget = async (target, method, params) => {
+      if (method === failedMethod) throw new Error("unavailable child data");
+      return send(target, method, params);
+    };
+    for (const maxTokens of [undefined, 100, 0]) {
+      const result = await captureVomObservation(cdp, 4, "https://example.com", { maxTokens });
+      expect(result.text).toContain(`@warning observation incomplete: some ${stage} data`);
+      expect(result.text.match(/@warning/g)).toHaveLength(2);
+      expect(result.text).toContain("document identity unverified");
+      expect(result.text.startsWith("@vom 1\n")).toBe(true);
+      if (maxTokens === undefined) {
+        expect(result.frames.map((frame) => frame.frameId)).toEqual(["main", "child"]);
+        expect(result.truncated).toBe(false);
+      }
+      if (maxTokens === 100)
+        expect(Math.ceil(result.text.length / 4)).toBeLessThanOrEqual(maxTokens);
+    }
+  });
+
+  it("reports omitted child ownership without exposing capture internals", async () => {
+    const { cdp } = makeFrameAwareDeps("available");
+    const send = cdp.send;
+    cdp.send = async (tabId, method, params) => {
+      const result = await send(tabId, method, params);
+      if (method === "DOMSnapshot.captureSnapshot") {
+        const child = await cdp.sendToTarget({ tabId, sessionId: "child-session" }, method, params);
+        (result as { documents: unknown[] }).documents.push(
+          ...(child as { documents: unknown[] }).documents,
+        );
+      }
+      return result as never;
+    };
+    const result = await captureVomObservation(cdp, 4, "https://example.com");
+    expect(result.frames.map((frame) => frame.frameId)).toEqual(["main"]);
+    expect(result.text).toContain("observation incomplete: some ownership data");
+    expect(result.text).not.toContain("Frame action");
+    expect(result).not.toHaveProperty("issues");
+  });
+
+  it("reports unavailable form state while retaining the observed document", async () => {
+    const { cdp } = makeOverlayDeps([], loginSnapshotReply(), VP_METRICS);
+    const result = await captureVomObservation(cdp, 4, "https://example.com");
+    expect(result.text).toContain("observation incomplete: some forms data");
+    expect(result.frames).toHaveLength(1);
+    expect(result.text).not.toContain("unexpected CDP method");
+  });
+
+  it.each([
+    "available",
+    "clipped",
+  ] as const)("does not report successful %s geometry as an observation failure", async (ownerGeometry) => {
+    const result = await captureVomObservation(
+      makeFrameAwareDeps(ownerGeometry).cdp,
+      4,
+      "https://example.com",
+    );
+    expect(result.text).not.toContain("iframe geometry incomplete");
+    expect(result.text).toContain("document identity unverified");
+    const node = result.matchNodes.find((item) => item.backendNodeId === 22);
+    if (ownerGeometry === "clipped") expect(node?.rect).toBeNull();
+    else expect(node?.rect).toEqual({ x: 120, y: 130, w: 120, h: 40 });
+  });
+
   it("keeps frames and rendered refs on the same frame identity", async () => {
     const deps = makeFrameAwareDeps();
 
@@ -3330,7 +3796,7 @@ describe("handleSnapshot", () => {
     expect(result.matchNodes.find((node) => node.backendNodeId === 22)).toMatchObject({
       frameId: "child",
       tag: "button",
-      localRect: { x: 20, y: 30, w: 120, h: 40 },
+      localRect: null,
     });
     expect(result.refs.find((ref) => ref.backendNodeId === 22)).toMatchObject({
       frameId: "child",
@@ -3468,6 +3934,7 @@ describe("handleSnapshot", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -3494,6 +3961,7 @@ describe("handleSnapshot", () => {
         },
         // documents[1]: cross-origin login form
         {
+          frameId: "child",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -3672,6 +4140,9 @@ describe("handleSnapshot", () => {
       strings: S,
       documents: [
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 0, 3, 4, 5],
             nodeName: [

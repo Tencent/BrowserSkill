@@ -17,6 +17,7 @@ import { readFile, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
+import { sniffImageMediaType } from "./image";
 import type { KeyedExecutor } from "./queue";
 import { BskError, type BskRunner, parseBskJson, runWithSessionBusyRetry } from "./runner";
 import type { SessionRegistry } from "./sessions";
@@ -48,8 +49,9 @@ export interface SessionObservation {
   dshSessionIds?: string[];
 }
 
-/** Incremental event carried to subscribers (SSE on the wire). */
+/** Initial snapshot or incremental change carried to subscribers (SSE on the wire). */
 export type ObservationEvent =
+  | { type: "snapshot"; sessions: SessionObservation[]; available: boolean }
   | { type: "upsert" | "remove" | "reset"; session?: SessionObservation }
   | { type: "availability"; available: boolean };
 
@@ -88,6 +90,7 @@ export class ObservationService {
   private readonly scratchNamespace = randomUUID();
   private readonly observations = new Map<string, SessionObservation>();
   private readonly listeners = new Set<(event: ObservationEvent) => void>();
+  private thumbnailViewers = 0;
   private readonly captureTimers = new Map<string, unknown>();
   private readonly captureInFlight = new Set<string>();
   /** Captures intentionally cancelled to make way for foreground work. */
@@ -124,7 +127,7 @@ export class ObservationService {
     return this.deps.scheduler ?? DEFAULT_SCHEDULER;
   }
 
-  /** All current entries (client initial/resync snapshot). */
+  /** One-time state read; use subscribe for an ordered snapshot and subsequent changes. */
   getState(): SessionObservation[] {
     return [...this.observations.values()].map((entry) => ({ ...entry }));
   }
@@ -140,10 +143,42 @@ export class ObservationService {
     this.emit({ type: "availability", available });
   }
 
-  /** Subscribe to incremental changes; returns an unsubscribe function. */
-  subscribe(listener: (event: ObservationEvent) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
+  /**
+   * Subscribe to an ordered initial snapshot and subsequent changes. On an
+   * active service, listener receives the snapshot synchronously before this
+   * method returns. Subscribing after disposal is a no-op.
+   *
+   * `thumbnails` defaults to true for compatibility: this subscription counts
+   * as a screenshot viewer for the service's owned sessions. Pass false for
+   * state-only observation. The first viewer starts capture scheduling.
+   *
+   * @returns An idempotent unsubscribe function releasing this subscription's
+   * screenshot demand. When the last viewer leaves, scheduled/queued captures
+   * are cancelled/skipped; an already running capture may finish.
+   */
+  subscribe(
+    listener: (event: ObservationEvent) => void,
+    { thumbnails = true }: { thumbnails?: boolean } = {},
+  ): () => void {
+    if (this.disposed) return () => {};
+    // Each subscription owns its lease, even if a caller reuses a callback.
+    const receive = (event: ObservationEvent) => listener(event);
+    this.listeners.add(receive);
+    try {
+      listener({ type: "snapshot", sessions: this.getState(), available: this.available });
+    } catch (error) {
+      this.listeners.delete(receive);
+      throw error;
+    }
+    if (thumbnails && ++this.thumbnailViewers === 1) {
+      for (const sessionId of this.observations.keys()) this.scheduleCapture(sessionId, 0);
+    }
+    return () => {
+      if (!this.listeners.delete(receive)) return;
+      if (thumbnails && --this.thumbnailViewers === 0) {
+        for (const sessionId of this.captureTimers.keys()) this.cancelCapture(sessionId);
+      }
+    };
   }
 
   private emit(event: ObservationEvent): void {
@@ -354,6 +389,7 @@ export class ObservationService {
     this.observations.clear();
     this.emit({ type: "reset" });
     this.listeners.clear();
+    this.thumbnailViewers = 0;
   }
 
   // ------------------------------------------------------------------
@@ -368,12 +404,21 @@ export class ObservationService {
     }
   }
 
+  private canCapture(sessionId: string): boolean {
+    const entry = this.observations.get(sessionId);
+    return (
+      this.deps.options.enabled &&
+      !this.disposed &&
+      this.thumbnailViewers > 0 &&
+      !this.foregroundDepth.has(sessionId) &&
+      entry !== undefined &&
+      entry.dead !== true
+    );
+  }
+
   /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */
   private scheduleCapture(sessionId: string, delayMs?: number): void {
-    if (!this.deps.options.enabled || this.disposed) return;
-    if (this.foregroundDepth.has(sessionId)) return;
-    const entry = this.observations.get(sessionId);
-    if (entry === undefined || entry.dead === true) return;
+    if (!this.canCapture(sessionId)) return;
     this.cancelCapture(sessionId);
     const now = this.scheduler.now();
     const lastSeen = this.lastActivity.get(sessionId) ?? 0;
@@ -398,9 +443,7 @@ export class ObservationService {
    * Failures keep the previous frame and back off silently.
    */
   private async capture(sessionId: string): Promise<void> {
-    if (this.disposed) return;
-    const current = this.observations.get(sessionId);
-    if (current === undefined || current.dead === true) return;
+    if (!this.canCapture(sessionId)) return;
     if (this.captureInFlight.has(sessionId)) return;
     this.captureInFlight.add(sessionId);
     // Stable within this service, isolated from captures owned by other instances.
@@ -409,8 +452,8 @@ export class ObservationService {
     let writtenPath = outPath;
     try {
       const result = await this.deps.queue.run(sessionId, () => {
-        // A foreground lease may have arrived while this capture was queued.
-        if (this.foregroundDepth.has(sessionId)) return Promise.resolve(undefined);
+        // The last viewer may have left, or foreground work arrived, while queued.
+        if (!this.canCapture(sessionId)) return Promise.resolve(undefined);
         return this.deps.runner.run(["screenshot", "--session", sessionId, "--out", outPath], {
           timeoutMs: 15_000,
           tag: `observation:${sessionId}`,
@@ -444,6 +487,7 @@ export class ObservationService {
       this.setAvailable(true);
       this.publishFrame(sessionId, entry, data);
     } catch {
+      if (this.disposed || !this.observations.has(sessionId)) return;
       // Foreground preemption is healthy scheduling, not browser/daemon
       // unavailability; do not let normal tool traffic trip capture backoff.
       if (!this.capturePreempted.delete(sessionId)) {
@@ -467,7 +511,7 @@ export class ObservationService {
     const seq = (this.seqs.get(sessionId) ?? 0) + 1;
     this.seqs.set(sessionId, seq);
     const id = `obs-${sessionId}-${seq}`;
-    this.frames.set(id, { data, mediaType: "image/png" });
+    this.frames.set(id, { data, mediaType: sniffImageMediaType(data) ?? "image/png" });
     this.hashes.set(sessionId, hash);
     const ring = this.rings.get(sessionId) ?? [];
     ring.push(id);
@@ -518,6 +562,10 @@ export function actionForLabel(label: string): string {
       return "clicking";
     case "hover":
       return "hovering";
+    case "focus":
+      return "focusing";
+    case "blur":
+      return "blurring";
     case "fill":
       return "filling";
     case "select":

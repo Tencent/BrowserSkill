@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentWindowApi, AgentWindowCreateOptions } from "../agent-window";
-import { SessionManager } from "../manager";
+import { isAgentControlledTab, SessionManager } from "../manager";
 
 function fakeAgentWindow(): AgentWindowApi & {
   createMock: ReturnType<typeof vi.fn>;
@@ -13,7 +13,7 @@ function fakeAgentWindow(): AgentWindowApi & {
     return id;
   });
   const removeMock = vi.fn(async (_id: number) => {});
-  const ensureActiveTabMock = vi.fn(async (_windowId: number, _url: string) => {});
+  const ensureActiveTabMock = vi.fn(async (_windowId: number, _url: string) => 0);
   return {
     create: createMock,
     remove: removeMock,
@@ -149,6 +149,76 @@ describe("SessionManager", () => {
     const dropped = await sm.stopAll();
     expect(dropped.sort()).toEqual(["aa11", "bb22"]);
     expect(sm.list()).toEqual([]);
+  });
+
+  describe("explicit tab claims", () => {
+    it("claims the exact home tab returned by AgentWindowApi", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      expect(ctx.agentCreatedTabs).toEqual(new Set([0]));
+      expect(isAgentControlledTab(ctx, 0)).toBe(true);
+    });
+
+    it("keeps every other tab free without classification state", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      expect(isAgentControlledTab(ctx, 99)).toBe(false);
+      expect(ctx).not.toHaveProperty("userTabs");
+      expect(ctx).not.toHaveProperty("pendingAgentTabCount");
+    });
+
+    it("treats a committed borrow as an explicit claim", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      const reservation = sm.tryReserveBorrow(42, ctx.sessionId);
+      if ("borrowedBy" in reservation) throw new Error("unexpected borrow conflict");
+      reservation.commit({ tabId: 42, originalWindowId: 7, originalIndex: 3 });
+      expect(isAgentControlledTab(ctx, 42)).toBe(true);
+    });
+
+    it("forgets an agent-created tab after Chrome removes it", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      ctx.agentCreatedTabs.add(42);
+      sm.forgetClosedTab(42);
+      expect(ctx.agentCreatedTabs.has(42)).toBe(false);
+      expect(isAgentControlledTab(ctx, 0)).toBe(true);
+    });
+
+    it("forgets closed borrows idempotently without affecting other tabs or sessions", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const a = await sm.start("aa11");
+      const b = await sm.start("bb22");
+      a.borrowedTabs.set(42, { tabId: 42, originalWindowId: 7, originalIndex: 0 });
+      a.borrowedTabs.set(43, { tabId: 43, originalWindowId: 7, originalIndex: 1 });
+      b.borrowedTabs.set(44, { tabId: 44, originalWindowId: 8, originalIndex: 0 });
+
+      sm.forgetClosedTab(42);
+      sm.forgetClosedTab(42);
+      sm.forgetClosedTab(999);
+
+      expect(isAgentControlledTab(a, 42)).toBe(false);
+      expect(sm.findBorrowingSession(42, null)).toBeNull();
+      expect([...a.borrowedTabs.keys()]).toEqual([43]);
+      expect([...b.borrowedTabs.keys()]).toEqual([44]);
+      expect(sm.list()).toHaveLength(2);
+    });
+
+    it("prevents an in-flight borrow from reclaiming a closed tab", async () => {
+      const sm = new SessionManager({ agentWindow: fakeAgentWindow() });
+      const ctx = await sm.start("aa11");
+      const reservation = sm.tryReserveBorrow(42, ctx.sessionId);
+      if ("borrowedBy" in reservation) throw new Error("unexpected borrow conflict");
+
+      sm.forgetClosedTab(42);
+
+      expect(() =>
+        reservation.commit({ tabId: 42, originalWindowId: 7, originalIndex: 0 }),
+      ).toThrow(/reservation disappeared/);
+      reservation.release();
+      expect(sm.findBorrowingSession(42, null)).toBeNull();
+      expect(ctx.borrowedTabs.has(42)).toBe(false);
+    });
   });
 
   describe("findBorrowingSession", () => {

@@ -7,6 +7,10 @@ dist/
 .output/
 .wxt/
 .web-extension-id
+.pnpm-store/
+
+# Git worktrees
+.worktrees/
 
 # Logs
 *.log

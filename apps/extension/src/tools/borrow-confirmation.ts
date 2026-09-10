@@ -24,7 +24,7 @@ export interface BorrowResponseMessage {
   allowed: boolean;
 }
 
-export const CONFIRMATION_TIMEOUT_MS = 5000;
+export const CONFIRMATION_TIMEOUT_MS = 60_000;
 const EXIT_ANIMATION_MS = 150;
 /** Matches BorrowConfirmationOverlay progress ring/bar transition (duration-1000). */
 export const PROGRESS_TRANSITION_MS = 1000;
@@ -479,6 +479,13 @@ export async function requestBorrowConfirmation(
       dismissPendingOverlay();
       settle(false);
     }, BACKGROUND_TIMEOUT_MS);
+
+    // Bring the user window to the front so the overlay is visible even
+    // when the Agent Window has stolen focus. This is fire-and-forget: if
+    // it fails the overlay / OS notification still give the user a path.
+    void windowsApi.update(notificationAnchor.windowId, { focused: true }).catch((err) => {
+      console.debug("[bsk borrow] proactive focus of user window failed", err);
+    });
 
     // Surface the OS notification *before* messaging any candidate so the
     // user has a parallel signal even if every content script is missing.

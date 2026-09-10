@@ -11,7 +11,7 @@ function fakeAgentWindow(ids: number[]) {
     return id;
   });
   const remove = vi.fn(async () => {});
-  const ensureActiveTab = vi.fn(async () => {});
+  const ensureActiveTab = vi.fn(async () => 1);
   return { create, remove, ensureActiveTab };
 }
 

@@ -61,8 +61,9 @@ export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGrap
         dom,
         sourceOrder: index,
         excluded:
-          document.frameId === rootFrameId &&
-          input.excludedBackendNodeIds?.has(dom.backendNodeId) === true,
+          document.excludedBackendNodeIds?.has(dom.backendNodeId) === true ||
+          (document.frameId === rootFrameId &&
+            input.excludedBackendNodeIds?.has(dom.backendNodeId) === true),
       };
       nodes.set(id, node);
       frameNodeIds.push(id);
@@ -90,9 +91,10 @@ export function buildSemanticGraph(input: BuildSemanticGraphInput): SemanticGrap
           ax,
           sourceOrder: document.domNodes.length + index,
           excluded:
-            document.frameId === rootFrameId &&
             typeof ax.backendDOMNodeId === "number" &&
-            input.excludedBackendNodeIds?.has(ax.backendDOMNodeId) === true,
+            (document.excludedBackendNodeIds?.has(ax.backendDOMNodeId) === true ||
+              (document.frameId === rootFrameId &&
+                input.excludedBackendNodeIds?.has(ax.backendDOMNodeId) === true)),
         });
         frameNodeIds.push(id);
       }

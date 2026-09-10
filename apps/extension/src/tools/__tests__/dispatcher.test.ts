@@ -49,13 +49,54 @@ describe("ToolDispatcher", () => {
     vi.unstubAllGlobals();
   });
 
+  it.each([
+    "tool.snapshot",
+    "tool.evaluate",
+    "tool.get_html",
+    "tool.console",
+  ])("annotates Chrome extension-access failures from %s", async (method) => {
+    const tab = { id: 7, windowId: 4242, active: true, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(),
+        ensureActiveTab: vi.fn(),
+      },
+    });
+    await sessions.start("test");
+    const error = new Error("Cannot access a chrome-extension:// URL of different extension");
+    const cdp = {
+      send: vi.fn().mockRejectedValue(error),
+      ensureConsoleCapture: vi.fn().mockRejectedValue(error),
+      consoleEntriesSince: vi.fn(),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+    deliver(makeRequest(method, { session_id: "test", expression: "document.title" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      error: {
+        code: "cdp_failed",
+        data: { reason: "cdp_extension_access_denied" },
+      },
+    });
+    dispatcher.stop();
+  });
+
   it("uses the configured recording runtime for start and stop", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -117,7 +158,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -140,7 +181,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create,
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -158,7 +199,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -172,6 +213,47 @@ describe("ToolDispatcher", () => {
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
   });
 
+  it("wires the production tab APIs into tool.session_stop so a surviving user tab releases the window", async () => {
+    // Regression guard for the deps that session_stop reads directly: when
+    // `tabManagement.tabs` / `tabsQuery` are not injected by the dispatcher,
+    // the agent-tab cleanup and the release decision silently no-op and the
+    // Agent Window is closed even though a user tab is still open (issue #57).
+    const removeTab = vi.fn(async () => {});
+    const closeWindow = vi.fn(async () => {});
+    // After cleanup the window still holds one tab (id 99) that is neither
+    // the home tab nor an agent-created tab — i.e. a genuine user tab.
+    vi.stubGlobal("chrome", {
+      tabs: {
+        remove: removeTab,
+        query: vi.fn(async () => [{ id: 99, windowId: 4242, active: true }]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: closeWindow,
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    await sessions.start("aa11");
+    // Register the exact tab id returned by the agent's creation path.
+    sessions.get("aa11")?.agentCreatedTabs.add(7);
+
+    const dispatcher = new ToolDispatcher({ transport, sessions });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
+    await flushMicrotasks();
+
+    // The agent tab is closed through the real chrome.tabs surface...
+    expect(removeTab).toHaveBeenCalledWith(7);
+    // ...and the window is released rather than closed, so the user's tab survives.
+    expect(closeWindow).not.toHaveBeenCalled();
+    expect(sessions.has("aa11")).toBe(false);
+    expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+  });
+
   it("routes tool.console through the CDP console buffer", async () => {
     vi.stubGlobal("chrome", {
       tabs: {
@@ -183,7 +265,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -232,13 +314,114 @@ describe("ToolDispatcher", () => {
     });
   });
 
+  it("bypasses and restores the control overlay for an upload trigger click", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => ({ id: 7, windowId: 4242, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 4242, active: true }]),
+        sendMessage,
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 123, { tabId: 7 });
+    const send = vi.fn(async <T>(_tabId: number, method: string, params?: object) => {
+      if (method === "Page.getLayoutMetrics") {
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } } as T;
+      }
+      if (method === "DOM.getContentQuads") {
+        return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] } as T;
+      }
+      if (method === "DOM.resolveNode") {
+        return { object: { objectId: "trigger-object" } } as T;
+      }
+      if (method === "DOM.describeNode") return { node: { backendNodeId: 456 } } as T;
+      if (method === "Runtime.callFunctionOn") {
+        const declaration = (params as { functionDeclaration?: string }).functionDeclaration ?? "";
+        if (declaration.includes("count: state.inputs.length")) {
+          return { result: { value: { count: 1, multiple: false } } } as T;
+        }
+        if (declaration.includes("inputs[0]")) {
+          return { result: { objectId: "input-object" } } as T;
+        }
+        return { result: { value: true } } as T;
+      }
+      if (method === "Runtime.evaluate") {
+        const expression = (params as { expression?: string }).expression ?? "";
+        if (expression.includes("overlayDetails")) {
+          return { result: { value: { hitIndex: 0 } } } as T;
+        }
+        if (expression.includes("overlayHostPresent")) {
+          return {
+            result: {
+              value: { overlayHostPresent: true, overlayHostConnected: true },
+            },
+          } as T;
+        }
+        if (expression.includes("count:")) {
+          return { result: { value: { count: 1, multiple: false } } } as T;
+        }
+        if (expression.includes("?.inputs[0]")) {
+          return { result: { objectId: "input-object" } } as T;
+        }
+        return { result: { value: true } } as T;
+      }
+      return {} as T;
+    });
+    const cdp = {
+      send,
+      detachSession: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
+    dispatcher.start();
+
+    deliver(
+      makeRequest("tool.upload", {
+        session_id: "aa11",
+        ref: "@e1",
+        files: [{ transfer_id: "tr_1", name: "test.png", staged_path: "/stage/test.png" }],
+      }),
+    );
+    await flushMicrotasks();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, file_names: ["test.png"] } });
+    expect(sendMessage).toHaveBeenNthCalledWith(1, 7, {
+      type: "bh-automation-bypass",
+      enabled: true,
+    });
+    expect(sendMessage).toHaveBeenNthCalledWith(2, 7, {
+      type: "bh-automation-bypass",
+      enabled: false,
+    });
+  });
+
   it("detaches CDP state before stopping a session", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -274,7 +457,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove,
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -322,7 +505,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -342,7 +525,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -366,7 +549,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -383,7 +566,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -400,7 +583,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const onSessionsChanged = vi.fn();
@@ -416,17 +599,128 @@ describe("ToolDispatcher", () => {
     expect(onSessionsChanged).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    "focus",
+    "blur",
+    "scroll_to",
+    "wheel",
+  ] as const)("routes %s with hover cleanup and cooperative cancellation", async (action) => {
+    const tab = { id: 7, windowId: 4242, active: true };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: async () => 4242,
+        remove: async () => {},
+        ensureActiveTab: async () => 7,
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 12, { tabId: 7 });
+    const { transport, sent, deliver } = fakeTransport();
+    const onBrowserControlResumed = vi.fn();
+    let resolveNode: ((value: object) => void) | undefined;
+    const cdp = {
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "DOM.resolveNode")
+          return new Promise((resolve) => {
+            resolveNode = resolve;
+          });
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 100, 0, 100, 100, 0, 100]] };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
+        if (method === "Runtime.callFunctionOn") return { result: { value: true } };
+        return {};
+      }),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp, onBrowserControlResumed });
+    const hover = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: object) => void;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+    };
+    hover.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    await hover.setHoverBypass("aa11", 7, true);
+    dispatcher.start();
+    deliver(
+      makeRequest(`tool.${action}`, {
+        session_id: "aa11",
+        ref: "e1",
+        ...(action === "wheel" ? { delta_y: 120 } : {}),
+      }),
+    );
+    await vi.waitFor(() => expect(resolveNode).toBeDefined());
+    expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
+    deliver({ id: "cancel-focus", method: "cancel", params: { rpc_id: "r-1" } });
+    resolveNode!({ object: { objectId: "focus-target" } });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(sent).toContainEqual({ id: "cancel-focus", result: { cancelled: true } });
+    expect(sent).toContainEqual({
+      id: "r-1",
+      error: expect.objectContaining({ code: "cancelled" }),
+    });
+    expect(cdp.send).not.toHaveBeenCalledWith(7, "DOM.focus", expect.anything());
+    expect(cdp.send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
+    if (action === "scroll_to" || action === "wheel") {
+      expect(cdp.send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", {
+        objectGroup: expect.any(String),
+      });
+    } else {
+      expect(cdp.send).toHaveBeenCalledWith(7, "Runtime.releaseObject", {
+        objectId: "focus-target",
+      });
+    }
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ enabled: false }),
+    );
+    if (action === "wheel") {
+      expect(cdp.send).toHaveBeenCalledWith(7, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: 10,
+        y: 20,
+      });
+      expect(cdp.send).not.toHaveBeenCalledWith(
+        7,
+        "Input.dispatchMouseEvent",
+        expect.objectContaining({ type: "mouseWheel" }),
+      );
+    }
+    expect(dispatcher.inflightAbortControllers.size).toBe(0);
+    dispatcher.stop();
+  });
+
   it("invokes onBrowserControlResumed for browser-control tools but not passive reads", async () => {
+    vi.stubGlobal("chrome", {
+      tabs: {
+        create: vi.fn(async (props: chrome.tabs.CreateProperties) => ({
+          id: 7,
+          windowId: props.windowId,
+          url: props.url,
+          active: props.active,
+        })),
+      },
+    });
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const onBrowserControlResumed = vi.fn();
-    const dispatcher = new ToolDispatcher({ transport, sessions, onBrowserControlResumed });
+    const onAgentTabClaimed = vi.fn();
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      onBrowserControlResumed,
+      onAgentTabClaimed,
+    });
     dispatcher.start();
 
     deliver(makeRequest("tool.session_start", { session_id: "aa11" }));
@@ -443,6 +737,7 @@ describe("ToolDispatcher", () => {
     });
     await flushMicrotasks();
     expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
+    expect(onAgentTabClaimed).toHaveBeenCalledWith(7, 1);
   });
 
   it("reasserts remembered hover before follow-up work and releases only after actions", async () => {
@@ -456,7 +751,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const order: string[] = [];
@@ -538,7 +833,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const cdp = {
@@ -588,6 +883,135 @@ describe("ToolDispatcher", () => {
     );
   });
 
+  it.each([
+    { tab_id: 7, code: "not_found" },
+    { tab_id: undefined, code: "invalid_params" },
+  ])("keeps hover when tab_return is rejected with $code", async ({ tab_id, code }) => {
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        sendMessage,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 100, active: true }]),
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 100),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    await sessions.start("aa11");
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as unknown as TestDispatcherCdp,
+    });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+    helpers.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
+    await helpers.setHoverBypass("aa11", 7, true);
+    dispatcher.start();
+    deliver(makeRequest("tool.tab_return", { session_id: "aa11", tab_id }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ error: { code } });
+    expect(cdp.releaseSessionTab).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalledWith(7, expect.objectContaining({ enabled: false }));
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+    expect(cdp.send).toHaveBeenCalledExactlyOnceWith(7, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: 10,
+      y: 20,
+    });
+    dispatcher.stop();
+  });
+
+  it("releases the returned tab's hover before moving it and leaves other tabs alone", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    const move = vi.fn(async () => {
+      expect(sendMessage).toHaveBeenCalledWith(7, expect.objectContaining({ enabled: false }));
+      return { id: 7, windowId: 200, index: 4 };
+    });
+    vi.stubGlobal("chrome", {
+      tabs: { sendMessage, move },
+      windows: { get: vi.fn(async () => ({ id: 200 })) },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 100),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 4 });
+    const cdp = {
+      send: vi.fn(async <T>() => ({}) as T),
+      detachSession: vi.fn(async () => {}),
+      releaseSessionTab: vi.fn(async () => {}),
+    };
+    const dispatcher = new ToolDispatcher({
+      transport,
+      sessions,
+      cdp: cdp as unknown as TestDispatcherCdp,
+    });
+    const helpers = dispatcher as unknown as {
+      rememberHover: (sessionId: string, result: unknown) => unknown;
+      setHoverBypass: (sessionId: string, tabId: number, enabled: boolean) => Promise<void>;
+      withHoverReassert: <T>(
+        params: { session_id: string; tab_id?: number },
+        work: () => Promise<T>,
+      ) => Promise<T>;
+    };
+    for (const [sessionId, tabId] of [
+      ["aa11", 7],
+      ["aa11", 8],
+      ["bb22", 9],
+    ] as const) {
+      helpers.rememberHover(sessionId, { tab_id: tabId, x: 10, y: 20 });
+      await helpers.setHoverBypass(sessionId, tabId, true);
+    }
+    dispatcher.start();
+    deliver(makeRequest("tool.tab_return", { session_id: "aa11", tab_id: 7 }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, returned_to_window_id: 200 } });
+    expect(cdp.releaseSessionTab).toHaveBeenCalledExactlyOnceWith("aa11", 7);
+    await helpers.withHoverReassert({ session_id: "aa11", tab_id: 7 }, async () => ({}));
+    expect(cdp.send).not.toHaveBeenCalled();
+    for (const [sessionId, tabId] of [
+      ["aa11", 8],
+      ["bb22", 9],
+    ] as const) {
+      expect(sendMessage).not.toHaveBeenCalledWith(
+        tabId,
+        expect.objectContaining({ enabled: false }),
+      );
+      await helpers.withHoverReassert({ session_id: sessionId, tab_id: tabId }, async () => ({}));
+      expect(cdp.send).toHaveBeenLastCalledWith(tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: 10,
+        y: 20,
+      });
+    }
+    dispatcher.stop();
+  });
+
   it("transfers hover overlay bypass ownership between sessions", async () => {
     vi.stubGlobal("chrome", {
       tabs: {
@@ -599,7 +1023,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -636,7 +1060,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     await sessions.start("aa11");
@@ -688,7 +1112,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -722,7 +1146,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 4242),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     transport.send = () => {
@@ -744,7 +1168,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 5555),
         remove,
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     transport.send = () => {
@@ -772,7 +1196,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(() => createPromise),
         remove: vi.fn(async () => {}),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -823,7 +1247,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(async () => 1),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });
@@ -844,7 +1268,7 @@ describe("ToolDispatcher", () => {
       agentWindow: {
         create: vi.fn(() => createPromise),
         remove: vi.fn(),
-        ensureActiveTab: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
       },
     });
     const dispatcher = new ToolDispatcher({ transport, sessions });

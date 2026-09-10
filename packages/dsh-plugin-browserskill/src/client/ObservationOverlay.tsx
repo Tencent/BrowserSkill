@@ -15,6 +15,7 @@ import {
   RiArrowDownSLine,
   RiCheckLine,
   RiCloseCircleLine,
+  RiCloseLine,
   RiErrorWarningLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
@@ -28,6 +29,7 @@ const asIcon = (component: unknown): IconComponent => component as IconComponent
 const IconStop = asIcon(RiStopCircleLine);
 const IconPip = asIcon(RiPictureInPicture2Line);
 const IconDown = asIcon(RiArrowDownSLine);
+const IconClose = asIcon(RiCloseLine);
 const IconWarn = asIcon(RiErrorWarningLine);
 const IconPin = asIcon(RiPushpinFill);
 const IconCloseSession = asIcon(RiCloseCircleLine);
@@ -46,7 +48,13 @@ import { createPortal } from "react-dom";
 import type { SessionObservation } from "../observation";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
-import { focusOf, statusOf, useObservationView, usePip } from "./observation-view";
+import {
+  focusOf,
+  statusOf,
+  useObservationView,
+  usePip,
+  useThumbnailObservation,
+} from "./observation-view";
 import { getSidebarMode, subscribeSidebarMode } from "./sidebar-mode";
 
 // The pure view helpers live in observation-view (shared with the sidebar
@@ -320,6 +328,7 @@ export function OverlayBody(props: {
   now: number;
   onPopOut?: (() => void) | undefined;
   onCollapse?: (() => void) | undefined;
+  onClosePip?: (() => void) | undefined;
   inPip: boolean;
   onHeaderPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -333,10 +342,12 @@ export function OverlayBody(props: {
     now,
     onPopOut,
     onCollapse,
+    onClosePip,
     inPip,
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
+  const viewRef = useThumbnailObservation(store, sessions.length > 0);
 
   const thumbId = focus?.thumbnailAttachmentId;
   useEffect(() => {
@@ -369,7 +380,12 @@ export function OverlayBody(props: {
   const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
 
   return (
-    <div className={cn(css.body, "bsk-obs")} data-state={state} data-in-pip={inPip || undefined}>
+    <div
+      ref={viewRef}
+      className={cn(css.body, "bsk-obs")}
+      data-state={state}
+      data-in-pip={inPip || undefined}
+    >
       <div
         className={css.header}
         data-testid="obs-header"
@@ -387,6 +403,16 @@ export function OverlayBody(props: {
             onClick={onCollapse}
           >
             <IconDown size={14} />
+          </button>
+        ) : null}
+        {onClosePip !== undefined ? (
+          <button
+            type="button"
+            className={css["icon-button"]}
+            aria-label="Close mini window"
+            onClick={onClosePip}
+          >
+            <IconClose size={14} />
           </button>
         ) : null}
       </div>
@@ -407,9 +433,15 @@ export function OverlayBody(props: {
           </div>
         )}
         {thumb?.status === "error" ? (
-          <span className={css.badge} aria-label="thumbnail failed">
+          <button
+            type="button"
+            className={css.badge}
+            aria-label="Retry thumbnail"
+            title="Frame unavailable — retry"
+            onClick={() => store.retryThumbnail(thumbId)}
+          >
             <IconWarn size={12} />
-          </span>
+          </button>
         ) : null}
       </div>
       {sessions.length >= 2 ? (
@@ -572,6 +604,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
           : undefined
       }
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
+      onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
       onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
   );

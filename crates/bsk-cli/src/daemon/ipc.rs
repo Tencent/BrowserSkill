@@ -27,7 +27,8 @@ use bsk_protocol::system::{
     VersionSkewEntry,
 };
 use bsk_protocol::tools::{
-    HelpOutcome, RequestHelpResult, ReturnFailure, WaitMsParams, WaitMsResult,
+    DownloadParams, DownloadResult, HelpOutcome, RequestHelpResult, ReturnFailure,
+    TransferBeginParams, TransferIdParams, UploadParams, WaitMsParams, WaitMsResult,
 };
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
@@ -61,6 +62,10 @@ pub type RpcHandler = Arc<
 >;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+// The upload transaction owns its operation deadline and may need a bounded
+// cleanup before it can return a useful structured error. Keep only that
+// transport alive slightly longer so it does not replace the result.
+const EXTENSION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound on `wait_for_browser_ms` accepted over IPC.
 const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
 // `session.stop` fast-fails while another tool is active; this budget
@@ -223,6 +228,11 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
+                Method::TransferBegin => handle_transfer_begin(&state, params),
+                Method::TransferChunk => handle_transfer_chunk(&state, params),
+                Method::TransferFinish => handle_transfer_finish(&state, params),
+                Method::TransferRead => handle_transfer_read(&state, params),
+                Method::TransferRelease => handle_transfer_release(&state, params),
                 Method::ToolTabList
                 | Method::ToolTabCreate
                 | Method::ToolTabClose
@@ -243,9 +253,15 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolReload
                 | Method::ToolClick
                 | Method::ToolHover
+                | Method::ToolWheel
+                | Method::ToolScrollTo
+                | Method::ToolFocus
+                | Method::ToolBlur
                 | Method::ToolFill
                 | Method::ToolPress
                 | Method::ToolSelect
+                | Method::ToolUpload
+                | Method::ToolDownload
                 | Method::ToolEvaluate
                 | Method::ToolWaitForNavigation
                 | Method::ToolRequestHelp
@@ -324,7 +340,7 @@ async fn handle_tool_dispatch(
             data: None,
         });
     }
-    let timeout = match tool_dispatch_timeout(&params) {
+    let timeout = match tool_dispatch_transport_timeout(&method, &params) {
         Ok(timeout) => timeout,
         Err(err) => return ResponseBody::Err(err),
     };
@@ -338,24 +354,180 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    let mut params = params;
+    let mut download_transfer_id: Option<String> = None;
+    if method == Method::ToolUpload {
+        let mut upload: UploadParams = match serde_json::from_value(params) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+        };
+        if upload.files.is_empty() || upload.files.len() > super::file_transfer::MAX_UPLOAD_FILES {
+            return ResponseBody::Err(invalid_params(format!(
+                "upload requires 1..={} files",
+                super::file_transfer::MAX_UPLOAD_FILES
+            )));
+        }
+        let ids: Vec<String> = upload.files.iter().map(|f| f.transfer_id.clone()).collect();
+        let paths = match state.transfers.resolve_uploads(&session_id.0, &ids) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(err),
+        };
+        for (file, path) in upload.files.iter_mut().zip(paths) {
+            file.staged_path = Some(path.to_string_lossy().into_owned());
+        }
+        params = serde_json::to_value(upload).unwrap_or(Value::Null);
+    } else if method == Method::ToolDownload {
+        let mut download: DownloadParams = match serde_json::from_value(params) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+        };
+        let staging = match state.transfers.begin_download(&session_id.0) {
+            Ok(v) => v,
+            Err(err) => return ResponseBody::Err(err),
+        };
+        download.browser_relative_dir = Some(staging.browser_relative_dir);
+        download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
+        download_transfer_id = Some(staging.transfer_id);
+        params = serde_json::to_value(download).unwrap_or(Value::Null);
+    }
     let entry = inflight_guard.entry();
     // `record_stop` must reach the extension while `record_await` holds the
     // serial busy lock — finishing the recording unblocks await.
     let outcome = if method == Method::ToolRecordStop {
         state
             .tool_queues
-            .dispatch_unlocked(&session_id, method, params, timeout, Some(entry))
+            .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
             .await
     } else {
         state
             .tool_queues
-            .dispatch(&session_id, method, params, timeout, Some(entry))
+            .dispatch(&session_id, method.clone(), params, timeout, Some(entry))
             .await
     };
     drop(inflight_guard);
     match outcome {
+        Ok(v) if method == Method::ToolDownload => {
+            let id = download_transfer_id.expect("download transfer allocated");
+            let mut result: DownloadResult = match serde_json::from_value(v) {
+                Ok(v) => v,
+                Err(err) => {
+                    state
+                        .transfers
+                        .release(TransferIdParams { transfer_id: id });
+                    return ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: format!("invalid tool.download result: {err}"),
+                        data: None,
+                    });
+                }
+            };
+            let Some(path) = result.browser_path.take() else {
+                state
+                    .transfers
+                    .release(TransferIdParams { transfer_id: id });
+                return ResponseBody::Err(RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: "tool.download returned no browser_path".into(),
+                    data: None,
+                });
+            };
+            match state
+                .transfers
+                .import_download(&id, std::path::Path::new(&path))
+            {
+                Ok(size) => {
+                    result.byte_size = size;
+                    result.transfer_id = Some(id);
+                    ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+                }
+                Err(err) => {
+                    state
+                        .transfers
+                        .release(TransferIdParams { transfer_id: id });
+                    ResponseBody::Err(err)
+                }
+            }
+        }
         Ok(v) => ResponseBody::Ok(v),
-        Err(err) => ResponseBody::Err(err.into_rpc()),
+        Err(err) => {
+            if let Some(id) = download_transfer_id {
+                state
+                    .transfers
+                    .release(TransferIdParams { transfer_id: id });
+            }
+            ResponseBody::Err(err.into_rpc())
+        }
+    }
+}
+
+fn handle_transfer_begin(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    let p: TransferBeginParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    if state
+        .sessions
+        .get(&SessionId(p.session_id.clone()))
+        .is_none()
+    {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::NotFound,
+            message: format!("session {} unknown", p.session_id),
+            data: None,
+        });
+    }
+    match state.transfers.begin_upload(p) {
+        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
+        Err(err) => ResponseBody::Err(err),
+    }
+}
+
+fn handle_transfer_chunk(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    let p = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    match state.transfers.write_chunk(p) {
+        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
+        Err(err) => ResponseBody::Err(err),
+    }
+}
+
+fn handle_transfer_finish(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    let p = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    match state.transfers.finish_upload(p) {
+        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
+        Err(err) => ResponseBody::Err(err),
+    }
+}
+
+fn handle_transfer_read(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    let p = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    match state.transfers.read_chunk(p) {
+        Ok(v) => ResponseBody::Ok(serde_json::to_value(v).unwrap_or(Value::Null)),
+        Err(err) => ResponseBody::Err(err),
+    }
+}
+
+fn handle_transfer_release(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    let p: TransferIdParams = match serde_json::from_value(params) {
+        Ok(v) => v,
+        Err(err) => return ResponseBody::Err(invalid_params(err.to_string())),
+    };
+    ResponseBody::Ok(serde_json::to_value(state.transfers.release(p)).unwrap_or(Value::Null))
+}
+
+fn invalid_params(message: impl Into<String>) -> RpcError {
+    RpcError {
+        code: ErrorCode::InvalidParams,
+        message: message.into(),
+        data: None,
     }
 }
 
@@ -531,6 +703,16 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
         data: None,
     })?;
     Ok(Duration::from_millis(u64::from(ms)))
+}
+
+fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
+    tool_dispatch_timeout(params).map(|timeout| {
+        if matches!(method, Method::ToolUpload | Method::ToolDownload) {
+            timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
+        } else {
+            timeout
+        }
+    })
 }
 
 // Local CLI-facing shapes. Intentionally distinct from
@@ -798,6 +980,7 @@ async fn handle_session_stop(
     .await
     {
         Ok(stop) => {
+            state.transfers.release_session(&session_id.0);
             let result = CliSessionStopResult {
                 stopped: vec![session_id.0],
                 failed: Vec::new(),
@@ -897,6 +1080,7 @@ async fn handle_session_stop_all(
         .await
         {
             Ok(stop) => {
+                state.transfers.release_session(&id.0);
                 stopped.push(id.0);
                 returned_tab_ids.extend(stop.returned_tab_ids);
                 return_failures.extend(stop.return_failures);
@@ -1219,6 +1403,28 @@ mod windows {
                 connected = pipe.connect() => {
                     match connected {
                         Ok(()) => {
+                            // Keep the connected instance alive until its replacement
+                            // exists. Otherwise a fast handler can close the last
+                            // instance and make new clients fail with NotFound.
+                            loop {
+                                match ServerOptions::new()
+                                    .access_inbound(true)
+                                    .access_outbound(true)
+                                    .create(&listener.pipe_name)
+                                {
+                                    Ok(next) => {
+                                        listener.first = Some(next);
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        warn!(?err, "create next named-pipe instance failed");
+                                        tokio::select! {
+                                            _ = &mut shutdown => return,
+                                            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                                        }
+                                    }
+                                }
+                            }
                             on_open();
                             let handler = handler.clone();
                             let on_act = on_activity.clone();
@@ -1287,6 +1493,118 @@ mod windows {
         }
         Ok(())
     }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+        use std::time::Duration;
+        use tokio::net::windows::named_pipe::ClientOptions;
+        use tokio::sync::oneshot;
+
+        fn isolated_listener() -> NamedPipeListener {
+            let pipe_name = format!(r"\\.\pipe\bsk-test-{}", uuid::Uuid::new_v4());
+            let first = ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&pipe_name)
+                .unwrap();
+            NamedPipeListener {
+                pipe_name,
+                first: Some(first),
+            }
+        }
+
+        #[tokio::test]
+        async fn next_instance_exists_before_connection_is_handed_off() {
+            let listener = isolated_listener();
+            let name = listener.pipe_name.clone();
+            let probe_name = name.clone();
+            let (probe_tx, probe_rx) = oneshot::channel();
+            let probe_tx = Mutex::new(Some(probe_tx));
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let server = tokio::spawn(serve(
+                listener,
+                crate::daemon::ipc::default_ping_handler(),
+                move || {
+                    if let Some(tx) = probe_tx.lock().unwrap().take() {
+                        // This callback runs before the connection task can finish.
+                        // A second client must already have an instance to open.
+                        let result = ClientOptions::new().open(&probe_name).map(drop);
+                        let _ = tx.send(result);
+                    }
+                },
+                || {},
+                || {},
+                async {
+                    let _ = stop_rx.await;
+                },
+            ));
+            let client = ClientOptions::new().open(&name).unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(5), probe_rx).await;
+            drop(client);
+            let _ = stop_tx.send(());
+            server.await.unwrap();
+            result
+                .expect("accept callback ran")
+                .unwrap()
+                .expect("next pipe instance is ready");
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn rapid_disconnects_and_concurrent_rpc_connections() {
+            let listener = isolated_listener();
+            let name = listener.pipe_name.clone();
+            let (stop_tx, stop_rx) = oneshot::channel();
+            let server = tokio::spawn(serve(
+                listener,
+                crate::daemon::ipc::default_ping_handler(),
+                || {},
+                || {},
+                || {},
+                async {
+                    let _ = stop_rx.await;
+                },
+            ));
+            let exercise = async {
+                // Include clients that close without sending any request.
+                for _ in 0..64 {
+                    drop(
+                        crate::ipc_client::Client::connect_path(name.clone().into())
+                            .await
+                            .unwrap(),
+                    );
+                }
+                let mut clients = tokio::task::JoinSet::new();
+                for _ in 0..8 {
+                    let name = name.clone();
+                    clients.spawn(async move {
+                        for _ in 0..32 {
+                            let mut client =
+                                crate::ipc_client::Client::connect_path(name.clone().into())
+                                    .await
+                                    .unwrap();
+                            let reply: bsk_protocol::PingResult = client
+                                .call(
+                                    bsk_protocol::Method::SystemPing,
+                                    &serde_json::json!({}),
+                                    Duration::from_secs(5),
+                                )
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            assert!(reply.pong);
+                        }
+                    });
+                }
+                while let Some(result) = clients.join_next().await {
+                    result.unwrap();
+                }
+            };
+            let result = tokio::time::timeout(Duration::from_secs(30), exercise).await;
+            let _ = stop_tx.send(());
+            server.await.unwrap();
+            result.expect("connection exercise completed");
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -1327,6 +1645,30 @@ mod tests {
         });
         let got = tool_dispatch_timeout(&params).expect("timeout parses");
         assert_eq!(got, std::time::Duration::from_millis(300_000));
+    }
+
+    #[test]
+    fn extension_transport_outlives_the_operation_deadline() {
+        let params = serde_json::json!({
+            "session_id": "abcd",
+            "timeout_ms": 60_000,
+        });
+        let dispatch_timeout =
+            tool_dispatch_transport_timeout(&Method::ToolUpload, &params).unwrap();
+
+        assert_eq!(dispatch_timeout, Duration::from_secs(62));
+    }
+
+    #[test]
+    fn extension_response_grace_does_not_change_other_tools() {
+        let params = serde_json::json!({
+            "session_id": "abcd",
+            "timeout_ms": 60_000,
+        });
+        let dispatch_timeout =
+            tool_dispatch_transport_timeout(&Method::ToolClick, &params).unwrap();
+
+        assert_eq!(dispatch_timeout, Duration::from_secs(60));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR, OVERLAY_HOST_NAME } from "../../../lib/overlay-bridge";
-import { captureViewModel, collectOverlayExcludedBackendIds } from "../capture";
+import { collectOverlayExcludedBackendIds, probeHoverSurfaces } from "../capture";
+import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
 
 // Minimal but format-accurate captureSnapshot reply: a body with one
 // fixed full-screen overlay div carrying a password input.
@@ -26,6 +27,7 @@ function fakeSnapshotReply() {
     strings: S,
     documents: [
       {
+        frameId: "root",
         nodes: {
           parentIndex: [-1, 0, 1, 2],
           nodeType: [1, 1, 1, 1],
@@ -73,6 +75,7 @@ function hoverTriggerSnapshotReply() {
     strings: S,
     documents: [
       {
+        frameId: "root",
         nodes: {
           parentIndex: [-1, 0, 1],
           nodeType: [1, 1, 1],
@@ -117,6 +120,7 @@ function twoHoverTriggerSnapshotReply() {
     strings: S,
     documents: [
       {
+        frameId: "root",
         nodes: {
           parentIndex: [-1, 0, 1, 1],
           nodeType: [1, 1, 1, 1],
@@ -170,6 +174,7 @@ function nestedHoverTriggerSnapshotReply() {
     strings: S,
     documents: [
       {
+        frameId: "root",
         nodes: {
           parentIndex: [-1, 0, 1, 2, 3],
           nodeType: [1, 1, 1, 1, 1],
@@ -210,38 +215,48 @@ function makeCdp(snapshot: unknown) {
       if (method === "DOMSnapshot.enable") return {};
       if (method === "DOMSnapshot.captureSnapshot") return snapshot;
       if (method === "Page.getLayoutMetrics") {
-        return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 } };
+        return {
+          visualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000 },
+          cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+        };
       }
       if (method === "Runtime.evaluate") {
         return {
           result: {
-            value: {
-              controls: [
+            deepSerializedValue: {
+              type: "array",
+              value: [
                 {
-                  state: "filled",
-                  sensitive: true,
-                  defaultValue: "hunter2",
-                  value: "hunter2",
-                  placeholder: "secret",
+                  type: "array",
+                  value: [
+                    { type: "node", value: { backendNodeId: 13 } },
+                    {
+                      type: "string",
+                      value: JSON.stringify({
+                        state: "filled",
+                        sensitive: true,
+                        placeholder: "secret",
+                      }),
+                    },
+                  ],
                 },
               ],
-              childFrames: [],
             },
           },
         };
       }
+      if (method === "Runtime.releaseObjectGroup") return {};
       throw new Error(`unexpected ${method}`);
     }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
   };
 }
 
-describe("captureViewModel", () => {
+describe("snapshot capture and hover", () => {
   it("parses nodes, attrs, rects, paint order and styles", async () => {
-    const { nodes, viewport, iframeNodes } = await captureViewModel(
-      makeCdp(fakeSnapshotReply()),
-      4,
-    );
-    expect(iframeNodes.size).toBe(0);
+    const { nodes, viewport } = semanticCapture(
+      await captureObservationFacts(makeCdp(fakeSnapshotReply()), 4),
+    ).captured;
     expect(viewport).toEqual({ width: 1000, height: 800 });
     const div = nodes.find((n) => n.backendNodeId === 12);
     expect(div).toMatchObject({ tag: "div", position: "fixed", parentBackendNodeId: 11 });
@@ -251,33 +266,11 @@ describe("captureViewModel", () => {
     expect(input?.attrs).toEqual({ type: "password" });
   });
 
-  it("does not run conditional surface probes by default", async () => {
+  it("never hovers the page while capturing", async () => {
     const cdp = makeCdp(fakeSnapshotReply());
-    const result = await captureViewModel(cdp, 4);
+    semanticCapture(await captureObservationFacts(cdp, 4)).captured;
 
-    expect(result.surfaceProbes).toEqual([]);
     expect(cdp.send).not.toHaveBeenCalledWith(4, "Input.dispatchMouseEvent", expect.anything());
-  });
-
-  it("batch-enriches form controls without per-node object resolution", async () => {
-    const cdp = makeCdp(fakeSnapshotReply());
-    const result = await captureViewModel(cdp, 4);
-    const input = result.nodes.find((node) => node.backendNodeId === 13);
-
-    expect(input).toMatchObject({
-      formState: "filled",
-      formPlaceholder: "secret",
-      attrs: { type: "password" },
-    });
-    expect(input?.formValue).toBeUndefined();
-    expect(input?.formDefaultValue).toBeUndefined();
-    expect(cdp.send).toHaveBeenCalledWith(
-      4,
-      "Runtime.evaluate",
-      expect.objectContaining({ returnByValue: true }),
-    );
-    expect(cdp.send).not.toHaveBeenCalledWith(4, "DOM.resolveNode", expect.anything());
-    expect(cdp.send).not.toHaveBeenCalledWith(4, "Runtime.callFunctionOn", expect.anything());
   });
 
   it("runs hover surface probes when explicitly enabled", async () => {
@@ -288,6 +281,8 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return hoverTriggerSnapshotReply();
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
@@ -319,9 +314,10 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
+    const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
 
-    expect(result.surfaceProbes).toEqual([
+    expect(surfaceProbes).toEqual([
       {
         triggerBackendNodeId: 12,
         triggerPoint: { x: 956, y: 32 },
@@ -350,6 +346,8 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return twoHoverTriggerSnapshotReply();
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
@@ -378,9 +376,10 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const result = await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
+    const surfaceProbes = await probeHoverSurfaces(cdp, 4, captured.nodes);
 
-    expect(result.surfaceProbes).toEqual([
+    expect(surfaceProbes).toEqual([
       expect.objectContaining({
         triggerBackendNodeId: 12,
         subItems: ["My profile", "Sign out"],
@@ -397,6 +396,8 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return nestedHoverTriggerSnapshotReply();
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
@@ -422,7 +423,8 @@ describe("captureViewModel", () => {
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    await captureViewModel(cdp, 4, { conditionalSurfaceProbe: true });
+    const captured = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
+    await probeHoverSurfaces(cdp, 4, captured.nodes);
 
     expect(hoverMoves).toBe(1);
   });
@@ -453,6 +455,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 0, 3, 4],
             nodeName: [i("html"), i("body"), i("div"), i(OVERLAY_HOST_NAME), i("div"), i("button")],
@@ -483,7 +486,7 @@ describe("captureViewModel", () => {
       ],
     };
 
-    const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(makeCdp(snapshot), 4)).captured;
     const ids = nodes.map((n) => n.backendNodeId);
     // Real page nodes survive.
     expect(ids).toContain(12);
@@ -514,6 +517,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 0, 3, 4],
             nodeName: [i("html"), i("body"), i("div"), i(OVERLAY_HOST_NAME), i("div"), i("button")],
@@ -544,7 +548,9 @@ describe("captureViewModel", () => {
       ],
     };
 
-    const { excludedBackendNodeIds } = await captureViewModel(makeCdp(snapshot), 4);
+    const { excludedBackendNodeIds } = semanticCapture(
+      await captureObservationFacts(makeCdp(snapshot), 4),
+    ).captured;
     expect(excludedBackendNodeIds).toEqual(new Set([13, 14, 15]));
   });
 
@@ -565,6 +571,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i(OVERLAY_HOST_NAME)],
@@ -587,7 +594,9 @@ describe("captureViewModel", () => {
       ],
     };
 
-    const { nodes, excludedBackendNodeIds } = await captureViewModel(makeCdp(snapshot), 4);
+    const { nodes, excludedBackendNodeIds } = semanticCapture(
+      await captureObservationFacts(makeCdp(snapshot), 4),
+    ).captured;
     expect(nodes.map((n) => n.backendNodeId)).not.toContain(13);
     expect(excludedBackendNodeIds).toEqual(new Set([13]));
   });
@@ -610,6 +619,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("div")],
@@ -632,7 +642,9 @@ describe("captureViewModel", () => {
       ],
     };
 
-    const { nodes, excludedBackendNodeIds } = await captureViewModel(makeCdp(snapshot), 4);
+    const { nodes, excludedBackendNodeIds } = semanticCapture(
+      await captureObservationFacts(makeCdp(snapshot), 4),
+    ).captured;
     expect(nodes.map((n) => n.backendNodeId)).not.toContain(13);
     expect(excludedBackendNodeIds).toEqual(new Set([13]));
   });
@@ -655,6 +667,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("div")],
@@ -677,7 +690,7 @@ describe("captureViewModel", () => {
         },
       ],
     };
-    const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(makeCdp(snapshot), 4)).captured;
     expect(nodes.find((n) => n.backendNodeId === 12)?.cursor).toBe("pointer");
     expect(nodes.find((n) => n.backendNodeId === 11)?.cursor).toBe("auto");
   });
@@ -689,6 +702,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1, 1, 1],
             nodeName: [i("html"), i("body"), i("button"), i("button"), i("button")],
@@ -715,7 +729,7 @@ describe("captureViewModel", () => {
       ],
     };
 
-    const { nodes } = await captureViewModel(makeCdp(snapshot), 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(makeCdp(snapshot), 4)).captured;
 
     expect(nodes.find((node) => node.backendNodeId === 12)?.rendered).toBe(true);
     expect(nodes.find((node) => node.backendNodeId === 13)?.rendered).toBe(false);
@@ -729,25 +743,28 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return fakeSnapshotReply();
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 200 },
           };
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const { nodes } = await captureViewModel(cdp, 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const div = nodes.find((n) => n.backendNodeId === 12);
     expect(div?.localRect?.y).toBe(-200);
     expect(div?.rect).toMatchObject({ y: 0, h: 600 });
   });
 
-  it("normalizes device-pixel bounds by devicePixelRatio", async () => {
+  it("normalizes raw snapshot bounds before viewport clipping", async () => {
     const S = ["html", "body", "div", "position", "fixed", "static", "pointer-events", "auto"];
     const i = (s: string) => S.indexOf(s);
     const snapshot = {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("div")],
@@ -775,6 +792,8 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 2000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
             layoutViewport: { clientWidth: 2000, clientHeight: 1600 },
           };
@@ -782,8 +801,14 @@ describe("captureViewModel", () => {
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const { nodes } = await captureViewModel(cdp, 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     expect(nodes.find((n) => n.backendNodeId === 12)?.rect).toEqual({
+      x: 0,
+      y: 0,
+      w: 1000,
+      h: 800,
+    });
+    expect(nodes.find((n) => n.backendNodeId === 12)?.localRect).toEqual({
       x: 0,
       y: 0,
       w: 1000,
@@ -812,6 +837,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -844,13 +870,15 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const { nodes } = await captureViewModel(cdp, 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     const btn = nodes.find((n) => n.backendNodeId === 12);
     expect(btn?.textContent).toBe("登录");
     const link = nodes.find((n) => n.backendNodeId === 14);
@@ -860,7 +888,7 @@ describe("captureViewModel", () => {
     expect(body?.textContent).toBeUndefined();
   });
 
-  it("parses iframe sub-documents and returns iframeNodes keyed by iframe backendNodeId", async () => {
+  it("retains explicit iframe document ownership and projected nodes", async () => {
     const S = [
       "html",
       "body",
@@ -934,39 +962,38 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [100, 300, 900, 300, 900, 700, 100, 700] } };
+        if (method === "DOM.resolveNode") return { object: { objectId: "owner" } };
+        if (method === "Runtime.callFunctionOn")
+          return { result: { value: { width: 800, height: 400 } } };
+        if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const {
-      nodes,
-      iframeNodes,
-      frameNodes,
-      frameOwnerBackendNodeIds,
-      frameParentIds,
-      rootFrameId,
-    } = await captureViewModel(cdp, 4);
-    // Main frame has 4 nodes; iframe is included
-    expect(nodes.find((n) => n.backendNodeId === 13)?.tag).toBe("iframe");
-    // iframeNodes keyed by the <iframe> element's backendNodeId=13
-    expect(iframeNodes.size).toBe(1);
-    expect(iframeNodes.has(13)).toBe(true);
-    const subNodes = iframeNodes.get(13)!;
+    const facts = await captureObservationFacts(cdp, 4);
+    const root = facts.documents.find((doc) => doc.frame.frameId === "main-frame")!;
+    const child = facts.documents.find((doc) => doc.frame.frameId === "child-frame")!;
+    expect(facts.documents).toHaveLength(2);
+    expect(root.domNodes.find((n) => n.backendNodeId === 13)?.tag).toBe("iframe");
+    const subNodes = child.domNodes;
     const input = subNodes.find((n) => n.backendNodeId === 101);
     expect(input?.tag).toBe("input");
     expect(input?.attrs.type).toBe("text");
     expect(input?.ownerFrameBackendNodeId).toBe(13);
     expect(input?.localRect).toEqual({ x: 0, y: 0, w: 200, h: 40 });
     expect(input?.rect).toEqual({ x: 100, y: 300, w: 200, h: 40 });
-    expect(rootFrameId).toBe("main-frame");
-    expect(frameNodes?.get("child-frame")).toBe(subNodes);
-    expect(frameOwnerBackendNodeIds?.get("child-frame")).toBe(13);
-    expect(frameParentIds?.get("child-frame")).toBe("main-frame");
+    expect(facts.rootFrameId).toBe("main-frame");
+    expect(child.frame.ownerBackendNodeId).toBe(13);
+    expect(child.frame.parentFrameId).toBe("main-frame");
   });
 
-  it("captures iframe documents without requiring owner-frame geometry", async () => {
+  it("projects iframe documents independently of owner snapshot geometry", async () => {
     const S = [
       "html",
       "body",
@@ -984,6 +1011,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -1001,6 +1029,7 @@ describe("captureViewModel", () => {
           },
         },
         {
+          frameId: "child",
           scrollOffsetX: 0,
           scrollOffsetY: 0,
           nodes: {
@@ -1024,18 +1053,28 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
           };
         }
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [100, 300, 900, 300, 900, 700, 100, 700] } };
+        if (method === "DOM.resolveNode") return { object: { objectId: "owner" } };
+        if (method === "Runtime.callFunctionOn")
+          return { result: { value: { width: 800, height: 400 } } };
+        if (method === "Runtime.releaseObject") return {};
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const { iframeNodes } = await captureViewModel(cdp, 4);
-    const input = iframeNodes.get(13)?.find((n) => n.backendNodeId === 101);
+    const { documents } = await captureObservationFacts(cdp, 4);
+    const input = documents
+      .find((doc) => doc.frame.frameId === "child")
+      ?.domNodes?.find((n) => n.backendNodeId === 101);
 
     expect(input?.localRect).toEqual({ x: 20, y: 20, w: 120, h: 60 });
-    expect(input?.rect).toBeNull();
+    expect(input?.rect).toEqual({ x: 120, y: 320, w: 120, h: 60 });
   });
 
   it("recursively normalizes nested iframe sub-documents", async () => {
@@ -1056,6 +1095,7 @@ describe("captureViewModel", () => {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("iframe")],
@@ -1077,6 +1117,9 @@ describe("captureViewModel", () => {
           },
         },
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "child",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("iframe")],
@@ -1098,6 +1141,9 @@ describe("captureViewModel", () => {
           },
         },
         {
+          scrollOffsetX: 0,
+          scrollOffsetY: 0,
+          frameId: "nested",
           nodes: {
             parentIndex: [-1, 0],
             nodeName: [i("body"), i("input")],
@@ -1114,21 +1160,54 @@ describe("captureViewModel", () => {
       ],
     };
     const cdp = {
-      send: vi.fn(async (_t: number, method: string) => {
-        if (method === "DOMSnapshot.enable") return {};
-        if (method === "DOMSnapshot.captureSnapshot") return snapshot;
-        if (method === "Page.getLayoutMetrics") {
-          return {
-            cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
-          };
-        }
-        throw new Error(method);
-      }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
+      send: vi.fn(
+        async (
+          _t: number,
+          method: string,
+          params?: { backendNodeId?: number; objectId?: string },
+        ) => {
+          if (method === "DOMSnapshot.enable") return {};
+          if (method === "DOMSnapshot.captureSnapshot") return snapshot;
+          if (method === "Page.getLayoutMetrics") {
+            return {
+              visualViewport: { clientWidth: 1000 },
+              cssVisualViewport: { clientWidth: 1000 },
+              cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 0 },
+            };
+          }
+          if (method === "DOM.getBoxModel")
+            return {
+              model: {
+                content:
+                  params?.backendNodeId === 13
+                    ? [10, 20, 310, 20, 310, 220, 10, 220]
+                    : [15, 26, 115, 26, 115, 106, 15, 106],
+              },
+            };
+          if (method === "DOM.resolveNode")
+            return { object: { objectId: String(params?.backendNodeId) } };
+          if (method === "Runtime.callFunctionOn")
+            return {
+              result: {
+                value:
+                  params?.objectId === "13"
+                    ? { width: 300, height: 200 }
+                    : { width: 100, height: 80 },
+              },
+            };
+          if (method === "Runtime.releaseObject") return {};
+          throw new Error(method);
+        },
+      ) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
 
-    const { iframeNodes } = await captureViewModel(cdp, 4);
-    const nestedIframe = iframeNodes.get(13)?.find((n) => n.backendNodeId === 23);
-    const input = iframeNodes.get(23)?.find((n) => n.backendNodeId === 31);
+    const { documents } = await captureObservationFacts(cdp, 4);
+    const nestedIframe = documents
+      .find((doc) => doc.frame.frameId === "child")
+      ?.domNodes?.find((n) => n.backendNodeId === 23);
+    const input = documents
+      .find((doc) => doc.frame.frameId === "nested")
+      ?.domNodes?.find((n) => n.backendNodeId === 31);
 
     expect(nestedIframe?.localRect).toEqual({ x: 5, y: 6, w: 100, h: 80 });
     expect(nestedIframe?.rect).toEqual({ x: 15, y: 26, w: 100, h: 80 });
@@ -1137,13 +1216,14 @@ describe("captureViewModel", () => {
     expect(input?.rect).toEqual({ x: 16, y: 28, w: 40, h: 20 });
   });
 
-  it("normalizes bounds then subtracts CSS scroll at dpr>1", async () => {
+  it("subtracts CSS scroll once without dividing snapshot bounds by a metrics ratio", async () => {
     const S = ["html", "body", "div", "position", "fixed", "static", "pointer-events", "auto"];
     const i = (s: string) => S.indexOf(s);
     const snapshot = {
       strings: S,
       documents: [
         {
+          frameId: "root",
           nodes: {
             parentIndex: [-1, 0, 1],
             nodeName: [i("html"), i("body"), i("div")],
@@ -1171,6 +1251,8 @@ describe("captureViewModel", () => {
         if (method === "DOMSnapshot.captureSnapshot") return snapshot;
         if (method === "Page.getLayoutMetrics") {
           return {
+            visualViewport: { clientWidth: 2000 },
+            cssVisualViewport: { clientWidth: 1000 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 0, pageY: 100 },
             layoutViewport: { clientWidth: 2000, clientHeight: 1600 },
           };
@@ -1178,7 +1260,7 @@ describe("captureViewModel", () => {
         throw new Error(method);
       }) as unknown as <T>(tabId: number, method: string, params?: object) => Promise<T>,
     };
-    const { nodes } = await captureViewModel(cdp, 4);
+    const { nodes } = semanticCapture(await captureObservationFacts(cdp, 4)).captured;
     expect(nodes.find((n) => n.backendNodeId === 12)?.rect?.y).toBe(400 / 2 - 100);
   });
 

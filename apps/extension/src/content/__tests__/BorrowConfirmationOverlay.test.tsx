@@ -23,7 +23,7 @@ describe("BorrowConfirmationOverlay", () => {
             id: "req-1",
             isActiveTab: true,
             tabTitle: "Example",
-            timeoutMs: 5000,
+            timeoutMs: 60_000,
             onAllow,
             onDeny,
           },
@@ -32,7 +32,7 @@ describe("BorrowConfirmationOverlay", () => {
     );
 
     expect(screen.getByText("允许借用标签页？")).toBeTruthy();
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 60; i++) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
@@ -66,7 +66,7 @@ describe("BorrowConfirmationOverlay", () => {
             id: "req-fallback",
             isActiveTab: true,
             tabTitle: "Example",
-            timeoutMs: 5000,
+            timeoutMs: 60_000,
             onAllow,
             onDeny,
           },
@@ -74,7 +74,7 @@ describe("BorrowConfirmationOverlay", () => {
       />,
     );
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 60; i++) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000);
       });

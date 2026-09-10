@@ -295,6 +295,7 @@ async fn drive_connection(
     for session in state.sessions.purge_browser(&browser_id) {
         state.tool_queues.remove(&session.id);
         state.session_interrupts.drop_session(&session.id);
+        state.transfers.release_session(&session.id.0);
         debug!(session = %session.id, "purged stale session before browser reconnect");
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
@@ -407,6 +408,7 @@ async fn drive_connection(
         for s in state.sessions.purge_browser(&browser_id) {
             state.tool_queues.remove(&s.id);
             state.session_interrupts.drop_session(&s.id);
+            state.transfers.release_session(&s.id.0);
             debug!(session = %s.id, "purged session on browser disconnect");
         }
     } else {
@@ -503,6 +505,7 @@ fn handle_session_window_closed(
         &state.session_interrupts,
         &session_id,
     ) {
+        state.transfers.release_session(&session_id.0);
         info!(session = %session_id, "session removed: user closed Agent Window");
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");

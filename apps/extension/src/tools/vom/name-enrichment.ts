@@ -1,7 +1,7 @@
 import { isVomReferenceNode } from "@browser-skill/vom";
 import { type CdpRunner, sendToCdpTarget } from "../shared";
 import type { FrameDocument, FrameOwnedAxNode } from "./frame-document";
-import { clearHover, waitForHover } from "./hover-perception";
+import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 import { stableIdentifierName } from "./semantic-graph/name-evidence";
 import { frameBackendKey, type ResolvedSemanticGraph } from "./semantic-graph/types";
 
@@ -9,11 +9,18 @@ const MAX_TOOLTIP_CANDIDATES = 8;
 const MAX_TOOLTIP_PROBE_MS = 2_400;
 const TOOLTIP_SETTLE_MS = 250;
 const CACHE_TTL_MS = 5 * 60_000;
+/**
+ * Misses expire sooner than hits: a control that gains a tooltip once the app
+ * finishes booting should still be discoverable, but not at the cost of
+ * re-probing every unlabelled control on every observation.
+ */
+const MISS_CACHE_TTL_MS = 60_000;
 const MAX_CACHE_ENTRIES = 500;
 const FORM_CONTROL_TAGS = new Set(["input", "select", "textarea"]);
 
 interface TooltipCacheEntry {
-  name: string;
+  /** `null` records "probed, revealed no tooltip" so the miss is not re-paid. */
+  name: string | null;
   expiresAt: number;
 }
 
@@ -27,7 +34,6 @@ interface TooltipCandidate<T extends FrameOwnedAxNode> {
 
 export interface TooltipNameProbeOptions {
   signal?: AbortSignal;
-  hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
 }
 
 const tooltipCache = new Map<string, TooltipCacheEntry>();
@@ -39,10 +45,11 @@ function cacheKey<T extends FrameOwnedAxNode>(
   return `${document.target.tabId}\u0000${document.frameId}\u0000${document.url ?? ""}\u0000${backendNodeId}`;
 }
 
-function cachedName<T extends FrameOwnedAxNode>(
+/** Returns the cache entry, or `undefined` when this control was never probed. */
+function cachedEntry<T extends FrameOwnedAxNode>(
   document: FrameDocument<T>,
   backendNodeId: number,
-): string | undefined {
+): TooltipCacheEntry | undefined {
   const key = cacheKey(document, backendNodeId);
   const entry = tooltipCache.get(key);
   if (!entry) return undefined;
@@ -50,13 +57,13 @@ function cachedName<T extends FrameOwnedAxNode>(
     tooltipCache.delete(key);
     return undefined;
   }
-  return entry.name;
+  return entry;
 }
 
 function storeName<T extends FrameOwnedAxNode>(
   document: FrameDocument<T>,
   backendNodeId: number,
-  name: string,
+  name: string | null,
 ): void {
   if (tooltipCache.size >= MAX_CACHE_ENTRIES) {
     const oldest = tooltipCache.keys().next().value;
@@ -64,7 +71,7 @@ function storeName<T extends FrameOwnedAxNode>(
   }
   tooltipCache.set(cacheKey(document, backendNodeId), {
     name,
-    expiresAt: Date.now() + CACHE_TTL_MS,
+    expiresAt: Date.now() + (name === null ? MISS_CACHE_TTL_MS : CACHE_TTL_MS),
   });
 }
 
@@ -237,22 +244,27 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
   const names = new Map<string, string>();
   const pending: TooltipCandidate<T>[] = [];
   for (const candidate of candidates(documents, graph)) {
-    const cached = cachedName(candidate.document, candidate.backendNodeId);
+    const cached = cachedEntry(candidate.document, candidate.backendNodeId);
     if (cached) {
-      names.set(frameBackendKey(candidate.document.frameId, candidate.backendNodeId), cached);
+      // A cached miss is still a decision: skip the control instead of re-probing.
+      if (cached.name !== null) {
+        names.set(
+          frameBackendKey(candidate.document.frameId, candidate.backendNodeId),
+          cached.name,
+        );
+      }
     } else if (pending.length < MAX_TOOLTIP_CANDIDATES) {
       pending.push(candidate);
     }
   }
   if (pending.length === 0) return names;
 
-  const started = Date.now();
+  const budget = new ProbeBudget(MAX_TOOLTIP_PROBE_MS);
   const contexts = new Map<string, number>();
-  await options.hoverProbeBypassOverlay?.(tabId, true).catch(() => undefined);
   try {
     for (const candidate of pending) {
       if (options.signal?.aborted) throw new DOMException("observation aborted", "AbortError");
-      if (Date.now() - started >= MAX_TOOLTIP_PROBE_MS) break;
+      if (!budget.canAfford(TOOLTIP_SETTLE_MS)) break;
       let objectId: string | undefined;
       try {
         let contextId = contexts.get(candidate.document.frameId);
@@ -278,9 +290,9 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
         await waitForHover(TOOLTIP_SETTLE_MS, options.signal);
         const after = await tooltipTexts(cdp, candidate.document, objectId);
         const name = cleanTooltipDiff(before, after);
+        storeName(candidate.document, candidate.backendNodeId, name ?? null);
         if (!name) continue;
         names.set(frameBackendKey(candidate.document.frameId, candidate.backendNodeId), name);
-        storeName(candidate.document, candidate.backendNodeId, name);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
       } finally {
@@ -290,7 +302,6 @@ export async function probeTooltipNames<T extends FrameOwnedAxNode>(
     }
   } finally {
     await clearHover(cdp, tabId);
-    await options.hoverProbeBypassOverlay?.(tabId, false).catch(() => undefined);
   }
   return names;
 }

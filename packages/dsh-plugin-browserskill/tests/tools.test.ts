@@ -102,6 +102,10 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.network": ["browser_inspect", "network"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
+  "interact.wheel": ["browser_interact", "wheel"],
+  "interact.scroll-to": ["browser_interact", "scroll-to"],
+  "interact.focus": ["browser_interact", "focus"],
+  "interact.blur": ["browser_interact", "blur"],
   "interact.fill": ["browser_interact", "fill"],
   "interact.select": ["browser_interact", "select"],
   "interact.press": ["browser_interact", "press"],
@@ -200,7 +204,17 @@ const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
   browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network"],
-  browser_interact: ["click", "hover", "fill", "select", "press"],
+  browser_interact: [
+    "click",
+    "hover",
+    "wheel",
+    "scroll-to",
+    "focus",
+    "blur",
+    "fill",
+    "select",
+    "press",
+  ],
   browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
   browser_assist: ["resize", "emulate", "request-help"],
 } as const;
@@ -497,6 +511,85 @@ describe("interaction tools", () => {
       "2",
       "@e1",
     ]);
+  });
+
+  it.each([
+    "focus",
+    "blur",
+  ] as const)("interact.%s maps focus state, target, tab and timeout", async (action) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      [action]: {
+        tab_id: 7,
+        focused: action === "focus",
+        ...(action === "blur" ? { was_focused: true } : {}),
+      },
+    });
+    await startSession(tools);
+    const target = action === "focus" ? "@e3" : "#field";
+    const value = await tools
+      .get(`interact.${action}`)
+      ?.execute({ target, tabId: 7, timeoutMs: 150_000 }, makeExec());
+    expect(value).toEqual({
+      session: "s1",
+      tabId: 7,
+      focused: action === "focus",
+      ...(action === "blur" ? { wasFocused: true } : {}),
+    });
+    expect(calls[1].args).toEqual([
+      action,
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--timeout",
+      "150000ms",
+      target,
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
+  });
+
+  it.each([
+    "focus",
+    "blur",
+    "scroll-to",
+  ] as const)("interact.%s validates arguments and session ownership before running", async (action) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const tool = tools.get(`interact.${action}`)!;
+    await expect(tool.execute({}, makeExec())).rejects.toThrow(/invalid arguments/i);
+    await expect(tool.execute({ target: " " }, makeExec())).rejects.toThrow(/non-empty/i);
+    await expect(tool.execute({ target: "e1", timeoutMs: 0 }, makeExec())).rejects.toThrow(
+      /greater than zero/i,
+    );
+    await expect(tool.execute({ target: "e1", session: "foreign" }, makeExec())).rejects.toThrow(
+      /session/i,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(["@e3", "#target"])("interact.scroll-to maps %s, bounds and timeout", async (target) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "scroll-to": { tab_id: 7, x: 10, y: 20, width: 100, height: 80 },
+    });
+    await startSession(tools);
+    expect(
+      await tools
+        .get("interact.scroll-to")
+        ?.execute({ target, tabId: 7, timeoutMs: 150_000 }, makeExec()),
+    ).toEqual({ session: "s1", tabId: 7, x: 10, y: 20, width: 100, height: 80 });
+    expect(calls[1].args).toEqual([
+      "scroll-to",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--timeout",
+      "150000ms",
+      target,
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
   });
 
   it("interact.fill passes value and --no-clear", async () => {
@@ -1324,5 +1417,64 @@ describe("observation action instrumentation timing", () => {
       expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("idle"),
     );
     observation.dispose();
+  });
+});
+
+describe("wheel action", () => {
+  it.each([
+    undefined,
+    "@e3",
+    "#panel",
+  ])("maps target %s, signed deltas, modifiers and timeout", async (target) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      wheel: { tab_id: 7, x: 10, y: 20, delta_x: -12.5, delta_y: 0 },
+    });
+    await startSession(tools);
+    expect(
+      await tools.get("interact.wheel")!.execute(
+        {
+          ...(target === undefined ? {} : { target }),
+          deltaX: -12.5,
+          modifiers: ["ctrl", "shift"],
+          tabId: 7,
+          timeoutMs: 150_000,
+        },
+        makeExec(),
+      ),
+    ).toEqual({ session: "s1", tabId: 7, x: 10, y: 20, deltaX: -12.5, deltaY: 0 });
+    expect(calls[1].args).toEqual([
+      "wheel",
+      "--session",
+      "s1",
+      "--delta-x",
+      "-12.5",
+      "--delta-y",
+      "0",
+      "--tab-id",
+      "7",
+      "--modifiers",
+      "ctrl,shift",
+      "--timeout",
+      "150000ms",
+      ...(target === undefined ? [] : [target]),
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
+  });
+
+  it.each([
+    {},
+    { deltaX: 0, deltaY: 0 },
+    { deltaY: NaN },
+    { deltaX: Infinity },
+    { target: " ", deltaY: 120 },
+    { deltaY: 120, timeoutMs: 0 },
+    { deltaY: 120, modifiers: ["invalid"] },
+    { deltaY: 120, session: "foreign" },
+  ])("rejects invalid or unowned arguments %j before invoking the CLI", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get("interact.wheel")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls).toHaveLength(1);
   });
 });

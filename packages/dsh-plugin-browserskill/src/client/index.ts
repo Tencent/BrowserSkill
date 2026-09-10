@@ -7,6 +7,7 @@
  */
 
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
+// Development-only types for the injected services; newer hosts no longer ship this package.
 import type { ClientContext, ISessions, SessionId } from "@deepseek-ai/dsh-client-runtime/client";
 // Type-only: pulls the 'shell.overlay' SlotMap merge into scope.
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
