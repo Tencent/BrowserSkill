@@ -23,6 +23,106 @@ export function registerPhaseOneInteractionTools(
 
   register(
     defineTool({
+      name: "interact.wheel",
+      description:
+        "Send native wheel input at the viewport centre or an optional target. " +
+        "A target is scrolled into view first. Deltas are input CSS pixels, not measured scroll " +
+        "distance; observe afterwards to check the page's response.",
+      parameters: {
+        target: {
+          type: "string",
+          description: "Optional snapshot ref or main-document CSS selector.",
+        },
+        session: SESSION_PARAM,
+        tabId: TAB_ID_PARAM,
+        deltaX: { type: "number", description: "Horizontal input in CSS pixels; defaults to 0." },
+        deltaY: { type: "number", description: "Vertical input in CSS pixels; defaults to 0." },
+        modifiers: { type: "array", items: { type: "string", enum: MODIFIERS } },
+        timeoutMs: TIMEOUT_MS_PARAM,
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            session: { type: "string", required: true },
+            tabId: { type: "integer", required: true },
+            x: { type: "number", required: true },
+            y: { type: "number", required: true },
+            deltaX: { type: "number", required: true },
+            deltaY: { type: "number", required: true },
+          },
+        },
+        render: (_args, value) => [
+          {
+            type: "text",
+            text: `[session ${value.session}] wheel input (${value.deltaX}, ${value.deltaY}) sent at (${value.x}, ${value.y}) on tab ${value.tabId}`,
+          },
+        ],
+      },
+      async execute(args, exec) {
+        if (args.target !== undefined) requireNonEmpty(args.target, "target");
+        requirePositive(args.timeoutMs, "timeoutMs");
+        const deltaX = args.deltaX ?? 0;
+        const deltaY = args.deltaY ?? 0;
+        if (!Number.isFinite(deltaX) || !Number.isFinite(deltaY))
+          throw new Error("wheel deltas must be finite numbers");
+        if (deltaX === 0 && deltaY === 0)
+          throw new Error("at least one wheel delta must be non-zero");
+        const sessionId = registry.resolve(args.session, "browser_interact(action=wheel)");
+        const cmdArgs = [
+          "wheel",
+          "--session",
+          sessionId,
+          "--delta-x",
+          String(deltaX),
+          "--delta-y",
+          String(deltaY),
+        ];
+        appendTabId(cmdArgs, args.tabId);
+        if (args.modifiers?.length) cmdArgs.push("--modifiers", args.modifiers.join(","));
+        if (args.timeoutMs !== undefined) cmdArgs.push("--timeout", `${args.timeoutMs}ms`);
+        if (args.target !== undefined) appendTarget(cmdArgs, args.target);
+        const reply = (await runtime.run(
+          exec,
+          cmdArgs,
+          "wheel",
+          sessionId,
+          runnerTimeout(deps, args.timeoutMs),
+        )) as {
+          tab_id: number;
+          x: number;
+          y: number;
+          delta_x: number;
+          delta_y: number;
+        };
+        return {
+          session: sessionId,
+          tabId: reply.tab_id,
+          x: reply.x,
+          y: reply.y,
+          deltaX: reply.delta_x,
+          deltaY: reply.delta_y,
+        };
+      },
+      presentCall: (args) => ({
+        card: "terminal",
+        title: runtime.commandLine([
+          "wheel",
+          "--delta-x",
+          String(args.deltaX ?? 0),
+          "--delta-y",
+          String(args.deltaY ?? 0),
+          ...(args.target === undefined ? [] : [args.target]),
+        ]),
+        description: "Send native wheel input",
+      }),
+      presentResult: runtime.presentTerminalResult,
+    }),
+  );
+
+  register(
+    defineTool({
       name: "interact.hover",
       description:
         "Move the mouse over a snapshot ref or CSS selector to reveal hover-triggered UI. " +

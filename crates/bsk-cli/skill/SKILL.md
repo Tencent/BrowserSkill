@@ -55,7 +55,7 @@ Use this default loop:
 ```text
 bsk navigate <url> --session <id>
 bsk observe --session <id>
-bsk click|hover|scroll-to|focus|blur|fill|select|press ... --session <id>
+bsk click|hover|wheel|scroll-to|focus|blur|fill|select|press ... --session <id>
 bsk observe --session <id>             # after navigation or a meaningful DOM change
 ```
 
@@ -65,6 +65,11 @@ The result is the visible border-box portion's bounds in top-level viewport CSS 
 ancestor clipping. Partial visibility is enough; hidden or fully clipped targets fail with
 `permission_denied` and `data.reason=element_not_visible`. This does not test occlusion by other elements.
 For a specific tab or deadline: `bsk scroll-to @e3 --session <id> --tab-id 42 --timeout 5s`.
+
+`bsk wheel --delta-y -120 --session <id>` sends native wheel input at the viewport centre.
+Add an optional ref/selector to target an element (scrolled into view first). Both delta axes
+accept signed numbers and default to zero; at least one must be nonzero. The result echoes
+input, not actual scroll distance or completion. Observe afterwards to check the page's response.
 
 `bsk focus <ref>` explicitly focuses a target; `bsk blur <ref>` removes focus and reports whether
 it was focused. Use these for UI states triggered by focus changes.
@@ -124,7 +129,7 @@ This list of names is complete. Never invent a command outside it; read
 session start|stop|list   browsers   status   doctor   update   logs
 navigate   navigate-back   navigate-forward   reload   wait-for-navigation   wait-ms
 observe   snapshot   get-html   screenshot   console   network
-click   hover   scroll-to   focus   blur   fill   select   press   evaluate
+click   hover   wheel   scroll-to   focus   blur   fill   select   press   evaluate
 tab list|create|close|select|borrow|return   window resize   emulate
 upload   download   request-help   record start|stop
 ```

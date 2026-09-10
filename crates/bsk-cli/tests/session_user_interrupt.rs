@@ -301,6 +301,11 @@ async fn user_interrupt_rejects_scroll_to_before_forwarding() {
     assert_idle_interrupt_rejects(Method::ToolScrollTo).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_interrupt_rejects_wheel_before_forwarding() {
+    assert_idle_interrupt_rejects(Method::ToolWheel).await;
+}
+
 async fn assert_idle_interrupt_rejects(method: Method) {
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;

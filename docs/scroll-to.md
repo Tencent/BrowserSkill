@@ -3,7 +3,7 @@
 `scroll-to` brings an existing element and its containing frames into view, then
 returns the visible portion's bounds. Use it to reveal a target before inspecting
 the page or taking a screenshot. It accepts an element target rather than a pixel
-distance or scroll direction.
+distance or scroll direction. Use [wheel](wheel.md) for native directional wheel input.
 
 | Entry point | Name |
 | --- | --- |

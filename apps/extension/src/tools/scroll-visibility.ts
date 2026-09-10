@@ -107,7 +107,7 @@ async function projectRect(
   return projectRegionToViewport(region, projection);
 }
 
-/** Only scroll-to needs renderer-clipped bounds; other interaction geometry is unchanged. */
+/** Renderer-clipped bounds for scroll-to and wheel; shared interaction geometry is unchanged. */
 export async function scrollVisibleBounds(
   cdp: CdpRunner,
   tabId: number,

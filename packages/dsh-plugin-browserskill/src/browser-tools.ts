@@ -167,12 +167,13 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: "browser_interact",
     description:
-      "Interact with an element in the active Agent Window tab. Actions: click, hover, scroll-to, focus, blur, fill, select, " +
+      "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
       "press. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
-      "values; press requires key and may optionally focus target first.",
+      "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       click: "interact.click",
       hover: "interact.hover",
+      wheel: "interact.wheel",
       "scroll-to": "interact.scroll-to",
       focus: "interact.focus",
       blur: "interact.blur",
@@ -191,9 +192,14 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       modifiers: {
         type: "array",
         items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
-        description: "Modifiers held during hover.",
+        description: "Modifiers held during hover or wheel input.",
       },
       settleMs: { type: "integer", description: "Hover settle delay." },
+      deltaX: {
+        type: "number",
+        description: "Horizontal wheel input in CSS pixels; defaults to 0.",
+      },
+      deltaY: { type: "number", description: "Vertical wheel input in CSS pixels; defaults to 0." },
       timeoutMs: TIMEOUT_MS_PARAM,
       values: {
         type: "array",

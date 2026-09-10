@@ -18,6 +18,7 @@ pub mod scroll;
 pub mod session;
 pub mod tabs;
 pub mod waits;
+pub mod wheel;
 pub mod window;
 
 pub use console::*;
@@ -35,4 +36,5 @@ pub use scroll::*;
 pub use session::*;
 pub use tabs::*;
 pub use waits::*;
+pub use wheel::*;
 pub use window::*;

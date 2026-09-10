@@ -603,6 +603,7 @@ describe("ToolDispatcher", () => {
     "focus",
     "blur",
     "scroll_to",
+    "wheel",
   ] as const)("routes %s with hover cleanup and cooperative cancellation", async (action) => {
     const tab = { id: 7, windowId: 4242, active: true };
     vi.stubGlobal("chrome", {
@@ -630,6 +631,9 @@ describe("ToolDispatcher", () => {
           return new Promise((resolve) => {
             resolveNode = resolve;
           });
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 100, 0, 100, 100, 0, 100]] };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 } };
         if (method === "Runtime.callFunctionOn") return { result: { value: true } };
         return {};
       }),
@@ -642,7 +646,13 @@ describe("ToolDispatcher", () => {
     hover.rememberHover("aa11", { tab_id: 7, x: 10, y: 20 });
     await hover.setHoverBypass("aa11", 7, true);
     dispatcher.start();
-    deliver(makeRequest(`tool.${action}`, { session_id: "aa11", ref: "e1" }));
+    deliver(
+      makeRequest(`tool.${action}`, {
+        session_id: "aa11",
+        ref: "e1",
+        ...(action === "wheel" ? { delta_y: 120 } : {}),
+      }),
+    );
     await vi.waitFor(() => expect(resolveNode).toBeDefined());
     expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
     deliver({ id: "cancel-focus", method: "cancel", params: { rpc_id: "r-1" } });
@@ -655,7 +665,7 @@ describe("ToolDispatcher", () => {
     });
     expect(cdp.send).not.toHaveBeenCalledWith(7, "DOM.focus", expect.anything());
     expect(cdp.send).not.toHaveBeenCalledWith(7, "Runtime.callFunctionOn", expect.anything());
-    if (action === "scroll_to") {
+    if (action === "scroll_to" || action === "wheel") {
       expect(cdp.send).toHaveBeenCalledWith(7, "Runtime.releaseObjectGroup", {
         objectGroup: expect.any(String),
       });
@@ -668,6 +678,18 @@ describe("ToolDispatcher", () => {
       7,
       expect.objectContaining({ enabled: false }),
     );
+    if (action === "wheel") {
+      expect(cdp.send).toHaveBeenCalledWith(7, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: 10,
+        y: 20,
+      });
+      expect(cdp.send).not.toHaveBeenCalledWith(
+        7,
+        "Input.dispatchMouseEvent",
+        expect.objectContaining({ type: "mouseWheel" }),
+      );
+    }
     expect(dispatcher.inflightAbortControllers.size).toBe(0);
     dispatcher.stop();
   });

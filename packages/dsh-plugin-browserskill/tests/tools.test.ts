@@ -102,6 +102,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.network": ["browser_inspect", "network"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
+  "interact.wheel": ["browser_interact", "wheel"],
   "interact.scroll-to": ["browser_interact", "scroll-to"],
   "interact.focus": ["browser_interact", "focus"],
   "interact.blur": ["browser_interact", "blur"],
@@ -203,7 +204,17 @@ const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
   browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network"],
-  browser_interact: ["click", "hover", "scroll-to", "focus", "blur", "fill", "select", "press"],
+  browser_interact: [
+    "click",
+    "hover",
+    "wheel",
+    "scroll-to",
+    "focus",
+    "blur",
+    "fill",
+    "select",
+    "press",
+  ],
   browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
   browser_assist: ["resize", "emulate", "request-help"],
 } as const;
@@ -1406,5 +1417,64 @@ describe("observation action instrumentation timing", () => {
       expect(observation.getState().find((s) => s.sessionId === "s1")?.action).toBe("idle"),
     );
     observation.dispose();
+  });
+});
+
+describe("wheel action", () => {
+  it.each([
+    undefined,
+    "@e3",
+    "#panel",
+  ])("maps target %s, signed deltas, modifiers and timeout", async (target) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      wheel: { tab_id: 7, x: 10, y: 20, delta_x: -12.5, delta_y: 0 },
+    });
+    await startSession(tools);
+    expect(
+      await tools.get("interact.wheel")!.execute(
+        {
+          ...(target === undefined ? {} : { target }),
+          deltaX: -12.5,
+          modifiers: ["ctrl", "shift"],
+          tabId: 7,
+          timeoutMs: 150_000,
+        },
+        makeExec(),
+      ),
+    ).toEqual({ session: "s1", tabId: 7, x: 10, y: 20, deltaX: -12.5, deltaY: 0 });
+    expect(calls[1].args).toEqual([
+      "wheel",
+      "--session",
+      "s1",
+      "--delta-x",
+      "-12.5",
+      "--delta-y",
+      "0",
+      "--tab-id",
+      "7",
+      "--modifiers",
+      "ctrl,shift",
+      "--timeout",
+      "150000ms",
+      ...(target === undefined ? [] : [target]),
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
+  });
+
+  it.each([
+    {},
+    { deltaX: 0, deltaY: 0 },
+    { deltaY: NaN },
+    { deltaX: Infinity },
+    { target: " ", deltaY: 120 },
+    { deltaY: 120, timeoutMs: 0 },
+    { deltaY: 120, modifiers: ["invalid"] },
+    { deltaY: 120, session: "foreign" },
+  ])("rejects invalid or unowned arguments %j before invoking the CLI", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get("interact.wheel")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls).toHaveLength(1);
   });
 });

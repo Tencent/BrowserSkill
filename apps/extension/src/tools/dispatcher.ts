@@ -34,6 +34,7 @@ import type {
   SnapshotParams,
   UploadParams,
   WaitForNavigationParams,
+  WheelParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { handleConsole } from "./console";
@@ -98,6 +99,7 @@ import {
 } from "./tabs";
 import { handleUpload } from "./upload";
 import { handleWaitForNavigation } from "./waits";
+import { handleWheel } from "./wheel";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
@@ -527,6 +529,20 @@ export class ToolDispatcher {
         );
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
+      case "tool.wheel":
+        return this.withHoverReassert(
+          req.params as WheelParams,
+          () =>
+            handleWheel(
+              this.sessions,
+              req.params as WheelParams,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, bypassOverlay }
+                : undefined,
+            ),
+          { releaseAfter: true },
+          signal,
+        );
       case "tool.scroll_to":
         return this.withHoverReleaseForRequest(
           req.params as ScrollToParams,
@@ -830,6 +846,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.reload":
     case "tool.click":
     case "tool.hover":
+    case "tool.wheel":
     case "tool.scroll_to":
     case "tool.focus":
     case "tool.blur":
