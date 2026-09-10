@@ -126,6 +126,15 @@ function fixture(child = false, oopif = false) {
         };
       }
       if (method === "Runtime.releaseObjectGroup") return {};
+      // OOPIF projection uses the full viewport for scale, independently of
+      // the scrollbar-excluding layout viewport used for clipping.
+      if (method === "Runtime.evaluate" && target.sessionId === "oopif") {
+        expect(params).toMatchObject({
+          expression: "({ width: window.innerWidth, height: window.innerHeight })",
+          returnByValue: true,
+        });
+        return { result: { value: { width: 200, height: 100 } } };
+      }
       if (method === "Page.getLayoutMetrics")
         return {
           cssLayoutViewport: { clientWidth: 1200, clientHeight: 800, pageX: 0, pageY: 0 },
