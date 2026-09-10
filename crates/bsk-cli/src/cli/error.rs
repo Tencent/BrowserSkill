@@ -451,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn not_found_ref_uses_snapshot_hint_in_json() {
+    fn not_found_ref_uses_observe_hint_in_json() {
         let cli = CliError::from_rpc(RpcError {
             code: ErrorCode::NotFound,
             message: "ref @e99 unknown for tab 7".into(),
@@ -467,7 +467,7 @@ mod tests {
                 .get("hint")
                 .and_then(|v| v.as_str())
                 .unwrap()
-                .contains("bsk snapshot")
+                .contains("bsk observe")
         );
         assert!(
             !parsed
