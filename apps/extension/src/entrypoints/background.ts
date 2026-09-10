@@ -1,12 +1,11 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ConnectionController } from "@/lib/connection-controller";
+import { watchDaemonPort } from "@/lib/daemon-port-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
-  getDaemonPort,
   setConnectionEnabled as persistConnectionEnabled,
-  STORAGE_KEYS,
   setLabel,
 } from "@/lib/instance-id";
 import { startKeepalive } from "@/lib/keepalive";
@@ -57,26 +56,13 @@ export default defineBackground(() => {
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
 
-  async function applyDaemonPort(port: number): Promise<void> {
+  const daemonPort = watchDaemonPort((port) => {
     const url = resolveDaemonWsUrl(port);
-    if (!transport.setUrl(url)) return;
-    await transport.disconnect();
-    if (!controller.isConnectionEnabled) return;
-    try {
-      await transport.connect();
-    } catch (err) {
-      console.debug("[browser-skill] reconnect after port change failed", err);
-    }
-  }
-
-  if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== "local") return;
-      const change = changes[STORAGE_KEYS.DAEMON_PORT];
-      if (!change || typeof change.newValue !== "number") return;
-      void applyDaemonPort(change.newValue);
+    void controller.reconfigureTransport(url, () => {
+      transport.setUrl(url);
     });
-  }
+  });
+  let preferenceWrites = Promise.resolve();
 
   function setControlMode(sessionId: string, mode: OverlayMode): void {
     if (controlModes.get(sessionId) === mode) return;
@@ -259,7 +245,7 @@ export default defineBackground(() => {
   // the BrowserSkill connection.
   startKeepalive({
     transport,
-    shouldConnect: () => controller.isConnectionEnabled,
+    requestConnect: () => controller.requestConnect(),
   });
 
   // Application-level heartbeat (Chrome 116+): while the post-handshake
@@ -281,13 +267,7 @@ export default defineBackground(() => {
   // the worker and let us reconnect immediately instead of waiting for
   // the next 30s alarm tick. They only help when the daemon is actually
   // running; a cold daemon is (re)spawned by the next `bsk` command.
-  const reconnectIfNeeded = () => {
-    if (!controller.isConnectionEnabled) return;
-    if (transport.state === "connected") return;
-    void transport.connect().catch((err) => {
-      console.debug("[browser-skill] wake reconnect attempt failed", err);
-    });
-  };
+  const reconnectIfNeeded = () => controller.requestConnect();
   if (typeof chrome.runtime?.onStartup?.addListener === "function") {
     chrome.runtime.onStartup.addListener(reconnectIfNeeded);
   }
@@ -302,22 +282,18 @@ export default defineBackground(() => {
   }
 
   void (async () => {
-    const connectionEnabled = await getConnectionEnabled();
-    const port = await getDaemonPort();
-    transport.setUrl(resolveDaemonWsUrl(port));
+    const [connectionEnabled] = await Promise.all([getConnectionEnabled(), daemonPort.ready]);
+    const cleanup = async () => {
+      const report = await cleanupAfterDisconnect();
+      if (report.failures.length > 0) {
+        throw new Error(
+          `Session cleanup incomplete: ${report.failures.map((failure) => failure.message).join("; ")}`,
+        );
+      }
+    };
     await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
-      beforeDisconnect: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup before disconnect was incomplete", report);
-        }
-      },
-      onDisconnected: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
-        }
-      },
+      beforeDisconnect: cleanup,
+      onDisconnected: cleanup,
     });
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
@@ -372,9 +348,13 @@ export default defineBackground(() => {
         if (msg.kind === "set_label") {
           void setLabel(msg.value).then(() => controller.refreshLabel());
         } else if (msg.kind === "set_connection_enabled") {
-          void controller
-            .setConnectionEnabled(msg.value)
-            .then(() => persistConnectionEnabled(msg.value));
+          void controller.setConnectionEnabled(msg.value);
+          // Persist user intent in message order, independently of slow cleanup.
+          preferenceWrites = preferenceWrites
+            .then(() => persistConnectionEnabled(msg.value))
+            .catch((err) => {
+              console.error("[browser-skill] connection preference write failed", err);
+            });
         }
       }
     });

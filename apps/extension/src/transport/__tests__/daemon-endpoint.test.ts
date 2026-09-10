@@ -21,6 +21,9 @@ describe("daemon-endpoint", () => {
     expect(normalizeDaemonPort(65536)).toBe(DEFAULT_DAEMON_PORT);
     expect(normalizeDaemonPort("abc")).toBe(DEFAULT_DAEMON_PORT);
     expect(normalizeDaemonPort(1.5)).toBe(DEFAULT_DAEMON_PORT);
+    expect(normalizeDaemonPort("53200abc")).toBe(DEFAULT_DAEMON_PORT);
+    expect(normalizeDaemonPort("1.5")).toBe(DEFAULT_DAEMON_PORT);
+    expect(normalizeDaemonPort("1e3")).toBe(DEFAULT_DAEMON_PORT);
   });
 
   it("normalizeDaemonPort accepts valid numbers and numeric strings", () => {

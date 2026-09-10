@@ -23,8 +23,7 @@ export function resolveDaemonWsUrl(port: number): string {
 export function normalizeDaemonPort(raw: unknown): number {
   if (typeof raw === "number" && isValidPort(raw)) return raw;
   if (typeof raw === "string" && raw.trim() !== "") {
-    const parsed = Number.parseInt(raw.trim(), 10);
-    if (isValidPort(parsed)) return parsed;
+    return parseDaemonPortInput(raw) ?? DEFAULT_DAEMON_PORT;
   }
   return DEFAULT_DAEMON_PORT;
 }

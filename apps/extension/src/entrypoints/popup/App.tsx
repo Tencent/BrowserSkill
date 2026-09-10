@@ -47,6 +47,10 @@ export function App() {
     setDraft: setDaemonPortDraft,
     commit: commitDaemonPort,
     invalid: daemonPortInvalid,
+    loaded: daemonPortLoaded,
+    saving: daemonPortSaving,
+    dirty: daemonPortDirty,
+    error: daemonPortError,
   } = useDaemonPort();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
@@ -206,14 +210,14 @@ export function App() {
                   {t(STATE_BADGE_KEYS[statusState])}
                 </Badge>
                 <Switch
-                  checked={snapshot.connectionEnabled && !isDisconnected}
+                  checked={snapshot.connectionEnabled}
                   onCheckedChange={setConnectionEnabled}
                   aria-label={t("popup.connectionToggleTitle")}
                   data-slot="popup-connection-toggle"
                 />
               </div>
             </div>
-            {isDisconnected && (
+            {isDisconnected && !snapshot.lastError && (
               <p
                 className="mt-2 text-xs leading-snug text-muted-foreground"
                 data-slot="popup-daemon-unreachable"
@@ -306,11 +310,11 @@ export function App() {
                 onChange={(event: ChangeEvent<HTMLInputElement>) =>
                   setDaemonPortDraft(event.target.value)
                 }
-                onBlur={commitDaemonPort}
+                disabled={!daemonPortLoaded || daemonPortSaving}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
                     event.preventDefault();
-                    commitDaemonPort();
+                    void commitDaemonPort();
                   }
                 }}
                 className="mt-0 h-7.5 w-19 shrink-0 rounded-md px-2 py-0 text-center text-sm leading-none shadow-none"
@@ -318,6 +322,27 @@ export function App() {
                 data-slot="popup-daemon-port-input"
               />
             </div>
+            <div className="mt-2 flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={!daemonPortLoaded || daemonPortSaving || !daemonPortDirty}
+                onClick={() => void commitDaemonPort()}
+              >
+                {t(daemonPortSaving ? "popup.daemonPortSaving" : "popup.daemonPortSave")}
+              </Button>
+            </div>
+            {daemonPortError && (
+              <p role="alert" className="mt-1.5 text-[11px] leading-snug text-destructive">
+                {t(
+                  daemonPortError === "read"
+                    ? "popup.daemonPortReadFailed"
+                    : "popup.daemonPortWriteFailed",
+                )}
+              </p>
+            )}
             {daemonPortInvalid && (
               <p
                 className="mt-1.5 text-[11px] leading-snug text-destructive"
@@ -328,7 +353,7 @@ export function App() {
             )}
           </section>
 
-          {snapshot.lastError && !isDisconnected && (
+          {snapshot.lastError && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
               data-slot="popup-error"

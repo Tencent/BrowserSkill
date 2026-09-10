@@ -71,11 +71,11 @@ describe("App", () => {
     expect(screen.queryByText("请先打开 BrowserSkill。")).toBeNull();
   });
 
-  it("shows the connection switch off and hides transport errors when disconnected", () => {
+  it("keeps the connection switch usable and shows protocol errors when disconnected", () => {
     mockUseConnectionState.mockReturnValue({
       snapshot: {
         ...baseSnapshot,
-        lastError: "[WSTransport] disconnect during connect",
+        lastError: "version_too_old: protocol-major mismatch",
       },
       statusState: "disconnected",
       setLabel,
@@ -85,12 +85,14 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByText("未连接")).toBeTruthy();
-    expect(screen.getByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeTruthy();
+    expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
     expect(screen.queryByText("端口不匹配")).toBeNull();
     expect(
       screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked"),
-    ).toBe("false");
-    expect(screen.queryByText("[WSTransport] disconnect during connect")).toBeNull();
+    ).toBe("true");
+    expect(screen.getByText("version_too_old: protocol-major mismatch")).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "BrowserSkill 连接" }));
+    expect(setConnectionEnabled).toHaveBeenCalledWith(false);
   });
 
   it("does not render record UI on the main view", () => {
@@ -462,29 +464,31 @@ describe("daemon port input", () => {
     await waitFor(() => expect((input as HTMLInputElement).value).toBe("53200"));
   });
 
-  it("persists a valid port on blur", async () => {
+  it("persists a valid port with the save button", async () => {
     const store = stubChromeStorage();
 
     render(<App />);
 
     const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { value: "53200" } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
 
-    expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200);
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200));
     expect((input as HTMLInputElement).value).toBe("53200");
   });
 
-  it("persists a valid port when Enter blurs the field", async () => {
+  it("persists a valid port on Enter", async () => {
     const store = stubChromeStorage();
 
     render(<App />);
 
     const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { value: "53200" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200);
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200));
   });
 
   it("shows an error and does not write invalid ports", async () => {
@@ -493,8 +497,9 @@ describe("daemon port input", () => {
     render(<App />);
 
     const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { value: "abc" } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
 
     expect(screen.getByText("请输入 1 到 65535 之间的端口号。")).toBeTruthy();
     expect(store[STORAGE_KEYS.DAEMON_PORT]).toBeUndefined();
@@ -506,10 +511,11 @@ describe("daemon port input", () => {
     render(<App />);
 
     const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
     fireEvent.change(input, { target: { value: "" } });
-    fireEvent.blur(input);
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
 
-    expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(DEFAULT_DAEMON_PORT);
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(DEFAULT_DAEMON_PORT));
     expect((input as HTMLInputElement).value).toBe(String(DEFAULT_DAEMON_PORT));
   });
 
@@ -520,7 +526,9 @@ describe("daemon port input", () => {
 
     const info = await screen.findByRole("button", { name: "连接端口说明" });
     expect(info).toBeTruthy();
-    const tooltip = screen.getByText("扩展通过此端口连接本机 daemon。非必要请勿修改。");
+    const tooltip = screen.getByText(
+      "通过此端口连接本机 daemon。保存修改会结束当前会话，并在连接开关开启时重新连接。",
+    );
     expect(tooltip.getAttribute("role")).toBe("tooltip");
     expect(tooltip.className).toContain("opacity-0");
   });

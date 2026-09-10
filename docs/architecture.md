@@ -43,7 +43,7 @@ Key modules:
 
 ### bsk daemon (same binary: `bsk daemon`)
 
-- Listens on loopback WebSocket (default **52800**, configurable in the extension popup) for extensions.
+- Listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
 - Validates `Origin: chrome-extension://…` on handshake.
 - Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
 - **Per-session queue** serializes tool calls targeting one session.
