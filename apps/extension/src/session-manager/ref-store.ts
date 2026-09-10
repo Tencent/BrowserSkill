@@ -14,6 +14,7 @@
 export type BackendNodeId = number;
 
 export interface RefEntry {
+  name?: string;
   backendNodeId: BackendNodeId;
   tabId: number | null;
   frameId?: string;
@@ -24,6 +25,7 @@ export interface RefEntry {
 export type RefInput =
   | BackendNodeId
   | {
+      name?: string;
       backendNodeId: BackendNodeId;
       tabId: number;
       frameId?: string;
@@ -98,6 +100,7 @@ export class RefStore {
       };
     }
     return {
+      ...(input.name ? { name: input.name } : {}),
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),

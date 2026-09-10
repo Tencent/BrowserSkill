@@ -32,6 +32,7 @@ export interface BrowserMeta {
 }
 
 export interface HandshakeInput {
+  auditEnabled?: boolean;
   instanceId: string;
   browser: BrowserMeta;
   label: string;
@@ -61,6 +62,7 @@ export function performHandshake(
 ): Promise<HandshakeOutcome> {
   const id = input.rpcId ?? ridToString();
   const params: HandshakeParams = {
+    ...(input.auditEnabled !== undefined ? { audit_enabled: input.auditEnabled } : {}),
     client: CLIENT_ID,
     version: EXTENSION_VERSION,
     protocol_version: PROTOCOL_VERSION,

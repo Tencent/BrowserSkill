@@ -8,6 +8,7 @@ import {
   RiInformationLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { AuditPanel } from "@/components/audit-panel";
 import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
@@ -134,7 +135,9 @@ export function App() {
       ? t("popup.launcher.title")
       : view === "record"
         ? t("popup.record.sectionTitle")
-        : t("popup.brandName");
+        : view === "audit"
+          ? t("audit.title")
+          : t("popup.brandName");
 
   return (
     <main
@@ -154,7 +157,7 @@ export function App() {
             size="icon"
             className="size-7 shrink-0 rounded-md"
             aria-label={t("popup.back")}
-            onClick={() => setView(view === "record" ? "features" : "main")}
+            onClick={() => setView(view === "record" || view === "audit" ? "features" : "main")}
             data-slot="popup-back"
           >
             <RiArrowLeftLine className="size-4" aria-hidden />
@@ -438,6 +441,8 @@ export function App() {
           })}
         </section>
       )}
+
+      {view === "audit" && <AuditPanel />}
 
       {view === "record" && (
         <section className="space-y-2.5" data-slot="popup-record-body">

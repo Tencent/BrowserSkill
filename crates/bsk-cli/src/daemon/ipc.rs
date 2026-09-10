@@ -202,7 +202,32 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
         let status = status.clone();
         let state = Arc::clone(&state);
         Box::pin(async move {
-            match method {
+            let mut params = params;
+            // Internal correlation is minted here, never accepted from a CLI caller.
+            if let Some(object) = params.as_object_mut() {
+                object.remove("_audit_id");
+            }
+            let ticket = if serde_json::to_value(&method)
+                .ok()
+                .and_then(|v| v.as_str().map(|s| s.starts_with("tool.")))
+                .unwrap_or(false)
+            {
+                match state.audit.begin(params.get("session_id").and_then(Value::as_str).unwrap_or(""), &method, &params) {
+                    Ok(ticket) => ticket,
+                    Err(_) => return ResponseBody::Err(RpcError { code: ErrorCode::ProtocolError, message: "Operation audit could not be saved; action was not dispatched. Check the audit page or turn recording off.".into(), data: None }),
+                }
+            } else {
+                None
+            };
+            if let Some(ticket) = &ticket
+                && let Some(object) = params.as_object_mut()
+            {
+                object.insert(
+                    "_audit_id".into(),
+                    Value::String(ticket.operation_id.clone()),
+                );
+            }
+            let body = match method {
                 Method::SystemPing => {
                     let result = PingResult { pong: true };
                     ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null))
@@ -277,7 +302,11 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     message: format!("method not implemented yet: {other:?}"),
                     data: None,
                 }),
+            };
+            if let Some(ticket) = ticket {
+                state.audit.finish(ticket, &body);
             }
+            body
         })
     })
 }
@@ -354,6 +383,7 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    let audit_id = params.get("_audit_id").cloned();
     let mut params = params;
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
@@ -389,6 +419,11 @@ async fn handle_tool_dispatch(
         download.max_byte_size = Some(super::file_transfer::MAX_TRANSFER_BYTES);
         download_transfer_id = Some(staging.transfer_id);
         params = serde_json::to_value(download).unwrap_or(Value::Null);
+    }
+    if let Some(audit_id) = audit_id
+        && let Some(object) = params.as_object_mut()
+    {
+        object.insert("_audit_id".into(), audit_id);
     }
     let entry = inflight_guard.entry();
     // `record_stop` must reach the extension while `record_await` holds the
@@ -822,6 +857,10 @@ async fn handle_session_start(
     rpc_id: RpcId,
     params: Value,
 ) -> Result<Value, RpcError> {
+    let task_name = params
+        .get("task_name")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let abort_guard = state
         .abort_registry
         .register(rpc_id)
@@ -874,6 +913,9 @@ async fn handle_session_start(
     .await
     {
         Ok(session) => {
+            if let Some(name) = task_name {
+                state.audit.set_name(&session.id.0, &name);
+            }
             let result = CliSessionStartResult {
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),

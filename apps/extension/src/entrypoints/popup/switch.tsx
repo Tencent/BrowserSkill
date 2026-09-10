@@ -2,6 +2,7 @@ import { cn } from "@browser-skill/ui";
 
 export interface SwitchProps {
   checked: boolean;
+  disabled?: boolean;
   onCheckedChange: (checked: boolean) => void;
   "aria-label": string;
   "data-slot"?: string;
@@ -14,6 +15,7 @@ export interface SwitchProps {
  */
 export function Switch({
   checked,
+  disabled = false,
   onCheckedChange,
   "aria-label": ariaLabel,
   "data-slot": dataSlot,
@@ -21,12 +23,13 @@ export function Switch({
   return (
     <button
       type="button"
+      disabled={disabled}
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
       data-slot={dataSlot}
       className={cn(
-        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+        "relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50",
         checked ? "bg-primary" : "bg-muted",
       )}
       onClick={() => onCheckedChange(!checked)}
