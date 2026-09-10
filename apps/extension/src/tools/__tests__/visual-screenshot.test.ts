@@ -6,6 +6,7 @@ import { handleScreenshot } from "../observation";
 import type { CdpRunner } from "../shared";
 import { consumeVisualCapture, issueVisualCapture } from "../visual-capture";
 import { captureVisualScreenshot, visualScreenshotScale } from "../visual-screenshot";
+import { resolveVisualRegionNow, verifyVisualHit } from "../visual-target";
 import type { VisualCandidate, VisualFramePath } from "../vom/visual-discovery";
 
 const styles = {
@@ -678,4 +679,82 @@ it.each([
   ).toHaveProperty("code", "invalid_params");
   expect(f.input).toHaveLength(0);
   expect(await handleClick(f.manager, f.params, f.deps)).not.toHaveProperty("code");
+});
+
+describe("visual hit shadow boundaries", () => {
+  it.each([
+    "plain",
+    "open",
+    "closed",
+    "nested",
+    "slotted",
+    "iframe",
+  ])("executes the hit script for %s targets and rejects occlusion in every scope", async (kind) => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const target = document.createElement(kind === "iframe" ? "iframe" : "canvas");
+    const scopes: { root: Document | ShadowRoot; node: Element }[] = [];
+    let parent: Element | ShadowRoot = container;
+    const modes: ShadowRootMode[] =
+      kind === "nested"
+        ? ["closed", "open", "closed"]
+        : kind === "plain"
+          ? []
+          : [kind === "open" ? "open" : "closed"];
+    let scope: Document | ShadowRoot = document;
+    for (const mode of modes) {
+      const host = document.createElement("div");
+      parent.append(host);
+      if (kind === "slotted") {
+        host.attachShadow({ mode }).append(document.createElement("slot"));
+        parent = host;
+        break;
+      }
+      scopes.push({ root: scope, node: host });
+      scope = host.attachShadow({ mode });
+      if (mode === "closed") expect(host.shadowRoot).toBeNull();
+      parent = scope;
+    }
+    parent.append(target);
+    scopes.push({ root: scope, node: target });
+    // happy-dom has no layout hit testing. Stub only the browser hit results;
+    // execute the actual CDP script against real DOM roots, including closed ones.
+    const hits = scopes.map(({ root, node }) => {
+      const original = Object.getOwnPropertyDescriptor(root, "elementFromPoint");
+      const hit = vi.fn((): Element | null => node);
+      Object.defineProperty(root, "elementFromPoint", { configurable: true, value: hit });
+      return { root, original, hit, node };
+    });
+    try {
+      const f = fixture();
+      const state = await resolveVisualRegionNow(f.cdp, f.candidate);
+      if ("code" in state) throw new Error(state.message);
+      const original = f.send.getMockImplementation()!;
+      f.send.mockImplementation(async (cdpTarget, method, params = {}) => {
+        if (
+          method === "Runtime.callFunctionOn" &&
+          String(params.functionDeclaration).includes("elementFromPoint")
+        ) {
+          const run = new Function(`return (${params.functionDeclaration});`)();
+          return { result: { value: run.call(target, 20, 30) } };
+        }
+        return original(cdpTarget, method, params);
+      });
+      expect(await verifyVisualHit(f.cdp, state, { x: 20, y: 30 })).toBe(true);
+      for (const { hit, node } of hits) {
+        hit.mockReturnValue(document.createElement("div"));
+        expect(await verifyVisualHit(f.cdp, state, { x: 20, y: 30 })).toBe(false);
+        hit.mockReturnValue(node);
+      }
+      target.remove();
+      expect(await verifyVisualHit(f.cdp, state, { x: 20, y: 30 })).toBe(false);
+      expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+    } finally {
+      for (const { root, original } of hits) {
+        if (original) Object.defineProperty(root, "elementFromPoint", original);
+        else Reflect.deleteProperty(root, "elementFromPoint");
+      }
+      container.remove();
+    }
+  });
 });

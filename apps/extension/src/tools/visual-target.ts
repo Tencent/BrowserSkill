@@ -424,7 +424,7 @@ export function sameVisualMapping(a: VisualTargetState, b: VisualTargetState): b
     })
   );
 }
-/** Browser hit testing follows each verified frame, including open shadow roots. */
+/** Browser hit testing follows each verified frame, including open and closed shadow roots. */
 export async function verifyVisualHit(
   cdp: CdpRunner,
   state: VisualTargetState,
@@ -447,13 +447,17 @@ export async function verifyVisualHit(
         functionDeclaration: `function(x,y) {
           if (!this.isConnected || this.ownerDocument !== document) return false;
           for(let n=this;n;n=n.parentElement || n.getRootNode().host) if(n.inert) return false;
-          let hit=document.elementFromPoint(x,y);
-          while(hit && hit.shadowRoot) {
-            const inner=hit.shadowRoot.elementFromPoint(x,y);
-            if(!inner || inner===hit) break;
-            hit=inner;
+          // Resolve roots from the verified target; closed hosts expose no shadowRoot.
+          const path=[];
+          for(let node=this;node;) {
+            const root=node.getRootNode();
+            path.push({root,node});
+            if(root===document) break;
+            if(!root.host) return false;
+            node=root.host;
           }
-          return hit===this;
+          // Check every outer scope as well, so internal hits cannot bypass an overlay.
+          return path.reverse().every(({root,node}) => root.elementFromPoint(x,y)===node);
         }`,
         arguments: [
           { value: (point.x - unit.x) / unit.width },
