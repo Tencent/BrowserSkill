@@ -64,16 +64,26 @@ pub fn acquire() -> Result<DaemonLock> {
 
     match file.try_lock_exclusive() {
         Ok(()) => Ok(DaemonLock { file, path }),
-        Err(_) => Err(anyhow::anyhow!(AlreadyLocked { path })),
+        Err(err) if err.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            Err(anyhow::anyhow!(AlreadyLocked { path }))
+        }
+        Err(err) => Err(anyhow::Error::new(err).context(format!("lock {}", path.display()))),
     }
 }
 
 /// Check if a pid is alive on the local machine.
 ///
 /// Returns `true` if a process with that pid exists (we don't differentiate
-/// our own daemon vs an unrelated process — the pid in `daemon.json` is
-/// validated against the held lock by [`info::read_valid`] in M2.4).
+/// our own daemon vs an unrelated process). This is local process metadata,
+/// not a daemon availability or identity check.
 pub fn pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    if pid > i32::MAX as u32 {
+        return false;
+    }
     #[cfg(unix)]
     {
         use nix::errno::Errno;

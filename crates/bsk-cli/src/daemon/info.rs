@@ -122,8 +122,8 @@ pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
 }
 
 /// Read `daemon.json` and only return it if the recorded pid is alive
-/// on the local machine. Stale files (daemon crashed without cleanup)
-/// surface as `Ok(None)` so callers can fall through to "auto-spawn".
+/// in the caller's PID namespace. This legacy helper does not establish
+/// daemon availability or identity; production discovery uses IPC probing.
 pub fn read_valid() -> Result<Option<DaemonInfo>> {
     Ok(read()?.filter(|info| lockfile::pid_alive(info.pid)))
 }

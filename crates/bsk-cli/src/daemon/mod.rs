@@ -9,6 +9,7 @@ pub mod info;
 pub mod ipc;
 pub mod lockfile;
 pub mod paths;
+pub(crate) mod probe;
 pub mod queue;
 pub mod session_interrupt;
 pub mod sessions;
