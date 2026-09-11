@@ -155,6 +155,20 @@ export function LongScreenshot() {
           {t(`longScreenshot.errors.${currentError}`)}
         </p>
       )}
+      {!active && currentError === "autoUnavailable" && (
+        <Button
+          className="w-full"
+          variant="outline"
+          size="sm"
+          disabled={pending}
+          onClick={() => {
+            setMode("manual");
+            void send({ type: LONG_SCREENSHOT, action: "start", mode: "manual" });
+          }}
+        >
+          {t("longScreenshot.useManual")}
+        </Button>
+      )}
       {active && state ? (
         <>
           <p className="text-[11px] leading-relaxed text-muted-foreground">

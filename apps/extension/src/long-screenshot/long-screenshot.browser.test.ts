@@ -1,7 +1,8 @@
 // @vitest-environment node
 // Build the extension first, then opt in with BSK_LONG_SCREENSHOT_CHROME.
 // Runs the shipped popup, content script, worker, PNG storage and preview in an
-// isolated browser. No daemon, CLI, user profile or external website is involved.
+// isolated browser. No daemon, CLI or user profile is involved; only the
+// restricted-page check visits the Chrome Web Store.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -15,6 +16,8 @@ type Send = <T = Record<string, unknown>>(
 ) => Promise<T>;
 
 import { fixture } from "./test-fixture";
+
+const extensionPath = process.env.BSK_LONG_SCREENSHOT_EXTENSION ?? path.resolve("dist/chrome-mv3");
 
 async function withHarness(
   run: (h: Awaited<ReturnType<typeof harness>>) => Promise<void>,
@@ -38,7 +41,7 @@ async function withHarness(
         executable: process.env.BSK_LONG_SCREENSHOT_CHROME,
         deviceScale: scale,
         zoom: 1,
-        extensionPath: path.resolve("dist/chrome-mv3"),
+        extensionPath,
         headless: true,
       },
       (send: Send) => runHarness(send),
@@ -51,7 +54,12 @@ async function withHarness(
   }
 }
 
-async function harness(send: Send, baseUrl: string) {
+async function harness(
+  send: Send,
+  baseUrl: string,
+  existingPage?: { targetId: string; sessionId: string },
+  knownOrigin?: string,
+) {
   const targets = () =>
     send<{ targetInfos: { type: string; url: string; targetId: string }[] }>("Target.getTargets");
   const poll = async <T>(
@@ -71,18 +79,23 @@ async function harness(send: Send, baseUrl: string) {
     }
     throw new Error("Browser condition timed out");
   };
-  const worker = await poll(async () =>
-    (await targets()).targetInfos.find(
-      (target) =>
-        target.type === "service_worker" &&
-        target.url.startsWith("chrome-extension://") &&
-        target.url.endsWith("/background.js"),
-    ),
-  );
   const origin =
-    new URL(worker.url).origin === "null"
-      ? worker.url.split("/").slice(0, 3).join("/")
-      : new URL(worker.url).origin;
+    knownOrigin ??
+    (
+      await poll(async () =>
+        (
+          await targets()
+        ).targetInfos.find(
+          (target) =>
+            target.type === "service_worker" &&
+            target.url.startsWith("chrome-extension://") &&
+            target.url.endsWith("/background.js"),
+        ),
+      )
+    ).url
+      .split("/")
+      .slice(0, 3)
+      .join("/");
   const create = async (url: string, background = false) => {
     const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
       url,
@@ -121,7 +134,7 @@ async function harness(send: Send, baseUrl: string) {
       "document.querySelector('[data-slot=popup-connection-toggle]')?.getAttribute('aria-checked') === 'false'",
     ),
   );
-  const page = await create(baseUrl);
+  const page = existingPage ?? (await create(baseUrl));
   await send("Page.bringToFront", {}, page.sessionId);
   await poll(() =>
     evaluate(
@@ -139,7 +152,14 @@ async function harness(send: Send, baseUrl: string) {
     );
   const status = async () => {
     const reply = await request<{
-      state: { id: string; phase: string; error?: string; width?: number; height?: number };
+      state: {
+        id: string;
+        phase: string;
+        mode?: string;
+        error?: string;
+        width?: number;
+        height?: number;
+      };
     }>("status");
     if (!reply)
       throw new Error(
@@ -198,6 +218,112 @@ async function harness(send: Send, baseUrl: string) {
 describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
   "full-page screenshot in a real extension",
   () => {
+    it.skipIf(!process.env.BSK_LONG_SCREENSHOT_URL)(
+      "captures a reported website automatically",
+      async () => {
+        await withHarness(async (h) => {
+          await h.send(
+            "Page.navigate",
+            { url: process.env.BSK_LONG_SCREENSHOT_URL },
+            h.page.sessionId,
+          );
+          await h.poll(
+            () => h.evaluate(h.page.sessionId, "document.readyState === 'complete'"),
+            60_000,
+          );
+          const original = await h.evaluate(h.page.sessionId, "scrollY");
+          await h.startFromPopup();
+          const state = await h.finished();
+          expect(state).toMatchObject({ phase: "complete", mode: "auto" });
+          expect(state, JSON.stringify(state)).not.toHaveProperty("partial", true);
+          expect(await h.evaluate(h.page.sessionId, "scrollY")).toBe(original);
+          const height = await h.evaluate<number>(
+            h.page.sessionId,
+            "Math.round(Math.max(document.documentElement.scrollHeight, document.body.scrollHeight) * devicePixelRatio)",
+          );
+          expect(state.height).toBe(height);
+          if (process.env.BSK_LONG_SCREENSHOT_OUTPUT) {
+            const output = process.env.BSK_LONG_SCREENSHOT_OUTPUT;
+            await mkdir(output, { recursive: true });
+            await writeFile(
+              path.join(output, "reported-site.json"),
+              JSON.stringify({ url: process.env.BSK_LONG_SCREENSHOT_URL, state, height }, null, 2),
+            );
+            const target = await h.poll(async () =>
+              (await h.targets()).targetInfos.find((t) =>
+                t.url.includes(`/long-screenshot.html?id=${state.id}`),
+              ),
+            );
+            const { sessionId } = await h.send<{ sessionId: string }>("Target.attachToTarget", {
+              targetId: target.targetId,
+              flatten: true,
+            });
+            await h.poll(() =>
+              h.evaluate(sessionId, "document.querySelector('.preview-image')?.complete"),
+            );
+            const png = await h.send<{ data: string }>("Page.captureScreenshot", {}, sessionId);
+            await writeFile(
+              path.join(output, "reported-site-preview.png"),
+              Buffer.from(png.data, "base64"),
+            );
+          }
+        });
+      },
+      180_000,
+    );
+
+    it("recovers automatic capture after an extension reload without refreshing the page", async () => {
+      await withHarness(async (h) => {
+        const document = await h.evaluate(h.page.sessionId, "performance.timeOrigin");
+        const oldWorker = (await h.targets()).targetInfos.find(
+          (t) => t.type === "service_worker" && t.url.startsWith(h.origin),
+        );
+        // Reload the unpacked extension while the original webpage stays open.
+        expect(await h.send("Extensions.loadUnpacked", { path: extensionPath })).toMatchObject({
+          id: h.origin.split("://")[1],
+        });
+        await h.poll(
+          async () =>
+            !(await h.targets()).targetInfos.some((t) => t.targetId === oldWorker?.targetId),
+        );
+        const installed = await h.send<{ extensions: { id: string; enabled: boolean }[] }>(
+          "Extensions.getExtensions",
+        );
+        expect(installed.extensions.find((e) => e.id === h.origin.split("://")[1])).toMatchObject({
+          enabled: true,
+        });
+        const reloaded = await harness(h.send, h.baseUrl, h.page, h.origin);
+        // Confirm this is a real missing receiver, not a page reloaded by the test.
+        expect(await h.evaluate(h.page.sessionId, "performance.timeOrigin")).toBe(document);
+        expect(
+          await reloaded.evaluate(
+            reloaded.popup.sessionId,
+            `(async()=>{
+          const [tab]=await chrome.tabs.query({active:true,lastFocusedWindow:true});
+          try { const reply=await chrome.tabs.sendMessage(tab.id,{type:'bsk/long-screenshot-page',id:'probe',action:'probe'}); return !!reply?.ok; }
+          catch { return false; }
+        })()`,
+          ),
+        ).toBe(false);
+        await reloaded.startFromPopup();
+        expect(
+          await reloaded.poll(async () => {
+            const state = await reloaded.status();
+            return state.phase !== "preparing" ? state : false;
+          }),
+        ).toMatchObject({ mode: "auto" });
+        expect(await reloaded.finished()).toMatchObject({
+          phase: "complete",
+          mode: "auto",
+          height: 2634,
+        });
+        expect(await h.evaluate(h.page.sessionId, "performance.timeOrigin")).toBe(document);
+        expect(
+          await h.evaluate(h.page.sessionId, "document.querySelector('#sticky').style.position"),
+        ).toBe("");
+      });
+    }, 60_000);
+
     it.each([
       1, 2,
     ])("captures exact rows at device scale %s and restores styles and scroll", async (scale) => {
@@ -299,6 +425,12 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
         const mode = url.startsWith("chrome:") ? "visible" : "auto";
         expect(await h.request("start", { mode })).toMatchObject({ ok: true });
         if (mode === "auto") {
+          expect(await h.finished()).toMatchObject({
+            phase: "error",
+            mode: "auto",
+            error: "autoUnavailable",
+          });
+          expect(await h.request("start", { mode: "manual" })).toMatchObject({ ok: true });
           const first = await h.poll(async () => {
             const value = await h.status();
             return value.height ? value : false;

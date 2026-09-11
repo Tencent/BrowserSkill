@@ -13,6 +13,7 @@ export type CapturePhase =
 export type CaptureError =
   | "unsupported"
   | "unavailable"
+  | "autoUnavailable"
   | "busy"
   | "changed"
   | "tooLarge"

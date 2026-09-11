@@ -8,7 +8,9 @@ Open **Quick actions → Full-page screenshot** in the BrowserSkill popup. Choos
 - **Visible area**: captures the current viewport once.
 
 The feature works with the CLI connection off. It does not require the CLI, daemon or an Agent session.
-After installing or reloading the extension, refresh ordinary pages to load the new content script.
+After installing or reloading the extension, automatic capture reconnects the screenshot content
+script in already-open pages on demand. Injection targets only the captured document and retries
+once; navigation, cancellation and timeouts remain errors instead of changing capture mode.
 
 ## Controls and page access
 
@@ -21,10 +23,13 @@ Keep the captured tab selected and its viewport size stable. Navigation, resizin
 and storage errors preserve durable tiles and identify the result as partial. A restarted background
 worker can reopen the committed portion. Individual browser operations still have timeouts, but
 there is no fixed whole-job duration, scroll count, 32K image-height or 48-megapixel cutoff.
+Navigation checks observe the top-level document. Background loading of ads or other embedded
+frames does not cancel an otherwise stable capture just because the tab reports `loading`.
 
 Clicking the extension grants `activeTab` for the current tab. This enables visible-area screenshots
 of Chrome internal pages and the Chrome Web Store as well as ordinary websites. These restricted
-pages do not permit content-script injection; automatic mode switches to manual scrolling there.
+pages do not permit content-script injection. Automatic mode explains the failure and offers an
+explicit **Use manual scrolling** action; it never silently changes the selected capture mode.
 Browser/enterprise capture policies and user permissions still apply. Restricted-page support does
 not bypass Chrome's scripting or debugger restrictions.
 
@@ -59,7 +64,7 @@ screenshot feature's buffers, not the memory used by a webpage's own DOM or load
 ## Verification
 
 The automated checks cover actual scroll-offset rounding, fixed-footer overlap, capture beyond
-120 frames, early finish, cancellation, DOM cleanup, paused interaction, restricted-page fallback,
+120 frames, early finish, cancellation, DOM cleanup, paused interaction, restricted-page errors,
 streaming PNG round trips, export cancellation and disk failures. Manual alignment tests cover
 fixed bars, exact pixel offsets, ambiguous repeated content and non-overlapping jumps.
 
@@ -71,8 +76,11 @@ BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome pnpm --filter @browser-skill/extensio
 ```
 
 The extension tests cover automatic and manual capture, popup closure, pause/resume, early finish,
-page restoration, native downloads, Chrome internal pages and the Chrome Web Store. Restricted-page
+page restoration, reconnecting after an extension reload, native downloads, Chrome internal pages
+and the Chrome Web Store. Restricted-page
 tests invoke the real extension action through the browser's extension testing API to grant activeTab.
+Set `BSK_LONG_SCREENSHOT_URL` to additionally check an ordinary public website and
+`BSK_LONG_SCREENSHOT_OUTPUT` to retain its result metadata and preview screenshot.
 
 A standalone renderer suite exercises the production capture, OPFS store, PNG export and built
 preview, including fractional/Retina scales, lazy loading and a 3,170 × 100,062-pixel result:

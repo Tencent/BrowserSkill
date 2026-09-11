@@ -141,7 +141,8 @@
       "saveFailed": "Local storage is full or unavailable. Free up some space and try again.",
       "interrupted": "Capture was interrupted. You can save the completed portion.",
       "storageFull": "Local storage is full. Free some space; captured content is still available to preview and export.",
-      "alignment": "Could not align these frames reliably. Scroll back a little for more overlap, then scroll down slowly."
+      "alignment": "Could not align these frames reliably. Scroll back a little for more overlap, then scroll down slowly.",
+      "autoUnavailable": "Automatic scrolling could not start: this page does not allow extension scrolling, or its capture script could not connect. Refresh and retry, or choose “I scroll” or “Visible area”."
     },
     "mode": "Capture mode",
     "modes": {
@@ -155,6 +156,7 @@
     "resume": "Resume",
     "finish": "Finish and keep",
     "exporting": "Exporting",
-    "partial": "The captured portion has been kept."
+    "partial": "The captured portion has been kept.",
+    "useManual": "Use manual scrolling"
   }
 }

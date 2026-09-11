@@ -96,7 +96,6 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         !current.active ||
         current.windowId !== windowId ||
         current.url !== url ||
-        current.status === "loading" ||
         options.isTabBusy(tabId)
       )
         throw new ScreenshotError("changed");
@@ -138,7 +137,12 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         if (info.windowId === windowId && info.tabId !== tabId) changed();
       };
       const updated = (updatedId: number, info: chrome.tabs.TabChangeInfo) => {
-        if (updatedId === tabId && (info.status === "loading" || info.url)) changed();
+        if (updatedId === tabId && info.url && info.url !== url) changed();
+      };
+      // Tab loading status also includes ads and other subframes. Only a
+      // top-level navigation invalidates the document being stitched.
+      const navigated = (info: { tabId: number; frameId: number }) => {
+        if (info.tabId === tabId && info.frameId === 0) changed();
       };
       const removed = (removedId: number) => {
         if (removedId === tabId) changed();
@@ -147,25 +151,48 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
       chrome.tabs.onUpdated.addListener(updated);
       chrome.tabs.onRemoved.addListener(removed);
       chrome.tabs.onAttached.addListener(removed);
+      chrome.webNavigation.onBeforeNavigate.addListener(navigated);
+      chrome.webNavigation.onCommitted.addListener(navigated);
       // Paused manual jobs have no content script traffic. Keep this user-started
       // operation alive; durable tile checkpoints also survive a worker restart.
       const heartbeat = setInterval(() => {
         void chrome.runtime.getPlatformInfo().catch(() => {});
       }, 20_000);
       try {
-        let mode = requested;
+        const mode = requested;
         if (mode === "auto") {
+          const frame = await waitForReply(
+            chrome.webNavigation.getFrame({ tabId, frameId: 0 }),
+            controller.signal,
+            8000,
+          );
+          documentId = frame?.documentId;
+          if (!documentId) throw new ScreenshotError("autoUnavailable");
           try {
-            const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 });
-            documentId = frame?.documentId;
-            if (!documentId) throw new ScreenshotError("unavailable");
             await page({ action: "probe" });
-          } catch {
-            controller.signal.throwIfAborted();
-            mode = "manual";
+          } catch (error) {
+            // Existing tabs can lack the content script after an extension reload.
+            // Repair this document once, before any page styles or scroll change.
+            // Timeouts, navigation and page errors must not turn into manual jobs.
+            if (!(error instanceof ScreenshotError) || error.code !== "unavailable") throw error;
+            await checkTab();
+            try {
+              await waitForReply(
+                chrome.scripting.executeScript({
+                  target: { tabId, documentIds: [documentId] },
+                  files: ["content-scripts/long-screenshot-page.js"],
+                }),
+                controller.signal,
+                8000,
+              );
+              await page({ action: "probe" });
+            } catch (error) {
+              await checkTab();
+              if (error instanceof ScreenshotError && error.code !== "unavailable") throw error;
+              throw new ScreenshotError("autoUnavailable");
+            }
           }
         }
-        if (state?.id === id) publish({ ...state, mode });
         await checkTab();
         source = await openScreenshotSource(
           tabId,
@@ -273,6 +300,8 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         chrome.tabs.onUpdated.removeListener(updated);
         chrome.tabs.onRemoved.removeListener(removed);
         chrome.tabs.onAttached.removeListener(removed);
+        chrome.webNavigation.onBeforeNavigate.removeListener(navigated);
+        chrome.webNavigation.onCommitted.removeListener(navigated);
         if (running?.id === id) running = null;
       }
       if (complete) await preview(id).catch(() => {});

@@ -100,4 +100,25 @@ describe("long screenshot quick action", () => {
       false,
     );
   });
+
+  it("explains automatic scrolling failure and starts manual mode only on request", async () => {
+    sendMessage.mockResolvedValue({
+      ok: true,
+      state: { ...state, mode: "auto", phase: "error", error: "autoUnavailable" },
+    });
+    render(<LongScreenshot />);
+    expect((await screen.findByRole("alert")).textContent).toContain("未能启动自动滚动");
+    expect(screen.queryByText(/手动滚动模式：/)).toBeNull();
+    expect(sendMessage).toHaveBeenCalledOnce();
+    sendMessage.mockResolvedValueOnce({ ok: true, state: { ...state, mode: "manual" } });
+    fireEvent.click(screen.getByRole("button", { name: "改用手动滚动" }));
+    await waitFor(() =>
+      expect(sendMessage).toHaveBeenLastCalledWith({
+        type: LONG_SCREENSHOT,
+        action: "start",
+        mode: "manual",
+      }),
+    );
+    expect(await screen.findByText(/手动滚动模式：/)).toBeTruthy();
+  });
 });

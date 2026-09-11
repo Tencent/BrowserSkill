@@ -34,6 +34,7 @@ export default defineConfig({
       "downloads",
       "idle",
       "notifications",
+      "scripting",
       "tabs",
       "storage",
       "webNavigation",

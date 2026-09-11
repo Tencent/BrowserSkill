@@ -68,7 +68,12 @@ function setup(saved: CaptureState | null = null, busy = false) {
       onRemoved: event(),
       onAttached: event(),
     },
-    webNavigation: { getFrame: vi.fn(async () => ({ documentId: "document" })) },
+    webNavigation: {
+      getFrame: vi.fn(async () => ({ documentId: "document" })),
+      onBeforeNavigate: event(),
+      onCommitted: event(),
+    },
+    scripting: { executeScript: vi.fn(async (_options: unknown) => []) },
     storage: {
       session: {
         get: vi.fn(async () => ({ [LONG_SCREENSHOT_STATE]: saved })),
@@ -114,20 +119,105 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("independent screenshot jobs", () => {
-  it("offers manual capture for documents without script access", async () => {
+  it.each([
+    new Error("Receiving end does not exist"),
+    undefined,
+  ])("reconnects an existing document without silently switching to manual (%s)", async (missing) => {
     const { api, call } = setup();
-    api.tabs.sendMessage.mockRejectedValue(new Error("Receiving end does not exist"));
+    if (missing) api.tabs.sendMessage.mockRejectedValueOnce(missing);
+    else api.tabs.sendMessage.mockResolvedValueOnce(undefined as never);
     await call("start");
-    await vi.waitFor(async () =>
-      expect(await call("status")).toMatchObject({
-        state: { mode: "manual" },
-      }),
-    );
-    expect(capturePage).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(captureManual).toHaveBeenCalled());
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    expect(api.scripting.executeScript).toHaveBeenCalledExactlyOnceWith({
+      target: { tabId: 4, documentIds: ["document"] },
+      files: ["content-scripts/long-screenshot-page.js"],
+    });
+    expect(await call("status")).toMatchObject({ state: { mode: "auto" } });
+    expect(captureManual).not.toHaveBeenCalled();
     const status = await call("status");
     if (status.ok && status.state) await call("cancel", { id: status.state.id });
     resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "cancelled" } }),
+    );
+  });
+
+  it("explains denied script access and waits for an explicit manual request", async () => {
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockRejectedValue(new Error("Receiving end does not exist"));
+    api.scripting.executeScript.mockRejectedValue(new Error("Cannot access contents of url"));
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { mode: "auto", phase: "error", error: "autoUnavailable" },
+      }),
+    );
+    expect(capturePage).not.toHaveBeenCalled();
+    expect(captureManual).not.toHaveBeenCalled();
+    await call("start", { mode: "manual" });
+    await vi.waitFor(() => expect(captureManual).toHaveBeenCalled());
+    expect(api.scripting.executeScript).toHaveBeenCalledOnce();
+    const status = await call("status");
+    if (status.ok && status.state) await call("cancel", { id: status.state.id });
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "cancelled" } }),
+    );
+  });
+
+  it("does not repeatedly inject when the repaired document still cannot reply", async () => {
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockResolvedValue(undefined as never);
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { mode: "auto", phase: "error", error: "autoUnavailable" },
+      }),
+    );
+    expect(api.scripting.executeScript).toHaveBeenCalledOnce();
+    expect(capturePage).not.toHaveBeenCalled();
+    expect(captureManual).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "timeout",
+    "changed",
+    "busy",
+  ] as const)("preserves %s instead of retrying or starting a manual capture", async (code) => {
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockRejectedValueOnce(new ScreenshotError(code));
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { mode: "auto", phase: "error", error: code },
+      }),
+    );
+    expect(api.scripting.executeScript).not.toHaveBeenCalled();
+    expect(capturePage).not.toHaveBeenCalled();
+    expect(captureManual).not.toHaveBeenCalled();
+  });
+
+  it("cancels while reconnecting and ignores late injection completion", async () => {
+    const { api, call } = setup();
+    api.tabs.sendMessage.mockRejectedValueOnce(new Error("Receiving end does not exist"));
+    let injected!: () => void;
+    api.scripting.executeScript.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          injected = () => resolve([]);
+        }),
+    );
+    const reply = await call("start");
+    if (!reply.ok || !reply.state) throw new Error("missing job");
+    await vi.waitFor(() => expect(api.scripting.executeScript).toHaveBeenCalledOnce());
+    await call("cancel", { id: reply.state.id });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "cancelled" } }),
+    );
+    injected();
+    expect(capturePage).not.toHaveBeenCalled();
+    expect(captureManual).not.toHaveBeenCalled();
+    expect(api.tabs.sendMessage).toHaveBeenCalledOnce();
   });
   it("saves a completed result and opens the extension preview", async () => {
     const { api, call } = setup();
@@ -136,6 +226,7 @@ describe("independent screenshot jobs", () => {
       state: { phase: "preparing", tabId: 4 },
     });
     await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    expect(api.scripting.executeScript).not.toHaveBeenCalled();
     await vi.mocked(capturePage).mock.calls[0][0].write({} as ImageBitmap, 800, 0, 0, 2600);
     resolveCapture({ width: 800, height: 2600, blob: new Blob(["png"]) });
     await vi.waitFor(() => expect(api.tabs.create).toHaveBeenCalledOnce());
@@ -145,6 +236,42 @@ describe("independent screenshot jobs", () => {
       state: { phase: "complete", width: 800, height: 2600 },
     });
     expect(api.tabs.onActivated.removeListener).toHaveBeenCalled();
+    expect(api.webNavigation.onBeforeNavigate.removeListener).toHaveBeenCalled();
+    expect(api.webNavigation.onCommitted.removeListener).toHaveBeenCalled();
+  });
+
+  it("continues while an embedded frame makes the tab report loading", async () => {
+    const { api, call } = setup();
+    await call("start");
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    api.webNavigation.onBeforeNavigate.addListener.mock.calls[0][0]({ tabId: 4, frameId: 12 });
+    api.webNavigation.onCommitted.addListener.mock.calls[0][0]({ tabId: 4, frameId: 12 });
+    api.tabs.onUpdated.addListener.mock.calls[0][0](4, { status: "loading" });
+    const tab = await api.tabs.get();
+    api.tabs.get.mockResolvedValue({ ...tab, status: "loading" });
+    const deps = vi.mocked(capturePage).mock.calls[0][0];
+    await expect(deps.page({ action: "inspect" })).resolves.toEqual({});
+    expect(deps.signal.aborted).toBe(false);
+    await deps.write({} as ImageBitmap, 800, 0, 0, 512);
+    resolveCapture({ width: 800, height: 512, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "complete", height: 512 } }),
+    );
+  });
+
+  it.each([
+    "onBeforeNavigate",
+    "onCommitted",
+  ] as const)("stops on top-level navigation via %s, including same-URL reloads", async (event) => {
+    const { api, call } = setup();
+    await call("start");
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    api.webNavigation[event].addListener.mock.calls[0][0]({ tabId: 4, frameId: 0 });
+    expect(vi.mocked(capturePage).mock.calls[0][0].signal.aborted).toBe(true);
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "error", error: "changed" } }),
+    );
   });
 
   it("keeps durable rows and labels the preview when a later exposure fails", async () => {
