@@ -50,6 +50,9 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Optional task name displayed in local operation history.
+    #[arg(long)]
+    pub name: Option<String>,
     /// Target browser instance id (only required when multiple browsers
     /// are connected).
     #[arg(long)]
@@ -97,6 +100,8 @@ pub struct SessionStopArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +187,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     let result = start_session(
         sock,
         SessionStartOptions {
+            name: args.name,
             browser: args.browser,
             width: args.width,
             height: args.height,
@@ -216,6 +222,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -228,6 +235,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
         sock,
         Method::SessionStart,
         Some(StartParams {
+            task_name: opts.name,
             browser_instance_id: opts.browser,
             width: opts.width,
             height: opts.height,

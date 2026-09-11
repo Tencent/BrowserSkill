@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { handleSessionStop } from "@/tools/session";
+import type { TabMutationApi } from "@/tools/tabs";
 import type { ConnectionStateHandler, FrameHandler, Transport } from "@/transport/transport";
 import type { ConnectionState, ProtocolFrame } from "@/transport/types";
 import { attachSessionEventHandler, type WindowRemovedListener } from "../event-handler";
@@ -34,6 +36,67 @@ function fakeTransport(): Transport & { sent: ProtocolFrame[] } {
 }
 
 describe("attachSessionEventHandler", () => {
+  it.each([
+    "window",
+    "last-tab",
+  ])("does not report normal session teardown as a user close when removing the %s", async (path) => {
+    const events = fakeWindowEvents();
+    const emitAndFlush = async () => {
+      events.emit(4242);
+      // Chrome can deliver onRemoved before its remove() promise resolves.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    };
+    const manager = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(path === "window" ? emitAndFlush : async () => {}),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    await manager.start("aa11");
+    const transport = fakeTransport();
+    attachSessionEventHandler({ manager, transport, windowEvents: events.api });
+    const result = await handleSessionStop(
+      manager,
+      { session_id: "aa11" },
+      path === "last-tab"
+        ? {
+            tabManagement: { tabs: { remove: emitAndFlush } as unknown as TabMutationApi },
+          }
+        : {},
+    );
+    expect(result).not.toHaveProperty("code");
+    expect(manager.has("aa11")).toBe(false);
+    expect(transport.sent).toEqual([]);
+  });
+
+  it("still reports a real user close after a failed programmatic teardown", async () => {
+    const events = fakeWindowEvents();
+    const manager = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {
+          throw new Error("close failed");
+        }),
+        ensureActiveTab: vi.fn(async () => 1),
+      },
+    });
+    await manager.start("aa11");
+    const transport = fakeTransport();
+    attachSessionEventHandler({ manager, transport, windowEvents: events.api });
+    await expect(handleSessionStop(manager, { session_id: "aa11" })).rejects.toThrow(
+      "close failed",
+    );
+    events.emit(4242);
+    await vi.waitUntil(() => transport.sent.length > 0);
+    expect(transport.sent).toEqual([
+      {
+        event: "session.window_closed",
+        payload: { session_id: "aa11", reason: "user_closed_window" },
+      },
+    ]);
+  });
+
   it("drops the local session and emits session.window_closed when the agent window closes", async () => {
     const manager = new SessionManager({
       agentWindow: {

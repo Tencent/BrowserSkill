@@ -1,6 +1,7 @@
 //! Daemon runtime: long-lived background process exposing IPC + WS.
 
 pub mod abort;
+pub mod audit;
 pub mod browsers;
 mod cancel_forward;
 pub mod file_transfer;

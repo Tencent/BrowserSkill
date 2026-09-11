@@ -1,0 +1,10 @@
+@import "@browser-skill/ui/styles";
+@source "../../";
+@source "../../../../../packages/ui/src";
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: auto;
+}
