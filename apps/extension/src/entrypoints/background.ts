@@ -242,9 +242,7 @@ export default defineBackground(() => {
       }
     }
   });
-  void interactionPreferences.ready().catch((err) => {
-    console.warn("[bsk] interaction preferences could not be loaded", err);
-  });
+  void interactionPreferences.readyOrFallback();
   const dispatcher = new ToolDispatcher({
     interactionPreferences,
     transport,
@@ -257,7 +255,7 @@ export default defineBackground(() => {
       void pushOverlayStateForTab(tabId, windowId);
     },
     approveBorrow: async (ctx) => {
-      await interactionPreferences.ready();
+      await interactionPreferences.readyOrFallback();
       return requestBorrowConfirmation(ctx.tabId, {
         timeoutMs: ctx.timeoutMs,
         autoAllow: {

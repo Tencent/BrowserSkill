@@ -8,6 +8,8 @@ use crate::ErrorCode;
 /// Protocol 1.2 supports interaction preferences and unattended sessions.
 pub const INTERACTION_POLICY_PROTOCOL: &str = "1.2";
 
+/// Stay within protocol major 1, matching handshake compatibility. A future
+/// major version must explicitly establish support rather than inherit it.
 pub fn supports_interaction_policy(protocol: &str) -> bool {
     crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
         && matches!(
@@ -59,7 +61,7 @@ pub struct SessionStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused: Option<bool>,
     /// Disable borrow confirmation and human-help waits for this session.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unattended: bool,
 }
 
@@ -95,6 +97,27 @@ pub struct SessionStopResult {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_start_omits_disabled_override_and_preserves_explicit_unattended() {
+        for unattended in [false, true] {
+            let params: SessionStartParams = serde_json::from_value(json!({
+                "session_id": "abcd", "unattended": unattended
+            }))
+            .unwrap();
+            let encoded = serde_json::to_value(params).unwrap();
+            assert_eq!(
+                encoded,
+                if unattended {
+                    json!({"session_id": "abcd", "unattended": true})
+                } else {
+                    json!({"session_id": "abcd"})
+                }
+            );
+            let decoded: SessionStartParams = serde_json::from_value(encoded).unwrap();
+            assert_eq!(decoded.unattended, unattended);
+        }
+    }
 
     #[test]
     fn interaction_policy_requires_a_compatible_protocol() {

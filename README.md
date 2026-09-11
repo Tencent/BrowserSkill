@@ -176,9 +176,12 @@ The extension popup has two independent **Automation settings**, both enabled by
 unattended operation in that browser profile. Preferences are saved automatically and apply to
 existing sessions as well as new ones. Turning confirmation off releases pending confirmation
 requests that follow the preference; turning help off finishes pending help requests as `disabled`.
-An explicit per-call confirmation override still takes precedence over the browser preference.
+Disabling human help does not disable borrow confirmation. Ordinary tasks use `bsk session start`
+and follow these settings; asking for a task to be completed automatically does not authorize
+skipping confirmation.
 
-For a single unattended task, keep your browser preferences and use:
+Only when the user or host explicitly requests both confirmation-free borrowing of existing user
+tabs and disabling human-help requests for this task, use the session override:
 
 ```sh
 bsk session start --unattended --no-focus
@@ -192,15 +195,38 @@ re-observe and make every reasonable effort to finish using available browser to
 does not confirm completion or by itself block the task. Phone-only QR scans, face verification,
 unavailable SMS codes, and image-only CAPTCHAs for text-only models may remain blocked. Other
 steps should be attempted and verified, with blockers reported only when required inputs or
-capabilities are missing or viable approaches are exhausted. Task authorization and host rules
-still apply. `BSK_REQUEST_HELP=off` also uses this behavior without changing borrow confirmation.
-With both settings enabled, the existing confirmation and human-help flows remain in effect.
+capabilities are missing or viable approaches are exhausted. Disabling help grants no additional
+task authorization or exemption from host approvals. Where task authorization and host rules allow,
+models with image understanding may attempt graphical verification using screenshots and supported
+interactions. `BSK_REQUEST_HELP=off` also uses this behavior without changing borrow confirmation.
+With both settings enabled and no explicit overrides, ordinary sessions retain the existing flows.
+
+| Setting | Scope | Borrow confirmation | Human help |
+| --- | --- | --- | --- |
+| Popup switches | Browser profile | Default for ordinary sessions | Default for ordinary sessions |
+| `--unattended` | One session | Skipped | Disabled |
+| `--no-confirm` | One borrow | Skipped | Unchanged |
+| `BSK_REQUEST_HELP=off` | CLI/daemon process with this environment variable | Unchanged | Disabled |
+
+`--unattended` overrides the popup settings; turning the switches back on does not change that
+session. Start an ordinary session to follow the saved settings again. In ordinary sessions, an
+explicit per-call confirmation parameter overrides the profile preference. `--no-confirm` and
+environment-based disabling also require an explicit user or host request; never enable them to
+escape confirmation, denial, or timeout. Explicit authorization already given need not be requested again.
+
+If preference loading fails, the runtime retains known values, or defaults to both enabled when
+no valid value is available. It neither writes those defaults nor blocks session creation. Later
+requests retry loading, and storage events can restore valid preferences. Prompts may reappear
+if the saved disabled setting could not be read; explicit session/process disabling still applies.
+The popup reports read failures and prevents saving; failed writes are not treated as successful.
 
 To skip one borrow confirmation, use `bsk tab borrow <tab-id> --session <id> --no-confirm`.
 `--timeout 60s` sets the borrow confirmation wait. `session start --json` and `session list --json`
-include the effective `interaction` policy. Protocol 1.2 support is required on both the daemon
-and extension for the new CLI overrides; unsupported versions produce an explicit update error.
-These settings govern BrowserSkill prompts, not the agent host's command approvals.
+include the browser/session `interaction` policy, excluding additional per-borrow or calling-process
+environment overrides. Protocol 1.2 support is required on both the daemon and extension for the
+new CLI overrides; unsupported versions produce an explicit update error. These settings govern
+BrowserSkill prompts. CLI overrides do not verify host authorization; host command approvals remain
+the host's responsibility.
 
 ## DeepSeek Harness plugin
 

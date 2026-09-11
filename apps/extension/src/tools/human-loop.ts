@@ -686,7 +686,7 @@ export async function handleRequestHelp(
   }
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
 
-  await deps.preferences?.ready();
+  if (!ctx.unattended) await deps.preferences?.readyOrFallback();
   const helpDisabled = () =>
     ctx.unattended === true || deps.preferences?.get().requestHelpEnabled === false;
   const disabledResult = (tabId: number): RequestHelpResult => ({

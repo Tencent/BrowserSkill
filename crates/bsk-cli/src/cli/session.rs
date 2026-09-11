@@ -100,6 +100,7 @@ pub struct SessionStopArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     unattended: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
@@ -565,6 +566,32 @@ fn run_skill_sync_for_session_start(format: Format) {
     }
     for (harness, msg) in &report.errors {
         tracing::warn!(harness = harness.cli_name(), error = %msg, "skill sync failed");
+    }
+}
+
+#[cfg(test)]
+mod start_params_tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_start_sends_no_override_but_explicit_unattended_is_preserved() {
+        for unattended in [false, true] {
+            let params = StartParams {
+                unattended,
+                browser_instance_id: None,
+                width: None,
+                height: None,
+                focused: None,
+            };
+            assert_eq!(
+                serde_json::to_value(params).unwrap(),
+                if unattended {
+                    serde_json::json!({"unattended": true})
+                } else {
+                    serde_json::json!({})
+                }
+            );
+        }
     }
 }
 

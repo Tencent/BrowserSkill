@@ -32,9 +32,8 @@ export const CONFIRMATION_TIMEOUT_MS = 60_000;
 const EXIT_ANIMATION_MS = 150;
 /** Matches BorrowConfirmationOverlay progress ring/bar transition (duration-1000). */
 export const PROGRESS_TRANSITION_MS = 1000;
-// UI auto-denies after countdown + progress transition + exit fade. Background
-// timeout must not fire before that chain completes or the UI decision races
-// with an already-settled deny.
+// Allow the countdown and progress transition to finish, plus delivery slack.
+// Keep the legacy exit-fade allowance even though decisions are now sent immediately.
 export const BACKGROUND_TIMEOUT_MS =
   CONFIRMATION_TIMEOUT_MS + PROGRESS_TRANSITION_MS + EXIT_ANIMATION_MS + 500;
 

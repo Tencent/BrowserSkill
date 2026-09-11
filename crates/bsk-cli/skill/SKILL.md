@@ -51,11 +51,20 @@ When multiple browsers are connected, use `bsk browsers` and start with
 Agent Window does not need to interrupt the user's current work; it is not a flag on other commands.
 Run `bsk doctor` when startup or transport problems persist after one retry.
 
-For user-authorized unattended work, start with `bsk session start --unattended --no-focus`.
-This session skips tab-borrow confirmation and returns `outcome: disabled` from `request-help`.
-It does not change the browser's saved settings. `session start` and `session list` JSON report
-the effective `interaction` policy. Ordinary sessions follow the extension popup's Automation
-settings for borrow confirmation and human assistance; both are enabled by default.
+Start ordinary tasks with `bsk session start` and follow the popup's saved Automation settings;
+both are enabled by default. A request to complete a task automatically does not authorize
+skipping confirmation. Turning off human help does not turn off tab-borrow confirmation.
+
+Use `bsk session start --unattended --no-focus` only when the user or host explicitly requests
+both confirmation-free borrowing of existing user tabs and disabling human-help requests for
+this task. Reuse explicit authorization already given; do not ask for it again. Never add this flag
+to escape a confirmation, denial, or timeout. It skips borrow confirmation and disables help
+for that session without changing saved settings; turning the popup switches back on does not
+override it. Use an ordinary new session to follow the saved settings again.
+
+Session `interaction` reports the browser/session policy. A single `--no-confirm` borrow and
+`BSK_REQUEST_HELP=off` in the calling CLI or daemon process can additionally disable their
+respective prompts; use either override only when explicitly requested by the user or host.
 
 ## Work toward one observable goal
 
@@ -129,7 +138,9 @@ Normal page writes affect only Agent Window tabs. To operate a user tab, first l
 after the relevant step with `bsk tab return <tab-id>`; never invent a tab id or keep a personal tab
 borrowed across unrelated work.
 
-An explicitly authorized single borrow can use `--no-confirm`; it applies only to that command.
+Use `--no-confirm` only when the user or host explicitly authorizes borrowing without a
+confirmation prompt. Authorization to operate a tab alone is not permission to skip confirmation.
+This override applies only to that borrow and does not disable human help.
 `tab borrow --timeout 120s` changes the confirmation wait (default 60s). These options require
 an updated CLI, daemon, and extension. Repeating a completed borrow in the same session returns
 its existing result. Do not repeat pending requests, denied requests, or confirmation timeouts,
@@ -153,18 +164,18 @@ reasonable effort to complete the task autonomously with BrowserSkill. Do not ca
 If a call returns `disabled`, no human action was confirmed: re-observe and continue working rather
 than marking the step blocked merely because help is unavailable.
 
-Use the current page, existing login state, and credentials or codes available under the user's
-authorization to complete login, forms, and other authorized actions. With image understanding,
-inspect screenshots and attempt visual challenges using supported interactions. Phone-only QR
-scans, face verification, and SMS codes you cannot obtain may remain blocked; a text-only model
-may also leave an image-only CAPTCHA unresolved. Otherwise, attempt the operation and verify its
-actual result before concluding it cannot be completed.
+Disabling help adds no permission: keep task authorization and host restrictions in force.
+Use the current page, existing login state, and authorized credentials or codes to complete the
+current step. Where the task authorization and host rules allow, a model with image understanding
+may attempt graphical verification through screenshots and supported interactions. Phone-only QR
+scans, face verification, and unavailable SMS codes may remain blocked; a text-only model may also
+leave an image-only CAPTCHA unresolved. Attempt other authorized steps within available capabilities
+and verify the actual result before concluding they cannot be completed.
 
 After a failed attempt, re-observe and try a different viable approach when available. Do not loop
 on identical failures or repeat an action whose outcome is unknown. Report a specific blocker only
 when required information or capability is missing, or viable approaches are exhausted; continue
-independent work. Keep task authorization and host restrictions in force. Do not re-enable help or
-switch browser backends to work around those limits.
+independent work. Do not re-enable help or switch browser backends to work around those limits.
 
 ## Command inventory
 

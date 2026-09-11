@@ -133,7 +133,7 @@ export async function handleSessionStart(
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
-    await deps.preferences?.ready();
+    if (!params.unattended) await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
       size: sizeOrErr,
       focused: params.focused,

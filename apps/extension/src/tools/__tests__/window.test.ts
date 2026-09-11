@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStart } from "../session";
 import { handleWindowResize, type WindowResizeApi } from "../window";
@@ -102,6 +103,48 @@ describe("handleWindowResize", () => {
 });
 
 describe("handleSessionStart window size", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("starts an interactive session on read failure and honors preferences after recovery", async () => {
+    vi.stubGlobal("chrome", { storage: { onChanged: { addListener: vi.fn() } } });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const storage = {
+      get: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("failed"))
+        .mockResolvedValueOnce({
+          [INTERACTION_STORAGE_KEY]: { confirmTabBorrow: false, requestHelpEnabled: false },
+        }),
+      set: vi.fn(),
+    };
+    const preferences = new InteractionPreferenceStore(storage);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+    expect(await handleSessionStart(sm, { session_id: "first" }, { preferences })).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
+    expect(sm.get("first")?.unattended).toBe(false);
+    expect(await handleSessionStart(sm, { session_id: "second" }, { preferences })).toMatchObject({
+      agent_window_id: 101,
+      interaction: { borrow_confirmation: "never", request_help: "disabled" },
+    });
+    expect(sm.get("second")?.unattended).toBe(false);
+    expect(storage.set).not.toHaveBeenCalled();
+  });
+
+  it("an explicit unattended session does not depend on preference loading", async () => {
+    const preferences = new InteractionPreferenceStore();
+    const read = vi.spyOn(preferences, "ready").mockRejectedValue(new Error("failed"));
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    expect(
+      await handleSessionStart(sm, { session_id: "auto", unattended: true }, { preferences }),
+    ).toMatchObject({ interaction: { borrow_confirmation: "never", request_help: "disabled" } });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("stores unattended mode per session and reports the effective policy", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
     const unattended = await handleSessionStart(sm, { session_id: "auto", unattended: true });

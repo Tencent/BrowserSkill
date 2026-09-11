@@ -33,7 +33,6 @@
     },
     "unattended": {
       "description": "Disable borrow confirmation and human-help waits for this session.",
-      "default": false,
       "type": "boolean"
     },
     "width": {

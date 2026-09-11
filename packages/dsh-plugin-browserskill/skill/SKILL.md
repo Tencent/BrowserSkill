@@ -5,7 +5,8 @@ description: Browser automation through six injected domain tools.
 
 # browser-skill for DeepSeek Harness
 
-Drive the user's logged-in Chromium in an Agent Window; borrow user tabs explicitly.
+Drive the user's logged-in Chromium in an Agent Window. User-window tabs remain protected unless
+explicitly borrowed.
 
 Use the loaded `action` schemas for `browser_session`, `browser_page`, `browser_inspect`,
 `browser_interact`, `browser_tabs`, and `browser_assist`; do not guess parameters.
@@ -80,13 +81,13 @@ payment confirmation, consent, or other human steps. Give a precise prompt and f
 use completion criteria only for a stable success signal. Resume on continuation or completion;
 cancellation and timeout block the step. Observe again before using refs.
 
-With help disabled, keep trying autonomously with current observations, page tools, existing login
-state and authorized credentials/codes. `disabled` confirms no human action; re-observe and continue.
-With vision, attempt visual challenges using screenshots and supported interactions. Phone-only QR
-scans, face verification, unavailable SMS codes, and image-only CAPTCHAs for text-only models may
-remain blocked. Attempt other steps and verify results. Try viable alternatives after failure;
-block only for missing inputs/capability or exhausted options. Do not repeat unknown effects,
-request help again, or switch backends. Respect task/host restrictions; continue independent work.
+With help disabled, task/host rules and borrow confirmation still apply; no new permission is granted.
+`disabled` confirms no human action: re-observe, use existing login state and authorized
+inputs, and continue. Where task/host rules allow, models with vision may attempt graphical
+verification using screenshots and supported interactions. Phone-only QR scans, face verification,
+unavailable SMS codes, and image-only CAPTCHAs for text-only models may remain blocked. Try viable
+alternatives and verify results; block only for missing inputs/capability or exhausted options.
+Do not repeat unknown effects, request help again, or switch backends. Continue independent work.
 
 `browser_assist` also resizes the Agent Window or emulates a device for one tab.
 

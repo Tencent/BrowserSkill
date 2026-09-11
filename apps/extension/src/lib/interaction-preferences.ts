@@ -35,6 +35,8 @@ export class InteractionPreferenceStore {
   private value = { ...DEFAULT_INTERACTION_PREFERENCES };
   private readonly listeners = new Set<(value: InteractionPreferences) => void>();
   private initialization?: Promise<void>;
+  private listening = false;
+  private loaded = false;
   private revision = 0;
 
   constructor(private readonly storage: StorageBackend = defaultStorage()) {}
@@ -50,6 +52,7 @@ export class InteractionPreferenceStore {
 
   private publish(value: unknown): void {
     const next = normalizeInteractionPreferences(value);
+    this.loaded = true;
     this.revision += 1;
     if (
       next.confirmTabBorrow === this.value.confirmTabBorrow &&
@@ -61,22 +64,43 @@ export class InteractionPreferenceStore {
   }
 
   async ready(): Promise<void> {
+    if (this.loaded) return;
     if (this.initialization) return this.initialization;
-    let changed = false;
-    chrome.storage.onChanged.addListener((changes, areaName) => {
-      if (areaName !== "local" || !changes[INTERACTION_STORAGE_KEY]) return;
-      changed = true;
-      this.publish(changes[INTERACTION_STORAGE_KEY].newValue);
-    });
+    if (!this.listening) {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== "local" || !changes[INTERACTION_STORAGE_KEY]) return;
+        this.publish(changes[INTERACTION_STORAGE_KEY].newValue);
+      });
+      this.listening = true;
+    }
+    const revision = this.revision;
     this.initialization = this.storage
       .get(INTERACTION_STORAGE_KEY)
-      .then((items) => {
-        if (!changed) this.publish(items[INTERACTION_STORAGE_KEY]);
-      })
-      .catch((error) => {
-        if (!changed) throw error;
+      .then(
+        (items) => {
+          if (revision === this.revision) this.publish(items[INTERACTION_STORAGE_KEY]);
+        },
+        (error) => {
+          if (!this.loaded) throw error;
+        },
+      )
+      .finally(() => {
+        // A failed initial read must not poison future requests or add another listener.
+        this.initialization = undefined;
       });
     return this.initialization;
+  }
+
+  /** Runtime reads preserve the current policy on failure; popup reads and writes remain strict. */
+  async readyOrFallback(): Promise<void> {
+    try {
+      await this.ready();
+    } catch (error) {
+      console.warn(
+        "[bsk] interaction preferences unavailable; retaining the current policy",
+        error,
+      );
+    }
   }
 
   async set(value: InteractionPreferences): Promise<void> {

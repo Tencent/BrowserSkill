@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import {
   __resetPendingBorrowDecisionsForTest,
   __resetPendingBorrowNotificationsForTest,
@@ -93,12 +94,20 @@ describe("requestBorrowConfirmation", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it.each([
-    true,
-    false,
-  ])("enabled confirmation waits for the original allow/deny decision (%s)", async (allowed) => {
+    [true, false],
+    [false, false],
+    [true, true],
+    [false, true],
+  ])("enabled confirmation waits for allow=%s, including after a read failure=%s", async (allowed, readFailed) => {
+    const preferences = new InteractionPreferenceStore();
+    const ready = vi.spyOn(preferences, "ready").mockResolvedValue();
+    if (readFailed) ready.mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await preferences.readyOrFallback();
     windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
     let respond!: (value: unknown) => void;
     tabs.sendMessage.mockImplementationOnce(
@@ -111,7 +120,10 @@ describe("requestBorrowConfirmation", () => {
     const unsubscribe = vi.fn();
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
-      autoAllow: { get: () => false, subscribe: () => unsubscribe },
+      autoAllow: {
+        get: () => !preferences.get().confirmTabBorrow,
+        subscribe: () => unsubscribe,
+      },
     }).then((result) => {
       settled = true;
       return result;

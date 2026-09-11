@@ -87,6 +87,53 @@ describe("handleRequestHelp", () => {
   afterEach(() => {
     resetHelpLifecycleForTests();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    "continued",
+    "cancelled",
+  ])("read failure preserves the human wait and %s decision", async (outcome) => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let respond!: (value: unknown) => void;
+    const deps = baseDeps({
+      preferences,
+      sendToTab: vi.fn((_tab, message) =>
+        message.type === "bsk-help-request"
+          ? new Promise((resolve) => {
+              respond = resolve;
+            })
+          : Promise.resolve(),
+      ),
+    });
+    let settled = false;
+    const pending = handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps).then(
+      (result) => {
+        settled = true;
+        return result;
+      },
+    );
+    await vi.waitFor(() => expect(respond).toBeTypeOf("function"));
+    expect(settled).toBe(false);
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+    respond({ type: "bsk-help-response", outcome });
+    expect(await pending).toMatchObject({ outcome, tab_id: 5 });
+  });
+
+  it("explicit unattended help stays disabled without reading preferences", async () => {
+    const preferences = new InteractionPreferenceStore();
+    const ready = vi
+      .spyOn(preferences, "ready")
+      .mockRejectedValue(new Error("storage unavailable"));
+    const deps = baseDeps({ preferences });
+    const result = await handleRequestHelp(fakeManager("abcd", 99, 5, true), baseParams(), deps);
+    expect(result).toMatchObject({ outcome: "disabled" });
+    expect(result).not.toHaveProperty("completed_by");
+    expect(ready).not.toHaveBeenCalled();
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+    expect(deps.activateTab).not.toHaveBeenCalled();
   });
 
   it("unattended help returns disabled without focusing or showing UI, while ordinary sessions still work", async () => {
