@@ -70,7 +70,8 @@ export interface SidebarStateLike {
    * optional here; earlier versions always provide it.
    */
   splits?: SidebarNodeLike;
-  bottomSplits: SidebarNodeLike;
+  /** Absent as well on the host's first frames, before either tree is populated. */
+  bottomSplits?: SidebarNodeLike;
   /** Whether the right panel is expanded (the merged drawer on narrow screens). */
   panelOpen?: boolean;
 }
@@ -164,12 +165,15 @@ export function ObservationSidebarTab({
   return <div className={css["sidebar-tab"]}>{body}</div>;
 }
 
-function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
+function* leafNodes(node: SidebarNodeLike | undefined): Generator<SidebarLeafLike> {
+  // The workbench layout is not populated yet on the first paint, so a root
+  // (or a split's children) can be missing; an absent subtree has no leaves.
+  if (node === undefined) return;
   if (node.kind === "leaf") {
     yield node;
     return;
   }
-  for (const child of node.children) yield* leafNodes(child);
+  for (const child of node.children ?? []) yield* leafNodes(child);
 }
 
 /** Whether a tab of our type is already open in either sidebar workbench. */
