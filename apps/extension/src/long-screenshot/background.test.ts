@@ -40,7 +40,14 @@ vi.mock("./tiles", () => ({
 }));
 
 function event() {
-  return { addListener: vi.fn(), removeListener: vi.fn() };
+  const listeners = new Set<(...args: unknown[]) => void>();
+  return {
+    addListener: vi.fn((listener: (...args: unknown[]) => void) => listeners.add(listener)),
+    removeListener: vi.fn((listener: (...args: unknown[]) => void) => listeners.delete(listener)),
+    emit: (...args: unknown[]) => {
+      for (const listener of listeners) listener(...args);
+    },
+  };
 }
 function setup(saved: CaptureState | null = null, busy = false) {
   const api = {
@@ -74,6 +81,7 @@ function setup(saved: CaptureState | null = null, busy = false) {
       onCommitted: event(),
     },
     scripting: { executeScript: vi.fn(async (_options: unknown) => []) },
+    windows: { WINDOW_ID_NONE: -1, onFocusChanged: event() },
     storage: {
       session: {
         get: vi.fn(async () => ({ [LONG_SCREENSHOT_STATE]: saved })),
@@ -119,6 +127,155 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("independent screenshot jobs", () => {
+  const completed: CaptureState = {
+    id: "previous",
+    tabId: 4,
+    pageUrl: "https://example.com/",
+    title: "Example",
+    mode: "auto",
+    phase: "complete",
+    progress: 100,
+    frames: 3,
+    width: 800,
+    height: 2600,
+  };
+
+  it("retains the result when the popup reopens on its source page or its own preview", async () => {
+    const { api, call } = setup(completed);
+    expect(await call("status")).toMatchObject({ state: completed });
+    const [tab] = await api.tabs.query();
+    api.tabs.query.mockResolvedValue([
+      { ...tab, id: 8, url: "chrome-extension://extension/long-screenshot.html?id=previous" },
+    ]);
+    api.tabs.onActivated.emit({ tabId: 8, windowId: 1 });
+    expect(await call("status")).toMatchObject({ state: completed });
+    expect(removeTiledScreenshot).not.toHaveBeenCalled();
+  });
+
+  it("retains a result while its newly activated preview URL is still pending", async () => {
+    const { api, call } = setup(completed);
+    await call("status");
+    const [tab] = await api.tabs.query();
+    const pending = {
+      ...tab,
+      id: 8,
+      url: "",
+      pendingUrl: "chrome-extension://extension/long-screenshot.html?id=previous",
+    };
+    api.tabs.query.mockResolvedValue([pending]);
+    api.tabs.onActivated.emit({ tabId: 8, windowId: 1 });
+    expect(await call("status")).toMatchObject({ state: completed });
+  });
+
+  it("does not clear a result during the initial blank phase of opening its preview", async () => {
+    const { api, call } = setup(completed);
+    await call("status");
+    let created!: () => void;
+    api.tabs.create.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          created = () => resolve({});
+        }),
+    );
+    const opening = call("preview", { id: completed.id });
+    await vi.waitFor(() => expect(created).toBeTypeOf("function"));
+    const [tab] = await api.tabs.query();
+    api.tabs.query.mockResolvedValue([{ ...tab, id: 8, url: "about:blank" }]);
+    api.tabs.onActivated.emit({ tabId: 8, windowId: 1 });
+    expect(await call("status")).toMatchObject({ state: completed });
+    api.tabs.query.mockResolvedValue([
+      { ...tab, id: 8, url: "chrome-extension://extension/long-screenshot.html?id=previous" },
+    ]);
+    created();
+    expect(await opening).toMatchObject({ state: completed });
+  });
+
+  it.each([
+    "tab",
+    "window",
+    "status",
+    "previewNavigation",
+  ])("discards a result on another page through %s", async (change) => {
+    const { api, call } = setup(completed);
+    await call("status");
+    const [tab] = await api.tabs.query();
+    api.tabs.query.mockResolvedValue([{ ...tab, id: 9, url: "https://other.example/" }]);
+    if (change === "tab") api.tabs.onActivated.emit({ tabId: 9, windowId: 1 });
+    if (change === "window") api.windows.onFocusChanged.emit(2);
+    if (change === "previewNavigation")
+      api.webNavigation.onCommitted.emit({ tabId: 9, frameId: 0 });
+    if (change !== "status")
+      await vi.waitFor(() =>
+        expect(api.storage.session.set).toHaveBeenCalledWith({ [LONG_SCREENSHOT_STATE]: null }),
+      );
+    expect(await call("status")).toEqual({ ok: true, state: null });
+    api.tabs.query.mockResolvedValue([tab]);
+    expect(await call("status")).toEqual({ ok: true, state: null });
+    expect(await call("preview", { id: completed.id })).toEqual({
+      ok: false,
+      error: "unavailable",
+    });
+  });
+
+  it.each([
+    "navigation",
+    "route",
+    "close",
+  ])("clears the result when its source page changes through %s", async (change) => {
+    const { api, call } = setup(completed);
+    await call("status");
+    if (change === "navigation") api.webNavigation.onCommitted.emit({ tabId: 4, frameId: 0 });
+    if (change === "route") api.tabs.onUpdated.emit(4, { url: "https://example.com/next" });
+    if (change === "close") api.tabs.onRemoved.emit(4);
+    await vi.waitFor(() =>
+      expect(api.storage.session.set).toHaveBeenCalledWith({ [LONG_SCREENSHOT_STATE]: null }),
+    );
+    expect(await call("status")).toEqual({ ok: true, state: null });
+  });
+
+  it("does not discard a result for background tabs, subframes or an unfocused browser", async () => {
+    const { api, call } = setup(completed);
+    await call("status");
+    api.webNavigation.onCommitted.emit({ tabId: 4, frameId: 2 });
+    api.webNavigation.onCommitted.emit({ tabId: 9, frameId: 0 });
+    api.tabs.onUpdated.emit(4, { status: "loading" });
+    api.tabs.onUpdated.emit(9, { url: "https://other.example/" });
+    api.tabs.onRemoved.emit(9);
+    api.windows.onFocusChanged.emit(-1);
+    expect(await call("status")).toMatchObject({ state: completed });
+  });
+
+  it("checks the current URL after restoring a completed state", async () => {
+    const { api, call } = setup(completed);
+    const [tab] = await api.tabs.query();
+    api.tabs.query.mockResolvedValue([{ ...tab, url: "https://example.com/next" }]);
+    expect(await call("status")).toEqual({ ok: true, state: null });
+  });
+
+  it("does not let a delayed page check clear a new capture", async () => {
+    const { api, call } = setup(completed);
+    await call("status");
+    const [tab] = await api.tabs.query();
+    let answer!: (tabs: (typeof tab)[]) => void;
+    api.tabs.query.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+    );
+    api.tabs.onActivated.emit({ tabId: 9, windowId: 1 });
+    await vi.waitFor(() => expect(answer).toBeTypeOf("function"));
+    const started = await call("start");
+    await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    answer([{ ...tab, id: 9, url: "https://other.example/" }]);
+    expect(await call("status")).toMatchObject({ state: { phase: "preparing", pageUrl: tab.url } });
+    if (started.ok && started.state) await call("cancel", { id: started.state.id });
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({ state: { phase: "cancelled" } }),
+    );
+  });
+
   it.each([
     new Error("Receiving end does not exist"),
     undefined,
@@ -244,9 +401,9 @@ describe("independent screenshot jobs", () => {
     const { api, call } = setup();
     await call("start");
     await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
-    api.webNavigation.onBeforeNavigate.addListener.mock.calls[0][0]({ tabId: 4, frameId: 12 });
-    api.webNavigation.onCommitted.addListener.mock.calls[0][0]({ tabId: 4, frameId: 12 });
-    api.tabs.onUpdated.addListener.mock.calls[0][0](4, { status: "loading" });
+    api.webNavigation.onBeforeNavigate.emit({ tabId: 4, frameId: 12 });
+    api.webNavigation.onCommitted.emit({ tabId: 4, frameId: 12 });
+    api.tabs.onUpdated.emit(4, { status: "loading" });
     const tab = await api.tabs.get();
     api.tabs.get.mockResolvedValue({ ...tab, status: "loading" });
     const deps = vi.mocked(capturePage).mock.calls[0][0];
@@ -266,7 +423,7 @@ describe("independent screenshot jobs", () => {
     const { api, call } = setup();
     await call("start");
     await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
-    api.webNavigation[event].addListener.mock.calls[0][0]({ tabId: 4, frameId: 0 });
+    api.webNavigation[event].emit({ tabId: 4, frameId: 0 });
     expect(vi.mocked(capturePage).mock.calls[0][0].signal.aborted).toBe(true);
     resolveCapture({ width: 0, height: 0, blob: new Blob() });
     await vi.waitFor(async () =>

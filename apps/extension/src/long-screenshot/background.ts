@@ -28,6 +28,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
     page?: (command: PageCommand) => Promise<unknown>;
   };
   let running: Job | null = null;
+  let openingPreviews = 0;
   let writes = Promise.resolve();
   const ready = chrome.storage.session
     .get(LONG_SCREENSHOT_STATE)
@@ -50,20 +51,74 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
       }
     })
     .catch(() => {});
-  function publish(next: CaptureState) {
+  function publish(next: CaptureState | null) {
     state = next;
     writes = writes
       .then(() => chrome.storage.session.set({ [LONG_SCREENSHOT_STATE]: next }))
       .catch(() => {});
   }
+  function clearResult() {
+    // Active jobs own their cancellation and partial-result lifecycle.
+    if (state && !running && !openingPreviews && !isCapturing(state)) publish(null);
+  }
+  async function clearResultOnPageChange() {
+    await ready;
+    const previous = state;
+    if (!previous || running || openingPreviews || isCapturing(previous)) return;
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (state !== previous || running || openingPreviews || !tab) return;
+    const pageUrl = tab.pendingUrl ?? tab.url;
+    if (!pageUrl) return;
+    if (tab.id === previous.tabId && (!previous.pageUrl || pageUrl === previous.pageUrl)) return;
+    // Opening the result's own preview is part of the same capture flow.
+    const previewUrl = chrome.runtime.getURL("/long-screenshot.html");
+    if (
+      pageUrl.startsWith(`${previewUrl}?`) &&
+      new URL(pageUrl).searchParams.get("id") === previous.id
+    )
+      return;
+    clearResult();
+  }
+  const pageChanged = () => {
+    void clearResultOnPageChange().catch(() => {});
+  };
+  chrome.tabs.onActivated.addListener(pageChanged);
+  chrome.windows.onFocusChanged.addListener((windowId) => {
+    if (windowId !== chrome.windows.WINDOW_ID_NONE) pageChanged();
+  });
+  chrome.tabs.onUpdated.addListener((tabId, info) => {
+    if (!info.url) return;
+    void ready.then(() => {
+      if (state?.tabId === tabId && info.url !== state.pageUrl) clearResult();
+      else pageChanged();
+    });
+  });
+  chrome.webNavigation.onCommitted.addListener((info) => {
+    if (info.frameId !== 0) return;
+    void ready.then(() => {
+      if (state?.tabId === info.tabId) clearResult();
+      else pageChanged();
+    });
+  });
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void ready.then(() => {
+      if (state?.tabId === tabId) clearResult();
+    });
+  });
   async function preview(id: string) {
     const notice =
       state?.id === id && state.partial && state.notice
         ? `&notice=${encodeURIComponent(state.notice)}`
         : "";
-    await chrome.tabs.create({
-      url: chrome.runtime.getURL(`/long-screenshot.html?id=${encodeURIComponent(id)}${notice}`),
-    });
+    // Chrome activates a newly created tab before its preview URL commits.
+    openingPreviews++;
+    try {
+      await chrome.tabs.create({
+        url: chrome.runtime.getURL(`/long-screenshot.html?id=${encodeURIComponent(id)}${notice}`),
+      });
+    } finally {
+      openingPreviews--;
+    }
   }
   async function start(requested: "auto" | "manual" | "visible" = "auto") {
     if (running) throw new ScreenshotError("busy");
@@ -83,6 +138,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
     publish({
       id,
       tabId,
+      pageUrl: url,
       title: writer.shot.title,
       mode: requested,
       phase: "preparing",
@@ -324,6 +380,8 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
         return { ok: false, error: "unsupported" };
     } else if (!extensionUi) return { ok: false, error: "unsupported" };
     try {
+      if (request.action === "status" || request.action === "preview")
+        await clearResultOnPageChange();
       if (request.action === "start") await start(request.mode);
       else if (request.action === "preview") {
         if (!state || state.id !== request.id || state.phase !== "complete")

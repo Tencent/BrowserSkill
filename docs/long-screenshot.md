@@ -19,6 +19,12 @@ paused, you can load additional content; resuming returns to the captured positi
 the current capture. Automatic captures restore the original scroll position and temporary styles
 when they finish or stop. Manual mode leaves the page at the user's chosen position.
 
+The popup's finished result belongs to its source tab and page. Switching to another webpage,
+navigating the source tab, or closing it discards that popup state; returning later starts fresh.
+Reopening the popup on the same page retains the result. Opening the capture's own preview does
+not count as leaving the capture flow, and an already-open preview remains usable for export
+after the popup state is cleared.
+
 Keep the captured tab selected and its viewport size stable. Navigation, resizing, capture failures
 and storage errors preserve durable tiles and identify the result as partial. A restarted background
 worker can reopen the committed portion. Individual browser operations still have timeouts, but

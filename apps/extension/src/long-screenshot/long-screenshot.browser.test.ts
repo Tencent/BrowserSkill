@@ -167,7 +167,7 @@ async function harness(
       );
     return reply.state;
   };
-  const startFromPopup = async () => {
+  const openFromPopup = async () => {
     await evaluate(popup.sessionId, `document.querySelector('[data-slot=popup-launcher]').click()`);
     await poll(() =>
       evaluate(
@@ -185,6 +185,9 @@ async function harness(
         `!!document.querySelector('[data-slot=popup-long-screenshot] button:not(:disabled)')`,
       ),
     );
+  };
+  const startFromPopup = async () => {
+    await openFromPopup();
     await evaluate(
       popup.sessionId,
       `document.querySelector('[data-slot=popup-long-screenshot] button').click()`,
@@ -206,6 +209,7 @@ async function harness(
     popup,
     request,
     status,
+    openFromPopup,
     startFromPopup,
     finished,
     poll,
@@ -218,6 +222,85 @@ async function harness(
 describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
   "full-page screenshot in a real extension",
   () => {
+    it("clears the completed popup result on another tab while keeping its open preview usable", async () => {
+      await withHarness(async (h) => {
+        await h.startFromPopup();
+        const completed = await h.finished();
+        expect(completed.phase).toBe("complete");
+        const preview = await h.poll(async () =>
+          (await h.targets()).targetInfos.find((t) =>
+            t.url.includes(`/long-screenshot.html?id=${completed.id}`),
+          ),
+        );
+        // The automatic move to this capture's preview must retain its result.
+        expect(await h.status()).toMatchObject({ id: completed.id, phase: "complete" });
+        await h.send("Page.bringToFront", {}, h.page.sessionId);
+        expect(await h.status()).toMatchObject({ id: completed.id, phase: "complete" });
+
+        const other = await h.create(`${h.baseUrl}/other`);
+        await h.send("Page.bringToFront", {}, other.sessionId);
+        await h.poll(() =>
+          h.evaluate(
+            h.popup.sessionId,
+            "chrome.storage.session.get('longScreenshotState').then(value=>value.longScreenshotState===null)",
+          ),
+        );
+        // Reopening the feature on the other page should show only a fresh start.
+        await h.send("Page.reload", {}, h.popup.sessionId);
+        await h.poll(() =>
+          h.evaluate(h.popup.sessionId, "!!document.querySelector('[data-slot=popup-launcher]')"),
+        );
+        await h.openFromPopup();
+        const popupText = await h.evaluate<string>(
+          h.popup.sessionId,
+          "document.querySelector('[data-slot=popup-long-screenshot]').innerText",
+        );
+        expect(popupText).toContain("开始截图");
+        expect(popupText).not.toContain("长截图已完成");
+        expect(popupText).not.toContain("打开预览");
+        await h.send("Page.bringToFront", {}, h.page.sessionId);
+        expect(await h.request("status")).toMatchObject({ state: null });
+
+        // The previously opened preview can still export after its popup state is gone.
+        const { sessionId } = await h.send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId: preview.targetId,
+          flatten: true,
+        });
+        await h.poll(() =>
+          h.evaluate(sessionId, "document.querySelector('.preview-image')?.complete"),
+        );
+        await h.evaluate(
+          sessionId,
+          "globalThis.savedDownload=null;chrome.downloads.download=async(args)=>{const file=await (await fetch(args.url)).blob();globalThis.savedDownload={size:file.size,name:args.filename};return 1;};document.querySelector('button').click()",
+        );
+        const saved = await h.poll(
+          async () =>
+            (await h.evaluate<{ size: number; name: string } | null>(
+              sessionId,
+              "globalThis.savedDownload",
+            )) ?? undefined,
+        );
+        expect(saved.size).toBeGreaterThan(0);
+        expect(saved.name).toMatch(/\.png$/);
+      });
+    }, 60_000);
+
+    it("discards a completed result after navigating the same source tab", async () => {
+      await withHarness(async (h) => {
+        await h.startFromPopup();
+        expect((await h.finished()).phase).toBe("complete");
+        await h.send("Page.bringToFront", {}, h.page.sessionId);
+        await h.send("Page.navigate", { url: `${h.baseUrl}/next` }, h.page.sessionId);
+        await h.poll(() =>
+          h.evaluate(
+            h.popup.sessionId,
+            "chrome.storage.session.get('longScreenshotState').then(value=>value.longScreenshotState===null)",
+          ),
+        );
+        expect(await h.request("status")).toMatchObject({ state: null });
+      });
+    }, 60_000);
+
     it.skipIf(!process.env.BSK_LONG_SCREENSHOT_URL)(
       "captures a reported website automatically",
       async () => {

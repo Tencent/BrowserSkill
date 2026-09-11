@@ -27,6 +27,7 @@ export type CaptureError =
 export interface CaptureState {
   id: string;
   tabId: number;
+  pageUrl?: string;
   title: string;
   phase: CapturePhase;
   progress: number;
