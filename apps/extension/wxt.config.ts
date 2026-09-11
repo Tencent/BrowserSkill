@@ -34,6 +34,7 @@ export default defineConfig({
       "idle",
       "notifications",
       "tabs",
+      "tabGroups",
       "storage",
       "webNavigation",
       "windows",

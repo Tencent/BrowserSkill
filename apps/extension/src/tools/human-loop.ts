@@ -331,7 +331,7 @@ async function findHelpForTab(
     const windowId = tab.windowId;
     if (typeof windowId !== "number") return null;
     for (const help of activeHelpRequests.values()) {
-      if (!help.settled && help.ctx.agentWindowId === windowId) return help;
+      if (!help.settled && !help.ctx.tabMode && help.ctx.agentWindowId === windowId) return help;
     }
   } catch {
     return null;
@@ -681,8 +681,10 @@ export async function handleRequestHelp(
     { scrollIntoView: true },
   );
 
-  await deps.windows.update(target.windowId, { focused: true }).catch(() => {});
-  await deps.activateTab(tabId).catch(() => {});
+  if (!ctx.tabMode) {
+    await deps.windows.update(target.windowId, { focused: true }).catch(() => {});
+    await deps.activateTab(tabId).catch(() => {});
+  }
 
   const requestId = makeRequestId(tabId);
   const notificationId = `bsk-help:${requestId}`;

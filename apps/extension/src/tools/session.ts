@@ -281,6 +281,8 @@ export async function handleSessionStop(
     return { code: "cancelled", message: "session_stop aborted before window close" };
   }
 
+  ctx.stopping = true;
+
   // Step 4: close every tab explicitly created by the agent, including the
   // home tab. `tabsApi` is a
   // TabMutationApi (remove only); `queryApi` is a separate read-only
@@ -301,6 +303,13 @@ export async function handleSessionStop(
         console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
       }
     }
+  }
+
+  if (ctx.tabMode) {
+    // Finish closing explicitly owned tabs, surfacing failures. The shared
+    // host window and every user/other-task tab must always survive cleanup.
+    await manager.stop(params.session_id);
+    return result;
   }
 
   // Step 5: decide whether to release (keep) the window or close it.

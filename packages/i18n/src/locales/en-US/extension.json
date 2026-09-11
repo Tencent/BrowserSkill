@@ -66,7 +66,13 @@
       "copied": "Copied",
       "hintDisconnected": "Available when connected",
       "promptTemplate": "Use BrowserSkill's `bsk` CLI to record the browser actions I'm about to demonstrate.\n\nSteps:\n1. Run: {{command}}\n2. Once you confirm it's started, I'll operate in the opened window myself.\n3. After I click Finish, read the written `./trace` bundle (`trace.json` + `states/`) and summarize what I did."
-    }
+    },
+    "remoteTitle": "Remote connection",
+    "remoteLocal": "Use local daemon",
+    "remotePairing": "Pairing link",
+    "remoteHint": "Paste a pairing link from a trusted server. Saving switches connections and ends existing sessions. The server can operate Agent Windows; borrowing existing tabs still requires your confirmation.",
+    "remoteSave": "Connect",
+    "remoteError": "Could not save. Check the pairing link and storage access."
   },
   "controlOverlay": {
     "status": "Agent controlling",

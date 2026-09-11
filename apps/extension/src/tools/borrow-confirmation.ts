@@ -89,6 +89,7 @@ export interface RequestBorrowConfirmationDeps {
   /** Returns `true` when `windowId` belongs to *any* live session's Agent Window. */
   isAgentWindowId?: (windowId: number) => boolean;
   notificationCopy?: BorrowNotificationCopy;
+  focusOnRequest?: boolean;
 }
 
 export interface RequestBorrowConfirmationOptions {
@@ -483,9 +484,10 @@ export async function requestBorrowConfirmation(
     // Bring the user window to the front so the overlay is visible even
     // when the Agent Window has stolen focus. This is fire-and-forget: if
     // it fails the overlay / OS notification still give the user a path.
-    void windowsApi.update(notificationAnchor.windowId, { focused: true }).catch((err) => {
-      console.debug("[bsk borrow] proactive focus of user window failed", err);
-    });
+    if (options.deps?.focusOnRequest !== false)
+      void windowsApi.update(notificationAnchor.windowId, { focused: true }).catch((err) => {
+        console.debug("[bsk borrow] proactive focus of user window failed", err);
+      });
 
     // Surface the OS notification *before* messaging any candidate so the
     // user has a parallel signal even if every content script is missing.
