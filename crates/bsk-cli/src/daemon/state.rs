@@ -18,8 +18,8 @@ use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const PROTOCOL_VERSION: &str = "1.3";
-/// Browser-authoritative interaction settings require both peers to speak 1.3.
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.3";
+/// Base wire compatibility. New interaction semantics are checked per operation.
+pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
 /// is emitted for old extensions. New code ignores this on read.
 pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";

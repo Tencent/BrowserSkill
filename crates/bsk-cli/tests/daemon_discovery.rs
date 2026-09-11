@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use bsk::daemon::info::{DaemonInfo, write_to_path};
 use bsk::daemon::lockfile::pid_alive;
-use bsk_protocol::{Frame, ResponseBody, ResponseFrame};
+use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody, ResponseFrame};
 use fs2::FileExt;
 use tempfile::TempDir;
 
@@ -55,6 +55,16 @@ impl MockDaemon {
     fn new(
         pid: u32,
         reply: impl Fn(usize, &DaemonInfo) -> Option<ResponseBody> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_requests(pid, move |n, info, _| reply(n, info))
+    }
+
+    fn with_requests(
+        pid: u32,
+        reply: impl Fn(usize, &DaemonInfo, &RequestFrame) -> Option<ResponseBody>
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         let temp = TempDir::new().unwrap();
         let sock = temp.path().join("daemon.sock");
@@ -102,7 +112,7 @@ impl MockDaemon {
                                     panic!("expected request")
                                 };
                                 let n = requests.fetch_add(1, Ordering::SeqCst);
-                                if let Some(body) = reply(n, &info) {
+                                if let Some(body) = reply(n, &info, &request) {
                                     let frame = Frame::Response(ResponseFrame {
                                         id: request.id,
                                         body,
@@ -161,28 +171,34 @@ fn status(info: &DaemonInfo) -> ResponseBody {
 }
 
 #[test]
-fn prompt_sensitive_commands_reject_a_daemon_with_legacy_override_semantics() {
+fn only_unsupported_operations_reject_a_legacy_daemon() {
     let daemon = MockDaemon::new(FOREIGN_PID, |_, info| Some(status(info)));
     let original = daemon.metadata();
-    for args in [
-        vec!["session", "start", "--unattended", "--json"],
-        vec![
-            "tab",
-            "borrow",
-            "7",
-            "--session",
-            "abcd",
-            "--no-confirm",
-            "--json",
-        ],
-        vec![
-            "request-help",
-            "--session",
-            "abcd",
-            "--prompt",
-            "Continue",
-            "--json",
-        ],
+    for (args, required_protocol) in [
+        (
+            vec![
+                "tab",
+                "borrow",
+                "7",
+                "--session",
+                "abcd",
+                "--timeout",
+                "120s",
+                "--json",
+            ],
+            "1.2",
+        ),
+        (
+            vec![
+                "request-help",
+                "--session",
+                "abcd",
+                "--prompt",
+                "Continue",
+                "--json",
+            ],
+            "1.3",
+        ),
     ] {
         let result = command(daemon.home(), &args)
             .env("BSK_REQUEST_HELP", "off")
@@ -192,9 +208,104 @@ fn prompt_sensitive_commands_reject_a_daemon_with_legacy_override_semantics() {
         assert!(!result.status.success());
         let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
         assert_eq!(error["code"], "unsupported", "{error}");
-        assert!(error["message"].as_str().unwrap().contains("protocol 1.3"));
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("protocol {required_protocol}"))
+        );
+        assert_eq!(error["data"]["component"], "daemon");
         assert!(error.get("outcome").is_none());
         assert_eq!(daemon.metadata(), original);
+    }
+}
+
+#[test]
+fn sessions_and_default_borrowing_work_with_legacy_daemons_without_forwarding_overrides() {
+    for protocol in ["1.0", "1.1", "1.2"] {
+        let daemon = MockDaemon::with_requests(FOREIGN_PID, move |_, info, request| {
+            Some(match request.method {
+                Method::SystemStatus => {
+                    let ResponseBody::Ok(mut value) = status(info) else {
+                        unreachable!()
+                    };
+                    value["protocol_version"] = protocol.into();
+                    ResponseBody::Ok(value)
+                }
+                Method::SessionStart => {
+                    assert!(request.params.as_ref().unwrap().get("unattended").is_none());
+                    ResponseBody::Ok(serde_json::json!({
+                        "session_id": "abcd", "browser_instance_id": "legacy", "agent_window_id": 1
+                    }))
+                }
+                Method::ToolTabBorrow => {
+                    let params = request.params.as_ref().unwrap();
+                    assert!(params.get("confirm").is_none());
+                    if params.get("confirmation_timeout_ms").is_some() {
+                        assert_eq!(protocol, "1.2");
+                        assert_eq!(params["confirmation_timeout_ms"], 120_000);
+                    }
+                    ResponseBody::Ok(serde_json::json!({
+                        "tab_id": 7, "original_window_id": 2, "original_index": 0, "agent_window_id": 1
+                    }))
+                }
+                Method::SessionStop => ResponseBody::Ok(serde_json::json!({"stopped": ["abcd"]})),
+                _ => panic!("unexpected request: {:?}", request.method),
+            })
+        });
+        let metadata = daemon.metadata();
+        success(&run(
+            daemon.home(),
+            &["session", "start", "--unattended", "--json"],
+        ));
+        success(&run(
+            daemon.home(),
+            &[
+                "tab",
+                "borrow",
+                "7",
+                "--session",
+                "abcd",
+                "--no-confirm",
+                "--json",
+            ],
+        ));
+        let custom = run(
+            daemon.home(),
+            &[
+                "tab",
+                "borrow",
+                "7",
+                "--session",
+                "abcd",
+                "--timeout",
+                "120s",
+                "--json",
+            ],
+        );
+        assert_eq!(custom.status.success(), protocol == "1.2");
+        let help = command(
+            daemon.home(),
+            &[
+                "request-help",
+                "--session",
+                "abcd",
+                "--prompt",
+                "Continue",
+                "--json",
+            ],
+        )
+        .env("BSK_REQUEST_HELP", "off")
+        .output()
+        .unwrap();
+        assert!(!help.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&help.stdout).unwrap();
+        assert_eq!(value["code"], "unsupported");
+        assert!(value.get("outcome").is_none());
+        // A feature error must neither shut down nor replace the daemon.
+        success(&run(daemon.home(), &["session", "stop", "abcd", "--json"]));
+        success(&run(daemon.home(), &["status", "--json"]));
+        assert_eq!(metadata, daemon.metadata());
     }
 }
 

@@ -75,11 +75,10 @@ describe("computeConnectedState (protocol-based compat)", () => {
     "1.0",
     "1.1",
     "1.2",
-  ])("rejects daemon %s that can bypass browser settings", (protocol) => {
-    const result = computeConnectedState(handshake(protocol, "1.0"), MIN_COMPATIBLE_PROTOCOL);
-    expect(result.kind).toBe("rejected");
-    if (result.kind === "rejected")
-      expect(result.reason).toContain("below extension min_compatible_protocol");
+  ])("keeps a legacy daemon %s connected with compatibility guidance", (protocol) => {
+    for (const floor of [undefined, "1.0"]) {
+      expect(computeConnectedState(handshake(protocol, floor))).toEqual({ kind: "version_skew" });
+    }
   });
 
   it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {
@@ -140,6 +139,26 @@ describe("ConnectionController connectionEnabled", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([
+    "1.0",
+    "1.1",
+    "1.2",
+  ])("keeps the live transport and sessions after a %s handshake", async (protocol) => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const onDisconnected = vi.fn();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      onDisconnected,
+    });
+    const request = transport.send.mock.calls[0]?.[0] as { id: string };
+    transport.emitMessage({ id: request.id, result: handshake(protocol, "1.0") });
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe("version_skew"));
+    expect(controller.snapshot().handshake?.protocol_version).toBe(protocol);
+    expect(controller.snapshot().lastError).toBeNull();
+    expect(transport.disconnect).not.toHaveBeenCalled();
+    expect(onDisconnected).not.toHaveBeenCalled();
   });
 
   it("does not connect on attach when connection is disabled", async () => {

@@ -81,8 +81,7 @@ async fn reply(ws: &mut Ws, request: RequestFrame, body: ResponseBody) {
     .unwrap();
 }
 
-#[tokio::test]
-async fn legacy_flags_and_both_process_environments_cannot_override_the_browser() {
+async fn start_with_protocol(protocol: &str) -> (tempfile::TempDir, Child, Ws) {
     let temp = tempfile::tempdir().unwrap();
     let mut daemon = command(
         temp.path(),
@@ -121,7 +120,7 @@ async fn legacy_flags_and_both_process_environments_cannot_override_the_browser(
     let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     ws.send(Message::Text(json!({"id":"hello", "method":"system.handshake", "params":{
         "client":"browser-skill-extension", "version":env!("CARGO_PKG_VERSION"),
-        "protocol_version":bsk::daemon::state::PROTOCOL_VERSION,
+        "protocol_version":protocol,
         "instance_id":"policy-test", "browser":{"name":"chrome", "version":"130"}, "label":"test"
     }}).to_string())).await.unwrap();
     let Message::Text(text) = ws.next().await.unwrap().unwrap() else {
@@ -129,6 +128,13 @@ async fn legacy_flags_and_both_process_environments_cannot_override_the_browser(
     };
     let handshake: ResponseFrame = serde_json::from_str(&text).unwrap();
     assert!(matches!(handshake.body, ResponseBody::Ok(_)));
+    (temp, daemon, ws)
+}
+
+#[tokio::test]
+async fn legacy_flags_and_both_process_environments_cannot_override_the_browser() {
+    let (temp, mut daemon, mut ws) =
+        start_with_protocol(bsk::daemon::state::PROTOCOL_VERSION).await;
 
     for borrow_confirmation in ["always", "never"] {
         for request_help in ["enabled", "disabled"] {
@@ -236,6 +242,127 @@ async fn legacy_flags_and_both_process_environments_cannot_override_the_browser(
     drop(ws);
     daemon.kill().await.unwrap();
     daemon.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn mixed_extension_versions_keep_sessions_usable_and_cannot_receive_legacy_overrides() {
+    for protocol in ["1.0", "1.1", "1.2", "1.3"] {
+        let (temp, mut daemon, mut ws) = start_with_protocol(protocol).await;
+        let info = read_from_path(&temp.path().join("daemon.json"))
+            .unwrap()
+            .unwrap();
+        let mut ipc = bsk::ipc_client::IpcClient::connect(&info.sock_path)
+            .await
+            .unwrap();
+        // Simulate the wire inputs of an old CLI, including its session override.
+        let start = ipc.call::<Value, Value>(
+            "start",
+            Method::SessionStart,
+            Some(json!({"unattended": true})),
+            WAIT,
+        );
+        let respond = async {
+            let request = next_request(&mut ws, Method::ToolSessionStart).await;
+            assert!(request.params.as_ref().unwrap().get("unattended").is_none());
+            // Legacy extensions can omit interaction policy entirely.
+            reply(
+                &mut ws,
+                request,
+                ResponseBody::Ok(json!({"agent_window_id": 100})),
+            )
+            .await;
+        };
+        let (started, ()) = tokio::join!(start, respond);
+        let started = started.unwrap().unwrap();
+        let session = started["session_id"].as_str().unwrap();
+
+        let custom = ipc.call::<Value, Value>(
+            "custom",
+            Method::ToolTabBorrow,
+            Some(json!({"session_id": session, "tab_id": 7, "confirmation_timeout_ms": 120_000})),
+            WAIT,
+        );
+        if protocol == "1.0" || protocol == "1.1" {
+            let error = custom.await.unwrap().unwrap_err();
+            assert_eq!(error.code, ErrorCode::Unsupported);
+            assert_eq!(error.data.unwrap()["component"], "extension");
+        } else {
+            let respond = async {
+                let request = next_request(&mut ws, Method::ToolTabBorrow).await;
+                assert_eq!(
+                    request.params.as_ref().unwrap()["confirmation_timeout_ms"],
+                    120_000
+                );
+                reply(&mut ws, request, ResponseBody::Ok(json!({"tab_id": 7}))).await;
+            };
+            let (result, ()) = tokio::join!(custom, respond);
+            result.unwrap().unwrap();
+        }
+
+        // This reaches the same connection even after an unsupported custom wait.
+        let borrow = ipc.call::<Value, Value>(
+            "borrow",
+            Method::ToolTabBorrow,
+            Some(json!({"session_id": session, "tab_id": 7, "confirm": false})),
+            WAIT,
+        );
+        let respond = async {
+            let request = next_request(&mut ws, Method::ToolTabBorrow).await;
+            let params = request.params.as_ref().unwrap();
+            assert!(params.get("confirm").is_none());
+            assert!(params.get("confirmation_timeout_ms").is_none());
+            reply(
+                &mut ws,
+                request,
+                ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "User denied borrowing".into(),
+                    data: Some(json!({"reason": "user_denied"})),
+                }),
+            )
+            .await;
+        };
+        let (result, ()) = tokio::join!(borrow, respond);
+        assert_eq!(
+            result.unwrap().unwrap_err().data.unwrap()["reason"],
+            "user_denied"
+        );
+
+        // The new daemon inherits BSK_REQUEST_HELP=off but still forwards help
+        // to older extensions. Their response, not the environment, decides.
+        let help = command(
+            temp.path(),
+            &[
+                "request-help",
+                "--session",
+                session,
+                "--prompt",
+                "Continue",
+                "--json",
+            ],
+        )
+        .spawn()
+        .unwrap();
+        let request = next_request(&mut ws, Method::ToolRequestHelp).await;
+        reply(
+            &mut ws,
+            request,
+            ResponseBody::Ok(json!({"outcome": "continued", "tab_id": 7})),
+        )
+        .await;
+        assert_eq!(successful_json(&output(help).await)["outcome"], "continued");
+
+        let stop = command(temp.path(), &["session", "stop", session, "--json"])
+            .spawn()
+            .unwrap();
+        let request = next_request(&mut ws, Method::ToolSessionStop).await;
+        reply(&mut ws, request, ResponseBody::Ok(json!({}))).await;
+        successful_json(&output(stop).await);
+        drop(ipc);
+        drop(ws);
+        daemon.kill().await.unwrap();
+        daemon.wait().await.unwrap();
+    }
 }
 
 #[tokio::test]

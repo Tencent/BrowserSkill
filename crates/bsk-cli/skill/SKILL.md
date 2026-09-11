@@ -135,7 +135,10 @@ after the relevant step with `bsk tab return <tab-id>`; never invent a tab id or
 borrowed across unrelated work.
 
 `tab borrow --timeout 120s` changes the confirmation wait (default 60s), not whether approval is
-required. CLI, daemon, and extension must support protocol 1.3; older peers require updating.
+required. Custom waits need daemon and extension protocol 1.2+. Compatible older peers can still
+start sessions and borrow with their default wait. The current CLI's `request-help` needs daemon
+protocol 1.3; an unsupported operation does not make the connection unusable. Update all three
+components for full browser-setting enforcement; older programs may still end help locally.
 Repeating a completed borrow in the same session returns
 its existing result. Do not repeat pending requests, denied requests, or confirmation timeouts,
 or switch to another browser tool to bypass them. If `reason` is `borrow_outcome_unknown`, inspect

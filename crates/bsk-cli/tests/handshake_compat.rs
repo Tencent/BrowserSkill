@@ -124,7 +124,7 @@ async fn handshake_ok_when_protocol_matches() {
     );
     assert_eq!(
         result.min_compatible_protocol.as_deref(),
-        Some("1.3"),
+        Some("1.0"),
         "daemon must advertise protocol floor for new extensions"
     );
     handle.shutdown().await;
@@ -303,16 +303,22 @@ async fn handshake_rejects_when_local_below_peer_min_compatible_protocol() {
 }
 
 #[tokio::test]
-async fn handshake_rejects_peers_that_can_override_browser_settings() {
+async fn handshake_keeps_legacy_peers_connected_with_version_skew() {
     let (handle, _) = spawn_daemon().await;
     for protocol in ["1.0", "1.1", "1.2"] {
         let mut ws = open_ws(handle.ws_addr()).await;
         let response = send_handshake(&mut ws, protocol, env!("CARGO_PKG_VERSION")).await;
-        let ResponseBody::Err(error) = response.body else {
-            panic!("accepted legacy protocol {protocol}")
+        let ResponseBody::Ok(result) = response.body else {
+            panic!("rejected compatible legacy protocol {protocol}")
         };
-        assert_eq!(error.code, ErrorCode::VersionTooOld);
-        assert!(handle.state().browsers.is_empty());
+        assert_eq!(result["min_compatible_protocol"], "1.0");
+        let state = handle.state();
+        let browser = state
+            .browsers
+            .get(&bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()))
+            .unwrap();
+        assert!(browser.version_skew);
+        assert_eq!(browser.extension_protocol_version, protocol);
         assert!(handle.state().sessions.is_empty());
     }
     handle.shutdown().await;

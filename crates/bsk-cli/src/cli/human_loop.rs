@@ -86,7 +86,7 @@ pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
         crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
     }
     let info = ensure_daemon().context("ensure daemon is running")?;
-    crate::cli::interaction_policy::require_support(&info.sock_path)?;
+    crate::cli::interaction_policy::require_help_support(&info.sock_path)?;
     let targets: Vec<HelpTarget> = args.target.iter().map(|t| parse_target(t)).collect();
     let completion_criteria = args
         .completion_criteria

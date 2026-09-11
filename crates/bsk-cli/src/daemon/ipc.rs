@@ -372,6 +372,38 @@ async fn handle_tool_dispatch(
     };
     let audit_id = params.get("_audit_id").cloned();
     let mut params = params;
+    if method == Method::ToolTabBorrow {
+        // Old CLI clients can still send this field. Never forward their
+        // override to an older extension that would act on it.
+        if let Some(confirm) = params.get("confirm")
+            && !confirm.is_boolean()
+            && !confirm.is_null()
+        {
+            return ResponseBody::Err(invalid_params("confirm must be a boolean"));
+        }
+        if let Some(object) = params.as_object_mut() {
+            object.remove("confirm");
+        }
+        if params
+            .get("confirmation_timeout_ms")
+            .is_some_and(|v| !v.is_null())
+            && let Some(session) = state.sessions.get(&session_id)
+            && let Some(browser) = state.browsers.get(&session.browser_id)
+            && !bsk_protocol::tools::supports_borrow_confirmation_timeout(
+                &browser.extension_protocol_version,
+            )
+        {
+            return ResponseBody::Err(RpcError {
+                code: ErrorCode::Unsupported,
+                message: "Custom tab-borrow confirmation waits require extension protocol 1.2; update the extension or omit --timeout to use its default wait".into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "operation": "tab borrow --timeout",
+                    "component": "extension", "required_protocol": bsk_protocol::tools::BORROW_CONFIRMATION_TIMEOUT_PROTOCOL,
+                    "actual_protocol": browser.extension_protocol_version,
+                })),
+            });
+        }
+    }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
         let mut upload: UploadParams = match serde_json::from_value(params) {

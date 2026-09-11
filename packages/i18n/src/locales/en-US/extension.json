@@ -1,5 +1,6 @@
 {
   "popup": {
+    "interactionCompatibilityWarning": "Connected to an older daemon (protocol v{{cliProtocol}}). Update the CLI and daemon for full support of Automation settings.",
     "brandCategory": "Browser Automation",
     "brandName": "BrowserSkill",
     "stateLabel": {
@@ -73,7 +74,7 @@
       "confirmTabBorrowHint": "When on, ask before borrowing a tab you already have open. When off, borrow directly.",
       "requestHelpEnabled": "Allow requests for human help",
       "requestHelpEnabledHint": "When on, the agent can ask for your help. When off, it tries to complete the task autonomously and reports steps it cannot resolve.",
-      "scope": "Saved automatically for this browser profile. These settings apply to all sessions; command-line options cannot override them.",
+      "scope": "Saved automatically for this browser profile. Applies to all session requests reaching the extension; command-line options cannot override it. Older CLIs or daemons may end help locally. Update all three components for full support.",
       "readFailed": "Could not load settings. Reopen the extension.",
       "writeFailed": "Could not save. Your settings have not changed. Try again.",
       "confirmTabBorrowInfoLabel": "About tab borrowing confirmation",

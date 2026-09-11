@@ -350,7 +350,8 @@ async fn tab_borrow_round_trips_original_position() {
     run_extension(ws, |req| {
         assert_eq!(req.method, Method::ToolTabBorrow);
         let p: TabBorrowParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
-        assert_eq!(p.confirm, Some(false));
+        // Legacy callers may send false, but only the browser decides prompts.
+        assert_eq!(p.confirm, None);
         ResponseBody::Ok(
             serde_json::to_value(TabBorrowResult {
                 tab_id: p.tab_id,

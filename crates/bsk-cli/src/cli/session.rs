@@ -240,7 +240,6 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
-    crate::cli::interaction_policy::require_support(&sock)?;
     call(
         sock,
         Method::SessionStart,

@@ -18,8 +18,9 @@ export const EXTENSION_VERSION: string =
  * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
  * Must stay in sync with daemon `MIN_COMPATIBLE_PROTOCOL`.
  */
-// Older daemons may answer help requests before the browser can enforce its settings.
-export const MIN_COMPATIBLE_PROTOCOL = "1.3";
+// New interaction semantics do not break the base wire protocol. Older peers
+// remain connected; the popup explains their local help-handling limitations.
+export const MIN_COMPATIBLE_PROTOCOL = "1.0";
 /**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.

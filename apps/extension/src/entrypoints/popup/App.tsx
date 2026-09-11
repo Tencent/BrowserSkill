@@ -3,6 +3,7 @@ import { Badge, Button, Input, Label } from "@browser-skill/ui";
 import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { AuditPanel } from "@/components/audit-panel";
+import { compareProtocol } from "@/lib/semver";
 import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
@@ -93,6 +94,8 @@ export function App() {
   const connectionLive = statusState === "connected" || isSkewed;
   const daemonVersion = snapshot.handshake?.version ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
+  const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
+  const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
 
@@ -231,10 +234,15 @@ export function App() {
                 className="mt-2 text-xs leading-snug text-muted-foreground"
                 data-slot="popup-version-skew-warning"
               >
-                {t("popup.versionSkewWarning", {
-                  extensionProtocol: PROTOCOL_VERSION,
-                  cliProtocol: daemonProtocol,
-                })}
+                {t(
+                  legacyInteraction
+                    ? "popup.interactionCompatibilityWarning"
+                    : "popup.versionSkewWarning",
+                  {
+                    extensionProtocol: PROTOCOL_VERSION,
+                    cliProtocol: daemonProtocol,
+                  },
+                )}
               </p>
             )}
           </section>

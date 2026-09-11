@@ -121,6 +121,17 @@ pub struct TabSelectResult {
 // tab_borrow (M8.2)
 // ---------------------------------------------------------------------------
 
+pub const BORROW_CONFIRMATION_TIMEOUT_PROTOCOL: &str = "1.2";
+
+/// Earlier peers may silently ignore a custom confirmation wait.
+pub fn supports_borrow_confirmation_timeout(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, BORROW_CONFIRMATION_TIMEOUT_PROTOCOL),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
 /// Params for `tool.tab_borrow`. Moves a *user* tab into the
 /// requesting session's Agent Window, recording its original window /
 /// index so `tab_return` (or session_stop) can put it back.

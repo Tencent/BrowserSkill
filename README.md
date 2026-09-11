@@ -210,9 +210,18 @@ failed writes are not treated as successful. A disconnected browser produces an 
 `disabled` result based on command-line flags or environment variables.
 
 `tab borrow --timeout 60s` controls the confirmation wait, not whether confirmation is required.
-Upgrade the CLI, daemon, and extension together: protocol 1.3 is required to enforce these rules;
-incompatible peers return an update error. An older CLI may exit locally for `BSK_REQUEST_HELP=off`
-before contacting the daemon, so updating only the extension cannot change that old executable.
+Protocol 1.3 retains connection compatibility with protocols 1.0–1.2. Ordinary sessions and
+default tab borrowing remain available during staggered upgrades. The popup identifies older
+daemons, while `bsk status` reports protocol differences. Custom borrowing waits require both
+daemon and extension protocol 1.2 or later; only that operation returns an upgrade error when
+unsupported. Older daemons may still have shorter default borrowing waits.
+
+The current CLI requires daemon protocol 1.3 for `request-help`, because older daemons can answer
+locally without consulting the browser. This restriction does not disconnect the browser or stop
+other operations. Update the CLI, running daemon, and extension for full enforcement of the
+settings above. New extensions always enforce their saved settings on requests they receive.
+An older CLI may exit locally for `BSK_REQUEST_HELP=off` before contacting the daemon; mixed-version
+installations retain such legacy behavior, which updating only the extension cannot change.
 
 ## DeepSeek Harness plugin
 
