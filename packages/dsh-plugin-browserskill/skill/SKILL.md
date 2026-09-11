@@ -29,9 +29,8 @@ success and failure unless asked to keep it open. Stopping also returns borrowed
 ## Work toward one observable goal
 
 - Derive a concrete success condition from the user's request.
-- Take the shortest purposeful path: observe, act, then make at most one observation to confirm an
-  ambiguous result.
-- Once success is visible, do not click, refresh, navigate, switch tabs, or perform extra checks.
+- Observe, act, and check ambiguous results once.
+- Stop acting once success is visible.
 - With help enabled, request help for human-only steps or after two attempts make no progress.
   With help disabled, use the autonomous handling rules below.
 
