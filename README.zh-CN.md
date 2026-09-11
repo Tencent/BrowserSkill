@@ -25,6 +25,11 @@ https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
 - **支持任意 Agent**：只要 Agent 能调用 Shell，就可以通过 `bsk` CLI 使用 BrowserSkill，不绑定特定模型、Agent 框架或 harness。
 - **内置 human-in-loop**：遇到 captcha、登录、确认弹窗等必须由人处理的步骤时，Agent 可以主动请求你接管，完成后再继续任务。
 
+可以在插件的 **快捷功能 → 长截图** 中截取长图，也可以让 Agent 调用
+`bsk screenshot --session <id> --full-page --out page.png`。
+默认采集与编码超时为两分钟，长页面可加 `--timeout 5m`；支持 Ctrl-C 取消，结束后恢复原始滚动位置。
+需要使用同一版本的 CLI 和扩展，详见[长截图说明](docs/long-screenshot.md)。
+
 ## 运行环境
 
 BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器扩展。

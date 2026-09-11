@@ -1,5 +1,8 @@
 # Full-page screenshots
 
+Available from extension Quick Actions or from an Agent through `bsk screenshot --full-page`.
+The capture, disk tiles and streaming PNG encoder are shared.
+
 Open **Quick actions → Full-page screenshot** in the BrowserSkill popup. Choose:
 
 - **Full page · Automatic**: captures from the top, scrolls incrementally and follows appended content.
@@ -7,10 +10,50 @@ Open **Quick actions → Full-page screenshot** in the BrowserSkill popup. Choos
   content between screens. Reopen the popup and choose **Finish and keep** when you are done.
 - **Visible area**: captures the current viewport once.
 
-The feature works with the CLI connection off. It does not require the CLI, daemon or an Agent session.
+The Quick Actions feature works with the CLI connection off. It does not require the CLI, daemon or an Agent session.
 After installing or reloading the extension, automatic capture reconnects the screenshot content
 script in already-open pages on demand. Injection targets only the captured document and retries
 once; navigation, cancellation and timeouts remain errors instead of changing capture mode.
+
+## Agent and CLI
+
+```sh
+bsk screenshot --session <id> --full-page --out page.png
+bsk screenshot --session <id> --full-page --timeout 5m --out page.png --json
+```
+
+The default viewport screenshot and `--ref` crop are unchanged. `--full-page` is exclusive
+with `--ref`. An optional `--tab-id` must identify the selected tab in the session's Agent
+Window; the tab must have been created or borrowed by that session. Automatic document
+scrolling is transient page input and obeys the existing user-interrupt gate. It supports
+scriptable HTTP(S) pages, not restricted browser pages or nested/virtualized scrollers.
+
+Agent capture restores scroll and temporary styles on completion, failure, timeout or
+cancellation. Ctrl-C cancels capture or transfer; a page navigation or tab switch stops the
+capture. Unlike interactive Quick Actions, an Agent failure never returns partial success.
+The capture/encoding deadline is two minutes by default and can be changed with `--timeout`.
+No fixed page-height or full-image canvas limit is added. Infinite scrolling may reach the
+deadline. The popup and any existing user previews are independent of Agent captures.
+
+`bsk screenshot --full-page` uses `tool.screenshot_full_page`, followed by internal
+`tool.screenshot_read` and `tool.screenshot_release` RPCs. This distinct capture method lets
+the daemon gate scrolling and wait for cancellation cleanup without changing the existing
+passive `tool.screenshot` route. Full-page requests use `session_id`, optional `tab_id` and
+optional `timeout_ms`. Results contain dimensions, `format: "png"`, `tab_id`, `byte_size`,
+optional dialogs and an opaque session-scoped `capture_id`; they contain no whole-image
+base64 or agent filesystem path. Read requests use `session_id`, `capture_id` and byte
+`offset`, returning at most 256 KiB encoded as `data_base64`, `next_offset` and `eof`.
+Release uses `session_id` and `capture_id` and returns `released`.
+
+The extension streams its PNG to OPFS; the CLI receives bounded chunks and atomically
+replaces the chosen output only after validating the complete byte count. Existing screenshot
+JSON output fields are preserved. There is no preview tab, browser download or additional
+permission. Exports are released after successful saving or local failure/cancellation,
+on session stop, and after ten minutes without reads. Closed-session exports are also swept
+once per minute. After a worker restart, orphan Agent scratch directories are removed before
+the next full-page capture; popup previews are retained. CLI or browser crashes can therefore
+leave temporary disk data until this cleanup runs. Matching CLI and extension builds are
+required. Restart a running daemon after updating the CLI (`bsk daemon restart`); older extensions reject the new RPC rather than returning an incorrect viewport.
 
 ## Controls and page access
 
@@ -68,6 +111,20 @@ entire exported PNG, so its working memory is independent of total image height.
 screenshot feature's buffers, not the memory used by a webpage's own DOM or loading behavior.
 
 ## Verification
+
+For the actual CLI → daemon → extension chain, build `bsk` and the extension, then run:
+
+```sh
+cargo build -p bsk --locked
+pnpm ext:build
+BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome BSK_LONG_SCREENSHOT_CLI="$PWD/target/debug/bsk" pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/agent.browser.test.ts
+```
+
+This suite uses an isolated browser profile and daemon. It verifies PNG scanlines and fixed
+footers, multi-chunk transfer, captures beyond 32K pixels, original page restoration, timeout,
+Ctrl-C, the page Escape control, output failures and scratch-file cleanup. The regular suites cover chunk ownership,
+invalid offsets, expiration, CLI flag validation and the unchanged viewport/ref routes.
+
 
 The automated checks cover actual scroll-offset rounding, fixed-footer overlap, capture beyond
 120 frames, early finish, cancellation, DOM cleanup, paused interaction, restricted-page errors,

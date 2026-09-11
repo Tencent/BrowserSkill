@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 // This regression owns its browser/profile. It never attaches to a user's Chrome.
 export async function withChrome(
-  { executable, deviceScale, zoom, extensionPath, headless = true },
+  { executable, deviceScale, zoom, extensionPath, headless = true, softwareRendering = false },
   run,
 ) {
   const profile = await mkdtemp(join(tmpdir(), "bsk-snapshot-coordinates-"));
@@ -29,7 +29,9 @@ export async function withChrome(
         "--no-default-browser-check",
         ...(extensionPath
           ? [
-              "--disable-gpu",
+              ...(softwareRendering
+                ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+                : ["--disable-gpu"]),
               `--disable-extensions-except=${extensionPath}`,
               `--load-extension=${extensionPath}`,
             ]

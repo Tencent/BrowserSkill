@@ -242,6 +242,9 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolWindowResize
                 | Method::ToolEmulate
                 | Method::ToolScreenshot
+                | Method::ToolScreenshotFullPage
+                | Method::ToolScreenshotRead
+                | Method::ToolScreenshotRelease
                 | Method::ToolConsole
                 | Method::ToolNetwork
                 | Method::ToolSnapshot
@@ -706,7 +709,13 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 }
 
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
-    tool_dispatch_timeout(params).map(|timeout| {
+    let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
+    {
+        Ok(Duration::from_secs(120))
+    } else {
+        tool_dispatch_timeout(params)
+    };
+    timeout.map(|timeout| {
         if matches!(method, Method::ToolUpload | Method::ToolDownload) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {

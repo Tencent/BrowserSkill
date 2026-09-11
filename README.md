@@ -35,6 +35,10 @@ https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
   dialogs, or other human-only steps, the Agent can ask you to take over and
   then continue afterwards.
 
+Capture a long image in **Quick actions → Full-page screenshot**, or let an Agent use
+`bsk screenshot --session <id> --full-page --out page.png`. See the
+[full-page screenshot guide](docs/long-screenshot.md) for page support, cancellation and export.
+
 ## Runtime Environment
 
 BrowserSkill has two local runtime pieces: the `bsk` CLI/daemon and the browser

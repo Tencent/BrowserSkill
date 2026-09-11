@@ -45,6 +45,25 @@ describe("screenshot backends", () => {
     expect(detach).toHaveBeenCalledExactlyOnceWith({ tabId: 4 });
   });
 
+  it("uses an Agent session's fallback without attaching or detaching its debugger", async () => {
+    native.mockRejectedValue(new Error("readback failed"));
+    const capture = vi.fn(async () => "data:image/png;base64,session");
+    const fallback = vi.fn(async () => ({ capture, close: async () => {} }));
+    const source = await openScreenshotSource(
+      4,
+      1,
+      new AbortController().signal,
+      async () => {},
+      true,
+      fallback,
+    );
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(await source.capture()).toContain("session");
+    await source.close();
+    expect(attach).not.toHaveBeenCalled();
+    expect(detach).not.toHaveBeenCalled();
+  });
+
   it("does not detach another debugger when attachment fails", async () => {
     native.mockRejectedValue(new Error("readback failed"));
     attach.mockRejectedValue(new Error("Another debugger is already attached"));

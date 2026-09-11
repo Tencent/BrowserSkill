@@ -761,10 +761,17 @@ async fn forward_one(
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
-            if job.method == Method::ToolWheel {
+            if matches!(
+                job.method,
+                Method::ToolWheel | Method::ToolScreenshotFullPage
+            ) {
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
-                    message: "wheel timed out and extension cleanup could not be confirmed".into(),
+                    message: if job.method == Method::ToolWheel {
+                        "wheel timed out and extension cleanup could not be confirmed".into()
+                    } else {
+                        "full-page screenshot timed out and extension cleanup could not be confirmed".into()
+                    },
                     data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
                 });
             }
@@ -814,10 +821,11 @@ async fn forward_one(
     }
 }
 
-// Wheel must also cancel at the daemon deadline: its extension-local deadline
-// cannot account for a request delayed in transit. Other input tools are unchanged.
+// Wheel and full-page screenshots must cancel at the daemon deadline: local
+// deadlines cannot account for transit delays. Keep the queue held for cleanup.
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    *method == Method::ToolWheel || is_effect_aware_transfer(method)
+    matches!(method, Method::ToolWheel | Method::ToolScreenshotFullPage)
+        || is_effect_aware_transfer(method)
 }
 
 fn is_effect_aware_transfer(method: &Method) -> bool {

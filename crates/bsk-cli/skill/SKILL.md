@@ -112,6 +112,7 @@ Escalate page reading only as needed:
 3. `bsk snapshot` when a stricter static accessibility tree is more useful.
 4. `bsk get-html` for exact markup or hidden metadata that semantic views cannot provide.
 5. `bsk screenshot` for layout, styling, canvas, images, or requested visual evidence.
+   Use `--full-page` when the user wants a long screenshot of the whole ordinary webpage.
 
 Do not start with raw HTML or screenshots merely to discover ordinary controls. When interaction is
 needed, obtain a fresh observation before acting on screenshot or HTML findings.
@@ -150,11 +151,11 @@ tab list|create|close|select|borrow|return   window resize   emulate
 upload   download   request-help   record start|stop
 ```
 
-Required flags that are easy to get wrong:
+Flags and argument forms that are easy to get wrong:
 
 ```text
 bsk fill <ref> --value <text>      bsk select <ref> --value <option-value>
-bsk screenshot --out <path>        bsk emulate --device <preset-id>
+bsk screenshot --out <path>       bsk emulate --device <preset-id>
 bsk upload <ref> --file <path>     bsk download <ref> --out <path>
 ```
 
@@ -169,6 +170,33 @@ lowercase and hyphenated, such as `iphone-14`.
   succeeded. Never evaluate credential surfaces to read storage, cookies, or auth data.
 - `record` captures a user's actions for later replay. Read `bsk record start --help` before use,
   and never record banking, SSO, password-manager, or other sensitive pages.
+
+## Screenshots
+
+```sh
+bsk screenshot --session <id> --out viewport.png
+bsk screenshot --session <id> --ref @e3 --out element.png
+bsk screenshot --session <id> --full-page --out page.png
+bsk screenshot --session <id> --full-page --timeout 5m --out page.png
+```
+
+Without `--ref` or `--full-page`, capture only the visible viewport. `--full-page` and
+`--ref` are mutually exclusive. Full-page mode scrolls the document from top to bottom,
+follows content loaded during scrolling, and restores the original position and styles.
+It is page input: use a selected, session-controlled tab in the Agent Window (create or
+borrow first), keep the viewport stable, and respect user interrupts. `--tab-id` targets
+a specific tab without selecting it. Chrome internal pages, the Web Store, nested scroll
+containers and virtualized lists are not supported by automatic full-page capture.
+
+Capture and PNG encoding default to two minutes. `--timeout` only applies with
+`--full-page`; allow your shell runner enough time for that deadline plus file transfer.
+Increase it for longer pages, but do not blindly retry an endlessly growing
+page or a cancelled request. Ctrl-C cancels. Failure produces no partial output.
+The CLI streams the PNG to disk and returns its path; `--json` also reports dimensions
+and byte size. An existing `--out` file is replaced only after a full-page image is
+received completely. Omitting `--out` uses a temporary path. No popup preview opens.
+Use the matching CLI and extension builds; an unknown full-page RPC indicates an older
+extension, not a reason to silently substitute a viewport screenshot.
 
 ## File transfer
 

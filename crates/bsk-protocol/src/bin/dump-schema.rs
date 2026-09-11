@@ -106,6 +106,12 @@ fn main() {
     dump!(GetHtmlResult, "tool_get_html_result");
     dump!(ScreenshotParams, "tool_screenshot_params");
     dump!(ScreenshotResult, "tool_screenshot_result");
+    dump!(ScreenshotFullPageParams, "tool_screenshot_full_page_params");
+    dump!(ScreenshotFullPageResult, "tool_screenshot_full_page_result");
+    dump!(ScreenshotReadParams, "tool_screenshot_read_params");
+    dump!(ScreenshotReadResult, "tool_screenshot_read_result");
+    dump!(ScreenshotReleaseParams, "tool_screenshot_release_params");
+    dump!(ScreenshotReleaseResult, "tool_screenshot_release_result");
     dump!(ConsoleParams, "tool_console_params");
     dump!(ConsoleResult, "tool_console_result");
     dump!(ConsoleEntry, "tool_console_entry");

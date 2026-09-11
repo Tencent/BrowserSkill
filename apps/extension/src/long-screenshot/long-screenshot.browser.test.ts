@@ -42,6 +42,7 @@ async function withHarness(
         deviceScale: scale,
         zoom: 1,
         extensionPath,
+        softwareRendering: true,
         headless: true,
       },
       (send: Send) => runHarness(send),

@@ -237,6 +237,58 @@ pub struct ScreenshotResult {
     pub dialogs: Vec<JavaScriptDialogInfo>,
 }
 
+/// Scroll the session's active web page from top to bottom. PNG bytes are
+/// exported in bounded chunks through `tool.screenshot_read`, then released.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotFullPageParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    /// Capture and PNG encoding deadline; defaults to 120000 milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotFullPageResult {
+    /// Opaque, session-scoped export capability. Never an agent filesystem path.
+    pub capture_id: String,
+    pub width: u32,
+    pub height: u32,
+    pub format: String,
+    pub tab_id: i64,
+    pub byte_size: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReadParams {
+    pub session_id: String,
+    pub capture_id: String,
+    /// Byte offset, allowing an interrupted chunk request to be retried.
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReadResult {
+    /// At most 256 KiB of PNG bytes, base64 encoded.
+    pub data_base64: String,
+    pub next_offset: u64,
+    pub eof: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReleaseParams {
+    pub session_id: String,
+    pub capture_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ScreenshotReleaseResult {
+    pub released: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

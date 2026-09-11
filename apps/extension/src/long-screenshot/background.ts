@@ -1,6 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { capturePage } from "./capture";
 import { captureManual } from "./manual";
+import { createPageClient } from "./page-client";
 import { openScreenshotSource } from "./source";
 import { readTiledScreenshot, removeTiledScreenshot, TileWriter } from "./tiles";
 import {
@@ -9,13 +10,10 @@ import {
   type CaptureState,
   isCapturing,
   LONG_SCREENSHOT,
-  LONG_SCREENSHOT_PAGE,
   LONG_SCREENSHOT_STATE,
   type PageCommand,
-  type PageReply,
   ScreenshotError,
 } from "./types";
-import { waitForReply } from "./wait";
 
 /** Screenshot-only controller. No CLI/Agent transport dependency. */
 export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolean }) {
@@ -156,27 +154,8 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
       )
         throw new ScreenshotError("changed");
     };
-    let documentId: string | undefined;
-    const page = async (command: PageCommand) => {
-      if (command.action !== "finish") await checkTab();
-      let response: PageReply;
-      try {
-        response = await waitForReply(
-          chrome.tabs.sendMessage(
-            tabId,
-            { type: LONG_SCREENSHOT_PAGE, id, ...command },
-            documentId ? { documentId } : { frameId: 0 },
-          ),
-          command.action === "finish" ? undefined : controller.signal,
-          command.action === "finish" ? 2000 : 8000,
-        );
-      } catch (error) {
-        if (error instanceof ScreenshotError || controller.signal.aborted) throw error;
-        throw new ScreenshotError("unavailable");
-      }
-      if (!response?.ok) throw new ScreenshotError(response?.error ?? "unavailable");
-      return response.metrics;
-    };
+    const client = createPageClient(tabId, id, controller.signal, checkTab);
+    const page = client.page;
     const checkpoint = async () => {
       while (job.paused && !job.finished) {
         controller.signal.throwIfAborted();
@@ -216,39 +195,7 @@ export function attachLongScreenshot(options: { isTabBusy(tabId: number): boolea
       }, 20_000);
       try {
         const mode = requested;
-        if (mode === "auto") {
-          const frame = await waitForReply(
-            chrome.webNavigation.getFrame({ tabId, frameId: 0 }),
-            controller.signal,
-            8000,
-          );
-          documentId = frame?.documentId;
-          if (!documentId) throw new ScreenshotError("autoUnavailable");
-          try {
-            await page({ action: "probe" });
-          } catch (error) {
-            // Existing tabs can lack the content script after an extension reload.
-            // Repair this document once, before any page styles or scroll change.
-            // Timeouts, navigation and page errors must not turn into manual jobs.
-            if (!(error instanceof ScreenshotError) || error.code !== "unavailable") throw error;
-            await checkTab();
-            try {
-              await waitForReply(
-                chrome.scripting.executeScript({
-                  target: { tabId, documentIds: [documentId] },
-                  files: ["content-scripts/long-screenshot-page.js"],
-                }),
-                controller.signal,
-                8000,
-              );
-              await page({ action: "probe" });
-            } catch (error) {
-              await checkTab();
-              if (error instanceof ScreenshotError && error.code !== "unavailable") throw error;
-              throw new ScreenshotError("autoUnavailable");
-            }
-          }
-        }
+        if (mode === "auto") await client.prepare();
         await checkTab();
         source = await openScreenshotSource(
           tabId,

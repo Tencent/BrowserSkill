@@ -9,6 +9,9 @@ export async function openScreenshotSource(
   signal: AbortSignal,
   checkTab: () => Promise<void>,
   allowDebugger = true,
+  // Agent requests can reuse their session's debugger instead of attaching a
+  // second owner. Popup captures keep the standalone attachment below.
+  fallback?: () => Promise<{ capture(): Promise<string>; close(): Promise<void> }>,
 ) {
   let lastShot = Date.now();
   try {
@@ -30,6 +33,7 @@ export async function openScreenshotSource(
     if (!allowDebugger) throw new ScreenshotError("unavailable");
   }
   await checkTab();
+  if (fallback) return fallback();
   const target = { tabId };
   const attaching = chrome.debugger.attach(target, "1.3");
   try {
