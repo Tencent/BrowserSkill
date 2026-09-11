@@ -2,8 +2,8 @@ import { cn } from "@browser-skill/ui";
 
 export interface SwitchProps {
   id?: string;
-  disabled?: boolean;
   checked: boolean;
+  disabled?: boolean;
   onCheckedChange: (checked: boolean) => void;
   "aria-label": string;
   "data-slot"?: string;
@@ -16,8 +16,8 @@ export interface SwitchProps {
  */
 export function Switch({
   id,
-  disabled,
   checked,
+  disabled = false,
   onCheckedChange,
   "aria-label": ariaLabel,
   "data-slot": dataSlot,
@@ -25,8 +25,8 @@ export function Switch({
   return (
     <button
       id={id}
-      disabled={disabled}
       type="button"
+      disabled={disabled}
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}

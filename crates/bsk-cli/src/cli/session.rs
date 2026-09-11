@@ -53,6 +53,9 @@ pub struct SessionStartArgs {
     /// Skip tab-borrow confirmation and return immediately from human-help requests.
     #[arg(long)]
     pub unattended: bool,
+    /// Optional task name displayed in local operation history.
+    #[arg(long)]
+    pub name: Option<String>,
     /// Target browser instance id (only required when multiple browsers
     /// are connected).
     #[arg(long)]
@@ -102,6 +105,8 @@ pub struct SessionStopArgs {
 struct StartParams {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     unattended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     browser_instance_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,6 +194,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     let result = start_session(
         sock,
         SessionStartOptions {
+            name: args.name,
             browser: args.browser,
             width: args.width,
             height: args.height,
@@ -226,6 +232,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
     pub unattended: bool,
+    pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
@@ -241,6 +248,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
         sock,
         Method::SessionStart,
         Some(StartParams {
+            task_name: opts.name,
             browser_instance_id: opts.browser,
             width: opts.width,
             height: opts.height,
@@ -575,22 +583,25 @@ mod start_params_tests {
 
     #[test]
     fn ordinary_start_sends_no_override_but_explicit_unattended_is_preserved() {
-        for unattended in [false, true] {
-            let params = StartParams {
-                unattended,
-                browser_instance_id: None,
-                width: None,
-                height: None,
-                focused: None,
-            };
-            assert_eq!(
-                serde_json::to_value(params).unwrap(),
-                if unattended {
-                    serde_json::json!({"unattended": true})
-                } else {
-                    serde_json::json!({})
+        for task_name in [None, Some("Check settings".to_string())] {
+            for unattended in [false, true] {
+                let params = StartParams {
+                    unattended,
+                    task_name: task_name.clone(),
+                    browser_instance_id: None,
+                    width: None,
+                    height: None,
+                    focused: None,
+                };
+                let mut expected = serde_json::json!({});
+                if let Some(name) = &task_name {
+                    expected["task_name"] = serde_json::json!(name);
                 }
-            );
+                if unattended {
+                    expected["unattended"] = serde_json::json!(true);
+                }
+                assert_eq!(serde_json::to_value(params).unwrap(), expected);
+            }
         }
     }
 }

@@ -1,5 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { getAuditEnabled } from "@/lib/audit";
+import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
 import { watchDaemonPort } from "@/lib/daemon-port-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
@@ -54,6 +56,7 @@ export default defineBackground(() => {
   const controller = new ConnectionController();
   const transport = new WSTransport({ url: __BSK_DAEMON_WS_URL__ });
   const sessions = new SessionManager();
+  attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
     shouldAutoAcceptDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
@@ -359,7 +362,12 @@ export default defineBackground(() => {
   }
 
   void (async () => {
-    const [connectionEnabled] = await Promise.all([getConnectionEnabled(), daemonPort.ready]);
+    const [connectionEnabled, , auditEnabled] = await Promise.all([
+      getConnectionEnabled(),
+      daemonPort.ready,
+      getAuditEnabled(),
+    ]);
+    controller.setAuditEnabled(auditEnabled);
     const cleanup = async () => {
       const report = await cleanupAfterDisconnect();
       if (report.failures.length > 0) {

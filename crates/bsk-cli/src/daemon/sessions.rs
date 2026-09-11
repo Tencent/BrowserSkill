@@ -69,6 +69,7 @@ impl Session {
 
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
+    audit: Option<Arc<super::audit::AuditStore>>,
     inner: Mutex<HashMap<SessionId, Session>>,
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
@@ -76,6 +77,12 @@ pub struct SessionRegistry {
 }
 
 impl SessionRegistry {
+    pub fn with_audit(audit: Arc<super::audit::AuditStore>) -> Self {
+        Self {
+            audit: Some(audit),
+            ..Self::default()
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -174,7 +181,12 @@ impl SessionRegistry {
         let mut guard = self.inner.lock().expect("session registry poisoned");
         let session = guard.get_mut(session_id)?;
         session.agent_window_id = agent_window_id;
-        Some(session.clone())
+        let session = session.clone();
+        drop(guard);
+        if let Some(audit) = &self.audit {
+            audit.session_started(&session);
+        }
+        Some(session)
     }
 
     /// Drop a placeholder reservation, used on extension error/timeout
@@ -200,6 +212,11 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .remove(id);
+        if removed.is_some()
+            && let Some(audit) = &self.audit
+        {
+            audit.session_ended(&id.0, "ended");
+        }
         removed
     }
 
@@ -281,6 +298,13 @@ impl SessionRegistry {
             .expect("session activity registry poisoned");
         for session in &drained {
             activity.remove(&session.id);
+        }
+        drop(activity);
+        drop(guard);
+        if let Some(audit) = &self.audit {
+            for session in &drained {
+                audit.session_ended(&session.id.0, "interrupted");
+            }
         }
         drained
     }
@@ -800,6 +824,9 @@ pub async fn stop_session(
             // leaving an orphan row visible to `bsk session list`
             // (review M4/M5 round 3 I-R3-2).
             if matches!(err.code, bsk_protocol::ErrorCode::NotFound) {
+                if let Some(audit) = &sessions.audit {
+                    audit.session_ended(&session_id.0, "interrupted");
+                }
                 if sessions.remove(session_id).is_some() {
                     tracing::info!(
                         session = %session_id,
@@ -839,6 +866,9 @@ pub fn forget_session(
     interrupts: &Arc<SessionInterruptRegistry>,
     session_id: &SessionId,
 ) -> bool {
+    if let Some(audit) = &sessions.audit {
+        audit.session_ended(&session_id.0, "interrupted");
+    }
     let removed = sessions.remove(session_id).is_some();
     if removed {
         drop_session_local(queues, interrupts, session_id);

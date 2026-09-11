@@ -42,6 +42,11 @@ export class ConnectionController {
   private handshake: HandshakeResult | null = null;
   private instanceId = "";
   private label = "";
+  private auditEnabled = false;
+
+  setAuditEnabled(enabled: boolean): void {
+    this.auditEnabled = enabled;
+  }
   private lastError: string | null = null;
   private connectionEnabled = true;
   private listeners = new Set<Listener>();
@@ -202,6 +207,7 @@ export class ConnectionController {
           instanceId: this.instanceId,
           browser,
           label: this.label,
+          auditEnabled: this.auditEnabled,
         },
         { signal },
       );

@@ -123,6 +123,7 @@ export interface BrowserPeerInfo {
 }
 
 export interface HandshakeParams {
+  audit_enabled?: boolean;
   client: string;
   version: string;
   protocol_version: string;
@@ -139,6 +140,8 @@ export interface HandshakeParams {
 }
 
 export interface HandshakeResult {
+  audit_version?: number;
+  audit_ready?: boolean;
   server: string;
   version: string;
   protocol_version: string;
