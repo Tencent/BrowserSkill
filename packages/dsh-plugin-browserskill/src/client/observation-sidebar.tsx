@@ -64,8 +64,14 @@ export interface SidebarSplitLike {
 export type SidebarNodeLike = SidebarLeafLike | SidebarSplitLike;
 
 export interface SidebarStateLike {
-  splits: SidebarNodeLike;
-  bottomSplits: SidebarNodeLike;
+  /**
+   * Optional because dsh-better-sidebar >= 0.19 removed the top-level splits
+   * workbench: at runtime `state.splits` is simply absent (undefined), and
+   * only `bottomSplits` is populated. Declaring it required made
+   * `observationTabOpen` crash on `node.kind` for the undefined root.
+   */
+  splits?: SidebarNodeLike;
+  bottomSplits?: SidebarNodeLike;
   /** Whether the right panel is expanded (the merged drawer on narrow screens). */
   panelOpen?: boolean;
 }
@@ -159,7 +165,12 @@ export function ObservationSidebarTab({
   return <div className={css["sidebar-tab"]}>{body}</div>;
 }
 
-function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
+function* leafNodes(node: SidebarNodeLike | undefined): Generator<SidebarLeafLike> {
+  // Guard the undefined root: with dsh-better-sidebar >= 0.19 the top-level
+  // `state.splits` workbench no longer exists, so callers iterate over an
+  // undefined member of the root pair. Skip it instead of throwing
+  // "Cannot read properties of undefined (reading 'kind')".
+  if (node === undefined) return;
   if (node.kind === "leaf") {
     yield node;
     return;
@@ -171,6 +182,7 @@ function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
 export function observationTabOpen(state: SidebarStateLike | undefined): boolean {
   if (state === undefined) return false;
   for (const root of [state.splits, state.bottomSplits]) {
+    if (root === undefined) continue;
     for (const leaf of leafNodes(root)) {
       if (leaf.tabs.some((tab) => tab.type === OBSERVATION_TAB_TYPE)) return true;
     }
