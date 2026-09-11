@@ -273,10 +273,16 @@ fn held_lock_protects_metadata_even_if_pid_and_endpoint_are_absent() {
     let out = run(temp.path(), &["daemon", "stop"]);
     assert!(!out.status.success());
     assert_eq!(std::fs::read(&path).unwrap(), original);
+    // Model a descriptor inherited by a concurrently spawned child before exec.
+    let inherited_lock = lock.try_clone().unwrap();
+    // Closing one descriptor does not release a flock while another survives.
+    // Match DaemonLock's explicit unlock instead of depending on child timing.
+    fs2::FileExt::unlock(&lock).unwrap();
     drop(lock);
     success(&run(temp.path(), &["daemon", "stop"]));
     assert!(!path.exists());
     assert!(temp.path().join("daemon.lock").exists());
+    drop(inherited_lock);
 }
 
 #[test]
