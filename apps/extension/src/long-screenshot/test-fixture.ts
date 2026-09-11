@@ -1,6 +1,6 @@
 export function fixture(height = 2603, lazy = false) {
   const rows = Array.from(
-    { length: Math.min(height, 3000) },
+    { length: height },
     (_, y) =>
       `<div style="height:1px;background:rgb(${y % 256},${Math.floor(y / 256)},127)"></div>`,
   ).join("");

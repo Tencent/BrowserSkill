@@ -5,6 +5,7 @@ export const LONG_SCREENSHOT_STATE = "longScreenshotState";
 export type CapturePhase =
   | "preparing"
   | "capturing"
+  | "paused"
   | "saving"
   | "complete"
   | "cancelled"
@@ -15,6 +16,8 @@ export type CaptureError =
   | "busy"
   | "changed"
   | "tooLarge"
+  | "storageFull"
+  | "alignment"
   | "timeout"
   | "captureFailed"
   | "saveFailed"
@@ -28,12 +31,18 @@ export interface CaptureState {
   progress: number;
   frames: number;
   error?: CaptureError;
+  mode?: CaptureMode;
+  notice?: CaptureError;
+  partial?: boolean;
   width?: number;
   height?: number;
 }
 
 export const isCapturing = (state: CaptureState | null | undefined) =>
-  state?.phase === "preparing" || state?.phase === "capturing" || state?.phase === "saving";
+  state?.phase === "preparing" ||
+  state?.phase === "capturing" ||
+  state?.phase === "paused" ||
+  state?.phase === "saving";
 
 export interface PageMetrics {
   x: number;
@@ -51,16 +60,20 @@ export interface PageMetrics {
 export type PageCommand =
   | { action: "probe" }
   | { action: "begin"; label: string; cancelLabel: string }
-  | { action: "move"; y: number; capture: boolean }
+  | { action: "move"; y: number; capture: boolean; final?: boolean }
   | { action: "inspect" }
+  | { action: "pause"; paused: boolean }
   | { action: "finish" };
 
 export type PageRequest = PageCommand & { type: typeof LONG_SCREENSHOT_PAGE; id: string };
 export type PageReply = { ok: true; metrics: PageMetrics } | { ok: false; error: CaptureError };
 
+export type CaptureMode = "auto" | "manual" | "visible";
+
 export type CaptureRequest =
-  | { type: typeof LONG_SCREENSHOT; action: "start" }
+  | { type: typeof LONG_SCREENSHOT; action: "start"; mode?: CaptureMode }
   | { type: typeof LONG_SCREENSHOT; action: "status" }
+  | { type: typeof LONG_SCREENSHOT; action: "pause" | "resume" | "finish"; id: string }
   | { type: typeof LONG_SCREENSHOT; action: "cancel"; id: string }
   | { type: typeof LONG_SCREENSHOT; action: "preview"; id: string };
 

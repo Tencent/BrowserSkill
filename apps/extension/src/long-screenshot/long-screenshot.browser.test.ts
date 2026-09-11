@@ -175,7 +175,7 @@ async function harness(send: Send, baseUrl: string) {
     poll(async () => {
       const state = await status();
       return state && ["complete", "cancelled", "error"].includes(state.phase) ? state : false;
-    }, 20_000).catch(async (error) => {
+    }, 120_000).catch(async (error) => {
       throw new Error(`${error}: ${JSON.stringify(await status())}`);
     });
   return {
@@ -191,6 +191,7 @@ async function harness(send: Send, baseUrl: string) {
     poll,
     targets,
     baseUrl,
+    origin,
   };
 }
 
@@ -230,12 +231,21 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
         const pixels = await h.evaluate<{ badRows: number[]; width: number; height: number }>(
           sessionId,
           `(async()=>{
-        const image=document.querySelector('.preview-image'); await image.decode();
-        const c=new OffscreenCanvas(image.naturalWidth,image.naturalHeight);const ctx=c.getContext('2d');ctx.drawImage(image,0,0);
-        const data=ctx.getImageData(0,0,c.width,c.height).data;const badRows=[];
-        for(let y=0;y<2603;y++){ const at=((y+31)*${scale}*c.width+100*${scale})*4;
-          if(data[at]!==y%256||data[at+1]!==Math.floor(y/256)||data[at+2]!==127){if(badRows.length<12)badRows.push(y);}
-        }return {badRows,width:c.width,height:c.height};})()`,
+            const root=await (await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots');
+            const directory=await root.getDirectoryHandle('${state.id}');
+            const shot=JSON.parse(await (await (await directory.getFileHandle('index.json')).getFile()).text());
+            const badRows=[];const canvas=new OffscreenCanvas(shot.width,512);const ctx=canvas.getContext('2d');
+            for(let tile=0;tile<Math.ceil(shot.height/512);tile++){
+              const bitmap=await createImageBitmap(await (await directory.getFileHandle(tile+'.png')).getFile());
+              ctx.clearRect(0,0,shot.width,512);ctx.drawImage(bitmap,0,0);bitmap.close();
+              const data=ctx.getImageData(0,0,shot.width,512).data;
+              for(let row=0;row<512;row++){
+                const y=Math.floor((tile*512+row)/${scale})-31;
+                if(y<0||y>=2603)continue;
+                const at=(row*shot.width+100*${scale})*4;
+                if(data[at]!==y%256||data[at+1]!==Math.floor(y/256)||data[at+2]!==127){if(badRows.length<12)badRows.push(y);}
+              }
+            }return {badRows,width:shot.width,height:shot.height};})()`,
         );
         expect(pixels.badRows).toEqual([]);
         expect(pixels.height).toBe(2634 * scale);
@@ -270,6 +280,80 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
       }, scale);
     }, 120_000);
 
+    it.each([
+      "chrome://version/",
+      "https://chromewebstore.google.com/",
+    ])("captures restricted page %s after an explicit extension action", async (url) => {
+      await withHarness(async (h) => {
+        await h.send("Page.navigate", { url }, h.page.sessionId);
+        await h.poll(() => h.evaluate(h.page.sessionId, "document.readyState==='complete'"));
+        const tabs = await h.send<{
+          targetInfos: { type: string; url: string; targetId: string }[];
+        }>("Target.getTargets", { filter: [{ type: "tab" }, { exclude: true }] });
+        const target = tabs.targetInfos.find((tab) => tab.url === url);
+        expect(target).toBeDefined();
+        await h.send("Extensions.triggerAction", {
+          id: h.origin.split("://")[1],
+          targetId: target!.targetId,
+        });
+        const mode = url.startsWith("chrome:") ? "visible" : "auto";
+        expect(await h.request("start", { mode })).toMatchObject({ ok: true });
+        if (mode === "auto") {
+          const first = await h.poll(async () => {
+            const value = await h.status();
+            return value.height ? value : false;
+          });
+          expect(first).toMatchObject({ mode: "manual" });
+          await h.request("finish", { id: first.id });
+        }
+        const result = await h.finished();
+        expect(result.phase, JSON.stringify(result)).toBe("complete");
+        expect(result.height).toBeGreaterThan(0);
+      });
+    }, 60000);
+
+    it("captures manual scrolling with a partial-width fixed footer and keeps the exact pixels", async () => {
+      await withHarness(async (h) => {
+        await h.evaluate(h.page.sessionId, "scrollTo(0,0)");
+        await h.request("start", { mode: "manual" });
+        const first = await h.poll(async () => {
+          const value = await h.status();
+          return value.height ? value : false;
+        });
+        const viewport = await h.evaluate<number>(h.page.sessionId, "innerHeight");
+        for (const y of [180, 360, 540]) {
+          await h.evaluate(h.page.sessionId, `scrollTo(0,${y})`);
+          await h.poll(async () => {
+            const value = await h.status();
+            return (value.height ?? 0) >= viewport + y ? value : false;
+          });
+        }
+        await h.request("finish", { id: first.id });
+        const state = await h.finished();
+        expect(state.height).toBe(viewport + 540);
+        expect(state.phase).toBe("complete");
+        const bad = await h.evaluate<number[]>(
+          h.popup.sessionId,
+          `(async()=>{
+          const d=await (await (await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots')).getDirectoryHandle('${first.id}');
+          const shot=JSON.parse(await (await (await d.getFileHandle('index.json')).getFile()).text());
+          const c=new OffscreenCanvas(shot.width,512),ctx=c.getContext('2d'),bad=[];
+          for(let index=0;index<Math.ceil(shot.height/512);index++){
+            const b=await createImageBitmap(await (await d.getFileHandle(index+'.png')).getFile());ctx.clearRect(0,0,shot.width,512);ctx.drawImage(b,0,0);b.close();
+            const pixels=ctx.getImageData(0,0,shot.width,512).data;
+            for(let r=0;r<512 && index*512+r<shot.height;r++){
+              const y=index*512+r-31;if(y<0)continue;const at=(r*shot.width+100)*4;
+              if(pixels[at]!==y%256||pixels[at+1]!==Math.floor(y/256)||pixels[at+2]!==127){if(bad.length<12)bad.push(y);}
+              const right=(r*shot.width+shot.width-40)*4,globalY=index*512+r;
+              if(globalY>=40 && globalY<shot.height-80 && (pixels[right]!==y%256||pixels[right+1]!==Math.floor(y/256)||pixels[right+2]!==127)){if(bad.length<12)bad.push(globalY);}
+              if(globalY>=shot.height-80 && (pixels[right]!==255||pixels[right+1]!==136||pixels[right+2]!==0)){if(bad.length<12)bad.push(globalY);}
+            }
+          }return bad;})()`,
+        );
+        expect(bad).toEqual([]);
+      });
+    }, 60000);
+
     it("cancels independently of popup lifetime and restores the page", async () => {
       await withHarness(async (h) => {
         const original = await h.evaluate<number>(h.page.sessionId, "scrollY");
@@ -289,7 +373,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
       });
     }, 60_000);
 
-    it("rejects an oversized page and permits a fresh capture afterwards", async () => {
+    it("captures a 50,000-pixel page, pauses, resumes and permits an early finish", async () => {
       await withHarness(async (h) => {
         await h.send("Page.navigate", { url: `${h.baseUrl}/large` }, h.page.sessionId);
         await h.poll(() =>
@@ -300,7 +384,20 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME)(
         );
         await new Promise((resolve) => setTimeout(resolve, 400));
         await h.startFromPopup();
-        expect(await h.finished()).toMatchObject({ phase: "error", error: "tooLarge" });
+        const active = await h.poll(async () => {
+          const s = await h.status();
+          return s.height && s.height > 1200 ? s : false;
+        });
+        await h.request("pause", { id: active.id });
+        expect(await h.status()).toMatchObject({ phase: "paused" });
+        await h.request("resume", { id: active.id });
+        await h.poll(async () => {
+          const s = await h.status();
+          return (s.height ?? 0) > (active.height ?? 0) ? s : false;
+        });
+        await h.request("finish", { id: active.id });
+        expect(await h.finished()).toMatchObject({ phase: "complete" });
+        await h.send("Page.bringToFront", {}, h.page.sessionId);
         await h.send("Page.navigate", { url: h.baseUrl }, h.page.sessionId);
         await h.poll(() =>
           h.evaluate(

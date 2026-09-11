@@ -1,19 +1,43 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachLongScreenshot } from "./background";
 import { capturePage } from "./capture";
-import { saveScreenshot } from "./storage";
+import { captureManual } from "./manual";
+import { removeTiledScreenshot, TileWriter } from "./tiles";
 import {
   type CaptureReply,
   type CaptureState,
   LONG_SCREENSHOT,
   LONG_SCREENSHOT_STATE,
+  ScreenshotError,
 } from "./types";
 
 vi.mock("./capture", () => ({ capturePage: vi.fn() }));
 vi.mock("./source", () => ({
   openScreenshotSource: vi.fn(async () => ({ capture: vi.fn(), close: vi.fn() })),
 }));
-vi.mock("./storage", () => ({ saveScreenshot: vi.fn(async () => {}) }));
+vi.mock("./manual", () => ({ captureManual: vi.fn() }));
+vi.mock("./tiles", () => ({
+  TileWriter: vi.fn(
+    class {
+      shot = { width: 0, height: 0, title: "Example" };
+      finish = vi.fn(async () => {});
+      write = vi.fn(
+        async (
+          _bitmap: unknown,
+          width: number,
+          _source: number,
+          target: number,
+          height: number,
+        ) => {
+          this.shot.width = width;
+          this.shot.height = target + height;
+        },
+      );
+    },
+  ),
+  readTiledScreenshot: vi.fn(async () => undefined),
+  removeTiledScreenshot: vi.fn(async () => {}),
+}));
 
 function event() {
   return { addListener: vi.fn(), removeListener: vi.fn() };
@@ -22,6 +46,7 @@ function setup(saved: CaptureState | null = null, busy = false) {
   const api = {
     runtime: {
       id: "extension",
+      getPlatformInfo: vi.fn(async () => ({})),
       getURL: (p: string) => `chrome-extension://extension${p}`,
       onMessage: event(),
     },
@@ -75,21 +100,34 @@ beforeEach(() => {
           resolveCapture = resolve;
         }),
     );
-  vi.mocked(saveScreenshot).mockClear();
+  vi.mocked(TileWriter).mockClear();
+  vi.mocked(removeTiledScreenshot).mockClear();
+  vi.mocked(captureManual)
+    .mockReset()
+    .mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveCapture = resolve;
+        }),
+    );
 });
 afterEach(() => vi.unstubAllGlobals());
 
 describe("independent screenshot jobs", () => {
-  it("reports inaccessible documents before starting the capture engine", async () => {
+  it("offers manual capture for documents without script access", async () => {
     const { api, call } = setup();
     api.tabs.sendMessage.mockRejectedValue(new Error("Receiving end does not exist"));
     await call("start");
     await vi.waitFor(async () =>
       expect(await call("status")).toMatchObject({
-        state: { phase: "error", error: "unavailable" },
+        state: { mode: "manual" },
       }),
     );
     expect(capturePage).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(captureManual).toHaveBeenCalled());
+    const status = await call("status");
+    if (status.ok && status.state) await call("cancel", { id: status.state.id });
+    resolveCapture({ width: 0, height: 0, blob: new Blob() });
   });
   it("saves a completed result and opens the extension preview", async () => {
     const { api, call } = setup();
@@ -98,14 +136,47 @@ describe("independent screenshot jobs", () => {
       state: { phase: "preparing", tabId: 4 },
     });
     await vi.waitFor(() => expect(capturePage).toHaveBeenCalledOnce());
+    await vi.mocked(capturePage).mock.calls[0][0].write({} as ImageBitmap, 800, 0, 0, 2600);
     resolveCapture({ width: 800, height: 2600, blob: new Blob(["png"]) });
     await vi.waitFor(() => expect(api.tabs.create).toHaveBeenCalledOnce());
-    expect(saveScreenshot).toHaveBeenCalledOnce();
+    expect(TileWriter).toHaveBeenCalledOnce();
     expect(await call("status")).toMatchObject({
       ok: true,
       state: { phase: "complete", width: 800, height: 2600 },
     });
     expect(api.tabs.onActivated.removeListener).toHaveBeenCalled();
+  });
+
+  it("keeps durable rows and labels the preview when a later exposure fails", async () => {
+    vi.mocked(capturePage).mockImplementationOnce(async (deps) => {
+      await deps.write({} as ImageBitmap, 800, 0, 0, 512);
+      throw new ScreenshotError("changed");
+    });
+    const { call, api } = setup();
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { phase: "complete", partial: true, notice: "changed", height: 512 },
+      }),
+    );
+    expect(removeTiledScreenshot).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(api.tabs.create).toHaveBeenCalledWith({
+        url: expect.stringContaining("&notice=changed"),
+      }),
+    );
+  });
+  it("cleans up an uncommitted capture when its first exposure fails", async () => {
+    vi.mocked(capturePage).mockRejectedValueOnce(new ScreenshotError("captureFailed"));
+    const { call, api } = setup();
+    await call("start");
+    await vi.waitFor(async () =>
+      expect(await call("status")).toMatchObject({
+        state: { phase: "error", error: "captureFailed" },
+      }),
+    );
+    expect(removeTiledScreenshot).toHaveBeenCalledOnce();
+    expect(api.tabs.create).not.toHaveBeenCalled();
   });
 
   it("rejects concurrent jobs and does not save a cancelled result", async () => {
@@ -119,7 +190,7 @@ describe("independent screenshot jobs", () => {
     await vi.waitFor(async () =>
       expect(await call("status")).toMatchObject({ state: { phase: "cancelled" } }),
     );
-    expect(saveScreenshot).not.toHaveBeenCalled();
+    expect(removeTiledScreenshot).toHaveBeenCalledOnce();
     expect(api.tabs.create).not.toHaveBeenCalled();
   });
 

@@ -4,6 +4,7 @@ import { RiCheckLine, RiImageLine, RiLoader4Line } from "@remixicon/react";
 import { useEffect, useState } from "react";
 import {
   type CaptureError,
+  type CaptureMode,
   type CaptureReply,
   type CaptureRequest,
   type CaptureState,
@@ -16,6 +17,7 @@ export function LongScreenshot() {
   const { t } = useTranslation("extension");
   const [state, setState] = useState<CaptureState | null>(null);
   const [error, setError] = useState<CaptureError | null>(null);
+  const [mode, setMode] = useState<CaptureMode>("auto");
   const [pending, setPending] = useState(true);
   const [cancelling, setCancelling] = useState(false);
 
@@ -73,6 +75,18 @@ export function LongScreenshot() {
       <p className="text-xs leading-relaxed text-muted-foreground">
         {t("longScreenshot.description")}
       </p>
+      {!active && (
+        <select
+          aria-label={t("longScreenshot.mode")}
+          value={mode}
+          onChange={(event) => setMode(event.target.value as CaptureMode)}
+          className="h-9 w-full rounded-md border border-border bg-background px-2 text-xs"
+        >
+          <option value="auto">{t("longScreenshot.modes.auto")}</option>
+          <option value="manual">{t("longScreenshot.modes.manual")}</option>
+          <option value="visible">{t("longScreenshot.modes.visible")}</option>
+        </select>
+      )}
       <div className="rounded-xl border border-border/80 bg-card/60 p-3">
         {active && state ? (
           <div className="space-y-3" role="status" aria-live="polite">
@@ -83,21 +97,30 @@ export function LongScreenshot() {
                   cancelling ? "longScreenshot.cancelling" : `longScreenshot.phase.${state.phase}`,
                 )}
               </span>
-              {!cancelling && <span className="ml-auto tabular-nums">{state.progress}%</span>}
+              {!cancelling && state.mode !== "manual" && (
+                <span className="ml-auto tabular-nums">{state.progress}%</span>
+              )}
             </div>
-            <div
-              role="progressbar"
-              aria-label={t("longScreenshot.title")}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={state.progress}
-              className="h-1.5 overflow-hidden rounded-full bg-muted"
-            >
+            {state.mode !== "manual" && (
               <div
-                className="h-full rounded-full bg-foreground transition-all"
-                style={{ width: `${state.progress}%` }}
-              />
-            </div>
+                role="progressbar"
+                aria-label={t("longScreenshot.title")}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={state.progress}
+                className="h-1.5 overflow-hidden rounded-full bg-muted"
+              >
+                <div
+                  className="h-full rounded-full bg-foreground transition-all"
+                  style={{ width: `${state.progress}%` }}
+                />
+              </div>
+            )}
+            {state.height && (
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {state.width} × {state.height} px
+              </p>
+            )}
             <p className="truncate text-[11px] text-muted-foreground" title={state.title}>
               {state.title}
             </p>
@@ -121,6 +144,12 @@ export function LongScreenshot() {
           </div>
         )}
       </div>
+      {state?.notice && (
+        <p role="status" className="text-xs leading-relaxed text-muted-foreground">
+          {state.partial && `${t("longScreenshot.partial")} `}
+          {t(`longScreenshot.errors.${state.notice}`)}
+        </p>
+      )}
       {currentError && (
         <p role="alert" className="text-xs leading-relaxed text-destructive">
           {t(`longScreenshot.errors.${currentError}`)}
@@ -129,8 +158,39 @@ export function LongScreenshot() {
       {active && state ? (
         <>
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {t("longScreenshot.runningHint")}
+            {t(
+              state.mode === "manual"
+                ? "longScreenshot.manualHint"
+                : state.phase === "paused"
+                  ? "longScreenshot.pausedHint"
+                  : "longScreenshot.runningHint",
+            )}
           </p>
+          <div className="flex gap-2">
+            <Button
+              className="flex-1"
+              variant="outline"
+              size="sm"
+              disabled={pending || cancelling}
+              onClick={() =>
+                void send({
+                  type: LONG_SCREENSHOT,
+                  action: state.phase === "paused" ? "resume" : "pause",
+                  id: state.id,
+                })
+              }
+            >
+              {t(state.phase === "paused" ? "longScreenshot.resume" : "longScreenshot.pause")}
+            </Button>
+            <Button
+              className="flex-1"
+              size="sm"
+              disabled={pending || cancelling || !state.height}
+              onClick={() => void send({ type: LONG_SCREENSHOT, action: "finish", id: state.id })}
+            >
+              {t("longScreenshot.finish")}
+            </Button>
+          </div>
           <Button
             className="w-full"
             variant="outline"
@@ -158,7 +218,7 @@ export function LongScreenshot() {
             className="flex-1"
             size="sm"
             disabled={pending}
-            onClick={() => void send({ type: LONG_SCREENSHOT, action: "start" })}
+            onClick={() => void send({ type: LONG_SCREENSHOT, action: "start", mode })}
           >
             {t("longScreenshot.start")}
           </Button>

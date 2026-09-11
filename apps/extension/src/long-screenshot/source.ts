@@ -8,6 +8,7 @@ export async function openScreenshotSource(
   windowId: number,
   signal: AbortSignal,
   checkTab: () => Promise<void>,
+  allowDebugger = true,
 ) {
   let lastShot = Date.now();
   try {
@@ -26,6 +27,7 @@ export async function openScreenshotSource(
     };
   } catch (error) {
     if (signal.aborted) throw error;
+    if (!allowDebugger) throw new ScreenshotError("unavailable");
   }
   await checkTab();
   const target = { tabId };

@@ -43,7 +43,14 @@ export function createPageCapture(onCancel: (id: string) => void) {
     document.documentElement.append(host);
     let watchdog: ReturnType<typeof setTimeout>;
     let finished = false;
+    let paused = false;
     let bottomOverlayHeight = 0;
+    const pendingRoots = new Set<Element>([document.documentElement]);
+    const observer = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.addedNodes) if (node instanceof Element) pendingRoots.add(node);
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
 
     function setStyle(element: HTMLElement | SVGElement, property: string, value: string) {
       if (!element.hasAttribute("style")) originallyUnstyled.add(element);
@@ -58,46 +65,59 @@ export function createPageCapture(onCancel: (id: string) => void) {
     }
 
     function normalize() {
-      for (const element of document.querySelectorAll("*")) {
-        if (
-          element === host ||
-          seen.has(element) ||
-          !(element instanceof HTMLElement || element instanceof SVGElement)
-        )
-          continue;
-        seen.add(element);
-        const computed = getComputedStyle(element);
-        if (computed.position === "sticky") {
-          // Relative positioning retains the element's place and size in flow.
-          setStyle(element, "position", "relative");
-          for (const edge of ["top", "right", "bottom", "left"]) setStyle(element, edge, "auto");
-        } else if (computed.position === "fixed" && !element.hasAttribute("data-bsk-overlay")) {
-          if (!element.hasAttribute("style")) originallyUnstyled.add(element);
-          const visibility = element.style.getPropertyValue("visibility");
-          const priority = element.style.getPropertyPriority("visibility");
-          fixed.push({
-            element,
-            atTop: element.getBoundingClientRect().top < window.innerHeight / 2,
-            visibility,
-            priority,
-          });
-          changes.push(() => {
-            if (element.style.getPropertyValue("visibility") !== "hidden") return;
-            if (visibility) element.style.setProperty("visibility", visibility, priority);
-            else element.style.removeProperty("visibility");
-          });
-        }
+      const roots = [...pendingRoots];
+      pendingRoots.clear();
+      for (const root of roots) {
+        if (!root.isConnected) continue;
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let element: Element | null = root;
+        do {
+          normalizeElement(element);
+          element = walker.nextNode() as Element | null;
+        } while (element);
+      }
+    }
+    function normalizeElement(element: Element) {
+      if (
+        element === host ||
+        seen.has(element) ||
+        !(element instanceof HTMLElement || element instanceof SVGElement)
+      )
+        return;
+      seen.add(element);
+      const computed = getComputedStyle(element);
+      if (computed.position === "sticky") {
+        // Relative positioning retains the element's place and size in flow.
+        setStyle(element, "position", "relative");
+        for (const edge of ["top", "right", "bottom", "left"]) setStyle(element, edge, "auto");
+      } else if (computed.position === "fixed" && !element.hasAttribute("data-bsk-overlay")) {
+        if (!element.hasAttribute("style")) originallyUnstyled.add(element);
+        const visibility = element.style.getPropertyValue("visibility");
+        const priority = element.style.getPropertyPriority("visibility");
+        fixed.push({
+          element,
+          atTop: element.getBoundingClientRect().top < window.innerHeight / 2,
+          visibility,
+          priority,
+        });
+        changes.push(() => {
+          if (element.style.getPropertyValue("visibility") !== "hidden") return;
+          if (visibility) element.style.setProperty("visibility", visibility, priority);
+          else element.style.removeProperty("visibility");
+        });
       }
     }
 
     function finish() {
       if (finished) return;
       finished = true;
+      observer.disconnect();
+      pendingRoots.clear();
       controller.abort();
       clearTimeout(watchdog);
       window.removeEventListener("keydown", keydown, true);
-      window.removeEventListener("wheel", cancel, true);
-      window.removeEventListener("touchstart", cancel, true);
+      window.removeEventListener("wheel", interaction, true);
+      window.removeEventListener("touchstart", interaction, true);
       window.removeEventListener("pagehide", cancel);
       document.removeEventListener("visibilitychange", visibilityChanged);
       host.remove();
@@ -113,7 +133,11 @@ export function createPageCapture(onCancel: (id: string) => void) {
       finish();
       onCancel(id);
     }
+    function interaction() {
+      if (!paused) cancel();
+    }
     function keydown(event: KeyboardEvent) {
+      if (paused && event.key !== "Escape") return;
       if (
         ["Escape", "PageDown", "PageUp", "Home", "End", "ArrowDown", "ArrowUp", " "].includes(
           event.key,
@@ -131,8 +155,8 @@ export function createPageCapture(onCancel: (id: string) => void) {
     }
     button.addEventListener("click", cancel);
     window.addEventListener("keydown", keydown, true);
-    window.addEventListener("wheel", cancel, { capture: true, passive: true });
-    window.addEventListener("touchstart", cancel, { capture: true, passive: true });
+    window.addEventListener("wheel", interaction, { capture: true, passive: true });
+    window.addEventListener("touchstart", interaction, { capture: true, passive: true });
     window.addEventListener("pagehide", cancel);
     document.addEventListener("visibilitychange", visibilityChanged);
 
@@ -156,7 +180,7 @@ export function createPageCapture(onCancel: (id: string) => void) {
         controller.signal.addEventListener("abort", abort, { once: true });
       });
 
-    async function move(y: number, capture: boolean) {
+    async function move(y: number, capture: boolean, final = false) {
       controller.signal.throwIfAborted();
       touch();
       host.style.setProperty("visibility", "visible", "important");
@@ -189,7 +213,7 @@ export function createPageCapture(onCancel: (id: string) => void) {
         for (const item of fixed) {
           const show = item.atTop
             ? metrics.y < 0.5
-            : metrics.y + metrics.viewportHeight >= metrics.height - 0.5;
+            : final && metrics.y + metrics.viewportHeight >= metrics.height - 0.5;
           if (!show) item.element.style.setProperty("visibility", "hidden", "important");
           else if (item.visibility)
             item.element.style.setProperty("visibility", item.visibility, item.priority);
@@ -214,6 +238,11 @@ export function createPageCapture(onCancel: (id: string) => void) {
       move,
       touch,
       signal: controller.signal,
+      pause(value: boolean) {
+        paused = value;
+        touch();
+        host.style.setProperty("visibility", "visible", "important");
+      },
       get bottomOverlayHeight() {
         return bottomOverlayHeight;
       },
@@ -253,7 +282,8 @@ export function createPageCapture(onCancel: (id: string) => void) {
       }
       task.signal.throwIfAborted();
       task.touch();
-      if (request.action === "move") return task.move(request.y, request.capture);
+      if (request.action === "pause") task.pause(request.paused);
+      if (request.action === "move") return task.move(request.y, request.capture, request.final);
       return measure();
     },
     dispose() {

@@ -25,6 +25,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
       { scale: 1, height: 2190, lazy: false },
       { scale: 1, height: 488, lazy: false },
       { scale: 1, height: 2603, lazy: true },
+      { scale: 2, height: 50_000, lazy: false },
     ])("captures exact pixels and previews at scale $scale, height $height, lazy $lazy", async ({
       scale,
       height,
@@ -35,19 +36,32 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
       const { build } = require("esbuild");
       const bundle = await build({
         stdin: {
-          contents: `import {capturePage} from './capture'; import {createPageCapture} from './page'; import {saveScreenshot} from './storage';
-        const abort = new AbortController(); const page = createPageCapture(()=>abort.abort());
+          contents: `import {capturePage} from './capture'; import {createPageCapture} from './page'; import {TileWriter} from './tiles'; import {exportPng} from './png';
+        globalThis.pixelStats={canvasBytes:0,bitmapBytes:0,peak:0,maxCanvasHeight:0};
+        const stats=globalThis.pixelStats; const canvasSizes=new WeakMap();
+        const measure=c=>{stats.canvasBytes-=canvasSizes.get(c)||0;const n=c.width*c.height*4;canvasSizes.set(c,n);stats.canvasBytes+=n;stats.maxCanvasHeight=Math.max(stats.maxCanvasHeight,c.height);stats.peak=Math.max(stats.peak,stats.canvasBytes+stats.bitmapBytes);};
+        const NativeCanvas=globalThis.OffscreenCanvas;
+        globalThis.OffscreenCanvas=class extends NativeCanvas {
+          constructor(w,h){super(w,h);measure(this);}
+          get width(){return super.width;} set width(v){super.width=v;measure(this);}
+          get height(){return super.height;} set height(v){super.height=v;measure(this);}
+        };
+        const decode=globalThis.createImageBitmap.bind(globalThis), bitmaps=new WeakMap();
+        globalThis.createImageBitmap=async(...args)=>{const b=await decode(...args);const n=b.width*b.height*4;bitmaps.set(b,n);stats.bitmapBytes+=n;stats.peak=Math.max(stats.peak,stats.canvasBytes+stats.bitmapBytes);return b;};
+        const close=ImageBitmap.prototype.close;ImageBitmap.prototype.close=function(){stats.bitmapBytes-=bitmaps.get(this)||0;bitmaps.delete(this);close.call(this);};
+        const writer = new TileWriter('pixel-test','Long screenshot test'); const abort = new AbortController(); const page = createPageCapture(()=>abort.abort());
         globalThis.shotState = {phase:'running'};
         globalThis.nextShot = null;
         globalThis.runCapture = () => {
           capturePage({signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
+            write:(...args)=>writer.write(...args),
             page:command=>page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command}),
             screenshot:()=>new Promise(resolve=>{globalThis.nextShot=async data=>{
               globalThis.nextShot=null; resolve(await createImageBitmap(await (await fetch(data)).blob()));
             };})
           }).then(async result=>{
-            await saveScreenshot({id:'pixel-test',title:'Long screenshot test',createdAt:Date.now(),...result});
-            const reader=new FileReader(); reader.onload=()=>{globalThis.shotState={phase:'complete',width:result.width,height:result.height,data:reader.result};};reader.readAsDataURL(result.blob);
+            const blob=await exportPng(writer.shot); globalThis.savedShot=writer.shot;
+            const reader=new FileReader(); reader.onload=()=>{globalThis.shotState={phase:'complete',width:result.width,height:result.height,pixelStats:{...stats},data:reader.result};};reader.readAsDataURL(blob);
           },error=>{globalThis.shotState={phase:'error',error:String(error)};});
         };`,
           resolveDir: path.resolve("src/long-screenshot"),
@@ -133,7 +147,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
             );
             await evaluate(bundle.outputFiles[0].text);
             await evaluate("runCapture()");
-            const deadline = Date.now() + 30_000;
+            const deadline = Date.now() + 180_000;
             while (Date.now() < deadline) {
               const status = await evaluate<{ phase: string; error?: string; needsShot: boolean }>(
                 "({...shotState,data:undefined,needsShot:!!nextShot})",
@@ -154,6 +168,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
               width: number;
               height: number;
               data: string;
+              pixelStats: { maxCanvasHeight: number; peak: number; bitmapBytes: number };
             }>("shotState");
             expect(result.phase).toBe("complete");
             expect(result.height).toBe(
@@ -164,7 +179,24 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
                 "({x:scrollX,y:scrollY,sticky:document.querySelector('#sticky').getAttribute('style'),fixed:document.querySelector('#fixed').getAttribute('style')})",
               ),
             ).toEqual(original);
-            const badRows = await evaluate<number[]>(`(async()=>{
+            expect(result.pixelStats.maxCanvasHeight).toBeLessThanOrEqual(512);
+            expect(result.pixelStats.bitmapBytes).toBe(0);
+            expect(result.pixelStats.peak).toBeLessThan(64 * 1024 * 1024);
+            const badRows =
+              height > 30_000
+                ? await evaluate<number[]>(`(async()=>{
+              const directory=await (await (await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots')).getDirectoryHandle('pixel-test');
+              const shot=savedShot;const canvas=new OffscreenCanvas(shot.width,512);const ctx=canvas.getContext('2d');const bad=[];
+              for(let tile=0;tile<Math.ceil(shot.height/512);tile++){
+                const bitmap=await createImageBitmap(await (await directory.getFileHandle(tile+'.png')).getFile());ctx.clearRect(0,0,shot.width,512);ctx.drawImage(bitmap,0,0);bitmap.close();
+                const data=ctx.getImageData(0,0,shot.width,512).data;
+                for(let row=0;row<512;row++){
+                  const y=Math.floor((tile*512+row)/${scale})-31;if(y<0||y>=${totalRows})continue;
+                  const at=(row*shot.width+100*${scale})*4;
+                  if(data[at]!==y%256||data[at+1]!==Math.min(255,Math.floor(y/256))||data[at+2]!==127){if(bad.length<16)bad.push(y);}
+                }
+              }canvas.width=canvas.height=1;return bad;})()`)
+                : await evaluate<number[]>(`(async()=>{
           const bitmap=await createImageBitmap(await (await fetch(shotState.data)).blob());
           const canvas=new OffscreenCanvas(bitmap.width,bitmap.height);const ctx=canvas.getContext('2d');ctx.drawImage(bitmap,0,0);
           const data=ctx.getImageData(0,0,canvas.width,canvas.height).data;const bad=[];
@@ -190,6 +222,18 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
               );
             }
             expect(badRows).toEqual([]);
+            if (process.env.BSK_LONG_SCREENSHOT_OUTPUT)
+              await writeFile(
+                path.join(
+                  process.env.BSK_LONG_SCREENSHOT_OUTPUT,
+                  `buffers-${scale}-${height}.json`,
+                ),
+                JSON.stringify(
+                  { width: result.width, height: result.height, ...result.pixelStats },
+                  null,
+                  2,
+                ),
+              );
             await send(
               "Page.addScriptToEvaluateOnNewDocument",
               {
@@ -221,11 +265,28 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
               previewReady,
               await evaluate("document.body.innerText+JSON.stringify(previewErrors)"),
             ).toBe(true);
-            expect(await evaluate("document.querySelector('.preview-image').naturalHeight")).toBe(
-              result.height,
-            );
+            expect(
+              await evaluate<number>("document.querySelectorAll('[data-tile-index]').length"),
+            ).toBeLessThan(12);
+            if (height > 30000) {
+              await evaluate("document.querySelector('.preview-canvas').scrollTop=1e9");
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              expect(
+                await evaluate(
+                  "[...document.querySelectorAll('[data-tile-index]')].some(el=>Number(el.dataset.tileIndex)===" +
+                    (Math.ceil(result.height / 512) - 1) +
+                    ")",
+                ),
+              ).toBe(true);
+              expect(
+                await evaluate<number>("document.querySelectorAll('[data-tile-index]').length"),
+              ).toBeLessThan(12);
+            }
             await evaluate("document.querySelector('button').click()");
-            await new Promise((resolve) => setTimeout(resolve, 100));
+            for (let i = 0; i < 200; i++) {
+              if (await evaluate("!!globalThis.downloadArgs")) break;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
             expect(await evaluate("globalThis.downloadArgs")).toMatchObject({
               saveAs: true,
               filename: expect.stringMatching(/Long screenshot test.*\.png$/),
@@ -245,6 +306,6 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
-    }, 60_000);
+    }, 240_000);
   },
 );

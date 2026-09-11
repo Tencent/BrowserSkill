@@ -72,6 +72,18 @@ describe("page capture cleanup", () => {
     expect(document.documentElement.querySelector(":scope > style")).toBeNull();
   });
 
+  it("allows interaction while paused and restores on resumed user scrolling", async () => {
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    await send({ action: "pause", paused: true });
+    window.dispatchEvent(new WheelEvent("wheel", { deltaY: 200 }));
+    expect(cancel).not.toHaveBeenCalled();
+    await expect(send({ action: "inspect" })).resolves.toBeDefined();
+    await send({ action: "pause", paused: false });
+    window.dispatchEvent(new WheelEvent("wheel", { deltaY: 200 }));
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(window.scrollY).toBe(350);
+  });
+
   it("Escape cancels pending waits and cleanup remains idempotent", async () => {
     await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
     const moving = send({ action: "move", y: 800, capture: true });

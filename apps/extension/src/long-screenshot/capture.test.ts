@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { capturePage, checkSize, sameLayout, sliceForFrame } from "./capture";
+import { capturePage, sameLayout, sliceForFrame } from "./capture";
 import { type PageCommand, type PageMetrics, ScreenshotError } from "./types";
 
 const metrics: PageMetrics = {
@@ -39,11 +39,8 @@ describe("long screenshot stitching", () => {
     expect(spans.reduce((sum, span) => sum + span.height, 0)).toBe(Math.round(2501 * scale));
   });
 
-  it("rejects gaps, oversized canvases and layout changes", () => {
+  it("rejects gaps and viewport layout changes", () => {
     expect(() => sliceForFrame({ ...metrics, y: 701 }, 600, 1)).toThrow("changed");
-    expect(() => checkSize(1600, 40000)).toThrow("tooLarge");
-    expect(() => checkSize(10000, 10000)).toThrow("tooLarge");
-    expect(() => checkSize(0, 100)).toThrow("tooLarge");
     expect(sameLayout(metrics, { ...metrics, dpr: 2 })).toBe(false);
     expect(sameLayout(metrics, { ...metrics, y: 600 })).toBe(false);
   });
@@ -52,24 +49,6 @@ describe("long screenshot stitching", () => {
 function harness() {
   const controller = new AbortController();
   const draw = vi.fn();
-  const canvases: { width: number; height: number }[] = [];
-  vi.stubGlobal(
-    "OffscreenCanvas",
-    class {
-      constructor(
-        public width: number,
-        public height: number,
-      ) {
-        canvases.push(this);
-      }
-      getContext() {
-        return { drawImage: draw };
-      }
-      async convertToBlob() {
-        return new Blob(["png"], { type: "image/png" });
-      }
-    },
-  );
   let current = { ...metrics, y: 401 };
   const commands: PageCommand[] = [];
   const page = vi.fn(async (command: PageCommand) => {
@@ -90,26 +69,26 @@ function harness() {
   const deps = {
     page,
     screenshot,
+    write: draw,
     signal: controller.signal,
     progress: vi.fn(),
     label: "Capture",
     cancelLabel: "Cancel",
   };
-  return { deps, controller, commands, bitmaps, draw, canvases };
+  return { deps, controller, commands, bitmaps, draw };
 }
 
 describe("capture lifecycle", () => {
-  it("warms lazy content, crops scrollbars, stitches and releases every bitmap", async () => {
+  it("captures incrementally, crops scrollbars and releases every bitmap", async () => {
     const h = harness();
     const result = await capturePage(h.deps);
     expect(result).toMatchObject({ width: 1600, height: 5002 });
-    expect(h.commands.filter((c) => c.action === "move" && !c.capture).length).toBeGreaterThan(4);
-    expect(h.draw.mock.calls[0].slice(1)).toEqual([0, 0, 1600, 1200, 0, 0, 1600, 1200]);
+    expect(h.commands.filter((c) => c.action === "move" && !c.capture).length).toBe(0);
+    expect(h.draw.mock.calls[0].slice(1)).toEqual([1600, 0, 0, 1200]);
     const last = h.draw.mock.calls.at(-1)!;
-    expect(last[6] + last[8]).toBe(5002);
+    expect(last[3] + last[4]).toBe(5002);
     expect(h.commands.at(-1)).toEqual({ action: "finish" });
     expect(h.bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true);
-    expect(h.canvases[0]).toMatchObject({ width: 1, height: 1 });
   });
 
   it("restores the page if begin mutates it but its response is lost", async () => {
@@ -145,15 +124,26 @@ describe("capture lifecycle", () => {
     expect(h.bitmaps[0].close).toHaveBeenCalledOnce();
   });
 
-  it("stops a continuously growing page with no partial result", async () => {
+  it("captures beyond the old pixel and 120-frame limits without allocating a full canvas", async () => {
     const h = harness();
     const page = h.deps.page.getMockImplementation()!;
-    h.deps.page.mockImplementation(async (command) => ({
-      ...(await page(command)),
-      height: 40_000,
-    }));
-    await expect(capturePage(h.deps)).rejects.toThrow("tooLarge");
-    expect(h.deps.screenshot).not.toHaveBeenCalled();
+    h.deps.page.mockImplementation(async (command) => {
+      // Feed the full dimensions into the clamped scroll simulation.
+      const result = await page(command);
+      const y = command.action === "move" ? Math.min(command.y, 99_400) : lastY;
+      lastY = y;
+      return { ...result, height: 100_000, y };
+    });
+    let lastY = 0;
+    const result = await capturePage(h.deps);
+    expect(result).toEqual({ width: 1600, height: 200_000 });
+    expect(h.deps.screenshot.mock.calls.length).toBeGreaterThan(120);
+    expect(h.bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true);
+  });
+  it("finishes early with all completed rows when the user chooses Finish", async () => {
+    const h = harness();
+    const result = await capturePage({ ...h.deps, finished: () => h.draw.mock.calls.length >= 2 });
+    expect(result.height).toBe(2220);
     expect(h.commands.at(-1)).toEqual({ action: "finish" });
   });
 });

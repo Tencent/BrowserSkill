@@ -1,70 +1,88 @@
 # Full-page screenshots
 
-Open the BrowserSkill extension popup, choose **Quick actions → Full-page screenshot**, and click
-**Start capture**. This feature works with the connection switch off; it does not require an Agent,
-a session, or the CLI.
+Open **Quick actions → Full-page screenshot** in the BrowserSkill popup. Choose:
 
-The extension scrolls an ordinary HTTP/HTTPS page to load content, returns to the top, and captures
-overlapping viewport images. It stitches them into a PNG at the browser's native pixel scale.
-The captured width is the current content viewport, excluding the scrollbar. Fixed headers and
-footers appear only at the corresponding page edge; sticky elements retain their place in document
-flow while the capture runs.
+- **Full page · Automatic**: captures from the top, scrolls incrementally and follows appended content.
+- **Long image · I scroll**: captures from the current position while you scroll down. Keep overlapping
+  content between screens. Reopen the popup and choose **Finish and keep** when you are done.
+- **Visible area**: captures the current viewport once.
 
-Keep the target tab selected and avoid scrolling or resizing its window. Closing the popup does
-not stop the task. Press **Esc**, use the page's cancel button, or reopen the quick action and choose
-**Cancel** to stop it. The page's original scroll position and temporary styling are restored on
-completion, cancellation and failure. A content-side watchdog restores the page if the background
-worker disappears.
+The feature works with the CLI connection off. It does not require the CLI, daemon or an Agent session.
+After installing or reloading the extension, refresh ordinary pages to load the new content script.
 
-When finished, a preview tab opens with fit-to-width and 25%, 50% and 100% zoom options. Choose
-**Download PNG** to save the original image. The popup can reopen the latest completed preview.
-Images stay in the extension's local IndexedDB, with no upload. Each new capture prunes previews
-older than 24 hours and keeps at most five recent results. Download images you want to retain.
+## Controls and page access
 
-## Scope and limits
+Pause and resume a capture, or finish early and keep the captured portion. While automatic capture is
+paused, you can load additional content; resuming returns to the captured position. Cancel discards
+the current capture. Automatic captures restore the original scroll position and temporary styles
+when they finish or stop. Manual mode leaves the page at the user's chosen position.
 
-- Captures the top-level page vertically, not the contents of nested scrolling panels, virtual
-  lists or independently scrolling frames. Horizontally overflowing content outside the viewport
-  is excluded.
-- Lazy images get a bounded loading period. Pages that continually change their layout may fail
-  with a retry message instead of producing an incorrectly stitched image.
-- The canvas is limited to 32,760 pixels per side and 48 million pixels total. Preparation and
-  capture each allow at most 120 steps, with an overall execution budget of three minutes and
-  bounded individual browser calls. Oversized pages fail explicitly without a truncated download.
-- Browser-internal pages, extension stores and pages without the content script cannot be captured.
-  After installing/reloading the extension, refresh an already-open webpage before capturing it.
-- An Agent-controlled tab cannot be captured concurrently by the quick action.
+Keep the captured tab selected and its viewport size stable. Navigation, resizing, capture failures
+and storage errors preserve durable tiles and identify the result as partial. A restarted background
+worker can reopen the committed portion. Individual browser operations still have timeouts, but
+there is no fixed whole-job duration, scroll count, 32K image-height or 48-megapixel cutoff.
 
-The normal backend uses `tabs.captureVisibleTab`. If its initial window-surface readback fails or
-times out, the feature acquires a temporary debugger attachment and uses `Page.captureScreenshot`
-from the renderer. Chrome may show its debugging indicator during this fallback. The backend is
-chosen before page measurement; an image never mixes viewport sizes from different backends.
-The temporary attachment is released before previewing, and a failed attach never detaches
-another debugger.
+Clicking the extension grants `activeTab` for the current tab. This enables visible-area screenshots
+of Chrome internal pages and the Chrome Web Store as well as ordinary websites. These restricted
+pages do not permit content-script injection; automatic mode switches to manual scrolling there.
+Browser/enterprise capture policies and user permissions still apply. Restricted-page support does
+not bypass Chrome's scripting or debugger restrictions.
 
-## Implementation and verification
+Manual mode matches overlapping pixels without reading the page DOM. It excludes static header
+and footer bands for alignment and replaces the reliable overlap to remove old floating footers.
+Blank/repeated/animated or insufficiently overlapping content may be ambiguous. In that case the
+capture keeps its last good frame and asks the user to scroll back for more overlap; it never invents
+a match. Independently scrolling panels, moving sidebars and virtualized layouts can still need
+manual adjustment; this is not a promise of automatic capture of every browser UI.
 
-The feature lives in `apps/extension/src/long-screenshot`. The content script owns reversible page
-preparation; the background owns a single cancellable job, captures and local storage. `capture.ts`
-is independent of popup and CLI transport, so a future API can reuse the engine without changing
-the UI. This release does not add a CLI command or protocol field.
+## Storage, memory and export
 
-The tests cover pixel boundary rounding, bottom-of-page overlap, bitmap release, DOM restoration,
-cancellation, job isolation, backend ownership, UI states and interrupted workers.
+New captures are a collection of 512-pixel-high PNG tiles in the extension's Origin Private File
+System (OPFS), with a small durable manifest. Only the current screenshot and a small working canvas
+are decoded while capturing. Appending content and replacing a footer do not allocate a full-page
+canvas. Thumbnails are generated for fitting large images into the preview.
 
-After building the extension, run real-browser integration tests with an isolated Chrome binary:
+The preview mounts only visible tiles and adjacent tiles. It rebases its scrollbar for very long
+images to avoid CSS element-height limits. Zooming to original size loads original tiles.
+Previous single-PNG previews stored in IndexedDB remain readable.
+
+Downloading launches a dedicated worker. It reads tiles sequentially, applies the PNG Up filter and
+uses native streaming zlib compression to write PNG chunks to an OPFS file. The browser downloads
+the resulting file; no full-image pixel buffer or base64 export is built. Export can be cancelled
+without losing the captured tiles. There is no upload and no new third-party encoding dependency.
+
+Disk usage grows with the capture. Browser storage quotas, available disk space, PNG format bounds
+and external image-viewer capabilities remain real constraints. The preview does not decode the
+entire exported PNG, so its working memory is independent of total image height. This controls the
+screenshot feature's buffers, not the memory used by a webpage's own DOM or loading behavior.
+
+## Verification
+
+The automated checks cover actual scroll-offset rounding, fixed-footer overlap, capture beyond
+120 frames, early finish, cancellation, DOM cleanup, paused interaction, restricted-page fallback,
+streaming PNG round trips, export cancellation and disk failures. Manual alignment tests cover
+fixed bars, exact pixel offsets, ambiguous repeated content and non-overlapping jumps.
+
+Build and run the real extension in an isolated Chrome profile:
 
 ```sh
 pnpm ext:build
 BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/long-screenshot.browser.test.ts
 ```
 
-The test owns its profile and disables the CLI connection. It exercises the shipped quick action,
-PNG persistence, preview and download. A separate pixel oracle runs the actual DOM preparation and
-capture engine against a standalone headless renderer, including fractional and Retina scales:
+The extension tests cover automatic and manual capture, popup closure, pause/resume, early finish,
+page restoration, native downloads, Chrome internal pages and the Chrome Web Store. Restricted-page
+tests invoke the real extension action through the browser's extension testing API to grant activeTab.
+
+A standalone renderer suite exercises the production capture, OPFS store, PNG export and built
+preview, including fractional/Retina scales, lazy loading and a 3,170 × 100,062-pixel result:
 
 ```sh
 BSK_LONG_SCREENSHOT_RENDERER=/path/to/chrome-headless-shell pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/renderer.browser.test.ts
 ```
 
-Set `BSK_LONG_SCREENSHOT_OUTPUT` to a directory to retain PNG evidence.
+Set `BSK_LONG_SCREENSHOT_OUTPUT` to retain PNGs and buffer measurements. The 100,062-pixel run used
+only canvases at most 512 pixels high; instrumented canvas and live ImageBitmap RGBA buffers peaked
+at 43,705,488 bytes (about 41.7 MiB), while a full RGBA image would require 1,268,786,160 bytes.
+This measurement excludes codec internals, ImageData/filter buffers, JavaScript heap, GPU copies,
+the webpage and other Chrome processes; it is not a measurement of total browser memory.

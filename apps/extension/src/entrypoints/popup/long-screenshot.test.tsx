@@ -43,7 +43,11 @@ describe("long screenshot quick action", () => {
     await waitFor(() =>
       expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("35"),
     );
-    expect(sendMessage).toHaveBeenLastCalledWith({ type: LONG_SCREENSHOT, action: "start" });
+    expect(sendMessage).toHaveBeenLastCalledWith({
+      type: LONG_SCREENSHOT,
+      action: "start",
+      mode: "auto",
+    });
   });
 
   it("reconnects to an ongoing capture and offers cancellation", async () => {
@@ -91,7 +95,7 @@ describe("long screenshot quick action", () => {
     );
     sendMessage.mockResolvedValueOnce({ ok: false, error: "unsupported" });
     fireEvent.click(screen.getByRole("button", { name: "开始截图" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("HTTP");
+    expect((await screen.findByRole("alert")).textContent).toContain("我来滚动");
     expect((screen.getByRole("button", { name: "开始截图" }) as HTMLButtonElement).disabled).toBe(
       false,
     );
