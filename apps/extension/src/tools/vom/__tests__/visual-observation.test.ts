@@ -17,6 +17,7 @@ import {
   projectSemanticGraph,
   resolveSemanticGraph,
 } from "../semantic-graph";
+import { deduplicateVisualCandidates } from "../visual-dedup";
 import type { VisualCandidate } from "../visual-discovery";
 import {
   attachVisualEntries,
@@ -108,6 +109,54 @@ describe("visual observation output", () => {
     expect(r.next_cursor).toBeUndefined();
     expect(r.text.match(/\[visual:screenshot\]/g)).toHaveLength(120);
     expect(f.store.resolveEntry("e1")?.kind).toBe("visual-region");
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it("publishes distinct refs for overlapping Canvas nodes after candidate deduplication", async () => {
+    const f = fixture(2);
+    const graph = normalizeSemanticStructure(
+      resolveSemanticGraph(
+        buildSemanticGraph({
+          rootFrameId: "top",
+          viewport: { width: 1200, height: 800 },
+          documents: [
+            {
+              frameId: "top",
+              target: identity.target,
+              contextScopeId: "top",
+              axNodes: [],
+              domNodes: [1, 100, 101].map((id) => ({
+                backendNodeId: id,
+                parentBackendNodeId: id === 1 ? null : 1,
+                tag: id === 1 ? "main" : "canvas",
+                attrs: {},
+                rect: { x: 0, y: 0, w: 100, h: 100 },
+                paintOrder: id,
+                position: "static",
+                pointerEvents: "auto",
+              })),
+            },
+          ],
+        }),
+      ),
+    );
+    const discovery = await deduplicateVisualCandidates({
+      candidates: [candidate(100), candidate(101), candidate(100)],
+      complete: true,
+      issues: [],
+      captureIssues: [],
+    });
+    f.output.candidates = discovery.candidates;
+    f.output.render = prepareObservationRender(
+      attachVisualEntries(projectSemanticGraph(graph), graph, discovery.candidates),
+    );
+    const result = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
+    expect(result.ref_count).toBe(2);
+    expect(result.text.match(/\[visual:screenshot\]/g)).toHaveLength(2);
+    const refs = [...f.store.entries()];
+    expect(refs[0][0]).not.toBe(refs[1][0]);
+    expect(
+      refs.map(([, entry]) => entry.kind === "visual-region" && entry.candidate.backendNodeId),
+    ).toEqual([100, 101]);
     expect(f.send).not.toHaveBeenCalled();
   });
   it("continues all candidates, replaces refs and retries the latest cursor without skipping", async () => {
