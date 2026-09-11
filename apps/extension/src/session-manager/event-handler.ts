@@ -49,45 +49,46 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
   const events = options.windowEvents ?? chromeWindowEvents();
 
   const onRemoved = (windowId: number): void => {
-    const ctx = manager.findByWindowId(windowId);
-    if (!ctx) return;
-    const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
-      tab_id: tabId,
-      code: "cdp_failed",
-      message: "Agent Window was closed before borrowed tab could be returned",
-    }));
-    if (returnFailures.length > 0) {
-      console.warn(
-        `[bh] Agent Window ${windowId} closed with borrowed tabs that could not be returned`,
-        returnFailures,
-      );
-    }
-    const detach = options.cdp
-      ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
-          console.debug("[bh] session-event cdp detach failed", err);
+    const affected = manager.list().filter((ctx) => !ctx.tabMode && ctx.agentWindowId === windowId);
+    for (const ctx of affected) {
+      const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
+        tab_id: tabId,
+        code: "cdp_failed",
+        message: "Agent Window was closed before borrowed tab could be returned",
+      }));
+      if (returnFailures.length > 0) {
+        console.warn(
+          `[bh] Agent Window ${windowId} closed with borrowed tabs that could not be returned`,
+          returnFailures,
+        );
+      }
+      const detach = options.cdp
+        ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
+            console.debug("[bh] session-event cdp detach failed", err);
+          })
+        : Promise.resolve();
+      void detach
+        .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
+        .then(() => {
+          onSessionsChanged?.();
+          const event: EventFrame = {
+            event: "session.window_closed",
+            payload: {
+              session_id: ctx.sessionId,
+              reason: "user_closed_window",
+              ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
+            },
+          };
+          try {
+            transport.send(event);
+          } catch (err) {
+            console.warn("[bh] could not push session.window_closed event", err);
+          }
         })
-      : Promise.resolve();
-    void detach
-      .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
-      .then(() => {
-        onSessionsChanged?.();
-        const event: EventFrame = {
-          event: "session.window_closed",
-          payload: {
-            session_id: ctx.sessionId,
-            reason: "user_closed_window",
-            ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
-          },
-        };
-        try {
-          transport.send(event);
-        } catch (err) {
-          console.warn("[bh] could not push session.window_closed event", err);
-        }
-      })
-      .catch((err) => {
-        console.warn("[bh] session-event handler failed", err);
-      });
+        .catch((err) => {
+          console.warn("[bh] session-event handler failed", err);
+        });
+    }
   };
 
   events.addListener(onRemoved);

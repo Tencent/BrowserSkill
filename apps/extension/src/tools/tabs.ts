@@ -246,7 +246,7 @@ export async function handleTabList(
   // per-tab classification is O(1).
   const otherAgentWindowIds = new Set<number>();
   for (const s of manager.list()) {
-    if (s.sessionId !== params.session_id) {
+    if (s.sessionId !== params.session_id && !s.tabMode) {
       otherAgentWindowIds.add(s.agentWindowId);
     }
   }
@@ -258,8 +258,16 @@ export async function handleTabList(
   for (const t of allTabs) {
     if (typeof t.id !== "number") continue;
     const winId = typeof t.windowId === "number" ? t.windowId : -1;
+    const owner = manager.findByTabId?.(t.id);
+    if (owner && owner.sessionId !== ctx.sessionId) continue;
     if (otherAgentWindowIds.has(winId)) continue;
-    const tabScope: "user" | "agent" = winId === myAgentWindowId ? "agent" : "user";
+    const tabScope: "user" | "agent" = (
+      ctx.tabMode
+        ? ctx.agentCreatedTabs.has(t.id) || ctx.borrowedTabs.has(t.id)
+        : winId === myAgentWindowId
+    )
+      ? "agent"
+      : "user";
     if (scope === "user" && tabScope !== "user") continue;
     if (scope === "agent" && tabScope !== "agent") continue;
     tabs.push({
@@ -361,7 +369,7 @@ function buildCreateProps(
   const createProps: chrome.tabs.CreateProperties = {
     windowId: ctx.agentWindowId,
     url: params.url ?? NEW_TAB_DEFAULT_URL,
-    active: params.active ?? true,
+    active: ctx.tabMode ? false : (params.active ?? true),
   };
   if (params.index !== undefined) createProps.index = params.index;
   return createProps;
@@ -392,6 +400,15 @@ async function createTabAndCleanup(
   // Claim the concrete id returned by Chrome. Ownership never depends on
   // matching this request to an asynchronous onCreated event.
   ctx.agentCreatedTabs.add(tab.id);
+  if (ctx.tabMode) {
+    ctx.activeTabId = tab.id;
+    try {
+      if (ctx.taskGroupId !== undefined)
+        await chrome.tabs.group({ tabIds: [tab.id], groupId: ctx.taskGroupId });
+    } catch {
+      /* Group may have been removed by the user; tab ownership still applies. */
+    }
+  }
   if (aborted(deps.signal, "tab_create")) {
     try {
       await getTabsApi(deps).remove(tab.id);
@@ -485,7 +502,11 @@ async function authoriseAgentTab(
       `${toolName}: tab ${tabId} is borrowed by session ${otherBorrower}`,
     );
   }
-  if (tab.windowId === ctx.agentWindowId) {
+  if (
+    ctx.tabMode
+      ? ctx.agentCreatedTabs.has(tabId) || ctx.borrowedTabs.has(tabId)
+      : tab.windowId === ctx.agentWindowId
+  ) {
     return tab;
   }
   return rpcError(
@@ -575,7 +596,8 @@ export async function handleTabSelect(
     return { code: "cancelled", message: "tab_select aborted" };
   }
   try {
-    await getTabsApi(deps).update(params.tab_id, { active: true });
+    if (ctx.tabMode) ctx.activeTabId = params.tab_id;
+    else await getTabsApi(deps).update(params.tab_id, { active: true });
   } catch (err) {
     return {
       code: "protocol_error",
@@ -638,14 +660,19 @@ async function validateBorrowTarget(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
-  if (tab.windowId === ctx.agentWindowId) {
+  if (ctx.tabMode ? ctx.agentCreatedTabs.has(tabId) : tab.windowId === ctx.agentWindowId) {
     return {
       code: "invalid_params",
       message: `tab_borrow: tab ${tabId} already lives in the Agent Window`,
     };
   }
   for (const s of manager.list()) {
-    if (s.sessionId !== ctx.sessionId && s.agentWindowId === tab.windowId) {
+    if (
+      s.sessionId !== ctx.sessionId &&
+      (s.tabMode
+        ? s.agentCreatedTabs.has(tabId) || s.borrowedTabs.has(tabId)
+        : s.agentWindowId === tab.windowId)
+    ) {
       return rpcError(
         "permission_denied",
         "agent_window_scope",
@@ -754,6 +781,8 @@ async function executeBorrowCore(
   );
   if (approvalErr) return approvalErr;
 
+  if (p.ctx.tabMode) return { originalWindowId, originalIndex };
+
   const moveErr = await moveTabForBorrow(
     p.tabsApi,
     p.tabId,
@@ -816,6 +845,7 @@ export async function handleTabBorrow(
 
     try {
       reservation.commit({
+        ...(ctx.tabMode ? { stationary: true } : {}),
         tabId: params.tab_id,
         originalWindowId: coreResult.originalWindowId,
         originalIndex: coreResult.originalIndex,
@@ -829,7 +859,8 @@ export async function handleTabBorrow(
     }
     // Activate after commit so overlay/event observers see the tab as claimed.
     try {
-      await tabsApi.update(params.tab_id, { active: true });
+      if (ctx.tabMode) ctx.activeTabId = params.tab_id;
+      else await tabsApi.update(params.tab_id, { active: true });
     } catch (err) {
       console.debug("[bsk tab_borrow] activate after move failed", err);
     }
@@ -994,6 +1025,15 @@ export async function returnBorrowedTab(
   const alreadyCancelled = aborted(deps.signal, "tab_return");
   if (alreadyCancelled) return alreadyCancelled;
 
+  if (entry.stationary) {
+    await releaseReturnedTabState(ctx, tabId, deps);
+    return {
+      tabId,
+      toWindowId: entry.originalWindowId,
+      toIndex: entry.originalIndex,
+      fallback: false,
+    };
+  }
   let targetWindowId = entry.originalWindowId;
   let targetIndex = entry.originalIndex;
   let fallback = false;

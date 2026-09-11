@@ -1,7 +1,7 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ConnectionController } from "@/lib/connection-controller";
-import { watchDaemonPort } from "@/lib/daemon-port-preference";
+import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
@@ -24,6 +24,7 @@ import {
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import { captureTaskPreview } from "@/lib/task-preview";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
@@ -44,28 +45,68 @@ import {
 } from "@/tools/record";
 import { chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
-import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { detectBrowserMeta } from "@/transport/handshake";
+import { watchRemoteAuthorization } from "@/transport/remote-authorization";
+import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 
 export default defineBackground(() => {
   const controller = new ConnectionController();
-  const transport = new WSTransport({ url: __BSK_DAEMON_WS_URL__ });
-  const sessions = new SessionManager();
+  let remoteEndpoint: RemoteEndpoint | null = null;
+  const transport = new WSTransport({
+    url: __BSK_DAEMON_WS_URL__,
+    webSocketFactory: (url) =>
+      remoteSocket(
+        url,
+        remoteEndpoint,
+        async (sessionId) => {
+          const task = sessions.get(sessionId);
+          if (!task) throw new Error("Browser task unavailable");
+          const tabId =
+            task.activeTabId !== undefined && isAgentControlledTab(task, task.activeTabId)
+              ? task.activeTabId
+              : [...task.agentCreatedTabs, ...task.borrowedTabs.keys()][0];
+          if (tabId === undefined || !isAgentControlledTab(task, tabId))
+            throw new Error("Task tab unavailable");
+          const tab = await chrome.tabs.get(tabId);
+          await chrome.tabs.update(tabId, { active: true });
+          await chrome.windows.update(tab.windowId, { focused: true });
+        },
+        (sessionId) => captureTaskPreview(sessions, cdp, sessionId),
+      ),
+  });
+  const sessions = new SessionManager({
+    taskTabs: () => remoteEndpoint !== null,
+    taskLabel: () => remoteEndpoint?.serviceName ?? "BrowserSkill",
+  });
   const cdp = new ChromiumCdp(undefined, {
     shouldAutoAcceptDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
-      return sessions.findByWindowId(tab.windowId) !== null;
+      return (
+        (typeof tab.id === "number" && sessions.findByTabId(tab.id) !== null) ||
+        sessions.findByWindowId(tab.windowId) !== null
+      );
     },
   });
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
 
-  const daemonPort = watchDaemonPort((port) => {
-    const url = resolveDaemonWsUrl(port);
-    void controller.reconfigureTransport(url, () => {
+  const remoteAuthorization = watchRemoteAuthorization();
+  const daemonPort = watchDaemonConnection((url, remote) => {
+    remoteAuthorization.changed();
+    // Token rotation for the same device must not interrupt a running task.
+    if (
+      remote?.deviceId &&
+      remoteEndpoint?.deviceId === remote.deviceId &&
+      remoteEndpoint.url === remote.url
+    ) {
+      remoteEndpoint = remote;
+      return;
+    }
+    void controller.reconfigureTransport(JSON.stringify([url, remote]), () => {
+      remoteEndpoint = remote;
       transport.setUrl(url);
     });
   });
@@ -104,8 +145,14 @@ export default defineBackground(() => {
    */
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
-      const ctx = sessions.findByWindowId(windowId);
-      if (ctx && isAgentControlledTab(ctx, tabId)) return overlayStateForWindow(windowId);
+      const ctx = sessions.findByTabId(tabId) ?? sessions.findByWindowId(windowId);
+      if (ctx && isAgentControlledTab(ctx, tabId))
+        return {
+          type: OVERLAY_AGENT_STATE,
+          sessionId: ctx.sessionId,
+          mode: controlModes.get(ctx.sessionId) ?? "control",
+          generation: overlayGeneration,
+        };
     }
     return {
       type: OVERLAY_AGENT_STATE,
@@ -165,7 +212,7 @@ export default defineBackground(() => {
   }
 
   function pushOverlayStateForAgentWindow(windowId: number): void {
-    if (!sessions.findByWindowId(windowId)) return;
+    if (!sessions.list().some((ctx) => ctx.agentWindowId === windowId)) return;
     void pushOverlayStateForWindow(windowId);
   }
   chrome.tabs.onActivated.addListener((activeInfo) => {
@@ -181,11 +228,32 @@ export default defineBackground(() => {
   // state; it never infers or mutates ownership from event ordering.
   chrome.tabs.onCreated.addListener((tab) => {
     if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
-    if (!sessions.findByWindowId(tab.windowId)) return;
+    if (!sessions.list().some((ctx) => ctx.agentWindowId === tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
+  chrome.tabs.onAttached.addListener((tabId, info) => {
+    const task = sessions.findByTabId(tabId);
+    if (task?.tabMode) void pushOverlayStateForTab(tabId, info.newWindowId);
+  });
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    const task = sessions.findByTabId(tabId);
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
+    if (task?.tabMode && !task.stopping && !task.agentCreatedTabs.size && !task.borrowedTabs.size) {
+      task.stopping = true;
+      void cdp
+        .detachSession(task.sessionId)
+        .then(() => sessions.stop(task.sessionId, { dropOnly: true }))
+        .then(() => {
+          onOverlaySessionStateChanged();
+          transport.send({
+            event: "session.window_closed",
+            payload: { session_id: task.sessionId, reason: "user_closed_window" },
+          });
+        })
+        .catch(() => {
+          /* Connection cleanup also drops the task if disconnected. */
+        });
+    }
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
@@ -247,6 +315,7 @@ export default defineBackground(() => {
           // Resolve i18n strings per-borrow so language switches take effect
           // without re-creating the dispatcher.
           notificationCopy: makeBorrowNotificationCopy(),
+          focusOnRequest: !remoteEndpoint,
         },
       }),
     helpNotificationCopy: () => ({
@@ -355,7 +424,7 @@ export default defineBackground(() => {
 
     if (msg.kind === OVERLAY_MSG_WHO_AM_I) {
       const windowId = sender.tab?.windowId;
-      const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
+      const ctx = sender.tab?.id !== undefined ? sessions.findByTabId(sender.tab.id) : null;
       sendResponse({ sessionId: ctx?.sessionId ?? null });
       return false;
     }
@@ -372,7 +441,11 @@ export default defineBackground(() => {
     if (msg.kind === OVERLAY_MSG_INTERRUPT) {
       const req = msg as OverlayInterruptRequest;
       const ctx = sessions.get(req.sessionId);
-      if (ctx) setControlMode(req.sessionId, "interrupting");
+      if (!ctx || sender.tab?.id === undefined || !isAgentControlledTab(ctx, sender.tab.id)) {
+        sendResponse({ ok: false, error: "Task tab is not authorized" });
+        return false;
+      }
+      setControlMode(req.sessionId, "interrupting");
       void handleOverlayInterrupt(transport, req.sessionId).then((reply) => {
         if (reply.ok && sessions.get(req.sessionId)) {
           setControlMode(req.sessionId, "paused");

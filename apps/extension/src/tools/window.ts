@@ -53,6 +53,8 @@ export async function handleWindowResize(
   const ctxOrErr = lookupSession(manager, params, "window_resize");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
+  if (ctx.tabMode)
+    return { code: "unsupported", message: "Task tabs cannot resize the user window" };
 
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;

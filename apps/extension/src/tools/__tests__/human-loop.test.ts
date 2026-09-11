@@ -86,6 +86,22 @@ describe("handleRequestHelp", () => {
     vi.unstubAllGlobals();
   });
 
+  it("remote task help never activates a tab or window", async () => {
+    const manager = fakeManager("abcd", 99, 5);
+    const ctx = {
+      ...manager.get("abcd")!,
+      tabMode: true,
+      activeTabId: 5,
+      agentCreatedTabs: new Set([5]),
+    };
+    manager.get = (id) => (id === "abcd" ? ctx : null);
+    const deps = baseDeps();
+    const result = await handleRequestHelp(manager, baseParams({ tab_id: 5 }), deps);
+    expect(result).toMatchObject({ outcome: "continued" });
+    expect(deps.windows.update).not.toHaveBeenCalled();
+    expect(deps.activateTab).not.toHaveBeenCalled();
+  });
+
   it("rejects unknown session", async () => {
     const res = await handleRequestHelp(
       fakeManager("abcd", 99, 5),

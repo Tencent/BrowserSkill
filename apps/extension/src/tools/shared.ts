@@ -8,7 +8,11 @@
 
 import type { CdpDebuggee, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
@@ -180,6 +184,15 @@ export async function resolveTargetTab(
   tabId: number | undefined,
   api: ChromeTabsApi,
 ): Promise<ResolvedTargetTab | RpcError> {
+  if (tabId === undefined && ctx.tabMode) {
+    const owned = [...ctx.agentCreatedTabs, ...ctx.borrowedTabs.keys()];
+    tabId =
+      ctx.activeTabId !== undefined && isAgentControlledTab(ctx, ctx.activeTabId)
+        ? ctx.activeTabId
+        : owned[0];
+    if (tabId === undefined)
+      return { code: "not_found", message: "No task tab remains; create a tab to continue" };
+  }
   if (tabId !== undefined) {
     if (!Number.isSafeInteger(tabId) || tabId <= 0) {
       return {
@@ -202,13 +215,18 @@ export async function resolveTargetTab(
         message: `tab ${tabId} not found`,
       };
     }
-    const owner = manager.findByWindowId(tab.windowId);
+    const owner = manager.findByTabId?.(tab.id) ?? manager.findByWindowId(tab.windowId);
     if (owner && owner.sessionId !== ctx.sessionId) {
       return {
         code: "not_found",
         message: `tab ${tabId} not found in session scope`,
       };
     }
+    if (ctx.tabMode && !isAgentControlledTab(ctx, tab.id))
+      return {
+        code: "permission_denied",
+        message: "Authorize this tab with tab_borrow before reading or operating it",
+      };
     return { tabId: tab.id, windowId: tab.windowId, active: tab.active === true, url: tab.url };
   }
   const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
@@ -318,6 +336,7 @@ export async function resolveCdpAccessibleTargetTab(
 
   const tabs = await api.query({ windowId: ctx.agentWindowId });
   for (const tab of tabs) {
+    if (ctx.tabMode && (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))) continue;
     const candidate = resolvedTargetFromChromeTab(tab, ctx.agentWindowId);
     if (!candidate) continue;
     if (!enforceCdpAccessibleTarget(candidate, toolName)) return candidate;
@@ -338,7 +357,9 @@ export function enforceAgentWindow(
   target: { tabId: number; windowId: number },
   toolName: string,
 ): RpcError | null {
-  if (target.windowId !== ctx.agentWindowId) {
+  if (
+    ctx.tabMode ? !isAgentControlledTab(ctx, target.tabId) : target.windowId !== ctx.agentWindowId
+  ) {
     return rpcError(
       "permission_denied",
       "agent_window_scope",
@@ -358,6 +379,6 @@ export function enforceToolTargetScope(
   effect: ToolEffect,
   toolName: string,
 ): RpcError | null {
-  if (effect === "passive_read") return null;
+  if (effect === "passive_read" && !ctx.tabMode) return null;
   return enforceAgentWindow(ctx, target, toolName);
 }

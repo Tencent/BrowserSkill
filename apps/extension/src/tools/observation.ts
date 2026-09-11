@@ -242,6 +242,16 @@ async function captureFullTabPng(
   signal?: AbortSignal,
 ): Promise<string | RpcError> {
   if (signal?.aborted) return cancelled("screenshot");
+  if (ctx.tabMode) {
+    if (!deps.cdp) return { code: "unsupported", message: "Task tab preview requires CDP" };
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+    const shot = await deps.cdp.send<{ data: string }>(target.tabId, "Page.captureScreenshot", {
+      format: "png",
+      fromSurface: true,
+    });
+    return shot.data;
+  }
   try {
     const dataUrl = await deps.captureApi.captureVisibleTab(target.windowId, { format: "png" });
     if (signal?.aborted) return cancelled("screenshot");
@@ -343,7 +353,7 @@ export async function handleScreenshot(
     });
   }
 
-  if (!target.active) {
+  if (!target.active && !ctx.tabMode) {
     return rpcError(
       "invalid_params",
       "tab_not_active",

@@ -13,6 +13,7 @@ import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
+import { RemoteConnection } from "./remote-connection";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
@@ -54,6 +55,7 @@ export function App() {
     dirty: daemonPortDirty,
     error: daemonPortError,
   } = useDaemonPort();
+  const [remoteConfigured, setRemoteConfigured] = useState(false);
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
   const [purposeDraft, setPurposeDraft] = useState("");
@@ -275,9 +277,11 @@ export function App() {
             </div>
           </section>
 
+          <RemoteConnection onRemoteChange={setRemoteConfigured} />
           <section
             className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
             data-slot="popup-daemon-port-card"
+            hidden={remoteConfigured}
           >
             <div className="flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1">

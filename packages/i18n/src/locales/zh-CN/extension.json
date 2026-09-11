@@ -66,7 +66,13 @@
       "copied": "已复制",
       "hintDisconnected": "连接后可用",
       "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取写出的 `./trace` 目录包（`trace.json` + `states/`），总结我做了什么。"
-    }
+    },
+    "remoteTitle": "远程连接",
+    "remoteLocal": "使用本机服务",
+    "remotePairing": "配对链接",
+    "remoteHint": "粘贴可信服务器提供的配对链接。保存后会切换连接并结束现有任务。服务器可操作 Agent Window；借用已有标签页仍需你确认。",
+    "remoteSave": "连接",
+    "remoteError": "保存失败，请检查配对链接及存储权限。"
   },
   "controlOverlay": {
     "status": "Agent 正在控制",
