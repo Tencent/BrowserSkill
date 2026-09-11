@@ -758,3 +758,86 @@ describe("visual hit shadow boundaries", () => {
     }
   });
 });
+
+it.each([
+  ["upper", "upper", true],
+  ["lower", "upper", false],
+  ["lower", "lower", true],
+  ["upper", "lower", false],
+] as const)("keeps overlapping target identity: requested=%s hit=%s", async (requested, hit, allowed) => {
+  const f = await pointFixture();
+  const lower = document.createElement("canvas");
+  const upper = document.createElement("canvas");
+  document.body.append(lower, upper);
+  const hitDescriptor = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+  // Model the browser's hit result: upper receives events, or passes them to lower.
+  Object.defineProperty(document, "elementFromPoint", {
+    configurable: true,
+    value: () => (hit === "upper" ? upper : lower),
+  });
+  const original = f.send.getMockImplementation()!;
+  f.send.mockImplementation(async (target, method, params = {}) => {
+    if (
+      method === "Runtime.callFunctionOn" &&
+      String(params.functionDeclaration).includes("elementFromPoint")
+    ) {
+      const run = new Function(`return (${params.functionDeclaration});`)();
+      const node = params.objectId === "4" ? upper : lower;
+      const coordinates = (params.arguments as { value: number }[]).map((arg) => arg.value);
+      return { result: { value: run.call(node, ...coordinates) } };
+    }
+    if (
+      method === "Runtime.callFunctionOn" &&
+      params.objectId === "4" &&
+      String(params.functionDeclaration).includes("styleNames")
+    ) {
+      const rows = [{ ...f.topRows[0], node: { backend: 4 } }, ...f.topRows.slice(1)];
+      return { result: { deepSerializedValue: encode({ top: true, dpr: 1, rows }) } };
+    }
+    return original(target, method, params);
+  });
+  try {
+    f.ctx.refStore.replace([
+      ["e1", { kind: "visual-region", candidate: f.candidate }],
+      ["e2", { kind: "visual-region", candidate: { ...f.candidate, backendNodeId: 4 } }],
+    ]);
+    const ref = requested === "upper" ? "e2" : "e1";
+    const shot = await handleScreenshot(
+      f.manager,
+      { session_id: "point", ref },
+      {
+        cdp: f.cdp,
+        tabsApi: f.deps.tabsApi,
+        captureApi: { ...f.deps.tabsApi, captureVisibleTab: vi.fn() },
+        sendToTab: vi.fn(async () => ({})),
+      },
+    );
+    expect(shot).toHaveProperty("capture_id");
+    const result = await handleClick(
+      f.manager,
+      {
+        ...f.params,
+        ref,
+        capture_id: (shot as { capture_id: string }).capture_id,
+      },
+      f.deps,
+    );
+    if (allowed) {
+      expect(result).toMatchObject({ x: 60, y: 40 });
+      expect(f.input.map((event) => event.type)).toEqual([
+        "mouseMoved",
+        "mousePressed",
+        "mouseReleased",
+      ]);
+    } else {
+      expect(result).toHaveProperty("data.reason", "visual_capture_stale");
+      expect(f.input).toHaveLength(0);
+    }
+    expect(f.cdp.getFrameGraph).not.toHaveBeenCalled();
+  } finally {
+    if (hitDescriptor) Object.defineProperty(document, "elementFromPoint", hitDescriptor);
+    else Reflect.deleteProperty(document, "elementFromPoint");
+    lower.remove();
+    upper.remove();
+  }
+});
