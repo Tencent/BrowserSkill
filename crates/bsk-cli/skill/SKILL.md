@@ -63,8 +63,8 @@ settings for borrow confirmation and human assistance; both are enabled by defau
 - Take the shortest purposeful path: observe, act, then make at most one observation to confirm an
   ambiguous result.
 - Once success is visible, do not click, refresh, navigate, switch tabs, or perform extra checks.
-- If a human-only step appears or two attempts make no progress, request help instead of
-  brute-forcing.
+- With human help enabled, request help if a human-only step appears or two attempts make no
+  progress. With help disabled, follow the autonomous handling rules below.
 
 With a trace, follow its semantic target information and values in order, but treat its refs as
 record-local hints. Stop when its purpose or last meaningful effect is satisfied. A trace guides the
@@ -138,20 +138,33 @@ tab and session state before continuing; the tab may already have moved.
 
 ## Ask the human when needed
 
-Use `bsk request-help` for login, captcha, OTP, payment confirmation, consent, or another step the
-user must complete. Give a precise prompt and pass fresh `--target` refs/selectors when concrete
-controls can be highlighted. Use completion criteria only when the page has a clear stable success
-signal.
+When human help is enabled (the default), use `bsk request-help` for login, captcha, OTP, payment
+confirmation, consent, or another step the user must complete. Give a precise prompt and pass
+fresh `--target` refs/selectors when concrete controls can be highlighted. Use completion criteria
+only when the page has a clear stable success signal.
 
 The result `outcome` is one of `continued`, `completed`, `cancelled`, `timed_out`, or `disabled`
-(`navigated` is deprecated — never treat navigation as a completion signal). Resume only after
-`continued` or `completed`. Treat `cancelled` as rejection, and `timed_out` or `disabled` as a
-blocker rather than a reason to retry. After control returns, run a fresh `bsk observe` before
-reasoning about the page or using refs.
+(`navigated` is deprecated — never treat navigation as a completion signal). After a human handoff,
+resume only after `continued` or `completed`. Treat `cancelled` as rejection and `timed_out` as a
+blocker; do not repeat that request. Observe again after control returns before using refs.
 
-When help is disabled by browser settings, `--unattended`, or `BSK_REQUEST_HELP=off`, report the
-blocked step and continue only independent work. Disabled assistance does not complete login,
-verification, or consent, and does not authorize changing settings to obtain approval.
+When help is disabled by browser settings, `--unattended`, or `BSK_REQUEST_HELP=off`, make every
+reasonable effort to complete the task autonomously with BrowserSkill. Do not call `request-help`.
+If a call returns `disabled`, no human action was confirmed: re-observe and continue working rather
+than marking the step blocked merely because help is unavailable.
+
+Use the current page, existing login state, and credentials or codes available under the user's
+authorization to complete login, forms, and other authorized actions. With image understanding,
+inspect screenshots and attempt visual challenges using supported interactions. Phone-only QR
+scans, face verification, and SMS codes you cannot obtain may remain blocked; a text-only model
+may also leave an image-only CAPTCHA unresolved. Otherwise, attempt the operation and verify its
+actual result before concluding it cannot be completed.
+
+After a failed attempt, re-observe and try a different viable approach when available. Do not loop
+on identical failures or repeat an action whose outcome is unknown. Report a specific blocker only
+when required information or capability is missing, or viable approaches are exhausted; continue
+independent work. Keep task authorization and host restrictions in force. Do not re-enable help or
+switch browser backends to work around those limits.
 
 ## Command inventory
 
@@ -205,7 +218,7 @@ Decision sequence when uploading:
 1. Try input mode (the default).
 2. If it returns `reason=file_input_not_activated` with `effect_state=none`, re-observe. When a
    reliable attachment target exists, try `--mode drop` once against that target.
-3. Otherwise fall back to `request-help`.
+3. Otherwise request help if enabled; when disabled, follow the autonomous handling rules above.
 4. **Never** switch mechanisms or repeat when `effect_state` is `unknown` or `committed` — the
    browser may already have applied the file.
 

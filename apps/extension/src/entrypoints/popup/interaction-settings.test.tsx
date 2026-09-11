@@ -18,6 +18,20 @@ describe("automation settings", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps explanations in labelled info tooltips without changing a preference on click", async () => {
+    render(<InteractionSettings />);
+    for (const name of ["借用标签页确认说明", "人工协助说明"]) {
+      const info = screen.getByRole("button", { name });
+      const tooltip = document.getElementById(info.getAttribute("aria-describedby")!);
+      expect(tooltip?.getAttribute("role")).toBe("tooltip");
+      expect(tooltip?.textContent).toContain("设置自动保存，适用于当前浏览器配置文件。");
+      fireEvent.click(info);
+    }
+    expect(interactionPreferences.set).not.toHaveBeenCalled();
+    expect(screen.getAllByRole("tooltip")).toHaveLength(2);
+    expect(document.querySelector('[data-slot="popup-interaction-settings"] > p')).toBeNull();
+  });
+
   it("saves borrowing and help independently without another confirmation", async () => {
     render(<InteractionSettings />);
     const borrow = screen.getByRole("switch", { name: "借用标签页前确认" });

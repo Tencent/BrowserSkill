@@ -692,9 +692,14 @@ export async function handleRequestHelp(
   const disabledResult = (tabId: number): RequestHelpResult => ({
     outcome: "disabled",
     tab_id: tabId,
-    note: ctx.unattended
-      ? "request-help disabled for this unattended session"
-      : "request-help disabled in browser settings",
+    note: [
+      ctx.unattended
+        ? "request-help disabled for this unattended session."
+        : "request-help disabled in browser settings.",
+      "Re-observe the page and try to complete the task autonomously using available browser tools.",
+      "Report a blocker only when required information or capability is missing, or no viable approach remains.",
+      "Do not request human help again or treat this result as completion.",
+    ].join(" "),
   });
   if (helpDisabled()) return disabledResult(params.tab_id ?? 0);
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };

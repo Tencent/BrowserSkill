@@ -70,12 +70,14 @@
     "interaction": {
       "title": "自动化设置",
       "confirmTabBorrow": "借用标签页前确认",
-      "confirmTabBorrowHint": "Agent 使用你已打开的标签页前，需要你允许。",
+      "confirmTabBorrowHint": "开启时，借用你已打开的标签页前会请求允许；关闭时，直接借用。",
       "requestHelpEnabled": "允许请求人工协助",
-      "requestHelpEnabledHint": "遇到登录、验证码或无法继续的步骤时，等待你处理。关闭后立即返回受阻。",
+      "requestHelpEnabledHint": "开启时，Agent 可以请求你协助。关闭时，Agent 会尽力自主完成操作，遇到无法处理的步骤再报告受阻。",
       "scope": "设置自动保存，适用于当前浏览器配置文件。",
       "readFailed": "无法读取自动化设置，请重新打开插件。",
-      "writeFailed": "保存失败，设置未更改，请重试。"
+      "writeFailed": "保存失败，设置未更改，请重试。",
+      "confirmTabBorrowInfoLabel": "借用标签页确认说明",
+      "requestHelpEnabledInfoLabel": "人工协助说明"
     }
   },
   "controlOverlay": {

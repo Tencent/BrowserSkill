@@ -70,12 +70,14 @@
     "interaction": {
       "title": "자동화 설정",
       "confirmTabBorrow": "탭을 빌리기 전에 확인",
-      "confirmTabBorrowHint": "Agent가 이미 열려 있는 탭을 사용하기 전에 허용을 요청합니다.",
+      "confirmTabBorrowHint": "켜면 이미 열려 있는 탭을 빌리기 전에 허용을 요청합니다. 끄면 바로 빌립니다.",
       "requestHelpEnabled": "사용자 도움 요청 허용",
-      "requestHelpEnabledHint": "로그인, 보안 문자 등에서 사용자의 도움을 기다립니다. 끄면 진행 불가 상태를 즉시 반환합니다.",
+      "requestHelpEnabledHint": "켜면 Agent가 도움을 요청할 수 있습니다. 끄면 스스로 작업을 완료하도록 시도하고 해결할 수 없는 단계를 알립니다.",
       "scope": "현재 브라우저 프로필에 자동 저장됩니다.",
       "readFailed": "설정을 불러오지 못했습니다. 확장 프로그램을 다시 여세요.",
-      "writeFailed": "저장하지 못했습니다. 설정은 변경되지 않았습니다. 다시 시도하세요."
+      "writeFailed": "저장하지 못했습니다. 설정은 변경되지 않았습니다. 다시 시도하세요.",
+      "confirmTabBorrowInfoLabel": "탭 빌리기 확인 안내",
+      "requestHelpEnabledInfoLabel": "사용자 도움 요청 안내"
     }
   },
   "controlOverlay": {

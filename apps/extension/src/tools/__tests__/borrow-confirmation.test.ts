@@ -95,6 +95,38 @@ describe("requestBorrowConfirmation", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    true,
+    false,
+  ])("enabled confirmation waits for the original allow/deny decision (%s)", async (allowed) => {
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    let respond!: (value: unknown) => void;
+    tabs.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+    );
+    let settled = false;
+    const unsubscribe = vi.fn();
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+      autoAllow: { get: () => false, subscribe: () => unsubscribe },
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(false);
+    expect(notifications.create).toHaveBeenCalledOnce();
+    expect(windows.update).toHaveBeenCalledWith(10, { focused: true });
+    respond({ type: "borrow-response", allowed });
+    if (allowed) expect(await pending).toBe(true);
+    else
+      expect(await pending).toMatchObject({ code: "cancelled", data: { reason: "user_denied" } });
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
   it("reports unavailable UI immediately when neither content nor notifications can show confirmation", async () => {
     windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
     tabs.sendMessage.mockRejectedValue(new Error("No content listener"));

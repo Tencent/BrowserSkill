@@ -5,22 +5,12 @@ description: Browser automation through six injected domain tools.
 
 # browser-skill for DeepSeek Harness
 
-Drive the user's logged-in Chromium through this plugin's structured browser tools. Automation is
-isolated in an Agent Window; user-window tabs remain protected unless explicitly borrowed.
+Drive the user's logged-in Chromium in an Agent Window; borrow user tabs explicitly.
 
-Loading this skill reveals six tools for the rest of the conversation:
-
-- `browser_session` owns session lifecycle.
-- `browser_page` handles navigation and lifecycle waits.
-- `browser_inspect` reads semantic, visual, console, and network state.
-- `browser_interact` performs normal page interactions.
-- `browser_tabs` manages Agent Window tabs and temporary user-tab borrowing.
-- `browser_assist` handles human help, window size, and device emulation.
-
-Every call includes an `action`. Treat each loaded tool schema as authoritative for its actions and
-parameters; do not guess fields. All browser work must use the injected tools directly so session
-ownership, cancellation, attachments, observation UI, and cleanup remain intact. Do not invoke
-another process to control the browser.
+Use the loaded `action` schemas for `browser_session`, `browser_page`, `browser_inspect`,
+`browser_interact`, `browser_tabs`, and `browser_assist`; do not guess parameters.
+All browser work must use the injected tools directly to preserve ownership, cancellation,
+attachments, observation UI, and cleanup. Do not invoke another process to control the browser.
 
 ## Mandatory workflow
 
@@ -32,9 +22,8 @@ browser_session({ action: "start", ... })
 browser_session({ action: "stop", session: sessionId })
 ```
 
-Pass the session explicitly when more than one exists. Never guess or reuse an id owned by another
-program. Stop in a finally-style path on success and failure unless the user explicitly asks to keep
-the session open. Stopping also returns borrowed tabs.
+Pass the session when more than one exists; never guess or use another program's id. Stop on
+success and failure unless asked to keep it open. Stopping also returns borrowed tabs.
 
 ## Work toward one observable goal
 
@@ -42,8 +31,8 @@ the session open. Stopping also returns borrowed tabs.
 - Take the shortest purposeful path: observe, act, then make at most one observation to confirm an
   ambiguous result.
 - Once success is visible, do not click, refresh, navigate, switch tabs, or perform extra checks.
-- If a human-only step appears or two attempts make no progress, request help instead of
-  brute-forcing.
+- With help enabled, request help for human-only steps or after two attempts make no progress.
+  With help disabled, use the autonomous handling rules below.
 
 ## Observe, act, observe
 
@@ -86,15 +75,20 @@ Honor Automation settings. Never repeat denied or expired borrows; inspect tabs 
 
 ## Ask the human when needed
 
-Use `browser_assist` action `request-help` for login, captcha, OTP, payment confirmation, consent, or
-another step the user must complete. Give a precise prompt and highlight fresh targets when concrete
-controls are involved. Use completion criteria only for a clear stable success signal.
+With human help enabled, use `browser_assist` action `request-help` for login, captcha, OTP,
+payment confirmation, consent, or other human steps. Give a precise prompt and fresh targets;
+use completion criteria only for a stable success signal. Resume on continuation or completion;
+cancellation and timeout block the step. Observe again before using refs.
 
-Resume only after continuation or completion. Cancellation, timeout, or disabled help blocks the
-step; do not retry or switch tools. Observe again after control returns before using refs.
+With help disabled, keep trying autonomously with current observations, page tools, existing login
+state and authorized credentials/codes. `disabled` confirms no human action; re-observe and continue.
+With vision, attempt visual challenges using screenshots and supported interactions. Phone-only QR
+scans, face verification, unavailable SMS codes, and image-only CAPTCHAs for text-only models may
+remain blocked. Attempt other steps and verify results. Try viable alternatives after failure;
+block only for missing inputs/capability or exhausted options. Do not repeat unknown effects,
+request help again, or switch backends. Respect task/host restrictions; continue independent work.
 
-The same tool can resize the Agent Window or emulate a device when the task requires visual or
-responsive testing. Emulation is scoped to one tab.
+`browser_assist` also resizes the Agent Window or emulates a device for one tab.
 
 ## Debug and recover without wandering
 

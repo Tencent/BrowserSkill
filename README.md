@@ -187,9 +187,14 @@ bsk session stop <session-id>
 ```
 
 The session remembers unattended mode across commands. It skips tab-borrow confirmation and
-returns `outcome: "disabled"` immediately from `request-help`. The task may still be blocked by a
-login or captcha; `disabled` does not mean that step was completed. `BSK_REQUEST_HELP=off` remains
-supported and only disables help requests, not borrow confirmation.
+returns `outcome: "disabled"` immediately from `request-help`. The skill then directs the agent to
+re-observe and make every reasonable effort to finish using available browser tools; disabling help
+does not confirm completion or by itself block the task. Phone-only QR scans, face verification,
+unavailable SMS codes, and image-only CAPTCHAs for text-only models may remain blocked. Other
+steps should be attempted and verified, with blockers reported only when required inputs or
+capabilities are missing or viable approaches are exhausted. Task authorization and host rules
+still apply. `BSK_REQUEST_HELP=off` also uses this behavior without changing borrow confirmation.
+With both settings enabled, the existing confirmation and human-help flows remain in effect.
 
 To skip one borrow confirmation, use `bsk tab borrow <tab-id> --session <id> --no-confirm`.
 `--timeout 60s` sets the borrow confirmation wait. `session start --json` and `session list --json`

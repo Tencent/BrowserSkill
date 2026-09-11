@@ -1,6 +1,7 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { useEffect, useState } from "react";
 import { type InteractionPreferences, interactionPreferences } from "@/lib/interaction-preferences";
+import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 
 export function InteractionSettings() {
@@ -46,13 +47,16 @@ export function InteractionSettings() {
     >
       <h2 className="text-sm font-medium">{t("popup.interaction.title")}</h2>
       {(["confirmTabBorrow", "requestHelpEnabled"] as const).map((key) => (
-        <div className="flex items-start justify-between gap-3" key={key}>
-          <label className="min-w-0 flex-1" htmlFor={`interaction-${key}`}>
-            <span className="text-sm">{t(`popup.interaction.${key}`)}</span>
-            <span className="mt-1 block text-xs leading-snug text-muted-foreground">
+        <div className="relative flex items-center justify-between gap-2" key={key}>
+          <span className="flex min-w-0 items-center gap-1">
+            <label className="text-sm font-medium" htmlFor={`interaction-${key}`}>
+              {t(`popup.interaction.${key}`)}
+            </label>
+            <SettingInfo label={t(`popup.interaction.${key}InfoLabel`)}>
               {t(`popup.interaction.${key}Hint`)}
-            </span>
-          </label>
+              <span className="mt-1 block">{t("popup.interaction.scope")}</span>
+            </SettingInfo>
+          </span>
           <Switch
             id={`interaction-${key}`}
             checked={preferences[key]}
@@ -62,7 +66,6 @@ export function InteractionSettings() {
           />
         </div>
       ))}
-      <p className="text-xs leading-snug text-muted-foreground">{t("popup.interaction.scope")}</p>
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {t(`popup.interaction.${error}Failed`)}

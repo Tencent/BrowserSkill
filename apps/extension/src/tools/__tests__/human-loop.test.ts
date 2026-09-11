@@ -118,6 +118,48 @@ describe("handleRequestHelp", () => {
     expect(deps.windows.update).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "continued",
+    "cancelled",
+  ])("re-enabling help restores the original wait and user %s outcome", async (outcome) => {
+    const preferences = new InteractionPreferenceStore();
+    let enabled = false;
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockImplementation(() => ({
+      confirmTabBorrow: true,
+      requestHelpEnabled: enabled,
+    }));
+    let respond!: (value: unknown) => void;
+    const deps = baseDeps({
+      preferences,
+      sendToTab: vi.fn((_tab, message) => {
+        if (message.type === "bsk-help-request")
+          return new Promise((resolve) => {
+            respond = resolve;
+          });
+        return Promise.resolve();
+      }),
+    });
+    const manager = fakeManager("abcd", 99, 5);
+    const disabled = await handleRequestHelp(manager, baseParams(), deps);
+    expect(disabled).toMatchObject({ outcome: "disabled" });
+    expect(disabled).not.toHaveProperty("completed_by");
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+
+    enabled = true;
+    let settled = false;
+    const pending = handleRequestHelp(manager, baseParams(), deps).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(respond).toBeTypeOf("function"));
+    expect(settled).toBe(false);
+    expect(deps.windows.update).toHaveBeenCalledWith(99, { focused: true });
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+    respond({ type: "bsk-help-response", outcome, note: "User decision" });
+    expect(await pending).toMatchObject({ outcome, tab_id: 5, note: "User decision" });
+  });
+
   it("disabling help finishes an already displayed request and removes its overlay", async () => {
     const preferences = new InteractionPreferenceStore();
     let enabled = true;

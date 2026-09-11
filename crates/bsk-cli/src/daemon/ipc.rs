@@ -27,8 +27,8 @@ use bsk_protocol::system::{
     VersionSkewEntry,
 };
 use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, HelpOutcome, RequestHelpResult, ReturnFailure,
-    TransferBeginParams, TransferIdParams, UploadParams, WaitMsParams, WaitMsResult,
+    DownloadParams, DownloadResult, ReturnFailure, TransferBeginParams, TransferIdParams,
+    UploadParams, WaitMsParams, WaitMsResult,
 };
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
@@ -305,13 +305,10 @@ async fn handle_tool_dispatch(
     // blocking human-in-loop call to the extension; answer immediately
     // with a synthetic `disabled` result.
     if method == Method::ToolRequestHelp && crate::cli::human_loop::request_help_disabled() {
-        let result = RequestHelpResult {
-            outcome: HelpOutcome::Disabled,
-            completed_by: None,
-            note: Some(crate::cli::human_loop::REQUEST_HELP_DISABLED_NOTE.into()),
-            tab_id: params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
-            resolved_targets: None,
-        };
+        let result = crate::cli::human_loop::disabled_help_result(
+            params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
+            crate::cli::human_loop::REQUEST_HELP_DISABLED_NOTE,
+        );
         return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
     }
     let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
@@ -326,10 +323,11 @@ async fn handle_tool_dispatch(
     };
     if let Some(session) = state.sessions.get(&session_id) {
         if method == Method::ToolRequestHelp && session.unattended {
-            return ResponseBody::Ok(serde_json::json!({
-                "outcome": "disabled", "tab_id": params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
-                "note": "request-help disabled for this unattended session",
-            }));
+            let result = crate::cli::human_loop::disabled_help_result(
+                params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
+                "request-help disabled for this unattended session",
+            );
+            return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
         }
         if method == Method::ToolTabBorrow
             && (params.get("confirm") == Some(&Value::Bool(false))
