@@ -17,9 +17,9 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.2";
-/// Lowest **protocol** version peers must speak (e.g. `"1.0"`).
-pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
+pub const PROTOCOL_VERSION: &str = "1.3";
+/// Browser-authoritative interaction settings require both peers to speak 1.3.
+pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.3";
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
 /// is emitted for old extensions. New code ignores this on read.
 pub const LEGACY_MIN_COMPATIBLE_PEER: &str = "0.0.0";
@@ -60,6 +60,9 @@ pub struct DaemonState {
 
 impl DaemonState {
     pub fn new(config: DaemonConfig) -> Self {
+        if crate::cli::human_loop::legacy_help_override_requested() {
+            crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
+        }
         let browsers = Arc::new(BrowserRegistry::new());
         let audit = Arc::new(super::audit::AuditStore::new(
             super::paths::bsk_home().ok().map(|path| path.join("audit")),

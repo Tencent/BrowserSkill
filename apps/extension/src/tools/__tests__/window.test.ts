@@ -126,37 +126,43 @@ describe("handleSessionStart window size", () => {
       agent_window_id: 100,
       interaction: { borrow_confirmation: "always", request_help: "enabled" },
     });
-    expect(sm.get("first")?.unattended).toBe(false);
     expect(await handleSessionStart(sm, { session_id: "second" }, { preferences })).toMatchObject({
       agent_window_id: 101,
       interaction: { borrow_confirmation: "never", request_help: "disabled" },
     });
-    expect(sm.get("second")?.unattended).toBe(false);
     expect(storage.set).not.toHaveBeenCalled();
   });
 
-  it("an explicit unattended session does not depend on preference loading", async () => {
+  it("legacy unattended cannot skip preference loading or interactive fallback", async () => {
     const preferences = new InteractionPreferenceStore();
     const read = vi.spyOn(preferences, "ready").mockRejectedValue(new Error("failed"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     expect(
       await handleSessionStart(sm, { session_id: "auto", unattended: true }, { preferences }),
-    ).toMatchObject({ interaction: { borrow_confirmation: "never", request_help: "disabled" } });
-    expect(read).not.toHaveBeenCalled();
+    ).toMatchObject({ interaction: { borrow_confirmation: "always", request_help: "enabled" } });
+    expect(read).toHaveBeenCalledOnce();
   });
 
-  it("stores unattended mode per session and reports the effective policy", async () => {
+  it.each([
+    [true, true, "always", "enabled"],
+    [true, false, "always", "disabled"],
+    [false, true, "never", "enabled"],
+    [false, false, "never", "disabled"],
+  ] as const)("legacy unattended leaves browser settings authoritative (%s, %s)", async (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockReturnValue({ confirmTabBorrow, requestHelpEnabled });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
-    const unattended = await handleSessionStart(sm, { session_id: "auto", unattended: true });
-    const ordinary = await handleSessionStart(sm, { session_id: "normal" });
-    expect(unattended).toMatchObject({
-      interaction: { borrow_confirmation: "never", request_help: "disabled" },
-    });
-    expect(ordinary).toMatchObject({
-      interaction: { borrow_confirmation: "always", request_help: "enabled" },
-    });
-    expect(sm.get("auto")?.unattended).toBe(true);
-    expect(sm.get("normal")?.unattended).toBe(false);
+    for (const unattended of [false, true]) {
+      expect(
+        await handleSessionStart(
+          sm,
+          { session_id: String(unattended), unattended },
+          { preferences },
+        ),
+      ).toMatchObject({ interaction: { borrow_confirmation, request_help } });
+    }
   });
 
   it("passes width/height through to Agent Window creation", async () => {

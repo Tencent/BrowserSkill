@@ -56,7 +56,7 @@ async fn handshake(ws: &mut Ws) {
             serde_json::to_value(HandshakeParams {
                 client: "browser-skill-extension".into(),
                 version: "0.1.10".parse().unwrap(),
-                protocol_version: "1.1".into(),
+                protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
                 instance_id: TEST_EXT_ID.into(),
                 browser: BrowserPeerInfo {
                     name: "chrome".into(),

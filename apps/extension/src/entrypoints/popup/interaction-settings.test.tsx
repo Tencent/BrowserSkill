@@ -1,3 +1,4 @@
+import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { interactionPreferences } from "@/lib/interaction-preferences";
@@ -24,7 +25,9 @@ describe("automation settings", () => {
       const info = screen.getByRole("button", { name });
       const tooltip = document.getElementById(info.getAttribute("aria-describedby")!);
       expect(tooltip?.getAttribute("role")).toBe("tooltip");
-      expect(tooltip?.textContent).toContain("设置自动保存，适用于当前浏览器配置文件。");
+      expect(tooltip?.textContent).toContain(
+        i18n.t("popup.interaction.scope", { ns: "extension" }),
+      );
       fireEvent.click(info);
     }
     expect(interactionPreferences.set).not.toHaveBeenCalled();

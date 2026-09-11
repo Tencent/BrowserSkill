@@ -237,7 +237,7 @@ export default defineBackground(() => {
           event: "session.interaction_changed",
           payload: {
             session_id: ctx.sessionId,
-            interaction: interactionPolicy(preferences, ctx.unattended),
+            interaction: interactionPolicy(preferences),
           },
         });
       } catch {
@@ -262,9 +262,7 @@ export default defineBackground(() => {
       return requestBorrowConfirmation(ctx.tabId, {
         timeoutMs: ctx.timeoutMs,
         autoAllow: {
-          get: () =>
-            ctx.unattended === true ||
-            (ctx.confirm ?? interactionPreferences.get().confirmTabBorrow) === false,
+          get: () => !interactionPreferences.get().confirmTabBorrow,
           subscribe: (listener) => interactionPreferences.subscribe(listener),
         },
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),

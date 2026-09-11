@@ -131,8 +131,7 @@ pub struct TabBorrowParams {
     pub confirmation_timeout_ms: Option<u32>,
     pub tab_id: i64,
     pub session_id: String,
-    /// Override the browser confirmation preference for this borrow.
-    /// Unattended sessions always skip confirmation.
+    /// Legacy input, ignored. Browser settings decide whether confirmation is required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm: Option<bool>,
 }

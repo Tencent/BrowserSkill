@@ -31,10 +31,6 @@
     "session_id": {
       "type": "string"
     },
-    "unattended": {
-      "description": "Disable borrow confirmation and human-help waits for this session.",
-      "type": "boolean"
-    },
     "width": {
       "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
       "type": [

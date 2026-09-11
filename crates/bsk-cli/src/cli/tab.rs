@@ -110,8 +110,7 @@ pub struct TabBorrowArgs {
     pub tab_id: i64,
     #[arg(long)]
     pub session: String,
-    /// Skip the inline confirmation overlay when borrowing a tab.
-    /// Overrides the browser preference for this borrow only.
+    /// Deprecated compatibility flag. The extension decides whether confirmation is required.
     #[arg(long = "no-confirm", action = clap::ArgAction::SetTrue)]
     pub no_confirm: bool,
     /// Maximum time to wait for user confirmation (default 60s).
@@ -203,14 +202,15 @@ fn run_select(sock: PathBuf, args: TabSelectArgs, format: Format) -> Result<(), 
 }
 
 fn run_borrow(sock: PathBuf, args: TabBorrowArgs, format: Format) -> Result<(), CliError> {
-    if args.no_confirm || args.timeout.is_some() {
-        crate::cli::interaction_policy::require_support(&sock)?;
+    if args.no_confirm {
+        crate::cli::interaction_policy::warn_legacy_override("--no-confirm");
     }
+    crate::cli::interaction_policy::require_support(&sock)?;
     let params = TabBorrowParams {
         session_id: args.session,
         tab_id: args.tab_id,
         confirmation_timeout_ms: args.timeout,
-        confirm: if args.no_confirm { Some(false) } else { None },
+        confirm: None,
     };
     let reply: TabBorrowResult = crate::cli::business_rpc::call(
         sock,

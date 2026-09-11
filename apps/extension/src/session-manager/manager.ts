@@ -13,7 +13,6 @@ export interface SessionContext {
    */
   agentCreatedTabs: Set<number>;
   createdAtMs: number;
-  unattended?: boolean;
 }
 
 /** Whether this session has explicitly claimed control of `tabId`. */
@@ -39,7 +38,6 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
-  unattended?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
@@ -235,7 +233,6 @@ export class SessionManager {
         // by its concrete Chrome tab id.
         agentCreatedTabs: new Set([homeTabId]),
         createdAtMs: this.now(),
-        unattended: opts.unattended === true,
       };
       this.sessions.set(sessionId, ctx);
       this.windowIndex.set(windowId, sessionId);

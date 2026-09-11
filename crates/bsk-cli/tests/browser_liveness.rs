@@ -27,7 +27,7 @@ fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc
         browser_name: "chrome".into(),
         browser_version: "131.0".into(),
         extension_version: "0.1.4".into(),
-        extension_protocol_version: "1.0".into(),
+        extension_protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
         label: String::new(),
         sink: BrowserSink { tx },
         pending: Mutex::new(Pending::default()),
@@ -42,7 +42,7 @@ fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc
 fn fake_session(session_id: &str, browser_id: &str) -> Session {
     Session {
         interaction: None,
-        unattended: false,
+
         id: SessionId(session_id.into()),
         browser_id: BrowserId(browser_id.into()),
         agent_window_id: None,

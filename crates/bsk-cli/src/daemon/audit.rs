@@ -740,7 +740,7 @@ mod tests {
             browser_id: BrowserId("browser-a".into()),
             agent_window_id: Some(1),
             created_at_ms: now_ms(),
-            unattended: false,
+
             interaction: None,
         };
         (temp, store, session)

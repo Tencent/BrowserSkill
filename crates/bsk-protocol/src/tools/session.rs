@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ErrorCode;
 
-/// Protocol 1.2 supports interaction preferences and unattended sessions.
-pub const INTERACTION_POLICY_PROTOCOL: &str = "1.2";
+/// Protocol 1.3 makes browser Automation settings authoritative.
+pub const INTERACTION_POLICY_PROTOCOL: &str = "1.3";
 
 /// Stay within protocol major 1, matching handshake compatibility. A future
 /// major version must explicitly establish support rather than inherit it.
@@ -38,13 +38,6 @@ pub struct InteractionPolicy {
     pub request_help: RequestHelpPolicy,
 }
 
-impl InteractionPolicy {
-    pub const UNATTENDED: Self = Self {
-        borrow_confirmation: BorrowConfirmationPolicy::Never,
-        request_help: RequestHelpPolicy::Disabled,
-    };
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
     pub session_id: String,
@@ -60,8 +53,9 @@ pub struct SessionStartParams {
     /// extension's default (`true`) for compatibility with older clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused: Option<bool>,
-    /// Disable borrow confirmation and human-help waits for this session.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// Legacy input, ignored. Browser settings decide both prompts for every session.
+    #[serde(default, skip_serializing)]
+    #[schemars(skip)]
     pub unattended: bool,
 }
 
@@ -99,32 +93,32 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn session_start_omits_disabled_override_and_preserves_explicit_unattended() {
+    fn legacy_unattended_is_accepted_but_never_forwarded() {
+        let schema = schemars::schema_for!(SessionStartParams);
+        let object = schema.schema.object.unwrap();
         for unattended in [false, true] {
             let params: SessionStartParams = serde_json::from_value(json!({
                 "session_id": "abcd", "unattended": unattended
             }))
             .unwrap();
             let encoded = serde_json::to_value(params).unwrap();
-            assert_eq!(
-                encoded,
-                if unattended {
-                    json!({"session_id": "abcd", "unattended": true})
-                } else {
-                    json!({"session_id": "abcd"})
-                }
-            );
-            let decoded: SessionStartParams = serde_json::from_value(encoded).unwrap();
-            assert_eq!(decoded.unattended, unattended);
+            assert_eq!(encoded, json!({"session_id": "abcd"}));
+            for required in &object.required {
+                assert!(
+                    encoded.get(required).is_some(),
+                    "schema requires omitted field {required}"
+                );
+            }
         }
+        assert!(!object.properties.contains_key("unattended"));
     }
 
     #[test]
     fn interaction_policy_requires_a_compatible_protocol() {
-        for protocol in ["1.0", "1.1", "2.0", "invalid"] {
+        for protocol in ["1.0", "1.1", "1.2", "2.0", "invalid"] {
             assert!(!supports_interaction_policy(protocol), "{protocol}");
         }
-        for protocol in ["1.2", "1.3"] {
+        for protocol in ["1.3", "1.4"] {
             assert!(supports_interaction_policy(protocol), "{protocol}");
         }
         let legacy: SessionStartParams =

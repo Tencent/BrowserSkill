@@ -185,16 +185,15 @@ describe("interaction preferences", () => {
     expect(store.get()).toEqual({ confirmTabBorrow: true, requestHelpEnabled: false });
   });
 
-  it("unattended policy is independent of ordinary sessions and persisted preferences", () => {
-    const preferences = { ...DEFAULT_INTERACTION_PREFERENCES };
-    expect(interactionPolicy(preferences, true)).toEqual({
-      borrow_confirmation: "never",
-      request_help: "disabled",
+  it.each([
+    [true, true, "always", "enabled"],
+    [true, false, "always", "disabled"],
+    [false, true, "never", "enabled"],
+    [false, false, "never", "disabled"],
+  ] as const)("browser settings independently decide both prompts (%s, %s)", (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
+    expect(interactionPolicy({ confirmTabBorrow, requestHelpEnabled })).toEqual({
+      borrow_confirmation,
+      request_help,
     });
-    expect(interactionPolicy(preferences)).toEqual({
-      borrow_confirmation: "always",
-      request_help: "enabled",
-    });
-    expect(preferences).toEqual(DEFAULT_INTERACTION_PREFERENCES);
   });
 });

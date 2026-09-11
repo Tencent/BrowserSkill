@@ -169,64 +169,50 @@ Start a new Agent session and write a prompt that needs the browser, for example
 /browser-skill open example.com and summarize what is on the page.
 ```
 
-### Automation and unattended sessions
+### Automation settings
 
-The extension popup has two independent **Automation settings**, both enabled by default:
-**Confirm before borrowing tabs** and **Allow requests for human help**. Turn both off for
-unattended operation in that browser profile. Preferences are saved automatically and apply to
-existing sessions as well as new ones. Turning confirmation off releases pending confirmation
-requests that follow the preference; turning help off finishes pending help requests as `disabled`.
-Disabling human help does not disable borrow confirmation. Ordinary tasks use `bsk session start`
-and follow these settings; asking for a task to be completed automatically does not authorize
-skipping confirmation.
+The extension popup has two independent **Automation settings**, both enabled by default.
+The user's saved browser settings are authoritative for every session:
 
-Only when the user or host explicitly requests both confirmation-free borrowing of existing user
-tabs and disabling human-help requests for this task, use the session override:
+| Confirm before borrowing tabs | Allow requests for human help | Behavior |
+| --- | --- | --- |
+| On | On | Borrowing requires approval; help requests show the existing UI. |
+| On | Off | Borrowing requires approval; help requests return `disabled`. |
+| Off | On | Borrowing skips confirmation; help requests show the existing UI. |
+| Off | Off | Borrowing skips confirmation; help requests return `disabled`. |
 
-```sh
-bsk session start --unattended --no-focus
-bsk tab borrow <tab-id> --session <session-id>
-bsk session stop <session-id>
-```
+Settings save automatically for the browser profile and apply to existing and new sessions.
+Turning confirmation off releases pending borrow confirmations; turning help off finishes pending
+help requests as `disabled`. Turning either back on restores its behavior for subsequent operations,
+including sessions created with the legacy `--unattended` flag. Completed borrows are not undone,
+and finished help requests are not reopened. Allowing help makes `request-help` available; it does
+not require every browser action to ask for permission. Task authorization and host approvals still apply.
 
-The session remembers unattended mode across commands. It skips tab-borrow confirmation and
-returns `outcome: "disabled"` immediately from `request-help`. The skill then directs the agent to
-re-observe and make every reasonable effort to finish using available browser tools; disabling help
-does not confirm completion or by itself block the task. Phone-only QR scans, face verification,
-unavailable SMS codes, and image-only CAPTCHAs for text-only models may remain blocked. Other
-steps should be attempted and verified, with blockers reported only when required inputs or
-capabilities are missing or viable approaches are exhausted. Disabling help grants no additional
-task authorization or exemption from host approvals. Where task authorization and host rules allow,
-models with image understanding may attempt graphical verification using screenshots and supported
-interactions. `BSK_REQUEST_HELP=off` also uses this behavior without changing borrow confirmation.
-With both settings enabled and no explicit overrides, ordinary sessions retain the existing flows.
+Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Agent Window.
+For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
+`tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
+deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
+the daemon also logs a notice for its inherited environment setting. Scripts that relied on these
+inputs alone to avoid waiting must now use the browser settings. `session start --json` and
+`session list --json` report the browser's effective `interaction` policy.
 
-| Setting | Scope | Borrow confirmation | Human help |
-| --- | --- | --- | --- |
-| Popup switches | Browser profile | Default for ordinary sessions | Default for ordinary sessions |
-| `--unattended` | One session | Skipped | Disabled |
-| `--no-confirm` | One borrow | Skipped | Unchanged |
-| `BSK_REQUEST_HELP=off` | CLI/daemon process with this environment variable | Unchanged | Disabled |
+When help is disabled, `request-help` returns `disabled` without confirming any human action.
+The skill directs the agent to re-observe and make reasonable efforts to complete authorized steps
+using existing login state, authorized inputs, and available tools. Where task authorization and
+host rules allow, models with image understanding may attempt graphical verification. Phone-only
+QR scans, face verification, unavailable SMS codes, and image-only CAPTCHAs for text-only models
+may remain blocked. A disabled result neither completes the task nor grants additional permission.
 
-`--unattended` overrides the popup settings; turning the switches back on does not change that
-session. Start an ordinary session to follow the saved settings again. In ordinary sessions, an
-explicit per-call confirmation parameter overrides the profile preference. `--no-confirm` and
-environment-based disabling also require an explicit user or host request; never enable them to
-escape confirmation, denial, or timeout. Explicit authorization already given need not be requested again.
+If preference loading fails, the runtime retains known values or defaults to both enabled when no
+valid value is available. It does not write fallback defaults or block session creation. Later reads
+and storage events can recover the settings. The popup reports read failures and prevents saving;
+failed writes are not treated as successful. A disconnected browser produces an error, not a local
+`disabled` result based on command-line flags or environment variables.
 
-If preference loading fails, the runtime retains known values, or defaults to both enabled when
-no valid value is available. It neither writes those defaults nor blocks session creation. Later
-requests retry loading, and storage events can restore valid preferences. Prompts may reappear
-if the saved disabled setting could not be read; explicit session/process disabling still applies.
-The popup reports read failures and prevents saving; failed writes are not treated as successful.
-
-To skip one borrow confirmation, use `bsk tab borrow <tab-id> --session <id> --no-confirm`.
-`--timeout 60s` sets the borrow confirmation wait. `session start --json` and `session list --json`
-include the browser/session `interaction` policy, excluding additional per-borrow or calling-process
-environment overrides. Protocol 1.2 support is required on both the daemon and extension for the
-new CLI overrides; unsupported versions produce an explicit update error. These settings govern
-BrowserSkill prompts. CLI overrides do not verify host authorization; host command approvals remain
-the host's responsibility.
+`tab borrow --timeout 60s` controls the confirmation wait, not whether confirmation is required.
+Upgrade the CLI, daemon, and extension together: protocol 1.3 is required to enforce these rules;
+incompatible peers return an update error. An older CLI may exit locally for `BSK_REQUEST_HELP=off`
+before contacting the daemon, so updating only the extension cannot change that old executable.
 
 ## DeepSeek Harness plugin
 

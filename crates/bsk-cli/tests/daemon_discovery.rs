@@ -161,6 +161,44 @@ fn status(info: &DaemonInfo) -> ResponseBody {
 }
 
 #[test]
+fn prompt_sensitive_commands_reject_a_daemon_with_legacy_override_semantics() {
+    let daemon = MockDaemon::new(FOREIGN_PID, |_, info| Some(status(info)));
+    let original = daemon.metadata();
+    for args in [
+        vec!["session", "start", "--unattended", "--json"],
+        vec![
+            "tab",
+            "borrow",
+            "7",
+            "--session",
+            "abcd",
+            "--no-confirm",
+            "--json",
+        ],
+        vec![
+            "request-help",
+            "--session",
+            "abcd",
+            "--prompt",
+            "Continue",
+            "--json",
+        ],
+    ] {
+        let result = command(daemon.home(), &args)
+            .env("BSK_REQUEST_HELP", "off")
+            .env("BSK_AUTO_START", "0")
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(error["code"], "unsupported", "{error}");
+        assert!(error["message"].as_str().unwrap().contains("protocol 1.3"));
+        assert!(error.get("outcome").is_none());
+        assert_eq!(daemon.metadata(), original);
+    }
+}
+
+#[test]
 fn discovery_accepts_ipc_without_local_pid_but_management_refuses_it() {
     assert!(!pid_alive(FOREIGN_PID));
     let daemon = MockDaemon::new(FOREIGN_PID, |_, info| Some(status(info)));

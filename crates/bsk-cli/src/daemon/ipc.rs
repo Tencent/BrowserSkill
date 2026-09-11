@@ -330,16 +330,6 @@ async fn handle_tool_dispatch(
     method: Method,
     params: Value,
 ) -> ResponseBody {
-    // `BSK_REQUEST_HELP=off` (unattended mode): never forward the
-    // blocking human-in-loop call to the extension; answer immediately
-    // with a synthetic `disabled` result.
-    if method == Method::ToolRequestHelp && crate::cli::human_loop::request_help_disabled() {
-        let result = crate::cli::human_loop::disabled_help_result(
-            params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
-            crate::cli::human_loop::REQUEST_HELP_DISABLED_NOTE,
-        );
-        return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
-    }
     let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => SessionId(s.to_string()),
         _ => {
@@ -350,28 +340,6 @@ async fn handle_tool_dispatch(
             });
         }
     };
-    if let Some(session) = state.sessions.get(&session_id) {
-        if method == Method::ToolRequestHelp && session.unattended {
-            let result = crate::cli::human_loop::disabled_help_result(
-                params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
-                "request-help disabled for this unattended session",
-            );
-            return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
-        }
-        if method == Method::ToolTabBorrow
-            && (params.get("confirm") == Some(&Value::Bool(false))
-                || params.get("confirmation_timeout_ms").is_some())
-        {
-            if let Some(browser) = state.browsers.get(&session.browser_id) {
-                if !bsk_protocol::tools::supports_interaction_policy(
-                    &browser.extension_protocol_version,
-                ) {
-                    return ResponseBody::Err(RpcError { code: ErrorCode::Unsupported,
-                        message: "Borrow confirmation overrides require an extension supporting protocol 1.2; update BrowserSkill".into(), data: None });
-                }
-            }
-        }
-    }
     // Pre-flight: if the user has clicked the agent-window mask's
     // stop button, every session carries a one-shot "pending
     // interrupt" marker. The marker is consumed by the next method
@@ -791,8 +759,6 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
-    pub unattended: bool,
-    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -909,7 +875,6 @@ async fn handle_session_start(
     let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
-            unattended: false,
             browser_instance_id: None,
             width: None,
             height: None,
@@ -943,7 +908,6 @@ async fn handle_session_start(
         AgentWindowOptions {
             size: window_size,
             focused: params.focused,
-            unattended: params.unattended,
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,

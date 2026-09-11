@@ -59,6 +59,7 @@ export interface SessionStartParams {
   height?: number;
   /** Defaults to true so existing clients preserve visible Agent Windows. */
   focused?: boolean;
+  /** Legacy input accepted for compatibility; browser settings always decide. */
   unattended?: boolean;
 }
 
@@ -133,19 +134,15 @@ export async function handleSessionStart(
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
-    if (!params.unattended) await deps.preferences?.readyOrFallback();
+    await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
       size: sizeOrErr,
       focused: params.focused,
-      unattended: params.unattended,
       signal: deps.signal,
     });
     return {
       agent_window_id: ctx.agentWindowId,
-      interaction: interactionPolicy(
-        deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES,
-        ctx.unattended,
-      ),
+      interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
     };
   } catch (err) {
     if (err instanceof SessionStartCleanupError) {

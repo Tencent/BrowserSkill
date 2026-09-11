@@ -122,31 +122,26 @@ describe("handleRequestHelp", () => {
     expect(await pending).toMatchObject({ outcome, tab_id: 5 });
   });
 
-  it("explicit unattended help stays disabled without reading preferences", async () => {
+  it("legacy session metadata cannot disable help on preference read failure", async () => {
     const preferences = new InteractionPreferenceStore();
     const ready = vi
       .spyOn(preferences, "ready")
       .mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
     const deps = baseDeps({ preferences });
     const result = await handleRequestHelp(fakeManager("abcd", 99, 5, true), baseParams(), deps);
-    expect(result).toMatchObject({ outcome: "disabled" });
-    expect(result).not.toHaveProperty("completed_by");
-    expect(ready).not.toHaveBeenCalled();
-    expect(deps.sendToTab).not.toHaveBeenCalled();
-    expect(deps.activateTab).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ outcome: "continued" });
+    expect(ready).toHaveBeenCalledOnce();
+    expect(deps.sendToTab).toHaveBeenCalled();
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
   });
 
-  it("unattended help returns disabled without focusing or showing UI, while ordinary sessions still work", async () => {
+  it.each([false, true])("legacy session metadata cannot disable help (%s)", async (unattended) => {
     const deps = baseDeps();
     expect(
-      await handleRequestHelp(fakeManager("abcd", 99, 5, true), baseParams(), deps),
-    ).toMatchObject({ outcome: "disabled" });
-    expect(deps.activateTab).not.toHaveBeenCalled();
-    expect(deps.windows.update).not.toHaveBeenCalled();
-    expect(deps.sendToTab).not.toHaveBeenCalled();
-    expect(await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps)).toMatchObject({
-      outcome: "continued",
-    });
+      await handleRequestHelp(fakeManager("abcd", 99, 5, unattended), baseParams(), deps),
+    ).toMatchObject({ outcome: "continued" });
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
   });
 
   it("the saved help preference prevents all browser UI work", async () => {
@@ -187,7 +182,7 @@ describe("handleRequestHelp", () => {
         return Promise.resolve();
       }),
     });
-    const manager = fakeManager("abcd", 99, 5);
+    const manager = fakeManager("abcd", 99, 5, true);
     const disabled = await handleRequestHelp(manager, baseParams(), deps);
     expect(disabled).toMatchObject({ outcome: "disabled" });
     expect(disabled).not.toHaveProperty("completed_by");

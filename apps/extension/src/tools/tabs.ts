@@ -80,7 +80,7 @@ export interface TabSelectResult {
 export interface TabBorrowParams {
   session_id: string;
   tab_id: number;
-  /** Overrides the browser preference for this borrow only. */
+  /** Legacy input, ignored. The browser preference decides confirmation. */
   confirm?: boolean;
   confirmation_timeout_ms?: number;
 }
@@ -187,27 +187,21 @@ export const chromeAgentOverlayResetApi: AgentOverlayResetApi = {
 // ---------------------------------------------------------------------------
 
 export interface BorrowConfirmationContext {
-  unattended?: boolean;
   timeoutMs?: number;
   sessionId: string;
   tabId: number;
-  confirm?: boolean;
   signal?: AbortSignal;
 }
 
 /**
  * Hook that asks the user to approve a `tool.tab_borrow`. Production
- * wiring uses `requestBorrowConfirmation` (overlay on every borrow).
- * `autoApproveBorrow` remains for unit tests only.
+ * wiring uses the current browser preference and `requestBorrowConfirmation`.
  *
  * Returning `false` causes `tab_borrow` to reply with `cancelled`.
  */
 export type BorrowConfirmationApprover = (
   ctx: BorrowConfirmationContext,
 ) => Promise<boolean | RpcError>;
-
-/** Test-only stub; production must use overlay-driven approver. */
-export const autoApproveBorrow: BorrowConfirmationApprover = async () => true;
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -287,7 +281,7 @@ export interface TabManagementDeps {
   windows?: ChromeWindowsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
-  /** Borrow approver — defaults to auto-approve (M8 stub). */
+  /** Browser-policy approver. Missing wiring must never silently approve a borrow. */
   approveBorrow?: BorrowConfirmationApprover;
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
@@ -605,7 +599,6 @@ interface ExecuteBorrowCoreParams {
   manager: SessionManager;
   ctx: SessionContext;
   tabId: number;
-  confirm: boolean | undefined;
   confirmationTimeoutMs?: number;
   tabsApi: TabMutationApi;
   approveBorrow: BorrowConfirmationApprover;
@@ -669,18 +662,15 @@ async function requestBorrowApproval(
   approveBorrow: BorrowConfirmationApprover,
   ctx: SessionContext,
   tabId: number,
-  confirm?: boolean,
   signal?: AbortSignal,
   timeoutMs?: number,
 ): Promise<RpcError | null> {
-  if (ctx.unattended || confirm === false) return aborted(signal, "tab_borrow");
+  if (signal?.aborted) return aborted(signal, "tab_borrow");
   let approved: boolean | RpcError;
   try {
     approved = await approveBorrow({
       sessionId: ctx.sessionId,
-      unattended: ctx.unattended,
       tabId,
-      confirm,
       timeoutMs,
       ...(signal !== undefined ? { signal } : {}),
     });
@@ -757,7 +747,6 @@ async function executeBorrowCore(
     p.approveBorrow,
     p.ctx,
     p.tabId,
-    p.confirm,
     p.signal,
     p.confirmationTimeoutMs,
   );
@@ -845,14 +834,20 @@ export async function handleTabBorrow(
   }
 
   const tabsApi = getTabsApi(deps);
-  const approve = deps.approveBorrow ?? autoApproveBorrow;
+  const approve: BorrowConfirmationApprover =
+    deps.approveBorrow ??
+    (async () =>
+      rpcError(
+        "permission_denied",
+        "confirmation_ui_unavailable",
+        "Borrow confirmation is unavailable",
+      ));
   let committed = false;
   try {
     const coreResult = await executeBorrowCore({
       manager,
       ctx,
       tabId: params.tab_id,
-      confirm: ctx.unattended ? false : params.confirm,
       confirmationTimeoutMs: params.confirmation_timeout_ms,
       tabsApi,
       approveBorrow: approve,

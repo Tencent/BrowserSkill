@@ -20,13 +20,10 @@ export function normalizeInteractionPreferences(value: unknown): InteractionPref
   };
 }
 
-export function interactionPolicy(
-  preferences: InteractionPreferences,
-  unattended = false,
-): InteractionPolicy {
+export function interactionPolicy(preferences: InteractionPreferences): InteractionPolicy {
   return {
-    borrow_confirmation: unattended || !preferences.confirmTabBorrow ? "never" : "always",
-    request_help: unattended || !preferences.requestHelpEnabled ? "disabled" : "enabled",
+    borrow_confirmation: preferences.confirmTabBorrow ? "always" : "never",
+    request_help: preferences.requestHelpEnabled ? "enabled" : "disabled",
   };
 }
 

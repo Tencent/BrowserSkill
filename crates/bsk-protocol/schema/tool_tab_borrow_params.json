@@ -9,7 +9,7 @@
   ],
   "properties": {
     "confirm": {
-      "description": "Override the browser confirmation preference for this borrow. Unattended sessions always skip confirmation.",
+      "description": "Legacy input, ignored. Browser settings decide whether confirmation is required.",
       "type": [
         "boolean",
         "null"

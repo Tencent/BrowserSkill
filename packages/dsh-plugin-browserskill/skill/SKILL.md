@@ -72,7 +72,8 @@ Use `browser_tabs` to list returned tab ids before selecting, closing, borrowing
 Borrow a user tab only for the immediate task, and return it as soon as that step is complete. Never
 invent a tab id or keep a personal tab borrowed across unrelated work.
 
-Honor Automation settings. Never repeat denied or expired borrows; inspect tabs if the outcome is unknown.
+The extension's Automation settings apply to all sessions; tools and environment variables cannot override them.
+Do not change settings to bypass a prompt. Never repeat denied or expired borrows; inspect unknown outcomes.
 
 ## Ask the human when needed
 

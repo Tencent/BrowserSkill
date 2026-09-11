@@ -51,20 +51,16 @@ When multiple browsers are connected, use `bsk browsers` and start with
 Agent Window does not need to interrupt the user's current work; it is not a flag on other commands.
 Run `bsk doctor` when startup or transport problems persist after one retry.
 
-Start ordinary tasks with `bsk session start` and follow the popup's saved Automation settings;
-both are enabled by default. A request to complete a task automatically does not authorize
-skipping confirmation. Turning off human help does not turn off tab-borrow confirmation.
+Start tasks with `bsk session start`. The extension's saved Automation settings decide whether
+borrowing needs confirmation and human help is available; both are enabled by default. Changes apply
+to existing sessions as well as new ones. Disabling human help does not disable borrow confirmation.
 
-Use `bsk session start --unattended --no-focus` only when the user or host explicitly requests
-both confirmation-free borrowing of existing user tabs and disabling human-help requests for
-this task. Reuse explicit authorization already given; do not ask for it again. Never add this flag
-to escape a confirmation, denial, or timeout. It skips borrow confirmation and disables help
-for that session without changing saved settings; turning the popup switches back on does not
-override it. Use an ordinary new session to follow the saved settings again.
-
-Session `interaction` reports the browser/session policy. A single `--no-confirm` borrow and
-`BSK_REQUEST_HELP=off` in the calling CLI or daemon process can additionally disable their
-respective prompts; use either override only when explicitly requested by the user or host.
+`--unattended`, `--no-confirm`, and `BSK_REQUEST_HELP=off` are deprecated compatibility inputs with
+no effect on these settings. Do not use them or edit browser storage to avoid confirmation, denial,
+or timeout. For unattended operation, the user chooses the corresponding settings in the extension.
+`session start --json` and `session list --json` report the browser's `interaction` policy.
+Allowing human help makes `request-help` available; it does not require a handoff for every action.
+Task authorization and host approvals still apply.
 
 ## Work toward one observable goal
 
@@ -138,11 +134,9 @@ Normal page writes affect only Agent Window tabs. To operate a user tab, first l
 after the relevant step with `bsk tab return <tab-id>`; never invent a tab id or keep a personal tab
 borrowed across unrelated work.
 
-Use `--no-confirm` only when the user or host explicitly authorizes borrowing without a
-confirmation prompt. Authorization to operate a tab alone is not permission to skip confirmation.
-This override applies only to that borrow and does not disable human help.
-`tab borrow --timeout 120s` changes the confirmation wait (default 60s). These options require
-an updated CLI, daemon, and extension. Repeating a completed borrow in the same session returns
+`tab borrow --timeout 120s` changes the confirmation wait (default 60s), not whether approval is
+required. CLI, daemon, and extension must support protocol 1.3; older peers require updating.
+Repeating a completed borrow in the same session returns
 its existing result. Do not repeat pending requests, denied requests, or confirmation timeouts,
 or switch to another browser tool to bypass them. If `reason` is `borrow_outcome_unknown`, inspect
 tab and session state before continuing; the tab may already have moved.
@@ -159,7 +153,7 @@ The result `outcome` is one of `continued`, `completed`, `cancelled`, `timed_out
 resume only after `continued` or `completed`. Treat `cancelled` as rejection and `timed_out` as a
 blocker; do not repeat that request. Observe again after control returns before using refs.
 
-When help is disabled by browser settings, `--unattended`, or `BSK_REQUEST_HELP=off`, make every
+When help is disabled in the extension, make every
 reasonable effort to complete the task autonomously with BrowserSkill. Do not call `request-help`.
 If a call returns `disabled`, no human action was confirmed: re-observe and continue working rather
 than marking the step blocked merely because help is unavailable.
