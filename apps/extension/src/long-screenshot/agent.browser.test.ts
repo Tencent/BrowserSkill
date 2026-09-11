@@ -2,8 +2,9 @@
 // Real CLI -> isolated daemon -> shipped extension. No installed CLI or user
 // profile is touched. Build both artifacts and opt in with the two env vars.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { type EventEmitter, once } from "node:events";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -33,7 +34,25 @@ async function withAgent(
   scale = 1,
 ) {
   const directory = await mkdtemp(path.join(tmpdir(), "bsk-agent-screenshot-"));
+  const fixtureHome = path.join(directory, "user");
+  const fixtureSkill = path.join(fixtureHome, ".cursor", "skills", "browser-skill");
+  const oldSkill = "Fixture managed skill before daemon startup\n";
+  await mkdir(fixtureSkill, { recursive: true });
+  await writeFile(path.join(fixtureSkill, "SKILL.md"), oldSkill);
+  await writeFile(
+    path.join(fixtureSkill, ".bsk-source"),
+    JSON.stringify({
+      version: 1,
+      source: "bundled",
+      sha256: createHash("sha256").update(oldSkill).digest("hex"),
+    }),
+  );
   const server = createServer((req, res) => {
+    if (req.url === "/update.json") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ version: "0.0.0", assets: {} }));
+      return;
+    }
     res.setHeader("Content-Type", "text/html");
     res.end(
       fixture(req.url?.includes("large") ? 34_003 : 2603) +
@@ -49,7 +68,19 @@ async function withAgent(
   await new Promise<void>((resolve) => portServer.listen(0, "127.0.0.1", resolve));
   const port = (portServer.address() as { port: number }).port;
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
-  const env = { ...process.env, BSK_HOME: directory, BSK_AUTO_START: "0" };
+  // Only the spawned CLI/daemon receive this home. Isolate skill auto-sync as
+  // well as sockets, including harnesses that have their own home overrides.
+  const env = {
+    ...process.env,
+    HOME: fixtureHome,
+    USERPROFILE: fixtureHome,
+    KIMI_CODE_HOME: path.join(fixtureHome, ".kimi-code"),
+    HERMES_HOME: path.join(fixtureHome, ".hermes"),
+    BSK_HOME: directory,
+    BSK_AUTO_START: "0",
+    BSK_AUTO_UPDATE: "off",
+    BSK_UPDATE_MANIFEST_URL: `${baseUrl}/update.json`,
+  };
   const cli = process.env.BSK_LONG_SCREENSHOT_CLI!;
   const daemon = spawn(cli, ["daemon", "start", "--foreground", "--port", String(port)], {
     env,
@@ -63,6 +94,10 @@ async function withAgent(
         return false;
       }
     });
+    // Exercise the real daemon sync path and prove it resolves the fixture home.
+    await poll(
+      async () => (await readFile(path.join(fixtureSkill, "SKILL.md"), "utf8")) !== oldSkill,
+    );
     const { withChrome } = await import(
       new URL(
         "../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
@@ -81,7 +116,16 @@ async function withAgent(
       async (send: Send) => run(await harness(send, directory, baseUrl, port, info, cli, env)),
     );
   } finally {
-    daemon.kill();
+    if (daemon.pid && daemon.exitCode === null && daemon.signalCode === null) {
+      const exited = once(daemon as unknown as EventEmitter, "exit");
+      daemon.kill();
+      const force = setTimeout(() => daemon.kill("SIGKILL"), 2000);
+      try {
+        await exited;
+      } finally {
+        clearTimeout(force);
+      }
+    }
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(directory, { recursive: true, force: true });
   }
@@ -151,8 +195,7 @@ async function harness(
     return JSON.parse(result.stdout);
   };
   await poll(async () => ((await ok(["status"])).browsers?.length ?? 0) > 0);
-  // Raw session setup avoids the CLI session-start skill auto-sync in the host's
-  // home directory. All screenshot operations below use the actual CLI binary.
+  // Keep session setup separate from the screenshot commands under test.
   const rpc = (method: string, params: object) =>
     new Promise<Record<string, any>>((resolve, reject) => {
       const socket = createConnection(info.sock_path);

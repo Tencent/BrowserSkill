@@ -51,7 +51,9 @@ JSON output fields are preserved. There is no preview tab, browser download or a
 permission. Exports are released after successful saving or local failure/cancellation,
 on session stop, and after ten minutes without reads. Closed-session exports are also swept
 once per minute. After a worker restart, orphan Agent scratch directories are removed before
-the next full-page capture; popup previews are retained. CLI or browser crashes can therefore
+the next full-page capture; popup previews are retained. Temporary storage initialization failures
+can be retried. Releasing an export immediately revokes reads; failed disk deletions are retried
+by the minute sweep without retaining image Blobs. CLI or browser crashes can therefore
 leave temporary disk data until this cleanup runs. Matching CLI and extension builds are
 required. Restart a running daemon after updating the CLI (`bsk daemon restart`); older extensions reject the new RPC rather than returning an incorrect viewport.
 
@@ -120,10 +122,16 @@ pnpm ext:build
 BSK_LONG_SCREENSHOT_CHROME=/path/to/chrome BSK_LONG_SCREENSHOT_CLI="$PWD/target/debug/bsk" pnpm --filter @browser-skill/extension exec vitest run src/long-screenshot/agent.browser.test.ts
 ```
 
-This suite uses an isolated browser profile and daemon. It verifies PNG scanlines and fixed
+This suite uses an isolated browser profile, daemon and child-process user home (including
+skill-directory overrides). A managed skill fixture verifies that daemon startup sync stays in
+that home; update checks use the local fixture server and automatic updates are disabled.
+It verifies PNG scanlines and fixed
 footers, multi-chunk transfer, captures beyond 32K pixels, original page restoration, timeout,
 Ctrl-C, the page Escape control, output failures and scratch-file cleanup. The regular suites cover chunk ownership,
 invalid offsets, expiration, CLI flag validation and the unchanged viewport/ref routes.
+Fault-injection tests cover unresponsive overlay replies during cancellation/timeout, storage
+initialization recovery, and retrying failed artifact deletion. Overlay cleanup uses a bounded
+wait and still targets the original document after cancellation.
 
 
 The automated checks cover actual scroll-offset rounding, fixed-footer overlap, capture beyond

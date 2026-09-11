@@ -16,6 +16,7 @@ type Entry = { sessionId: string; file: Blob; touched: number };
  * disk; only one bounded slice is materialized for each transport response. */
 export class ScreenshotExports {
   private readonly entries = new Map<string, Entry>();
+  private readonly pendingDeletes = new Set<string>();
   private ready?: Promise<void>;
   private timer?: ReturnType<typeof setInterval>;
   private closed = false;
@@ -23,10 +24,16 @@ export class ScreenshotExports {
   constructor(private readonly hasSession: (id: string) => boolean) {}
 
   prepare(): Promise<void> {
-    this.ready ??= this.removeOrphans().then(() => {
-      if (this.closed) throw new Error("Screenshot exports closed");
-      this.timer = setInterval(() => void this.sweep(), 60_000);
-    });
+    if (this.closed) return Promise.reject(new Error("Screenshot exports closed"));
+    this.ready ??= this.removeOrphans()
+      .then(() => {
+        if (this.closed) throw new Error("Screenshot exports closed");
+        this.timer = setInterval(() => void this.sweep(), 60_000);
+      })
+      .catch((error) => {
+        this.ready = undefined;
+        throw error;
+      });
     return this.ready;
   }
 
@@ -75,7 +82,7 @@ export class ScreenshotExports {
 
   async release(params: ScreenshotReleaseParams): Promise<ScreenshotReleaseResult> {
     if (!this.get(params)) return { released: false };
-    await this.remove(params.capture_id);
+    await this.discard(params.capture_id);
     return { released: true };
   }
 
@@ -89,25 +96,35 @@ export class ScreenshotExports {
       : undefined;
   }
 
-  private async remove(id: string) {
+  /** Revoke reads immediately; retry failed disk cleanup without retaining the Blob. */
+  async discard(id: string) {
     this.entries.delete(id);
-    await removeTiledScreenshot(id).catch(() => {});
+    this.pendingDeletes.add(id);
+    try {
+      await removeTiledScreenshot(id);
+      this.pendingDeletes.delete(id);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "NotFoundError")
+        this.pendingDeletes.delete(id);
+    }
   }
 
   async releaseSession(sessionId: string) {
     for (const [id, entry] of this.entries)
-      if (entry.sessionId === sessionId) await this.remove(id);
+      if (entry.sessionId === sessionId) await this.discard(id);
   }
 
   private async sweep() {
+    for (const id of this.pendingDeletes) await this.discard(id);
     for (const [id, entry] of this.entries)
       if (!this.hasSession(entry.sessionId) || Date.now() - entry.touched >= EXPORT_IDLE_MS)
-        await this.remove(id);
+        await this.discard(id);
   }
 
   async dispose() {
     this.closed = true;
     clearInterval(this.timer);
-    for (const id of this.entries.keys()) await this.remove(id);
+    for (const id of new Set([...this.entries.keys(), ...this.pendingDeletes]))
+      await this.discard(id);
   }
 }

@@ -42,6 +42,51 @@ describe("Agent screenshot exports", () => {
     await store.prepare();
     expect(removed).toEqual(["agent-orphan"]);
   });
+  it("retries initialization after storage recovers and shares concurrent attempts", async () => {
+    const getDirectory = vi.spyOn(navigator.storage, "getDirectory");
+    getDirectory.mockRejectedValueOnce(new DOMException("Storage unavailable", "UnknownError"));
+    const first = store.prepare();
+    expect(store.prepare()).toBe(first);
+    await expect(first).rejects.toThrow("Storage unavailable");
+    await expect(store.prepare()).resolves.toBeUndefined();
+    await store.prepare();
+    expect(getDirectory).toHaveBeenCalledTimes(2);
+    expect(removed).toEqual(["agent-orphan"]);
+    expect(vi.getTimerCount()).toBe(1);
+  });
+  it("revokes reads immediately and retries failed deletion without retaining exports", async () => {
+    await store.prepare();
+    store.put("one", "agent-released", new Blob(["png"]));
+    vi.mocked(removeTiledScreenshot).mockRejectedValueOnce(
+      new DOMException("File busy", "NoModificationAllowedError"),
+    );
+    expect(await store.release({ session_id: "one", capture_id: "agent-released" })).toEqual({
+      released: true,
+    });
+    expect(
+      await store.read({ session_id: "one", capture_id: "agent-released", offset: 0 }),
+    ).toMatchObject({ code: "not_found" });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(removeTiledScreenshot).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(removeTiledScreenshot).toHaveBeenCalledTimes(2);
+  });
+  it("retries cleanup for failed captures and closed sessions, and accepts missing files", async () => {
+    await store.prepare();
+    store.put("one", "agent-session", new Blob(["png"]));
+    vi.mocked(removeTiledScreenshot)
+      .mockRejectedValueOnce(new DOMException("File busy", "NoModificationAllowedError"))
+      .mockRejectedValueOnce(new DOMException("File busy", "NoModificationAllowedError"));
+    await store.releaseSession("one");
+    await store.discard("agent-failed-capture");
+    vi.mocked(removeTiledScreenshot).mockRejectedValueOnce(
+      new DOMException("Already removed", "NotFoundError"),
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(removeTiledScreenshot).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(removeTiledScreenshot).toHaveBeenCalledTimes(4);
+  });
   it("streams exact bounded chunks and permits retrying the same offset", async () => {
     await store.prepare();
     const bytes = Uint8Array.from({ length: SCREENSHOT_CHUNK_BYTES * 2 + 19 }, (_, i) => i % 251);

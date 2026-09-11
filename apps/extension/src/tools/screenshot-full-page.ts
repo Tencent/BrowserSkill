@@ -1,11 +1,11 @@
 import { i18n } from "@browser-skill/i18n";
-import { withExtensionOverlayHidden } from "@/lib/capture-suppress-bridge";
+import { CAPTURE_SUPPRESS, type CaptureSuppressPhase } from "@/lib/capture-suppress-bridge";
 import { capturePage } from "@/long-screenshot/capture";
 import type { ScreenshotExports } from "@/long-screenshot/exports";
 import { createPageClient } from "@/long-screenshot/page-client";
 import { exportPng } from "@/long-screenshot/png";
 import { openScreenshotSource } from "@/long-screenshot/source";
-import { removeTiledScreenshot, TileWriter } from "@/long-screenshot/tiles";
+import { TileWriter } from "@/long-screenshot/tiles";
 import { LONG_SCREENSHOT, ScreenshotError } from "@/long-screenshot/types";
 import { waitForReply } from "@/long-screenshot/wait";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
@@ -135,8 +135,10 @@ export async function handleFullPageScreenshot(
   try {
     await deps.exports.prepare();
     await client.prepare();
-    await withExtensionOverlayHidden(
+    await withScreenshotOverlayHidden(
       target.tabId,
+      client.documentId!,
+      controller.signal,
       async () => {
         phase = "opening capture source";
         source = await openScreenshotSource(
@@ -185,8 +187,6 @@ export async function handleFullPageScreenshot(
           cancelLabel: i18n.t("longScreenshot.cancel", { ns: "extension" }),
         });
       },
-      (tabId, message) =>
-        chrome.tabs.sendMessage(tabId, message, { documentId: client.documentId }),
     );
     controller.signal.throwIfAborted();
     await writer.finish();
@@ -244,6 +244,31 @@ export async function handleFullPageScreenshot(
     chrome.tabs.onActivated.removeListener(activated);
     chrome.runtime.onMessage.removeListener(cancelled);
     await source?.close();
-    if (!retained) await removeTiledScreenshot(id).catch(() => {});
+    if (!retained) await deps.exports.discard(id);
+  }
+}
+
+/** A screenshot may outlive a responsive renderer. Bound both bridge phases,
+ * and send exactly one restore even if the page hid its overlay but never acked. */
+async function withScreenshotOverlayHidden<T>(
+  tabId: number,
+  documentId: string,
+  signal: AbortSignal,
+  capture: () => Promise<T>,
+): Promise<T> {
+  const send = (phase: CaptureSuppressPhase) =>
+    chrome.tabs.sendMessage(tabId, { type: CAPTURE_SUPPRESS, phase }, { documentId });
+  try {
+    try {
+      await waitForReply(send("begin"), signal);
+    } catch (error) {
+      // A missing overlay script is allowed, but a stuck renderer must stop capture.
+      if (signal.aborted || error instanceof ScreenshotError) throw error;
+    }
+    signal.throwIfAborted();
+    return await capture();
+  } finally {
+    // Cleanup must still be sent after cancellation, to the original document.
+    await waitForReply(send("end"), undefined, 1000).catch(() => {});
   }
 }
