@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
 import type { ObserveResult } from "@/transport/types";
+import { auditContext } from "../../audit-context";
 import { handleObserve, handleSnapshot } from "../../observation";
 import type { CdpRunner } from "../../shared";
 import type { DocumentIdentity } from "../facts";
@@ -164,6 +165,7 @@ describe("visual observation output", () => {
     let r = success(await publishObservationPage(f.store, f.cdp, 4, { output: f.output }));
     const seen = new Set<string>();
     let pages = 0;
+    let retriedFinalPage = false;
     while (true) {
       expect(
         r.text.split("\n").reduce((n, line) => n + Math.ceil(line.length / 4), 0),
@@ -177,9 +179,13 @@ describe("visual observation output", () => {
       const old = [...f.store.entries()].map(([ref]) => ref);
       r = success(await publishObservationPage(f.store, f.cdp, 4, { cursor }));
       for (const ref of old) expect(f.store.resolveEntry(ref)).toBeNull();
+      const revision = f.store.revision;
       expect(await publishObservationPage(f.store, f.cdp, 4, { cursor })).toEqual(r);
+      expect(f.store.revision).toBe(revision);
+      if (!r.next_cursor) retriedFinalPage = true;
       expect(++pages).toBeLessThan(35);
     }
+    expect(retriedFinalPage).toBe(true);
     expect(seen.size).toBe(35);
     expect(
       f.send.mock.calls.every((c) =>
@@ -845,4 +851,85 @@ it("can retry a cancelled final page with a smaller budget without losing buffer
     cursor = result.next_cursor;
   }
   expect(seen.size).toBe(20);
+});
+
+it("preserves DOM labels for audit on the first and continuation pages", async () => {
+  const f = fixture(0, 110);
+  f.scene.nodes.push(
+    ...Array.from({ length: 12 }, (_, i) => ({
+      ...node(i + 2, 1, "button", `Action ${i}`),
+      rect: { x: 0, y: i * 35, w: 100, h: 30 },
+    })),
+  );
+  f.output.render = prepareObservationRender(f.scene);
+  const manager = new SessionManager({
+    agentWindow: {
+      create: async () => 100,
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  const ctx = await manager.start("audit-test");
+  ctx.agentCreatedTabs.add(4);
+  const originalChrome = globalThis.chrome;
+  vi.stubGlobal("chrome", {
+    tabs: { get: vi.fn(async () => ({ id: 4, url: "https://fixture.test/page" })) },
+  });
+  try {
+    let result = success(
+      await publishObservationPage(ctx.refStore, f.cdp, 4, { output: f.output }),
+    );
+    let pages = 0;
+    const labels: string[] = [];
+    while (true) {
+      for (const [ref, entry] of ctx.refStore.entries()) {
+        expect(entry.kind).toBe("dom");
+        if (entry.kind !== "dom") throw new Error("expected DOM ref");
+        expect(entry.name).toBe(`Action ${labels.length}`);
+        const audit = await auditContext(
+          {
+            id: "audit-click",
+            method: "tool.click",
+            params: {
+              session_id: ctx.sessionId,
+              tab_id: 4,
+              ref,
+              _audit_id: "operation-test",
+            },
+          },
+          manager,
+        );
+        expect(audit).toMatchObject({ target: entry.name, tab_id: 4 });
+        labels.push(entry.name!);
+      }
+      pages++;
+      if (!result.next_cursor) break;
+      result = success(
+        await publishObservationPage(ctx.refStore, f.cdp, 4, { cursor: result.next_cursor }),
+      );
+    }
+    expect(pages).toBeGreaterThan(1);
+    expect(labels).toHaveLength(12);
+    // A visual ref has no DOM audit label, even when its candidate has a label.
+    ctx.refStore.replace([
+      ["e1", { kind: "visual-region", candidate: { ...candidate(100), label: "Canvas" } }],
+    ]);
+    expect(
+      await auditContext(
+        {
+          id: "audit-visual",
+          method: "tool.click",
+          params: {
+            session_id: ctx.sessionId,
+            tab_id: 4,
+            ref: "e1",
+            _audit_id: "operation-test",
+          },
+        },
+        manager,
+      ),
+    ).not.toHaveProperty("target");
+  } finally {
+    vi.stubGlobal("chrome", originalChrome);
+  }
 });
