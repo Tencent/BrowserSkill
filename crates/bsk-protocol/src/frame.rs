@@ -40,6 +40,8 @@ pub struct EventFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EventKind {
+    #[serde(rename = "audit.context")]
+    AuditContext,
     /// Application-level keepalive emitted by the extension roughly
     /// every 20s while the WS link is up. Two purposes: (1) the
     /// send/receive activity resets the MV3 service-worker idle timer

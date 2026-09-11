@@ -92,6 +92,7 @@ export class SessionManager {
   private readonly sessions = new Map<string, SessionContext>();
   private readonly windowIndex = new Map<number, string>();
   private readonly borrowReservations = new Map<number, string>();
+  private readonly expectedWindowClosures = new WeakSet<SessionContext>();
   private readonly agentWindow: AgentWindowApi;
   private readonly now: () => number;
 
@@ -106,6 +107,21 @@ export class SessionManager {
 
   get(sessionId: string): SessionContext | null {
     return this.sessions.get(sessionId) ?? null;
+  }
+
+  isWindowCloseExpected(ctx: SessionContext): boolean {
+    return this.expectedWindowClosures.has(ctx);
+  }
+
+  /** Mark only the committed window/tab removal stage of session.stop. */
+  async withExpectedWindowClose<T>(ctx: SessionContext, close: () => Promise<T>): Promise<T> {
+    this.expectedWindowClosures.add(ctx);
+    try {
+      return await close();
+    } finally {
+      // Failed teardown must not hide a later user-initiated close.
+      this.expectedWindowClosures.delete(ctx);
+    }
   }
 
   findByWindowId(windowId: number): SessionContext | null {

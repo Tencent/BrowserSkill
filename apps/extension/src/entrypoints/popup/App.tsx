@@ -8,6 +8,7 @@ import {
   RiInformationLine,
 } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
+import { AuditPanel } from "@/components/audit-panel";
 import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
@@ -137,7 +138,9 @@ export function App() {
         ? t("popup.record.sectionTitle")
         : view === "long-screenshot"
           ? t("longScreenshot.title")
-          : t("popup.brandName");
+          : view === "audit"
+            ? t("audit.title")
+            : t("popup.brandName");
 
   return (
     <main
@@ -443,6 +446,7 @@ export function App() {
       )}
 
       {view === "long-screenshot" && <LongScreenshot />}
+      {view === "audit" && <AuditPanel />}
 
       {view === "record" && (
         <section className="space-y-2.5" data-slot="popup-record-body">

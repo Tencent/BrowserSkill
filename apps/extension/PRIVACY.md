@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** August 20, 2026
+**Last updated:** September 10, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -25,7 +25,7 @@ Depending on the commands the user (via their AI agent) sends to the local daemo
 | **Web page content** | The DOM, accessibility tree, HTML, and visible-tab screenshots of pages opened in the BrowserSkill-controlled "Agent Window," or in user tabs the user explicitly approves for borrowing. | Required so the AI agent can read pages, locate elements, and verify results. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Tab and window metadata** | Tab IDs, URLs, titles, window IDs of the Agent Window and any tabs the user explicitly authorizes. | Required to target automation commands at the correct tab/window. |
-| **Local extension storage** | A randomly generated 8-character instance ID and an optional user-supplied label. | Used so the local daemon can recognize this browser instance across reconnects. No personal data is stored. |
+| **Local extension storage** | A randomly generated 8-character instance ID, an optional user-supplied label, and feature preferences including the audit toggle. | Used to recognize this browser instance and restore user settings. |
 | **File transfers requested by the agent** | Local files explicitly supplied to `bsk upload`, and the file created by a single `bsk download` action. | Required to attach a task file to a web page or return a browser-generated download to the invoking local agent. |
 | **OS notifications** | Permission to display a system notification when the agent requests to "borrow" one of the user's existing tabs. | Required to obtain explicit, per-tab user consent before the agent touches any pre-existing tab. |
 
@@ -52,7 +52,7 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the local WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
 - **`downloads`** — Correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unclaimed downloads.
-- **`storage`** — Persist a random instance ID and optional label in `chrome.storage.local`.
+- **`storage`** — Persist a random instance ID, optional label, and feature preferences in `chrome.storage.local`.
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. The Extension does **not** read or transmit page content from sites the agent is not actively driving.
 
 ## 6. Where Data Goes
@@ -61,15 +61,18 @@ All Extension activity stays on the user's local device. The only network traffi
 
 ## 7. Data Retention
 
-- The instance ID and optional label persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
+- The instance ID, optional label, and feature preferences persist in `chrome.storage.local` until the user uninstalls the Extension or clears extension storage.
 - Page content, screenshots, DOM snapshots, and other observed data are returned to the local daemon in response to commands and are **not retained by the Extension**. They live only as long as the agent's tool call.
 - Upload and download bytes are staged by the local daemon in a private, session-scoped directory. Download staging is removed after it is copied to the requested destination. Upload staging is retained until the session ends so a later form submission can still read the attached file. Remaining staging is removed when the session ends or disconnects, or when the daemon next starts after a crash.
+
+- Operation audit is off by default. When enabled, the local daemon stores task and operation metadata in `BSK_HOME/audit` (by default `.bsk/audit` under the user home directory). Records include timestamps, tool types, website origins, element names with basic redaction, statuses, and error codes. Input values, page bodies, screenshots, scripts, and file contents are excluded. Ended tasks are retained for 30 days and pruned when history is loaded, audit is enabled, a task starts, or the task list is queried. Users can export or delete ended tasks from the audit page. Exported copies are not automatically removed.
 
 ## 8. User Control
 
 Users can at any time:
 
-- Uninstall the Extension from `chrome://extensions`, which removes all stored data.
+- Uninstall the Extension from `chrome://extensions`, which removes extension storage. Local audit files and exported copies must be deleted separately.
+- Turn operation audit off in Quick Features to stop collecting new operations while retaining existing history. Previously recorded tasks still receive their final lifecycle status.
 - Close the Agent Window to stop all agent automation immediately.
 - Deny tab-borrow notification prompts to keep their existing tabs off-limits.
 - Stop the local daemon to sever the WebSocket connection.

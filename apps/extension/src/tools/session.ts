@@ -281,66 +281,68 @@ export async function handleSessionStop(
     return { code: "cancelled", message: "session_stop aborted before window close" };
   }
 
-  // Step 4: close every tab explicitly created by the agent, including the
-  // home tab. `tabsApi` is a
-  // TabMutationApi (remove only); `queryApi` is a separate read-only
-  // ChromeTabsApi. If neither is injected, we conservatively fall back to
-  // closing the window (see Step 5).
-  const tabsApi = deps.tabManagement?.tabs;
-  const queryApi = deps.tabsQuery;
+  return manager.withExpectedWindowClose(ctx, async () => {
+    // Step 4: close every tab explicitly created by the agent, including the
+    // home tab. `tabsApi` is a
+    // TabMutationApi (remove only); `queryApi` is a separate read-only
+    // ChromeTabsApi. If neither is injected, we conservatively fall back to
+    // closing the window (see Step 5).
+    const tabsApi = deps.tabManagement?.tabs;
+    const queryApi = deps.tabsQuery;
 
-  if (tabsApi) {
-    // Close each agent-created tab that still exists.
-    const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
-    for (const tabId of agentCreatedTabIds) {
+    if (tabsApi) {
+      // Close each agent-created tab that still exists.
+      const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
+      for (const tabId of agentCreatedTabIds) {
+        try {
+          await tabsApi.remove(tabId);
+          ctx.agentCreatedTabs.delete(tabId);
+        } catch (err) {
+          // Tab may already be gone (closed by the user). Non-fatal.
+          console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
+        }
+      }
+    }
+
+    // Step 5: decide whether to release (keep) the window or close it.
+    let shouldRelease = false;
+    if (queryApi) {
       try {
-        await tabsApi.remove(tabId);
-        ctx.agentCreatedTabs.delete(tabId);
-      } catch (err) {
-        // Tab may already be gone (closed by the user). Non-fatal.
-        console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
-      }
-    }
-  }
-
-  // Step 5: decide whether to release (keep) the window or close it.
-  let shouldRelease = false;
-  if (queryApi) {
-    try {
-      const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
-      // Only genuine *user* tabs count toward keeping the window open.
-      // An agent tab that failed to close in Step 4 may still be present
-      // here; if we counted it as a reason to release (dropOnly), the
-      // window would be kept and that agent tab would leak (issue #57
-      // regression). Exclude any id still tracked in agentCreatedTabs.
-      const userTabs = liveWindowTabs.filter((t) => {
-        if (t.id === undefined) return false;
-        return !ctx.agentCreatedTabs.has(t.id);
-      });
-      const leakedAgentTabs = liveWindowTabs.filter(
-        (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
-      );
-      if (leakedAgentTabs.length > 0) {
-        console.warn(
-          `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
-          leakedAgentTabs.map((t) => t.id),
+        const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
+        // Only genuine *user* tabs count toward keeping the window open.
+        // An agent tab that failed to close in Step 4 may still be present
+        // here; if we counted it as a reason to release (dropOnly), the
+        // window would be kept and that agent tab would leak (issue #57
+        // regression). Exclude any id still tracked in agentCreatedTabs.
+        const userTabs = liveWindowTabs.filter((t) => {
+          if (t.id === undefined) return false;
+          return !ctx.agentCreatedTabs.has(t.id);
+        });
+        const leakedAgentTabs = liveWindowTabs.filter(
+          (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (leakedAgentTabs.length > 0) {
+          console.warn(
+            `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
+            leakedAgentTabs.map((t) => t.id),
+          );
+        }
+        shouldRelease = userTabs.length > 0;
+      } catch {
+        // Query failed (e.g. window already gone) — conservatively close it.
+        shouldRelease = false;
       }
-      shouldRelease = userTabs.length > 0;
-    } catch {
-      // Query failed (e.g. window already gone) — conservatively close it.
-      shouldRelease = false;
     }
-  }
 
-  if (shouldRelease) {
-    // Keep the window + its user tabs; only drop the session binding.
-    await manager.stop(params.session_id, { dropOnly: true });
-    result.window_released = true;
-  } else {
-    // Window is empty (or we couldn't verify state) — close it.
-    await manager.stop(params.session_id);
-  }
+    if (shouldRelease) {
+      // Keep the window + its user tabs; only drop the session binding.
+      await manager.stop(params.session_id, { dropOnly: true });
+      result.window_released = true;
+    } else {
+      // Window is empty (or we couldn't verify state) — close it.
+      await manager.stop(params.session_id);
+    }
 
-  return result;
+    return result;
+  });
 }

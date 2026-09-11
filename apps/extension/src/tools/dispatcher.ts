@@ -41,6 +41,7 @@ import type {
   WheelParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
+import { auditContext } from "./audit-context";
 import { handleConsole } from "./console";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
@@ -262,6 +263,13 @@ export class ToolDispatcher {
     try {
       const sessionId = sessionIdForBrowserControlMethod(req);
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
+      // Best-effort context must never prevent the requested operation.
+      try {
+        const context = await auditContext(req, this.sessions);
+        if (context) this.transport.send({ event: "audit.context", payload: context });
+      } catch {
+        /* The daemon still has the original operation metadata. */
+      }
       const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
         body = { id: req.id, error: classifyCdpError(result) };
