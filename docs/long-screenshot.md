@@ -15,6 +15,20 @@ After installing or reloading the extension, automatic capture reconnects the sc
 script in already-open pages on demand. Injection targets only the captured document and retries
 once; navigation, cancellation and timeouts remain errors instead of changing capture mode.
 
+Automatic capture stitches using measured document coordinates with overlapping viewports.
+At the bottom it waits for at least 1.5 seconds of stable height and 600 ms without nearby
+content changes. Rendered loading text or accessibility busy/indeterminate progress indicators near the
+document tail keep capture open until loading ends; **Finish and keep** and cancellation
+remain available. This avoids making every ordinary scroll slower. A page that keeps loading
+can still require an explicit Finish, or reach an Agent's configured deadline.
+Without a loading indicator, the quiet wait is bounded to five seconds so a ticking clock
+or other widget that changes text without changing page height cannot hold capture open forever.
+
+If appended content moves the old bottom, capture rewinds to the provisional tail, including
+semantic page footers and loading rows, and replaces those disk tiles before continuing.
+Fixed bottom overlays are exposed only for the settled final frame. No full-image canvas or
+whole-page rescan is needed for that repair.
+
 ## Agent and CLI
 
 ```sh
@@ -84,8 +98,11 @@ explicit **Use manual scrolling** action; it never silently changes the selected
 Browser/enterprise capture policies and user permissions still apply. Restricted-page support does
 not bypass Chrome's scripting or debugger restrictions.
 
-Manual mode matches overlapping pixels without reading the page DOM. It excludes static header
-and footer bands for alignment and replaces the reliable overlap to remove old floating footers.
+Manual mode matches overlapping pixels without reading the page DOM. Textured patches across
+horizontal regions vote on the displacement, excluding stationary sidebars and tolerating local
+animation. It excludes static header and footer bands and replaces the reliable overlap to remove
+old floating footers. A transient miss gets another exposure before showing an alignment notice;
+the last accepted frame stays the anchor, and ambiguous frames never enter the image.
 Blank/repeated/animated or insufficiently overlapping content may be ambiguous. In that case the
 capture keeps its last good frame and asks the user to scroll back for more overlap; it never invents
 a match. Independently scrolling panels, moving sidebars and virtualized layouts can still need
@@ -138,6 +155,8 @@ The automated checks cover actual scroll-offset rounding, fixed-footer overlap, 
 120 frames, early finish, cancellation, DOM cleanup, paused interaction, restricted-page errors,
 streaming PNG round trips, export cancellation and disk failures. Manual alignment tests cover
 fixed bars, exact pixel offsets, ambiguous repeated content and non-overlapping jumps.
+They also cover delayed multi-batch loading above a tall flow footer, repainting all old footer
+rows, fixed sidebars with sparse scrolling content, local animation, and shorter valid overlaps.
 
 Build and run the real extension in an isolated Chrome profile:
 

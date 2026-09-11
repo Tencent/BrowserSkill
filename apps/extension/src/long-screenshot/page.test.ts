@@ -51,6 +51,7 @@ describe("page capture cleanup", () => {
     capture.dispose();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
   });
 
@@ -116,5 +117,95 @@ describe("page capture cleanup", () => {
     });
     await expect(send({ action: "finish" })).rejects.toThrow("interrupted");
     await expect(send({ action: "move", y: 900, capture: true })).rejects.toThrow("interrupted");
+  });
+  it("waits for loading above a tall footer and a quiet bottom before finalizing", async () => {
+    const footer = document.createElement("footer");
+    const loader = document.createElement("span");
+    loader.textContent = "加载中...";
+    document.body.append(loader, footer);
+    vi.spyOn(footer, "getBoundingClientRect").mockReturnValue({
+      top: -200,
+      bottom: 600,
+      width: 800,
+      height: 800,
+    } as DOMRect);
+    vi.spyOn(loader, "getBoundingClientRect").mockReturnValue({
+      top: -230,
+      bottom: -200,
+      width: 200,
+      height: 30,
+    } as DOMRect);
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    const moving = send({ action: "move", y: 1800, capture: true, final: true });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await moving).toMatchObject({ bottomReady: false, tailStart: 1570 });
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: false });
+    loader.textContent = "";
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: false });
+    await vi.advanceTimersByTimeAsync(700);
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: true });
+  });
+  it("does not finalize when the quiet deadline crosses after painting hidden overlays", async () => {
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    const first = send({ action: "move", y: 1800, capture: true });
+    await vi.advanceTimersByTimeAsync(400);
+    await first;
+    await vi.advanceTimersByTimeAsync(1080);
+    const pending = send({ action: "move", y: 1800, capture: true, final: true });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await pending).toMatchObject({ bottomReady: false });
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: true });
+    const final = send({ action: "move", y: 1800, capture: true, final: true });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(await final).toMatchObject({ bottomReady: true });
+  });
+  it("does not wait indefinitely for a ticking footer with a stable document height", async () => {
+    let notify!: (records: { target: Element; addedNodes: Node[] }[]) => void;
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: typeof notify) {
+          notify = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const clock = document.createElement("span");
+    document.body.append(clock);
+    vi.spyOn(clock, "getBoundingClientRect").mockReturnValue({
+      top: 500,
+      bottom: 520,
+      width: 100,
+      height: 20,
+    } as DOMRect);
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    const first = send({ action: "move", y: 1800, capture: true });
+    await vi.advanceTimersByTimeAsync(400);
+    await first;
+    for (let tick = 0; tick < 18; tick++) {
+      clock.textContent = String(tick);
+      notify([{ target: clock, addedNodes: [] }]);
+      await vi.advanceTimersByTimeAsync(300);
+      const metrics = await send({ action: "inspect" });
+      if (tick < 14) expect(metrics.bottomReady).toBe(false);
+    }
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: true });
+  });
+  it("does not treat article text, code examples or numeric progress widgets as loading", async () => {
+    document.body.innerHTML +=
+      '<p>Loading files in JavaScript</p><pre><code>Loading...</code></pre><div role="progressbar" aria-valuenow="100"></div>';
+    for (const element of document.querySelectorAll("p, code, [role=progressbar]"))
+      vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
+        top: 500,
+        bottom: 520,
+        width: 100,
+        height: 20,
+      } as DOMRect);
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    const first = send({ action: "move", y: 1800, capture: true });
+    await vi.advanceTimersByTimeAsync(2000);
+    await first;
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: true });
   });
 });

@@ -25,13 +25,15 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
       { scale: 1, height: 2190, lazy: false },
       { scale: 1, height: 488, lazy: false },
       { scale: 1, height: 2603, lazy: true },
+      { scale: 1.25, height: 2603, lazy: false, delayedBatches: 2 },
       { scale: 2, height: 50_000, lazy: false },
     ])("captures exact pixels and previews at scale $scale, height $height, lazy $lazy", async ({
       scale,
       height,
       lazy,
+      delayedBatches = 0,
     }) => {
-      const totalRows = height + (lazy ? 400 : 0);
+      const totalRows = height + (lazy ? 400 : 0) + delayedBatches * 900;
       const require = createRequire(import.meta.resolve("wxt"));
       const { build } = require("esbuild");
       const bundle = await build({
@@ -52,10 +54,12 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
         const writer = new TileWriter('pixel-test','Long screenshot test'); const abort = new AbortController(); const page = createPageCapture(()=>abort.abort());
         globalThis.shotState = {phase:'running'};
         globalThis.nextShot = null;
+        globalThis.captureTrace = [];
         globalThis.runCapture = () => {
           capturePage({signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
             write:(...args)=>writer.write(...args),
-            page:command=>page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command}),
+            page:async command=>{const metrics=await page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command});
+              captureTrace.push({command,metrics});if(captureTrace.length>8)captureTrace.shift();return metrics;},
             screenshot:()=>new Promise(resolve=>{globalThis.nextShot=async data=>{
               globalThis.nextShot=null; resolve(await createImageBitmap(await (await fetch(data)).blob()));
             };})
@@ -75,7 +79,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
         const url = new URL(req.url || "/", "http://localhost");
         if (url.pathname === "/") {
           res.setHeader("Content-Type", "text/html");
-          res.end(fixture(height, lazy));
+          res.end(fixture(height, lazy, delayedBatches));
           return;
         }
         const root = path.resolve("dist/chrome-mv3");
@@ -171,8 +175,10 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
               pixelStats: { maxCanvasHeight: number; peak: number; bitmapBytes: number };
             }>("shotState");
             expect(result.phase).toBe("complete");
-            expect(result.height).toBe(
-              Math.round(Math.max(totalRows + 31, viewportHeight) * scale),
+            expect(result.height, JSON.stringify(await evaluate("captureTrace"))).toBe(
+              Math.round(
+                Math.max(totalRows + 31 + (delayedBatches ? 1200 : 0), viewportHeight) * scale,
+              ),
             );
             expect(
               await evaluate(
@@ -207,6 +213,14 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
           for(let y=canvas.height-Math.floor(80*${scale});y<canvas.height;y++){
             const at=(y*canvas.width+canvas.width-Math.floor(40*${scale}))*4;
             if(data[at]!==255||data[at+1]!==136||data[at+2]!==0){if(bad.length<16)bad.push(y);}
+          }
+          ${
+            delayedBatches
+              ? `for(let y=Math.ceil((${totalRows}+31)*${scale});y<canvas.height-Math.floor(80*${scale});y++){
+            const at=(y*canvas.width+Math.floor(100*${scale}))*4;
+            if(data[at]!==120||data[at+1]!==80||data[at+2]!==200){if(bad.length<16)bad.push(y);}
+          }`
+              : ""
           }
           bitmap.close();return bad;
         })()`);

@@ -146,4 +146,47 @@ describe("capture lifecycle", () => {
     expect(result.height).toBe(2220);
     expect(h.commands.at(-1)).toEqual({ action: "finish" });
   });
+  it("waits through loading bottoms and redraws a moved flow footer after each append", async () => {
+    const h = harness();
+    let height = 1200,
+      y = 0,
+      waiting = 0,
+      batches = 0,
+      frameHeight = 0;
+    h.deps.page.mockImplementation(async (command) => {
+      if (command.action === "move") {
+        if (command.final && ++waiting === 4 && batches < 2) {
+          height += 900;
+          batches++;
+          waiting = 0;
+        }
+        y = Math.min(command.y, height - 600);
+      }
+      frameHeight = height;
+      return { ...metrics, height, y, tailStart: height - 700, bottomReady: batches === 2 };
+    });
+    // Each source row identifies its document position; a provisional 700px
+    // flow footer uses a sentinel, so even a one-row stale footer is detected.
+    const pixels: number[] = [];
+    h.deps.screenshot.mockImplementation(
+      async () =>
+        ({
+          width: 815,
+          height: 600,
+          close: vi.fn(),
+          y,
+          pageHeight: frameHeight,
+        }) as unknown as ImageBitmap,
+    );
+    h.deps.write.mockImplementation(async (bitmap, _width, sourceY, targetY, count) => {
+      for (let row = 0; row < count; row++) {
+        const documentY = bitmap.y + sourceY + row;
+        pixels[targetY + row] = documentY >= bitmap.pageHeight - 700 ? -1 : documentY;
+      }
+    });
+    expect(await capturePage(h.deps)).toEqual({ width: 800, height: 3000 });
+    expect(batches).toBe(2);
+    expect(pixels.slice(0, 2300)).toEqual(Array.from({ length: 2300 }, (_, i) => i));
+    expect(pixels.slice(2300)).toEqual(Array(700).fill(-1));
+  });
 });

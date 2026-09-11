@@ -69,22 +69,43 @@ export async function capturePage(deps: CaptureDeps) {
   try {
     await checkpoint();
     let metrics = await page({ action: "begin", label: deps.label, cancelLabel: deps.cancelLabel });
+    let previous = metrics;
+    let repairThrough = 0;
     deps.prepared?.();
     let y = 0;
     let failures = 0;
     let final = false;
     while (true) {
       await checkpoint();
-      if (covered && deps.finished?.()) break;
+      if (covered && covered >= repairThrough && deps.finished?.()) break;
       metrics = await page({ action: "move", y, capture: true, final });
       if (baseline && !sameLayout({ ...baseline, height: metrics.height }, metrics, false))
         throw new ScreenshotError("changed");
       if (metrics.height < covered - 0.5) throw new ScreenshotError("changed");
       baseline ??= metrics;
+      const tail = previous.tailStart ?? Math.max(0, previous.height - previous.viewportHeight);
+      const grew = metrics.height > previous.height + 0.5;
+      previous = grew
+        ? metrics
+        : { ...metrics, tailStart: Math.min(tail, metrics.tailStart ?? tail) };
+      if (grew && covered > tail) {
+        // Insertions move an ordinary in-flow footer. Repaint the old tail from
+        // its original position; appending alone would leave that footer inside
+        // the image. Reuse disk tiles, keeping only one viewport in memory.
+        repairThrough = Math.max(repairThrough, covered);
+        covered = tail;
+        y = tail;
+        final = false;
+        continue;
+      }
+      // A loading indicator or recent layout/content changes keeps the bottom
+      // provisional. Checkpoints still allow pause, Finish and cancellation.
+      if (final && metrics.bottomReady === false && covered >= metrics.height - 0.5) continue;
       const bitmap = await deps.screenshot();
       try {
         signal.throwIfAborted();
         const after = await page({ action: "inspect" });
+        if (final && after.bottomReady === false) continue;
         if (!sameLayout(metrics, after)) {
           if (++failures >= 3) throw new ScreenshotError("changed");
           continue;

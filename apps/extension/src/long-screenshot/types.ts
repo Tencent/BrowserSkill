@@ -57,6 +57,10 @@ export interface PageMetrics {
   innerHeight: number;
   dpr: number;
   bottomOverlayHeight?: number;
+  /** Mutable document tail to redraw if content is inserted before the footer. */
+  tailStart?: number;
+  /** False while the current bottom is loading or has not settled yet. */
+  bottomReady?: boolean;
 }
 
 export type PageCommand =

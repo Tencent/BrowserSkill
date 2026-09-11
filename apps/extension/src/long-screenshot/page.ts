@@ -45,12 +45,53 @@ export function createPageCapture(onCancel: (id: string) => void) {
     let finished = false;
     let paused = false;
     let bottomOverlayHeight = 0;
+    let bottomSince = performance.now();
+    let lastMutation = bottomSince;
+    let lastHeight = 0;
+    let wasBusy = false;
+    const loading = new Set<Element>();
+    const footers = new Set<Element>();
+    const loadingText =
+      /^(?:加载中|正在加载|载入中|loading(?:\s+(?:more|content|items|results))?)[\s.。…!！]*$/i;
+    const trackLoading = (element: Element) => {
+      if (
+        element.matches('[aria-busy="true"], [role="progressbar"], [role="status"]') ||
+        (element.childElementCount === 0 &&
+          !element.closest("pre, code") &&
+          loadingText.test(element.textContent?.trim() ?? ""))
+      )
+        loading.add(element);
+    };
     const pendingRoots = new Set<Element>([document.documentElement]);
     const observer = new MutationObserver((records) => {
-      for (const record of records)
+      const targets = new Set<Element>();
+      for (const record of records) {
         for (const node of record.addedNodes) if (node instanceof Element) pendingRoots.add(node);
+        const element =
+          record.target instanceof Element ? record.target : record.target.parentElement;
+        if (element) targets.add(element);
+      }
+      for (const element of targets) {
+        if (element === host || element.matches("script, style") || !element.isConnected) continue;
+        trackLoading(element);
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        if (
+          rect.bottom > 0 &&
+          rect.top < window.innerHeight &&
+          style.position !== "fixed" &&
+          style.visibility !== "hidden"
+        )
+          lastMutation = performance.now();
+      }
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: ["aria-busy", "hidden", "class", "src"],
+    });
 
     function setStyle(element: HTMLElement | SVGElement, property: string, value: string) {
       if (!element.hasAttribute("style")) originallyUnstyled.add(element);
@@ -85,6 +126,12 @@ export function createPageCapture(onCancel: (id: string) => void) {
       )
         return;
       seen.add(element);
+      trackLoading(element);
+      if (
+        element.getAttribute("role") === "contentinfo" ||
+        (element.tagName === "FOOTER" && !element.closest("article, aside, section"))
+      )
+        footers.add(element);
       const computed = getComputedStyle(element);
       if (computed.position === "sticky") {
         // Relative positioning retains the element's place and size in flow.
@@ -113,6 +160,8 @@ export function createPageCapture(onCancel: (id: string) => void) {
       finished = true;
       observer.disconnect();
       pendingRoots.clear();
+      loading.clear();
+      footers.clear();
       controller.abort();
       clearTimeout(watchdog);
       window.removeEventListener("keydown", keydown, true);
@@ -180,6 +229,61 @@ export function createPageCapture(onCancel: (id: string) => void) {
         controller.signal.addEventListener("abort", abort, { once: true });
       });
 
+    function inspect(): PageMetrics {
+      const metrics = measure();
+      const atBottom = metrics.y + metrics.viewportHeight >= metrics.height - 0.5;
+      const now = performance.now();
+      if (!atBottom || metrics.height !== lastHeight) bottomSince = now;
+      lastHeight = metrics.height;
+      let tailStart = Math.max(0, metrics.height - metrics.viewportHeight);
+      for (const element of footers) {
+        if (!element.isConnected) {
+          footers.delete(element);
+          continue;
+        }
+        const rect = element.getBoundingClientRect();
+        if (rect.height && getComputedStyle(element).position !== "fixed")
+          tailStart = Math.min(tailStart, Math.max(0, metrics.y + rect.top));
+      }
+      let busy = false;
+      const loadingStart = tailStart - metrics.viewportHeight;
+      for (const element of loading) {
+        if (!element.isConnected) {
+          loading.delete(element);
+          continue;
+        }
+        const rect = element.getBoundingClientRect();
+        if (!rect.width || !rect.height || metrics.y + rect.bottom <= loadingStart) continue;
+        const style = getComputedStyle(element);
+        if (style.visibility === "hidden" || style.display === "none") continue;
+        if (
+          element.getAttribute("aria-busy") === "true" ||
+          (element.getAttribute("role") === "progressbar" &&
+            !element.hasAttribute("aria-valuenow")) ||
+          (!element.closest("pre, code") && loadingText.test(element.textContent?.trim() ?? ""))
+        ) {
+          busy = true;
+          // A loading row can sit above a tall footer, outside the viewport.
+          // Its provisional pixels must also be repainted on growth.
+          if (rect.height <= metrics.viewportHeight)
+            tailStart = Math.min(tailStart, Math.max(0, metrics.y + rect.top));
+        }
+      }
+      if (busy !== wasBusy) lastMutation = now;
+      wasBusy = busy;
+      return {
+        ...metrics,
+        tailStart,
+        // A clock or live widget can mutate forever without moving any rows.
+        // Bound that quiet wait; an actual loading indicator still keeps waiting.
+        bottomReady:
+          atBottom &&
+          !busy &&
+          now - bottomSince >= 1500 &&
+          (now - lastMutation >= 600 || now - bottomSince >= 5000),
+      };
+    }
+
     async function move(y: number, capture: boolean, final = false) {
       controller.signal.throwIfAborted();
       touch();
@@ -206,14 +310,14 @@ export function createPageCapture(onCancel: (id: string) => void) {
         if (stable >= 2) break;
       }
       controller.signal.throwIfAborted();
+      let paintedReady = false;
       if (capture) {
         normalize();
-        const metrics = measure();
+        const metrics = inspect();
+        paintedReady = metrics.bottomReady === true;
         bottomOverlayHeight = 0;
         for (const item of fixed) {
-          const show = item.atTop
-            ? metrics.y < 0.5
-            : final && metrics.y + metrics.viewportHeight >= metrics.height - 0.5;
+          const show = item.atTop ? metrics.y < 0.5 : final && metrics.bottomReady;
           if (!show) item.element.style.setProperty("visibility", "hidden", "important");
           else if (item.visibility)
             item.element.style.setProperty("visibility", item.visibility, item.priority);
@@ -229,13 +333,17 @@ export function createPageCapture(onCancel: (id: string) => void) {
         // Paint the final visibility changes before the background reads pixels.
         await wait(80);
       }
-      return measure();
+      const metrics = inspect();
+      // Crossing the quiet deadline during the paint wait must not advertise a
+      // final frame whose bottom overlays were still hidden before that paint.
+      return { ...metrics, bottomReady: metrics.bottomReady && (!capture || paintedReady) };
     }
 
     return {
       id,
       finish,
       move,
+      inspect,
       touch,
       signal: controller.signal,
       pause(value: boolean) {
@@ -284,7 +392,7 @@ export function createPageCapture(onCancel: (id: string) => void) {
       task.touch();
       if (request.action === "pause") task.pause(request.paused);
       if (request.action === "move") return task.move(request.y, request.capture, request.final);
-      return measure();
+      return task.inspect();
     },
     dispose() {
       task?.finish();
