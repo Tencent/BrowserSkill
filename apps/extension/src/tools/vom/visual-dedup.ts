@@ -6,12 +6,13 @@ export const MAX_VISUAL_DEDUP_KEYS = 50_000;
 export interface VisualDedupResult extends VisualDiscoveryResult {
   /** Known valid candidates in this capture, not the total Canvas count on the page. */
   readonly candidateCount: number;
-  /** Candidates actually removed by exact coverage deduplication. */
+  /** Repeated records removed for the same Canvas identity, parent and crop. */
   readonly deduplicatedCount: number;
   readonly dedupDegraded: boolean;
 }
 
-/** Keep the first real anchor for each exact DOM/parent/crop key, in encounter order.
+/** Deduplicate records of the same Canvas identity, parent and crop, in encounter order.
+ * Equal coverage does not make distinct Canvas nodes interchangeable.
  * Once the key set is full, unknown keys pass through: capacity never drops candidates. */
 export async function deduplicateVisualCandidates(
   discovery: VisualDiscoveryResult,
@@ -38,6 +39,7 @@ export async function deduplicateVisualCandidates(
       document.target.sessionId ?? null,
       document.frameId,
       document.documentElementBackendNodeId,
+      candidate.backendNodeId,
       candidate.parentBackendNodeId,
       crop.x,
       crop.y,

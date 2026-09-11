@@ -41,11 +41,11 @@ describe("visual candidate deduplication", () => {
     }
   });
 
-  it("only deduplicates exact crops within the same full DOM identity and direct parent", async () => {
+  it("only deduplicates the same Canvas identity, direct parent and exact crop", async () => {
     const base = candidate(20);
     const variants = [
-      candidate(30, 100, 2),
-      { ...candidate(40), parentBackendNodeId: null },
+      candidate(20, 100, 2),
+      { ...base, parentBackendNodeId: null },
       ...["x", "y", "width", "height"].map((axis) => ({
         ...base,
         region: {
@@ -64,11 +64,26 @@ describe("visual candidate deduplication", () => {
         { attachmentId: "b" },
       ].map((identity) => ({ ...base, document: { ...base.document, ...identity } })),
     ];
-    const duplicate = { ...candidate(10), label: "Not a new target" };
+    const duplicate = { ...base, label: "Repeated record" };
     const result = await deduplicateVisualCandidates(discovery([base, ...variants, duplicate]));
     expect(result.candidates).toEqual([base, ...variants]);
     expect(result.candidates[0]).toBe(base);
     expect(result.deduplicatedCount).toBe(1);
+  });
+
+  it("preserves distinct overlapping Canvas anchors in either encounter order", async () => {
+    const first = candidate(20);
+    const second = candidate(30);
+    for (const ordered of [
+      [first, second],
+      [second, first],
+    ]) {
+      const result = await deduplicateVisualCandidates(discovery([...ordered, { ...ordered[0] }]));
+      expect(result.candidates).toEqual(ordered);
+      expect(result.candidates[0]).toBe(ordered[0]);
+      expect(result.candidates[1]).toBe(ordered[1]);
+      expect(result).toMatchObject({ candidateCount: 3, deduplicatedCount: 1 });
+    }
   });
 
   it.each([
