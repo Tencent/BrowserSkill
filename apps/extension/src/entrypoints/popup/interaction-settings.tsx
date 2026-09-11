@@ -49,7 +49,10 @@ export function InteractionSettings() {
       {(["confirmTabBorrow", "requestHelpEnabled"] as const).map((key) => (
         <div className="relative flex items-center justify-between gap-2" key={key}>
           <span className="flex min-w-0 items-center gap-1">
-            <label className="text-sm font-medium" htmlFor={`interaction-${key}`}>
+            <label
+              className="text-[13px] font-normal leading-5 text-foreground/85"
+              htmlFor={`interaction-${key}`}
+            >
               {t(`popup.interaction.${key}`)}
             </label>
             <SettingInfo label={t(`popup.interaction.${key}InfoLabel`)}>
