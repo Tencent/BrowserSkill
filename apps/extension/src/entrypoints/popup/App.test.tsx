@@ -315,15 +315,48 @@ describe("App", () => {
     expect(screen.queryByText("协议不一致")).toBeNull();
     expect(screen.queryByText("Action needed")).toBeNull();
     expect(screen.queryByText("兼容")).toBeNull();
-    const warning = screen.getByText(/协议版本不同，请及时升级/);
-    expect(warning.textContent).toContain("CLI 协议");
-    expect(warning.textContent).toContain("扩展协议");
+    const warning = screen.getByText(/已连接到旧版 Daemon/);
+    expect(warning.textContent).toContain("协议 v1.0");
+    expect(warning.textContent).toContain("部分自动化设置");
+    expect(
+      screen.getByRole("switch", { name: "借用标签页前确认" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("switch", { name: "允许请求人工协助" }).getAttribute("aria-checked"),
+    ).toBe("true");
 
     openRecordView();
     const copyButton = screen.getByRole("button", { name: "复制录制指令" });
     expect(copyButton.getAttribute("disabled")).toBeNull();
     fireEvent.click(copyButton);
     expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the legacy settings warning after the daemon is updated", () => {
+    const connected = (protocol: string) => ({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew" as const,
+        handshake: { server: "bh", version: mockDaemonVersion, protocol_version: protocol },
+      },
+      statusState: "version_skew" as const,
+      setLabel,
+      setConnectionEnabled,
+    });
+    mockUseConnectionState.mockReturnValue(connected("1.2"));
+    const { rerender } = render(<App />);
+    expect(screen.getByText(/部分自动化设置/)).toBeTruthy();
+    mockUseConnectionState.mockReturnValue({
+      ...connected(PROTOCOL_VERSION),
+      statusState: "connected",
+    });
+    rerender(<App />);
+    expect(screen.queryByText(/部分自动化设置/)).toBeNull();
+    expect(screen.getByText("已连接")).toBeTruthy();
+    mockUseConnectionState.mockReturnValue(connected("1.4"));
+    rerender(<App />);
+    expect(screen.queryByText(/部分自动化设置/)).toBeNull();
+    expect(screen.getByText(/协议版本不同，请及时升级/)).toBeTruthy();
   });
 
   it("renders Korean upgrade guidance and copies usable recording instructions", async () => {
@@ -350,7 +383,7 @@ describe("App", () => {
     expect(screen.getByText("업그레이드 가능")).toBeTruthy();
     expect(
       screen.getByText(
-        `확장 프로그램 프로토콜 v${PROTOCOL_VERSION}, CLI 프로토콜 v1.0. 프로토콜 버전이 다릅니다. 업그레이드해 주세요.`,
+        "이전 Daemon에 연결되었습니다(프로토콜 v1.0). 자동화 설정을 완전히 지원하려면 CLI와 Daemon을 업데이트하세요.",
       ),
     ).toBeTruthy();
 

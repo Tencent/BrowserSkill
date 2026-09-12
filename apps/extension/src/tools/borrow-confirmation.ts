@@ -5,6 +5,9 @@
 // even when the Agent Window has stolen focus.
 // ---------------------------------------------------------------------------
 
+import type { RpcError } from "@/transport/types";
+import { rpcError } from "./errors";
+
 export interface BorrowRequestMessage {
   type: "borrow-request";
   requestId: string;
@@ -22,15 +25,15 @@ export interface BorrowCancelMessage {
 export interface BorrowResponseMessage {
   type: "borrow-response";
   allowed: boolean;
+  timedOut?: boolean;
 }
 
 export const CONFIRMATION_TIMEOUT_MS = 60_000;
 const EXIT_ANIMATION_MS = 150;
 /** Matches BorrowConfirmationOverlay progress ring/bar transition (duration-1000). */
 export const PROGRESS_TRANSITION_MS = 1000;
-// UI auto-denies after countdown + progress transition + exit fade. Background
-// timeout must not fire before that chain completes or the UI decision races
-// with an already-settled deny.
+// Allow the countdown and progress transition to finish, plus delivery slack.
+// Keep the legacy exit-fade allowance even though decisions are now sent immediately.
 export const BACKGROUND_TIMEOUT_MS =
   CONFIRMATION_TIMEOUT_MS + PROGRESS_TRANSITION_MS + EXIT_ANIMATION_MS + 500;
 
@@ -94,6 +97,8 @@ export interface RequestBorrowConfirmationDeps {
 export interface RequestBorrowConfirmationOptions {
   signal?: AbortSignal;
   deps?: RequestBorrowConfirmationDeps;
+  timeoutMs?: number;
+  autoAllow?: { get(): boolean; subscribe(listener: () => void): () => void };
 }
 
 // ---------------------------------------------------------------------------
@@ -366,15 +371,18 @@ async function listConfirmationCandidates(
  * Clicking the notification body (vs. its buttons) focuses the chosen user
  * window so the overlay becomes visible — the previous behaviour.
  *
- * Returns `true` only on an explicit user allow from the overlay or
- * notification. Missing UI, aborts, malformed responses, and timeouts all
- * fail closed and return `false`.
+ * Returns `true` on user approval or when the effective preference permits
+ * automatic borrowing. Other outcomes return a structured error, distinguishing
+ * rejection, unavailable UI, timeout, and cancellation.
  */
 export async function requestBorrowConfirmation(
   tabId: number,
   options: RequestBorrowConfirmationOptions = {},
-): Promise<boolean> {
+): Promise<true | RpcError> {
   const { signal, deps = {} } = options;
+  if (signal?.aborted) return { code: "cancelled", message: "tab_borrow aborted" };
+  if (options.autoAllow?.get()) return true;
+  const timeoutMs = options.timeoutMs ?? CONFIRMATION_TIMEOUT_MS;
   const tabsApi = deps.tabs ?? defaultBorrowChromeTabs;
   const windowsApi = deps.windows ?? defaultBorrowChromeWindows;
   const notificationsApi =
@@ -400,11 +408,17 @@ export async function requestBorrowConfirmation(
   }
 
   const candidates = await listConfirmationCandidates(windowsApi, isAgentWindowId);
+  if (signal?.aborted) return { code: "cancelled", message: "tab_borrow aborted" };
+  if (options.autoAllow?.get()) return true;
   if (candidates.length === 0) {
     console.warn("[bsk borrow] no injectable user window available — denying borrow", {
       tabId,
     });
-    return false;
+    return rpcError(
+      "unsupported",
+      "confirmation_ui_unavailable",
+      "No user tab can display the borrow confirmation",
+    );
   }
 
   const requestId = createBorrowRequestId(tabId);
@@ -415,13 +429,32 @@ export async function requestBorrowConfirmation(
   // overlay immediately.
   const notificationAnchor = candidates[0];
   if (!notificationAnchor) {
-    return false;
+    return rpcError(
+      "unsupported",
+      "confirmation_ui_unavailable",
+      "No user tab can display the borrow confirmation",
+    );
   }
 
-  return new Promise<boolean>((resolve) => {
+  return new Promise<true | RpcError>((resolve) => {
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let activeMessageTabId: number | null = null;
+    let unsubscribe: (() => void) | undefined;
+    let overlaysUnavailable = false;
+    let notificationUnavailable = !notificationsApi;
+
+    const checkUiUnavailable = () => {
+      if (overlaysUnavailable && notificationUnavailable) {
+        settle(
+          rpcError(
+            "unsupported",
+            "confirmation_ui_unavailable",
+            "No confirmation UI could be displayed",
+          ),
+        );
+      }
+    };
 
     const cleanupNotification = () => {
       if (!notificationsApi) return;
@@ -435,13 +468,21 @@ export async function requestBorrowConfirmation(
       });
     };
 
-    const settle = (allowed: boolean) => {
+    const settle = (allowed: boolean | RpcError) => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
       signal?.removeEventListener("abort", onAbort);
+      unsubscribe?.();
+      dismissPendingOverlay();
       cleanupNotification();
-      resolve(allowed);
+      resolve(
+        allowed === true
+          ? true
+          : allowed === false
+            ? rpcError("cancelled", "user_denied", "User denied the tab borrow")
+            : allowed,
+      );
     };
 
     const dismissPendingOverlay = () => {
@@ -461,8 +502,7 @@ export async function requestBorrowConfirmation(
     };
 
     const onAbort = () => {
-      dismissPendingOverlay();
-      settle(false);
+      settle({ code: "cancelled", message: "tab_borrow aborted" });
     };
 
     if (signal?.aborted) {
@@ -470,15 +510,29 @@ export async function requestBorrowConfirmation(
       return;
     }
     signal?.addEventListener("abort", onAbort, { once: true });
+    const checkPolicy = () => {
+      if (options.autoAllow?.get()) settle(true);
+    };
+    unsubscribe = options.autoAllow?.subscribe(checkPolicy);
+    checkPolicy();
+    if (settled) return;
 
-    timeout = setTimeout(() => {
-      console.info("[bsk borrow] confirmation timed out — denying borrow", {
-        tabId,
-        messageTabId: activeMessageTabId,
-      });
-      dismissPendingOverlay();
-      settle(false);
-    }, BACKGROUND_TIMEOUT_MS);
+    timeout = setTimeout(
+      () => {
+        console.info("[bsk borrow] confirmation timed out — denying borrow", {
+          tabId,
+          messageTabId: activeMessageTabId,
+        });
+        settle(
+          rpcError(
+            "timeout",
+            "confirmation_timeout",
+            "Timed out waiting for tab borrow confirmation",
+          ),
+        );
+      },
+      timeoutMs + PROGRESS_TRANSITION_MS + EXIT_ANIMATION_MS + 500,
+    );
 
     // Bring the user window to the front so the overlay is visible even
     // when the Agent Window has stolen focus. This is fire-and-forget: if
@@ -508,6 +562,9 @@ export async function requestBorrowConfirmation(
           silent: false,
           buttons: [{ title: copy.allowButton }, { title: copy.denyButton }],
         })
+        .then(() => {
+          if (settled) cleanupNotification();
+        })
         .catch((err) => {
           console.debug("[bsk borrow] notifications.create failed — continuing overlay-only", {
             tabId,
@@ -519,6 +576,8 @@ export async function requestBorrowConfirmation(
           // map would leak).
           pendingBorrowNotifications.delete(notificationId);
           pendingBorrowDecisions.delete(notificationId);
+          notificationUnavailable = true;
+          checkUiUnavailable();
         });
     }
 
@@ -528,13 +587,7 @@ export async function requestBorrowConfirmation(
     ): void => {
       if (settled) return;
       if (index >= candidates.length) {
-        // Every candidate rejected sendMessage. Keep the promise pending and
-        // rely on:
-        //   • the OS notification's Allow / Deny buttons for an explicit
-        //     user choice (preferred), or
-        //   • the BACKGROUND_TIMEOUT_MS fail-closed result so the agent does
-        //     not hang forever when even the notification API is unavailable.
-        // Keep the diagnostics so real-world frequency is still observable.
+        // A notification can still provide approval when no page has a listener.
         console.warn(
           "[bsk borrow] every candidate user window failed sendMessage — awaiting notification button or timeout",
           {
@@ -542,6 +595,8 @@ export async function requestBorrowConfirmation(
             attempts: errorTrail,
           },
         );
+        overlaysUnavailable = true;
+        checkUiUnavailable();
         return;
       }
       const candidate = candidates[index];
@@ -555,7 +610,7 @@ export async function requestBorrowConfirmation(
         tabId,
         tabTitle,
         isActiveTab,
-        timeoutMs: CONFIRMATION_TIMEOUT_MS,
+        timeoutMs,
       };
       activeMessageTabId = candidate.tabId;
       tabsApi
@@ -566,7 +621,22 @@ export async function requestBorrowConfirmation(
           const allowed =
             candidateResponse?.type === "borrow-response" && candidateResponse.allowed === true;
           console.info("[bsk borrow] confirmation response", { tabId, allowed });
-          settle(allowed);
+          settle(
+            candidateResponse?.timedOut
+              ? rpcError(
+                  "timeout",
+                  "confirmation_timeout",
+                  "Timed out waiting for tab borrow confirmation",
+                )
+              : candidateResponse?.type === "borrow-response" &&
+                  typeof candidateResponse.allowed === "boolean"
+                ? allowed
+                : rpcError(
+                    "unsupported",
+                    "confirmation_ui_unavailable",
+                    "Invalid borrow confirmation response",
+                  ),
+          );
         })
         .catch((err) => {
           if (settled) return;

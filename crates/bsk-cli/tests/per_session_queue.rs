@@ -81,7 +81,7 @@ async fn handshake_as_ext(
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -161,6 +161,7 @@ async fn run_fake_extension(
                                 id: req.id.clone(),
                                 body: ResponseBody::Ok(
                                     serde_json::to_value(SessionStartResult {
+                                        interaction: None,
                                         agent_window_id: Some(id),
                                     })
                                     .unwrap(),

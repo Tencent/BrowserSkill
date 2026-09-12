@@ -1,5 +1,6 @@
 {
   "popup": {
+    "interactionCompatibilityWarning": "已连接到旧版 Daemon（协议 v{{cliProtocol}}）。部分自动化设置需要更新 CLI 和 Daemon 才能完整生效。",
     "brandCategory": "Browser Automation",
     "brandName": "BrowserSkill",
     "stateLabel": {
@@ -66,6 +67,18 @@
       "copied": "已复制",
       "hintDisconnected": "连接后可用",
       "promptTemplate": "用 BrowserSkill 的 `bsk` CLI 录制我接下来的浏览器操作。\n\n步骤：\n1. 执行：{{command}}\n2. 你确认已开始后，我会在打开的窗口里自己操作。\n3. 我点“结束”后，读取写出的 `./trace` 目录包（`trace.json` + `states/`），总结我做了什么。"
+    },
+    "interaction": {
+      "title": "自动化设置",
+      "confirmTabBorrow": "借用标签页前确认",
+      "confirmTabBorrowHint": "开启时，借用你已打开的标签页前会请求允许；关闭时，直接借用。",
+      "requestHelpEnabled": "允许请求人工协助",
+      "requestHelpEnabledHint": "开启时，Agent 可以请求你协助。关闭时，Agent 会尽力自主完成操作，遇到无法处理的步骤再报告受阻。",
+      "scope": "自动保存到当前浏览器配置，对到达插件的所有会话请求生效；命令行参数不能覆盖。旧 CLI 或 Daemon 可能在本地结束求助，完整支持需更新三端。",
+      "readFailed": "无法读取自动化设置，请重新打开插件。",
+      "writeFailed": "保存失败，设置未更改，请重试。",
+      "confirmTabBorrowInfoLabel": "借用标签页确认说明",
+      "requestHelpEnabledInfoLabel": "人工协助说明"
     }
   },
   "controlOverlay": {

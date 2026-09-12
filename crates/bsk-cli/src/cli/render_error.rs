@@ -212,6 +212,37 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (_, "user_denied") => RenderInfo {
+            summary: "the user denied the tab borrow",
+            hint: Some("do not repeat the same authorization request"),
+            ..base
+        },
+        (_, "confirmation_timeout") => RenderInfo {
+            summary: "timed out waiting for human confirmation",
+            hint: Some(
+                "report the blocked step; do not automatically repeat the request or switch browser tools",
+            ),
+            ..base
+        },
+        (_, "confirmation_ui_unavailable") => RenderInfo {
+            summary: "the browser could not display a confirmation request",
+            hint: Some(
+                "report the unavailable confirmation UI; unattended users can change Automation settings in the extension",
+            ),
+            ..base
+        },
+        (_, "borrow_in_progress") => RenderInfo {
+            summary: "this tab already has a pending borrow request",
+            hint: Some("wait for the existing request; do not issue another borrow"),
+            ..base
+        },
+        (_, "borrow_outcome_unknown") => RenderInfo {
+            summary: "the final tab borrow state could not be confirmed",
+            hint: Some(
+                "inspect tab and session state before continuing; do not blindly retry the borrow",
+            ),
+            ..base
+        },
         (ErrorCode::CdpFailed, reason::CDP_EXTENSION_ACCESS_DENIED) => RenderInfo {
             summary: "Chrome blocked CDP access to another extension's content in this tab",
             hint: Some(

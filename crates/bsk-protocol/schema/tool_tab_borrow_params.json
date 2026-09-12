@@ -9,11 +9,20 @@
   ],
   "properties": {
     "confirm": {
-      "description": "Whether to wait for an inline user confirmation overlay (M10 will introduce the UI). Currently ignored: the M8 stub always proceeds when `false` and forwards `true` to a no-op approver.",
+      "description": "Legacy input, ignored. Browser settings decide whether confirmation is required.",
       "type": [
         "boolean",
         "null"
       ]
+    },
+    "confirmation_timeout_ms": {
+      "description": "Maximum time to wait for user confirmation (default 60 seconds).",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
     },
     "session_id": {
       "type": "string"

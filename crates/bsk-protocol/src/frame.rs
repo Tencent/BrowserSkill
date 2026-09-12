@@ -56,6 +56,8 @@ pub enum EventKind {
     SessionWindowClosed,
     #[serde(rename = "session.user_interrupt")]
     SessionUserInterrupt,
+    #[serde(rename = "session.interaction_changed")]
+    SessionInteractionChanged,
     #[serde(rename = "browser.disconnected")]
     BrowserDisconnected,
     #[serde(rename = "browser.connected")]

@@ -52,8 +52,8 @@ jobs:
       - name: Run Windows audit storage tests
         run: cargo test -p bsk --lib --locked daemon::audit::tests
 
-      - name: Run Windows audit WebSocket tests
-        run: cargo test -p bsk --test audit_ws --locked
+      - name: Run Windows audit and browser interaction policy tests
+        run: cargo test -p bsk --test audit_ws --test interaction_preferences --locked
 
       - name: Run Windows process liveness tests
         run: cargo test -p bsk --lib --locked daemon::lockfile::tests

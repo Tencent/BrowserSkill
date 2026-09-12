@@ -1,3 +1,4 @@
+import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
@@ -139,6 +140,7 @@ export interface DispatcherDeps {
   onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   /** User approval for `tool.tab_borrow` (overlay in content script). */
   approveBorrow?: BorrowConfirmationApprover;
+  interactionPreferences?: InteractionPreferenceStore;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
 }
@@ -168,6 +170,7 @@ export class ToolDispatcher {
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
+  private readonly interactionPreferences?: InteractionPreferenceStore;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
@@ -189,6 +192,7 @@ export class ToolDispatcher {
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
     this.onAgentTabClaimed = deps.onAgentTabClaimed;
     this.approveBorrow = deps.approveBorrow;
+    this.interactionPreferences = deps.interactionPreferences;
     this.helpNotificationCopy = deps.helpNotificationCopy;
   }
 
@@ -325,7 +329,10 @@ export class ToolDispatcher {
   private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
     switch (req.method) {
       case "tool.session_start":
-        return handleSessionStart(this.sessions, req.params as SessionStartParams, { signal });
+        return handleSessionStart(this.sessions, req.params as SessionStartParams, {
+          signal,
+          preferences: this.interactionPreferences,
+        });
       case "tool.session_stop": {
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
@@ -665,6 +672,7 @@ export class ToolDispatcher {
         );
       case "tool.request_help":
         return handleRequestHelp(this.sessions, req.params as RequestHelpParams, {
+          preferences: this.interactionPreferences,
           tabsApi: chromeTabsApi,
           windows: { update: (id, info) => chrome.windows.update(id, info) },
           activateTab: async (tabId) => {

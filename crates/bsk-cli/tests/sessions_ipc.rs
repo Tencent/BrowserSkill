@@ -83,10 +83,14 @@ async fn connect_ext(addr: std::net::SocketAddr) -> TestWs {
 }
 
 async fn handshake_as_ext(ws: &mut TestWs) -> HandshakeResult {
+    handshake_with_protocol(ws, bsk::daemon::state::PROTOCOL_VERSION).await
+}
+
+async fn handshake_with_protocol(ws: &mut TestWs, protocol: &str) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: protocol.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -174,6 +178,7 @@ async fn respond_to_aborted_start(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    interaction: None,
                     agent_window_id: Some(agent_window_id),
                 })
                 .unwrap(),
@@ -209,6 +214,7 @@ async fn respond_to_aborted_stop(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    interaction: None,
                     agent_window_id: Some(4242),
                 })
                 .unwrap(),
@@ -272,6 +278,7 @@ async fn session_start_stop_round_trip_via_ipc() {
                             serde_json::from_value(req.params.clone().unwrap()).unwrap();
                         assert_eq!(params.focused, Some(false));
                         let result = SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(4242),
                         };
                         ResponseFrame {
@@ -616,6 +623,8 @@ async fn session_idle_timeout_stops_and_unregisters_session() {
     let state = handle.state();
     let session_id = bsk::daemon::sessions::SessionId("idle".into());
     state.sessions.insert(bsk::daemon::sessions::Session {
+        interaction: None,
+
         id: session_id.clone(),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(7),
@@ -705,6 +714,7 @@ async fn session_start_waits_for_late_extension_handshake() {
                 continue;
             }
             let result = SessionStartResult {
+                interaction: None,
                 agent_window_id: Some(4242),
             };
             let resp = Frame::Response(ResponseFrame {
@@ -758,7 +768,7 @@ async fn connect_second_ext(
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
         instance_id: instance_id.into(),
         browser: BrowserPeerInfo {
             name: "edge".into(),
@@ -844,6 +854,7 @@ async fn session_start_with_browser_instance_id_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    interaction: None,
                     agent_window_id: Some(123),
                 };
                 let reply = ResponseFrame {
@@ -948,6 +959,7 @@ async fn session_start_label_match_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    interaction: None,
                     agent_window_id: Some(456),
                 };
                 let reply = ResponseFrame {
@@ -1035,6 +1047,8 @@ async fn session_window_closed_event_purges_session() {
     let _ = handshake_as_ext(&mut ws).await;
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        interaction: None,
+
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(7),
@@ -1072,6 +1086,8 @@ async fn browser_disconnect_purges_sessions() {
     // post-start state without bothering with the round-trip.
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        interaction: None,
+
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(7),
@@ -1101,6 +1117,8 @@ async fn session_stop_self_heals_when_extension_reports_not_found() {
     // restart from the daemon's point of view).
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        interaction: None,
+
         id: bsk::daemon::sessions::SessionId("yyyy".into()),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(99),
@@ -1200,6 +1218,8 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
     let state = handle.state();
     // Pretend ext A registered a real session.
     let session = bsk::daemon::sessions::Session {
+        interaction: None,
+
         id: bsk::daemon::sessions::SessionId("xxxx".into()),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(11),
@@ -1263,4 +1283,225 @@ async fn reserve_id_loops_until_vacant_and_caps_attempts() {
     // Cancelling makes the slot vacant again.
     registry.cancel_reservation(&first);
     assert_eq!(registry.len(), 1);
+}
+
+#[tokio::test]
+async fn legacy_unattended_uses_browser_policy_and_help_reaches_extension() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let responder = tokio::spawn(async move {
+        let request = next_extension_request(&mut ws).await;
+        assert_eq!(request.method, Method::ToolSessionStart);
+        assert!(request.params.as_ref().unwrap().get("unattended").is_none());
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: request.id,
+                body: ResponseBody::Ok(serde_json::json!({"agent_window_id": 987,
+                "interaction": {"borrow_confirmation": "always", "request_help": "enabled"}})),
+            },
+        )
+        .await;
+        let help = next_extension_request(&mut ws).await;
+        assert_eq!(help.method, Method::ToolRequestHelp);
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: help.id,
+                body: ResponseBody::Ok(serde_json::json!({"outcome": "cancelled", "tab_id": 5})),
+            },
+        )
+        .await;
+        ws
+    });
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let result: serde_json::Value = ipc
+        .call(
+            "start-legacy",
+            Method::SessionStart,
+            Some(serde_json::json!({"unattended": true})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result["interaction"]["borrow_confirmation"], "always");
+    assert_eq!(result["interaction"]["request_help"], "enabled");
+    let mut later = IpcClient::connect(&sock).await.unwrap();
+    let help: serde_json::Value = later.call("help", Method::ToolRequestHelp,
+        Some(serde_json::json!({"session_id": result["session_id"], "prompt": "Log in", "timeout_ms": 300_000})),
+        Duration::from_secs(5)).await.unwrap().unwrap();
+    assert_eq!(help["outcome"], "cancelled");
+    let listed: serde_json::Value = later
+        .call::<(), _>("list", Method::SessionList, None, Duration::from_secs(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(listed["sessions"][0]["interaction"], result["interaction"]);
+    let ws = responder.await.unwrap();
+    drop(ws);
+    handle.shutdown().await;
+}
+
+#[test]
+fn interaction_updates_follow_the_owning_browser_in_both_directions() {
+    use bsk::daemon::{
+        browsers::BrowserId,
+        sessions::{Session, SessionId, SessionRegistry},
+    };
+    use bsk_protocol::tools::{BorrowConfirmationPolicy, InteractionPolicy, RequestHelpPolicy};
+    let registry = SessionRegistry::new();
+    let owner = BrowserId("owner".into());
+    let id = SessionId("existing".into());
+    registry.insert(Session {
+        id: id.clone(),
+        browser_id: owner.clone(),
+        agent_window_id: Some(100),
+        created_at_ms: 0,
+        interaction: None,
+    });
+    let interactive = InteractionPolicy {
+        borrow_confirmation: BorrowConfirmationPolicy::Always,
+        request_help: RequestHelpPolicy::Enabled,
+    };
+    let disabled = InteractionPolicy {
+        borrow_confirmation: BorrowConfirmationPolicy::Never,
+        request_help: RequestHelpPolicy::Disabled,
+    };
+    registry.update_interaction(&id, &BrowserId("other".into()), disabled);
+    assert_eq!(registry.get(&id).unwrap().interaction, None);
+    for policy in [interactive, disabled, interactive] {
+        registry.update_interaction(&id, &owner, policy);
+        assert_eq!(
+            registry.get(&id).unwrap().status_entry().interaction,
+            Some(policy)
+        );
+        registry.update_interaction(&id, &BrowserId("other".into()), disabled);
+        assert_eq!(registry.get(&id).unwrap().interaction, Some(policy));
+    }
+}
+
+#[tokio::test]
+async fn borrow_deadline_cancels_the_extension_and_preserves_a_committed_result() {
+    use bsk::daemon::{
+        queue::DispatchError,
+        sessions::{Session, SessionId},
+    };
+    for committed in [false, true] {
+        let (handle, _sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        handshake_with_protocol(&mut ws, bsk::daemon::state::PROTOCOL_VERSION).await;
+        let state = handle.state();
+        let session_id = SessionId("borrow-deadline".into());
+        state.sessions.insert(Session {
+            id: session_id.clone(),
+            browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+            agent_window_id: Some(100),
+            created_at_ms: 0,
+
+            interaction: None,
+        });
+        state.tool_queues.spawn(session_id.clone());
+        let responder = tokio::spawn(async move {
+            let request = next_extension_request(&mut ws).await;
+            assert_eq!(request.method, Method::ToolTabBorrow);
+            let cancel = next_extension_request(&mut ws).await;
+            acknowledge_extension_cancel(&mut ws, cancel, &request.id).await;
+            let body = if committed {
+                ResponseBody::Ok(serde_json::json!({"tab_id": 7, "agent_window_id": 100,
+                    "original_window_id": 200, "original_index": 4}))
+            } else {
+                ResponseBody::Err(RpcError {
+                    code: ErrorCode::Cancelled,
+                    message: "borrow aborted before move".into(),
+                    data: None,
+                })
+            };
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: request.id,
+                    body,
+                },
+            )
+            .await;
+            ws
+        });
+        let result = state
+            .tool_queues
+            .dispatch(
+                &session_id,
+                Method::ToolTabBorrow,
+                serde_json::json!({"session_id": session_id.0, "tab_id": 7}),
+                Duration::from_millis(20),
+                None,
+            )
+            .await;
+        if committed {
+            assert_eq!(result.unwrap()["tab_id"], 7);
+        } else {
+            assert!(matches!(
+                result,
+                Err(DispatchError::Rpc(RpcError {
+                    code: ErrorCode::Timeout,
+                    ..
+                }))
+            ));
+        }
+        drop(responder.await.unwrap());
+        handle.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn borrow_reports_unknown_outcome_when_cancel_cleanup_never_finishes() {
+    use bsk::daemon::{
+        queue::DispatchError,
+        sessions::{Session, SessionId},
+    };
+    let (handle, _sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_with_protocol(&mut ws, bsk::daemon::state::PROTOCOL_VERSION).await;
+    let state = handle.state();
+    let sid = SessionId("borrow-unknown".into());
+    state.sessions.insert(Session {
+        id: sid.clone(),
+        browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+        agent_window_id: Some(100),
+        created_at_ms: 0,
+
+        interaction: None,
+    });
+    state.tool_queues.spawn(sid.clone());
+    let queues = state.tool_queues.clone();
+    let pending = tokio::spawn(async move {
+        queues
+            .dispatch(
+                &sid,
+                Method::ToolTabBorrow,
+                serde_json::json!({"session_id": sid.0, "tab_id": 7}),
+                Duration::from_millis(20),
+                None,
+            )
+            .await
+    });
+    let borrow = next_extension_request(&mut ws).await;
+    let cancel = next_extension_request(&mut ws).await;
+    acknowledge_extension_cancel(&mut ws, cancel, &borrow.id).await;
+    // Acknowledging cancel is not proof that the original operation stopped.
+    let result = tokio::time::timeout(Duration::from_secs(10), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    let Err(DispatchError::Rpc(error)) = result else {
+        panic!("expected unknown outcome");
+    };
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        "borrow_outcome_unknown"
+    );
+    assert_eq!(error.data.as_ref().unwrap()["effect_state"], "unknown");
+    drop(ws);
+    handle.shutdown().await;
 }

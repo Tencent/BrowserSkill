@@ -27,8 +27,8 @@ use bsk_protocol::system::{
     VersionSkewEntry,
 };
 use bsk_protocol::tools::{
-    DownloadParams, DownloadResult, HelpOutcome, RequestHelpResult, ReturnFailure,
-    TransferBeginParams, TransferIdParams, UploadParams, WaitMsParams, WaitMsResult,
+    DownloadParams, DownloadResult, ReturnFailure, TransferBeginParams, TransferIdParams,
+    UploadParams, WaitMsParams, WaitMsResult,
 };
 use bsk_protocol::{
     CancelParams, CancelResult, ErrorCode, Method, PingResult, ResponseBody, RpcError, RpcId,
@@ -330,19 +330,6 @@ async fn handle_tool_dispatch(
     method: Method,
     params: Value,
 ) -> ResponseBody {
-    // `BSK_REQUEST_HELP=off` (unattended mode): never forward the
-    // blocking human-in-loop call to the extension; answer immediately
-    // with a synthetic `disabled` result.
-    if method == Method::ToolRequestHelp && crate::cli::human_loop::request_help_disabled() {
-        let result = RequestHelpResult {
-            outcome: HelpOutcome::Disabled,
-            completed_by: None,
-            note: Some(crate::cli::human_loop::REQUEST_HELP_DISABLED_NOTE.into()),
-            tab_id: params.get("tab_id").and_then(Value::as_i64).unwrap_or(0),
-            resolved_targets: None,
-        };
-        return ResponseBody::Ok(serde_json::to_value(result).unwrap_or(Value::Null));
-    }
     let session_id = match params.get("session_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => SessionId(s.to_string()),
         _ => {
@@ -385,6 +372,38 @@ async fn handle_tool_dispatch(
     };
     let audit_id = params.get("_audit_id").cloned();
     let mut params = params;
+    if method == Method::ToolTabBorrow {
+        // Old CLI clients can still send this field. Never forward their
+        // override to an older extension that would act on it.
+        if let Some(confirm) = params.get("confirm")
+            && !confirm.is_boolean()
+            && !confirm.is_null()
+        {
+            return ResponseBody::Err(invalid_params("confirm must be a boolean"));
+        }
+        if let Some(object) = params.as_object_mut() {
+            object.remove("confirm");
+        }
+        if params
+            .get("confirmation_timeout_ms")
+            .is_some_and(|v| !v.is_null())
+            && let Some(session) = state.sessions.get(&session_id)
+            && let Some(browser) = state.browsers.get(&session.browser_id)
+            && !bsk_protocol::tools::supports_borrow_confirmation_timeout(
+                &browser.extension_protocol_version,
+            )
+        {
+            return ResponseBody::Err(RpcError {
+                code: ErrorCode::Unsupported,
+                message: "Custom tab-borrow confirmation waits require extension protocol 1.2; update the extension or omit --timeout to use its default wait".into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "operation": "tab borrow --timeout",
+                    "component": "extension", "required_protocol": bsk_protocol::tools::BORROW_CONFIRMATION_TIMEOUT_PROTOCOL,
+                    "actual_protocol": browser.extension_protocol_version,
+                })),
+            });
+        }
+    }
     let mut download_transfer_id: Option<String> = None;
     if method == Method::ToolUpload {
         let mut upload: UploadParams = match serde_json::from_value(params) {
@@ -741,8 +760,22 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 }
 
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
+    if *method == Method::ToolTabBorrow {
+        let ms = params
+            .get("confirmation_timeout_ms")
+            .map_or(Some(60_000), Value::as_u64)
+            .filter(|ms| (1..=2_147_000_000).contains(ms))
+            .ok_or_else(|| {
+                invalid_params("confirmation_timeout_ms must be a positive bounded integer")
+            })?;
+        // Include the UI countdown/fade and Chrome move before deadline cancellation.
+        return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
+    }
     tool_dispatch_timeout(params).map(|timeout| {
-        if matches!(method, Method::ToolUpload | Method::ToolDownload) {
+        if matches!(
+            method,
+            Method::ToolUpload | Method::ToolDownload | Method::ToolRequestHelp
+        ) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout
@@ -769,6 +802,8 @@ struct CliSessionStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -917,6 +952,7 @@ async fn handle_session_start(
                 state.audit.set_name(&session.id.0, &name);
             }
             let result = CliSessionStartResult {
+                interaction: session.interaction,
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),
                 agent_window_id: session.agent_window_id,
@@ -1659,6 +1695,38 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+
+    #[test]
+    fn borrow_wait_budget_covers_the_confirmation_and_browser_move() {
+        let ordinary =
+            tool_dispatch_transport_timeout(&Method::ToolTabBorrow, &serde_json::json!({}))
+                .unwrap();
+        assert_eq!(ordinary, Duration::from_secs(75));
+        let custom = tool_dispatch_transport_timeout(
+            &Method::ToolTabBorrow,
+            &serde_json::json!({"confirmation_timeout_ms": 120_000}),
+        )
+        .unwrap();
+        assert_eq!(custom, Duration::from_secs(135));
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!("60s"),
+            serde_json::json!(2_147_000_001_u64),
+        ] {
+            assert!(
+                tool_dispatch_transport_timeout(
+                    &Method::ToolTabBorrow,
+                    &serde_json::json!({"confirmation_timeout_ms": invalid})
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(
+            tool_dispatch_transport_timeout(&Method::ToolClick, &serde_json::json!({})).unwrap(),
+            DEFAULT_TOOL_TIMEOUT
+        );
+    }
 
     #[test]
     fn session_stop_timeout_covers_stop_round_trip() {

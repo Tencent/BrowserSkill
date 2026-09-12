@@ -170,7 +170,10 @@ describe("ToolDispatcher", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toEqual({
       id: "r-1",
-      result: { agent_window_id: 4242 },
+      result: {
+        agent_window_id: 4242,
+        interaction: { borrow_confirmation: "always", request_help: "enabled" },
+      },
     });
   });
 

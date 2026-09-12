@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { INTERACTION_STORAGE_KEY, InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { handleSessionStart } from "../session";
 import { handleWindowResize, type WindowResizeApi } from "../window";
@@ -102,11 +103,76 @@ describe("handleWindowResize", () => {
 });
 
 describe("handleSessionStart window size", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("starts an interactive session on read failure and honors preferences after recovery", async () => {
+    vi.stubGlobal("chrome", { storage: { onChanged: { addListener: vi.fn() } } });
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const storage = {
+      get: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("failed"))
+        .mockResolvedValueOnce({
+          [INTERACTION_STORAGE_KEY]: { confirmTabBorrow: false, requestHelpEnabled: false },
+        }),
+      set: vi.fn(),
+    };
+    const preferences = new InteractionPreferenceStore(storage);
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+    expect(await handleSessionStart(sm, { session_id: "first" }, { preferences })).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
+    expect(await handleSessionStart(sm, { session_id: "second" }, { preferences })).toMatchObject({
+      agent_window_id: 101,
+      interaction: { borrow_confirmation: "never", request_help: "disabled" },
+    });
+    expect(storage.set).not.toHaveBeenCalled();
+  });
+
+  it("legacy unattended cannot skip preference loading or interactive fallback", async () => {
+    const preferences = new InteractionPreferenceStore();
+    const read = vi.spyOn(preferences, "ready").mockRejectedValue(new Error("failed"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    expect(
+      await handleSessionStart(sm, { session_id: "auto", unattended: true }, { preferences }),
+    ).toMatchObject({ interaction: { borrow_confirmation: "always", request_help: "enabled" } });
+    expect(read).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [true, true, "always", "enabled"],
+    [true, false, "always", "disabled"],
+    [false, true, "never", "enabled"],
+    [false, false, "never", "disabled"],
+  ] as const)("legacy unattended leaves browser settings authoritative (%s, %s)", async (confirmTabBorrow, requestHelpEnabled, borrow_confirmation, request_help) => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockReturnValue({ confirmTabBorrow, requestHelpEnabled });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 101]) });
+    for (const unattended of [false, true]) {
+      expect(
+        await handleSessionStart(
+          sm,
+          { session_id: String(unattended), unattended },
+          { preferences },
+        ),
+      ).toMatchObject({ interaction: { borrow_confirmation, request_help } });
+    }
+  });
+
   it("passes width/height through to Agent Window creation", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11", width: 1280, height: 800 });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", { size: { width: 1280, height: 800 } });
   });
 
@@ -114,7 +180,10 @@ describe("handleSessionStart window size", () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11" });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", {});
   });
 
@@ -122,7 +191,10 @@ describe("handleSessionStart window size", () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });
     const result = await handleSessionStart(sm, { session_id: "aa11", focused: false });
-    expect(result).toEqual({ agent_window_id: 100 });
+    expect(result).toMatchObject({
+      agent_window_id: 100,
+      interaction: { borrow_confirmation: "always", request_help: "enabled" },
+    });
     expect(aw.create).toHaveBeenCalledWith("about:blank", { focused: false });
   });
 
