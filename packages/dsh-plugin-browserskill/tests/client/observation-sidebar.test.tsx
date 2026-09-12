@@ -290,6 +290,23 @@ describe("observationTabOpen", () => {
     expect(() => observationTabOpen(noSplits)).not.toThrow();
     expect(observationTabOpen(noSplits)).toBe(false);
   });
+
+  it("tolerates a layout whose trees are not populated yet (first paint, #232)", () => {
+    // better-sidebar 0.19 publishes the state before either workbench tree
+    // exists; the first open used to throw "Cannot read properties of
+    // undefined (reading 'kind')" and land in the host's error boundary.
+    expect(observationTabOpen({})).toBe(false);
+    // Only one tree present: the tab is still found in it.
+    expect(observationTabOpen({ splits: leafWith(OBSERVATION_TAB_TYPE).splits })).toBe(true);
+    expect(observationTabOpen({ bottomSplits: leafWith(OBSERVATION_TAB_TYPE).splits })).toBe(true);
+    // A split whose children are not populated yet is treated as empty.
+    const halfBuilt: SidebarStateLike = {
+      splits: { kind: "split", id: "s1", dir: "row", sizes: [1] } as SidebarStateLike["splits"],
+      bottomSplits: leafWith(OBSERVATION_TAB_TYPE).splits,
+    };
+    expect(observationTabOpen(halfBuilt)).toBe(true);
+    expect(observationTabOpen({ splits: halfBuilt.splits })).toBe(false);
+  });
 });
 
 describe("ObservationSidebarTab", () => {
