@@ -1,6 +1,6 @@
 /**
  * Shared view logic for the observation carriers (the floating overlay card
- * and the better-sidebar tab): the store-backed view model (snapshot, focus
+ * and the native sidebar tab): the store-backed view model (snapshot, focus
  * pinning, elapsed ticker) and the Document PiP pop-out. Extracted from
  * ObservationOverlay so both carriers run the same focus/interrupt behavior
  * without duplicating hooks.
@@ -68,7 +68,7 @@ export function visibleToScope(obs: SessionObservation, scopeId: string): boolea
  * The store-backed observation view model. Holds the feed for the component
  * lifetime (refcounted — overlapping carriers never kill each other's
  * stream). `scopeId` narrows the view to one DSH conversation's sessions
- * (the better-sidebar tab); undefined keeps the global view (floating
+ * (the native sidebar tab); undefined keeps the global view (floating
  * card, PiP).
  */
 export function useObservationView(

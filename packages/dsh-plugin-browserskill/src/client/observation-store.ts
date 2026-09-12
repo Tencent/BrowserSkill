@@ -8,6 +8,7 @@
  */
 
 import type { ObservationEvent, SessionObservation } from "../observation";
+import { ObservationPresentation } from "./observation-presentation";
 
 export interface EventSourceLike {
   onmessage: ((event: { data: string }) => void) | null;
@@ -59,6 +60,7 @@ function revoke(url: string | undefined): void {
 }
 
 export class ObservationClientStore {
+  readonly presentation = new ObservationPresentation();
   private sessions = new Map<string, SessionObservation>();
   private thumbs = new Map<string, ThumbnailState>();
   /** sessionId → the attachment id currently advertised for it. */
@@ -175,7 +177,7 @@ export class ObservationClientStore {
   /**
    * Hold the feed for one consumer's lifetime: the stream starts with the
    * first holder and stops with the last release. Several carriers can share
-   * the store (the floating card, the better-sidebar tab, and the sidebar
+   * the store (the floating card, the native sidebar tab, and the sidebar
    * integration fiber) without one unmount killing the others' updates.
    */
   acquire(): void {

@@ -3,9 +3,8 @@
 // composer's way); collapsed = a status capsule; "pop out" upgrades the same
 // content to a native Document PiP window (user gesture required by the
 // browser). Multi-session renders a meeting-style strip under the focus view.
-// When the dsh-better-sidebar plugin is installed the tracking view moves
-// into a sidebar tab instead (see observation-sidebar.tsx) and this floating
-// card hides itself via the sidebar-mode flag. Visuals follow the
+// A native DSH sidebar hosts the view by default when available; the user
+// can switch to this floating card for the current page. Visuals follow the
 // BrowserSkill product family: @browser-skill/ui components and oklch tokens
 // on a .bsk-obs scope root, so the card reads as BSK's own surface without
 // leaking styles into (or inheriting themes from) the shell.
@@ -17,9 +16,11 @@ import {
   RiCloseCircleLine,
   RiCloseLine,
   RiErrorWarningLine,
+  RiLayoutRightLine,
   RiPictureInPicture2Line,
   RiPushpinFill,
   RiStopCircleLine,
+  RiWindowLine,
 } from "@remixicon/react";
 
 // remixicon's component types target @types/react 19 while the dsh shell
@@ -34,6 +35,8 @@ const IconWarn = asIcon(RiErrorWarningLine);
 const IconPin = asIcon(RiPushpinFill);
 const IconCloseSession = asIcon(RiCloseCircleLine);
 const IconCheck = asIcon(RiCheckLine);
+const IconSidebar = asIcon(RiLayoutRightLine);
+const IconWindow = asIcon(RiWindowLine);
 
 import {
   type ReactNode,
@@ -55,7 +58,6 @@ import {
   usePip,
   useThumbnailObservation,
 } from "./observation-view";
-import { getSidebarMode, subscribeSidebarMode } from "./sidebar-mode";
 
 // The pure view helpers live in observation-view (shared with the sidebar
 // tab); re-export so existing imports of this module keep working.
@@ -329,6 +331,9 @@ export function OverlayBody(props: {
   onPopOut?: (() => void) | undefined;
   onCollapse?: (() => void) | undefined;
   onClosePip?: (() => void) | undefined;
+  onUseFloating?: () => void;
+  onUseSidebar?: () => void;
+  visible?: boolean;
   inPip: boolean;
   onHeaderPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
@@ -343,11 +348,14 @@ export function OverlayBody(props: {
     onPopOut,
     onCollapse,
     onClosePip,
+    onUseFloating,
+    onUseSidebar,
+    visible = true,
     inPip,
     onHeaderPointerDown,
   } = props;
   const [interrupting, setInterrupting] = useState(false);
-  const viewRef = useThumbnailObservation(store, sessions.length > 0);
+  const viewRef = useThumbnailObservation(store, visible && sessions.length > 0);
 
   const thumbId = focus?.thumbnailAttachmentId;
   useEffect(() => {
@@ -395,6 +403,24 @@ export function OverlayBody(props: {
       >
         <StatusDot state={state === "error" ? "error" : state === "active" ? "active" : "idle"} />
         <span className={css["status-text"]}>{statusText}</span>
+        {onUseFloating !== undefined ? (
+          <IconAction
+            label="Use floating view"
+            hint="Show the browser view in a floating window."
+            onClick={onUseFloating}
+          >
+            <IconWindow size={14} />
+          </IconAction>
+        ) : null}
+        {onUseSidebar !== undefined ? (
+          <IconAction
+            label="Move to sidebar"
+            hint="Show the browser view in the sidebar."
+            onClick={onUseSidebar}
+          >
+            <IconSidebar size={14} />
+          </IconAction>
+        ) : null}
         {onCollapse !== undefined ? (
           <button
             type="button"
@@ -491,10 +517,10 @@ export function OverlayBody(props: {
 
 export function ObservationOverlay({ store }: { store: ObservationClientStore }) {
   const { snapshot, focus, pinnedId, onTogglePin, now } = useObservationView(store);
-  // While the better-sidebar plugin carries the tracking view, this floating
-  // card (and its capsule) stays out of the way; an already-open PiP window
-  // keeps its portal until the user closes it.
-  const sidebarMode = useSyncExternalStore(subscribeSidebarMode, getSidebarMode);
+  const presentation = useSyncExternalStore(
+    store.presentation.subscribe,
+    store.presentation.getSnapshot,
+  );
 
   const [collapsed, setCollapsed] = useState(false);
   const [pos, setPos] = useState<Point | null>(null);
@@ -605,6 +631,14 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
       }
       onCollapse={pipWindow === null ? () => setCollapsed(true) : undefined}
       onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
+      onUseSidebar={
+        presentation.sidebarAvailable
+          ? () => {
+              pipWindow?.close();
+              store.presentation.showSidebar();
+            }
+          : undefined
+      }
       onHeaderPointerDown={pipWindow === null ? beginMove : undefined}
     />
   );
@@ -614,7 +648,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   }
 
   // The sidebar tab is the carrier now — no floating card, no capsule.
-  if (sidebarMode) return null;
+  if (!presentation.floating) return null;
 
   // Hidden while no owned session exists (and no PiP is up).
   if (snapshot.sessions.length === 0) return null;

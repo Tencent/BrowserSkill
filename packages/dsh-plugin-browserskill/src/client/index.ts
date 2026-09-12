@@ -1,9 +1,8 @@
 /**
  * dsh-plugin-browserskill browser half: the `browser_inspect` keyed toolview
  * plus the observation overlay (live thumbnails + interrupt). The
- * default carrier is a floating card on the `shell.overlay` seat; when the
- * dsh-better-sidebar plugin provides its `betterSidebar` service, the view
- * moves into a sidebar tab instead (see observation-sidebar.tsx).
+ * native right Sidebar is preferred when the host provides it; older hosts
+ * keep the floating card. The user may switch to floating for this page.
  */
 
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
@@ -19,7 +18,7 @@ import "./bsk-tokens.nomodule.css";
 import "./bsk-ui.nomodule.css";
 import { BrowserInspectToolView } from "./BrowserInspectToolView";
 import { ObservationOverlay } from "./ObservationOverlay";
-import { type BetterSidebarLike, registerObservationSidebar } from "./observation-sidebar";
+import { type NativeSidebarHost, registerObservationSidebar } from "./observation-sidebar";
 import { type EventSourceLike, ObservationClientStore } from "./observation-store";
 
 /** Required services: slots, session-scoped attachment reads, and the overlay seat. */
@@ -85,14 +84,9 @@ export function apply(ctx: ClientContext): void {
       createElement(ObservationOverlay, { store }),
     ),
   );
-  // Optional carrier upgrade: when the dsh-better-sidebar plugin is installed,
-  // its service moves the tracking view into a sidebar tab (the floating
-  // overlay hides itself through the sidebar-mode flag). In profiles without
-  // the sidebar plugin this fiber never runs and nothing changes.
-  ctx.inject(["betterSidebar"], (injected) =>
-    registerObservationSidebar(
-      (injected as unknown as { betterSidebar: BetterSidebarLike }).betterSidebar,
-      store,
-    ),
+  // Optional services, not required client packages: profiles without the
+  // native sidebar still load this bundle and use the floating observation.
+  ctx.inject(["sidebarRight", "sidebarRightTabs"], (injected) =>
+    registerObservationSidebar(injected as unknown as NativeSidebarHost, store),
   );
 }

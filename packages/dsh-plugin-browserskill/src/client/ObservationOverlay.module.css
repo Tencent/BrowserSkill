@@ -30,7 +30,7 @@
   color: var(--card-foreground);
 }
 
-/* Sidebar carrier: fill the better-sidebar tab area and let the body flex
+/* Sidebar carrier: fill the native tab area and let the body flex
    (the tab content container owns the outer sizing). */
 .sidebar-tab {
   display: flex;
@@ -49,6 +49,33 @@
 .brand-icon {
   display: block;
   border-radius: 22%;
+}
+
+.tab-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.floating-notice {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 16px;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.floating-notice button {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--card-foreground);
+  cursor: pointer;
 }
 
 .header {

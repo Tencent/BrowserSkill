@@ -33,6 +33,25 @@ registers the tools. Setting `lazyTools: false` registers them at plugin startup
 
 ## Observation subscriptions and routes
 
+- **Native presentation**: the client optionally injects `sidebarRight` and
+  `sidebarRightTabs` and waits for the native body/title slots. It registers a page
+  kind (`browserskill-observation`) with a separate implementation id used by the
+  keyed slots. It uses the DSH 0.1.5 controller's session-addressed `openTabIn` so
+  a pending conversation switch cannot navigate the previously mounted session.
+  The sidebar package is not a required client dependency or runtime import;
+  missing capabilities leave the floating panel available. `betterSidebar` is
+  not used, and no file path or third-party layout tree is involved.
+- **Presentation lifetime**: each observation store owns its in-memory choice
+  between sidebar and floating. Native registration and disposal connect and
+  disconnect the sidebar; nothing is persisted. Automatic opening is scoped to
+  conversations with owned browser sessions and happens once while those sessions
+  remain live. Data refreshes and switching back do not reopen closed tabs.
+  An initial native open may precede session-store adoption; bounded retries stop
+  as soon as a body/title mounts, or fall back to floating if none mounts.
+  Native rendering has its own error boundary, and registration failures roll back.
+  Host tab visibility also gates screenshot demand; a popped-out view uses its
+  own document's visibility.
+
 - **Screenshot demand**: the client requests periodic screenshots while an observation view is
   visible, using the PiP document's visibility when popped out. Hidden or collapsed views can
   keep subscribing to state without requesting screenshots. The first screenshot subscriber
