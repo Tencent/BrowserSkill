@@ -23,6 +23,8 @@ export const VISUAL_STYLES = [
   "perspective",
   "clip",
   "contain",
+  "content-visibility",
+  "container-type",
   "overflow-clip-margin",
 ] as const;
 

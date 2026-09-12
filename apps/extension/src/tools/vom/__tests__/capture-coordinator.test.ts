@@ -102,6 +102,7 @@ function fixture(
             "block",
             "none",
             "0px",
+            "normal",
           ],
           documents: frames
             .filter(
@@ -158,7 +159,7 @@ function fixture(
                   styles: Array.from({ length: 2 }, () =>
                     requested.map(
                       (name) =>
-                        [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 11][
+                        [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 5, 12, 11][
                           VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])
                         ],
                     ),

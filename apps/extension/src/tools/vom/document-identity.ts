@@ -25,7 +25,7 @@ export async function verifyVisualTargetIdentity(
 
 export type VerifiedNodeResult =
   | { status: "changed" | "unavailable" }
-  | { status: "current"; objectId: string; objectGroup: string };
+  | { status: "current"; objectId: string; objectGroup: string; executionContextId: number };
 
 /** Caller must release objectGroup in finally after its local read. */
 export async function resolveVerifiedNode(
@@ -35,8 +35,16 @@ export async function resolveVerifiedNode(
   signal?: AbortSignal,
 ): Promise<VerifiedNodeResult> {
   const result = await verifyIdentity(cdp, identity, signal, backendNodeId, true);
-  return result.status === "current" && result.objectId && result.objectGroup
-    ? { status: "current", objectId: result.objectId, objectGroup: result.objectGroup }
+  return result.status === "current" &&
+    result.objectId &&
+    result.objectGroup &&
+    result.executionContextId !== undefined
+    ? {
+        status: "current",
+        objectId: result.objectId,
+        objectGroup: result.objectGroup,
+        executionContextId: result.executionContextId,
+      }
     : { status: result.status === "changed" ? "changed" : "unavailable" };
 }
 
@@ -50,6 +58,7 @@ async function verifyIdentity(
   status: "current" | "changed" | "unavailable";
   objectId?: string;
   objectGroup?: string;
+  executionContextId?: number;
 }> {
   const attached = () => cdp.getAttachmentId?.(identity.target.tabId) === identity.attachmentId;
   throwIfAborted(signal);
@@ -104,8 +113,11 @@ async function verifyIdentity(
     if (id === undefined) return { status: "unavailable" };
     if (id !== identity.documentElementBackendNodeId) return { status: "changed" };
     throwIfAborted(signal);
-    retained = retain && !!objectId;
-    return { status: "current", ...(retained ? { objectId, objectGroup } : {}) };
+    retained = retain && !!objectId && world.executionContextId !== undefined;
+    return {
+      status: "current",
+      ...(retained ? { objectId, objectGroup, executionContextId: world.executionContextId } : {}),
+    };
   } catch (error) {
     throwIfAborted(signal);
     if (isAbortError(error)) throw error;

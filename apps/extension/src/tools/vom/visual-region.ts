@@ -142,6 +142,37 @@ export interface VisualAncestor {
   readonly clientBox?: ViewportRect | null;
 }
 
+interface OverflowElement {
+  readonly backendNodeId: number;
+  readonly tag: string;
+  readonly styles: Readonly<Record<string, string>>;
+}
+
+/** The viewport already clips projected geometry. Its overflow source must not
+ * also clip descendants to its own box (CSS Overflow, viewport propagation).
+ * Adapters supply the document element and its actual first body child. */
+export function viewportOverflowSource(
+  root: OverflowElement | undefined,
+  body?: OverflowElement,
+): number | undefined {
+  if (!root || root.styles.display === "none") return undefined;
+  const permitsPropagation = ({ styles }: OverflowElement) =>
+    styles.contain === "none" &&
+    styles["content-visibility"] === "visible" &&
+    !!styles["container-type"] &&
+    !/(?:^|\s)(size|inline-size)(?:$|\s)/.test(styles["container-type"]);
+  return root.tag === "html" &&
+    root.styles["overflow-x"] === "visible" &&
+    root.styles["overflow-y"] === "visible" &&
+    body?.tag === "body" &&
+    !!body.styles.display &&
+    body.styles.display !== "none" &&
+    permitsPropagation(root) &&
+    permitsPropagation(body)
+    ? body.backendNodeId
+    : root.backendNodeId;
+}
+
 /** One ancestor step, reusable by discovery and the future live local adapter. */
 export function extendVisualContext(
   parent: VisualContext,

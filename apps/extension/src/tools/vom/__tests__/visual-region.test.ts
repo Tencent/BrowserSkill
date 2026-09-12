@@ -5,6 +5,7 @@ import {
   projectVisualBox,
   resolveVisualRegion,
   type VisualAncestor,
+  viewportOverflowSource,
 } from "../visual-region";
 
 const styles = {
@@ -246,5 +247,60 @@ describe("shared visual region rules", () => {
         false,
       ).issue,
     ).toBe("geometry-unsupported");
+  });
+});
+
+describe("viewport overflow propagation", () => {
+  const root = {
+    backendNodeId: 1,
+    tag: "html",
+    styles: { ...styles, "content-visibility": "visible", "container-type": "normal" },
+  };
+  const body = { ...root, backendNodeId: 2, tag: "body" };
+
+  it("uses the root unless an eligible HTML body supplies viewport overflow", () => {
+    expect(viewportOverflowSource(root, body)).toBe(2);
+    expect(viewportOverflowSource(root)).toBe(1);
+    expect(viewportOverflowSource({ ...root, tag: "svg" }, body)).toBe(1);
+    expect(viewportOverflowSource(root, { ...body, tag: "frameset" })).toBe(1);
+    expect(
+      viewportOverflowSource(root, { ...body, styles: { ...body.styles, display: "none" } }),
+    ).toBe(1);
+    expect(viewportOverflowSource(undefined, body)).toBeUndefined();
+  });
+
+  it.each([
+    { contain: "size" },
+    { contain: "layout" },
+    { contain: "style" },
+    { contain: "paint" },
+    { contain: "strict" },
+    { contain: "content" },
+    { "container-type": "size" },
+    { "container-type": "inline-size scroll-state" },
+    { "content-visibility": "auto" },
+    { "content-visibility": "hidden" },
+    { contain: "" },
+    { "container-type": "" },
+    { "content-visibility": "" },
+  ])("keeps body overflow local with containment or missing evidence: %o", (extra) => {
+    for (const onRoot of [false, true]) {
+      expect(
+        viewportOverflowSource(
+          onRoot ? { ...root, styles: { ...root.styles, ...extra } } : root,
+          onRoot ? body : { ...body, styles: { ...body.styles, ...extra } },
+        ),
+      ).toBe(1);
+    }
+  });
+
+  it("requires both root overflow axes to be visible", () => {
+    for (const axis of ["overflow-x", "overflow-y"]) {
+      for (const value of ["hidden", "auto", "scroll", "clip", ""]) {
+        expect(
+          viewportOverflowSource({ ...root, styles: { ...root.styles, [axis]: value } }, body),
+        ).toBe(1);
+      }
+    }
   });
 });

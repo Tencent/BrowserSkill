@@ -17,6 +17,7 @@ import {
   type VisualContext,
   type VisualIssueReason,
   type VisualRegionResult,
+  viewportOverflowSource,
   visualProjectionIssue,
 } from "./visual-region";
 
@@ -124,6 +125,7 @@ export async function discoverVisualCandidates(
   const framePaths = new Map<string, VisualFramePath>();
   const contexts = new Map<string, Map<number, NodeContext>>();
   const roots = new Map<string, VisualContext>();
+  const overflowSources = new Map<string, number | undefined>();
 
   async function nodeContext(document: Document, id: number): Promise<NodeContext> {
     const cache = contexts.get(document.frame.frameId)!;
@@ -179,7 +181,9 @@ export async function discoverVisualCandidates(
           children = extendVisualContext(
             parent,
             ancestor,
-            current.tag !== "iframe" && current.tag !== "frame",
+            current.tag !== "iframe" &&
+              current.tag !== "frame" &&
+              current.backendNodeId !== overflowSources.get(document.frame.frameId),
           );
           self = current.tag === "canvas" ? extendVisualContext(parent, ancestor, false) : children;
         }
@@ -223,6 +227,23 @@ export async function discoverVisualCandidates(
     for (let i = path.length - 1; i >= 0; i--) {
       const doc = path[i];
       const { frame } = doc;
+      const documentRoot = doc.identity
+        ? doc.index.nodes.get(doc.identity.documentElementBackendNodeId)
+        : undefined;
+      const body = doc.domNodes.find(
+        (node) => node.tag === "body" && node.parentBackendNodeId === documentRoot?.backendNodeId,
+      );
+      const overflowElement = (node: NodeFacts | undefined) =>
+        node?.layout
+          ? { backendNodeId: node.backendNodeId, tag: node.tag, styles: node.layout.styles }
+          : undefined;
+      overflowSources.set(
+        frame.frameId,
+        viewportOverflowSource(
+          overflowElement(documentRoot),
+          overflowElement(body ? doc.index.nodes.get(body.backendNodeId) : undefined),
+        ),
+      );
       let root: VisualContext = roots.get(frame.frameId) ?? EMPTY_VISUAL_CONTEXT;
       if (frame.parentFrameId) {
         const parent = documents.get(frame.parentFrameId);
