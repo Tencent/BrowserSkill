@@ -1,26 +1,59 @@
-// better-sidebar carrier for the observation view. When the
-// dsh-better-sidebar plugin is installed its client publishes a
-// `betterSidebar` cordis service; the client entry then runs the
-// registration below and the tracking view moves from the floating card
-// into a single-instance sidebar tab (Document PiP pop-out stays available
-// from inside the tab). Detection is purely service-based — profiles
-// without the sidebar plugin never start this fiber and keep the floating
-// overlay.
-
-import { createElement, type ReactNode } from "react";
+/** Native DSH right-Sidebar carrier. All runtime collaboration uses optional host services. */
+import { Component, type ReactNode, useEffect, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { BSK_LOGO_URL } from "./brand-icon";
 import { OverlayBody } from "./ObservationOverlay";
 import css from "./ObservationOverlay.module.css";
 import type { ObservationClientStore } from "./observation-store";
 import { useObservationView, usePip, visibleToScope } from "./observation-view";
-import { setSidebarMode } from "./sidebar-mode";
 
-/** The tab title — "Browser Skill", distinct from the sidebar's built-in "browser" tab. */
+export const OBSERVATION_TAB_KIND = "browserskill-observation";
+export const OBSERVATION_TAB_ID = "@wxg-prc-cpg/browser-skill-dsh-plugin/observation";
 const TAB_TITLE = "Browser Skill";
+const BODY_SLOT = "sidebar.right.pane.tab";
+const TITLE_SLOT = "sidebar.right.pane.tab.title";
 
-/** Tab strip icon: the BrowserSkill product mark at the requested size. */
-function TabIcon({ size }: { size: number }) {
+/**
+ * Narrow public contract from dsh-client-ui-sidebar-right 0.1.5-rc.1.
+ * No value imports: older hosts need neither the package nor its module-loader entry.
+ * openTabIn is the exported controller's session-addressed navigation method;
+ * the mounted-only openTab can act on the previous conversation during a switch.
+ */
+export interface NativeSidebar {
+  openTabIn(sessionId: string, kind: string): void;
+}
+
+export interface NativeTabDefinition {
+  id: string;
+  kind: string;
+  title: () => string;
+  guide: { order: number; title: () => string; description: () => string; icon: typeof TabIcon }[];
+}
+
+export interface NativeTabProps {
+  sessionId: string;
+  useTabInfo: () => { tab: { visible: boolean } };
+}
+
+export interface NativeSidebarSlots {
+  inject(name: string, callback: () => () => void): () => void;
+  register(
+    options: { name: string; key: string },
+    component: (props: NativeTabProps) => ReactNode,
+  ): () => void;
+}
+
+export interface SessionListSource {
+  getSnapshot(): { current: string | undefined };
+  subscribe(listener: () => void): () => void;
+}
+
+export interface NativeSidebarHost {
+  slots: NativeSidebarSlots;
+  get(name: string): unknown;
+}
+
+function TabIcon({ size = 16 }: { size?: number }) {
   return (
     <img
       src={BSK_LOGO_URL}
@@ -33,115 +66,33 @@ function TabIcon({ size }: { size: number }) {
   );
 }
 
-/**
- * Structural mirrors of dsh-better-sidebar's client service surface (only
- * the slices this integration touches — see the upstream
- * lib/types/client/service.d.ts). Declared locally so the plugin carries no
- * dependency on the sidebar package; the service contract has been stable
- * since v0.4.0 and newer capabilities arrive behind its `features` list.
- */
-export interface SidebarTabLike {
-  id: string;
-  type: string;
-  title: string;
-}
-
-export interface SidebarLeafLike {
-  kind: "leaf";
-  id: string;
-  tabs: SidebarTabLike[];
-  active: string | null;
-}
-
-export interface SidebarSplitLike {
-  kind: "split";
-  id: string;
-  dir: "row" | "col";
-  sizes: number[];
-  children: SidebarNodeLike[];
-}
-
-export type SidebarNodeLike = SidebarLeafLike | SidebarSplitLike;
-
-export interface SidebarStateLike {
-  /**
-   * Right-column split tree. DSH 0.1.5 (better-sidebar 0.19+) moved the right
-   * column to dsh's native Sidebar and no longer emits this field, so it is
-   * optional here; earlier versions always provide it.
-   */
-  splits?: SidebarNodeLike;
-  bottomSplits: SidebarNodeLike;
-  /** Whether the right panel is expanded (the merged drawer on narrow screens). */
-  panelOpen?: boolean;
-}
-
-export interface SidebarSnapshotLike {
-  sessionId?: string;
-  state?: SidebarStateLike;
-}
-
-/** Props every tab component receives (the slices we read). */
-export interface TabComponentPropsLike {
-  /** The conversation this sidebar instance belongs to. */
-  scope: { sessionId: string };
-}
-
-export interface TabDescriptorLike {
-  id: string;
-  title: string | (() => string);
-  icon?: ReactNode | ((size: number) => ReactNode);
-  order?: number;
-  /** Single-instance: opening focuses the existing tab instead of duplicating. */
-  single?: boolean;
-  /** Small pill on the tab strip; null/undefined hides it. */
-  badge?: (
-    ctx: unknown,
-    scope: { sessionId: string },
-    state: unknown,
-  ) => string | number | null | undefined;
-  component: (props: TabComponentPropsLike) => ReactNode;
-}
-
-export interface BetterSidebarLike {
-  registerTab(descriptor: TabDescriptorLike): () => void;
-  openTab(seed: {
-    type: string;
-    title?: string;
-    /** Content seed (lands on tab.path); content opens expand the panel. */
-    path?: string;
-  }): void;
-  getSnapshot(): SidebarSnapshotLike;
-  /** Sidebar state feed (v0.12+): session switches, state and prefs changes. */
-  subscribeState?: (listener: () => void) => () => void;
-  isTabEnabled(id: string): boolean;
-}
-
-/** The registered tab type id (also the SidebarTab.type value). */
-export const OBSERVATION_TAB_TYPE = "browserskill:observation";
-
-/**
- * Inert content seed carried on auto-opened tabs: its mere presence makes
- * the sidebar treat the open as a content open (expanding the hosting panel
- * so the tracking view lands in sight). Never read by our component.
- */
-export const OBSERVATION_TAB_PATH = "browser-skill:observation";
-
-/**
- * The observation tab body: the same OverlayBody the floating card renders,
- * minus the card chrome (no drag header, no collapse — the sidebar tab bar
- * owns those), plus the PiP pop-out upgrade. The view is scoped to the
- * sidebar's conversation: only browser sessions started by it (or its
- * descendants) show here — the floating card keeps the global view.
- */
+/** Same observation content as the overlay, scoped by the native slot's session identity. */
 export function ObservationSidebarTab({
   store,
   scopeId,
+  visible = true,
 }: {
   store: ObservationClientStore;
   scopeId: string;
+  visible?: boolean;
 }) {
   const { snapshot, focus, pinnedId, onTogglePin, now } = useObservationView(store, scopeId);
   const { pipWindow, pipSupported, popOut } = usePip();
+  const presentation = useSyncExternalStore(
+    store.presentation.subscribe,
+    store.presentation.getSnapshot,
+  );
+
+  if (presentation.floating && presentation.sidebarAvailable) {
+    return (
+      <div className={`${css["floating-notice"]} bsk-obs`}>
+        <p>The browser view is in a floating window.</p>
+        <button type="button" onClick={store.presentation.showSidebar}>
+          Show here
+        </button>
+      </div>
+    );
+  }
 
   const body = (
     <OverlayBody
@@ -152,115 +103,262 @@ export function ObservationSidebarTab({
       pinnedId={pinnedId}
       onTogglePin={onTogglePin}
       now={now}
+      visible={visible || pipWindow !== null}
       inPip={pipWindow !== null}
       onPopOut={pipWindow === null && pipSupported ? () => popOut() : undefined}
       onClosePip={pipWindow !== null ? () => pipWindow.close() : undefined}
+      onUseFloating={() => {
+        pipWindow?.close();
+        store.presentation.showFloating();
+      }}
     />
   );
-
-  if (pipWindow !== null) {
-    return createPortal(body, pipWindow.document.body);
-  }
+  if (pipWindow !== null) return createPortal(body, pipWindow.document.body);
   return <div className={css["sidebar-tab"]}>{body}</div>;
 }
 
-function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
-  if (node.kind === "leaf") {
-    yield node;
-    return;
-  }
-  for (const child of node.children) yield* leafNodes(child);
+function ObservationTitle({ store, scopeId }: { store: ObservationClientStore; scopeId: string }) {
+  const snapshot = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const count = snapshot.sessions.filter((session) => visibleToScope(session, scopeId)).length;
+  return (
+    <span className={css["tab-title"]}>
+      <TabIcon size={14} />
+      {TAB_TITLE}
+      {count > 0 ? ` (${count})` : ""}
+    </span>
+  );
 }
 
-/** Whether a tab of our type is already open in either sidebar workbench. */
-export function observationTabOpen(state: SidebarStateLike | undefined): boolean {
-  if (state === undefined) return false;
-  // A root may be absent even when the snapshot exists: `splits` is gone on
-  // DSH 0.1.5+ (better-sidebar 0.19+), where the right column belongs to dsh's
-  // native Sidebar. Guard before walking so we do not dereference undefined.
-  for (const root of [state.splits, state.bottomSplits]) {
-    if (root === undefined) continue;
-    for (const leaf of leafNodes(root)) {
-      if (leaf.tabs.some((tab) => tab.type === OBSERVATION_TAB_TYPE)) return true;
-    }
+function reportFailure(error: unknown): void {
+  console.warn("[browser-skill] native sidebar unavailable; using floating view", error);
+}
+
+/** A native hook or view failure must never reach DSH's surrounding workbench. */
+class ObservationBoundary extends Component<
+  { children: ReactNode; onError: (error: unknown) => void },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
   }
-  return false;
+
+  componentDidCatch(error: unknown) {
+    this.props.onError(error);
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children;
+  }
 }
 
 /**
- * Register the observation sidebar tab and flip the carrier flag. Returns
- * the disposer the cordis fiber invokes when the sidebar service goes away
- * (plugin unload/HMR): the floating overlay then resumes as the carrier.
+ * Wait for both native seats, then install the type and its keyed renderers as
+ * one lifetime. Missing native services are normal, including on older DSH.
  */
 export function registerObservationSidebar(
-  service: BetterSidebarLike,
+  host: NativeSidebarHost,
   store: ObservationClientStore,
 ): () => void {
-  setSidebarMode(true);
-  // Hold the feed for the whole sidebar lifetime so the auto-open watcher
-  // sees new sessions even while the tab itself is closed.
-  store.acquire();
-  const disposeTab = service.registerTab({
-    id: OBSERVATION_TAB_TYPE,
-    title: TAB_TITLE,
-    icon: (size: number) => createElement(TabIcon, { size }),
-    single: true,
-    // The badge counts only sessions visible to the tab strip's own
-    // conversation (global sessions from other conversations stay hidden,
-    // mirroring the tab body's scoped view).
-    badge: (_ctx, scope) => {
-      const count = store
-        .getSnapshot()
-        .sessions.filter((s) => visibleToScope(s, scope.sessionId)).length;
-      return count > 0 ? count : null;
-    },
-    component: (props) =>
-      createElement(ObservationSidebarTab, { store, scopeId: props.scope.sessionId }),
-  });
+  const sidebar = host.get("sidebarRight") as NativeSidebar | undefined;
+  const tabs = host.get("sidebarRightTabs") as
+    | { register(definition: NativeTabDefinition): () => void }
+    | undefined;
+  const sessions = (host.get("sessions") as { list?: SessionListSource } | undefined)?.list;
+  if (
+    typeof sidebar?.openTabIn !== "function" ||
+    typeof tabs?.register !== "function" ||
+    typeof sessions?.getSnapshot !== "function" ||
+    typeof sessions?.subscribe !== "function"
+  )
+    return () => {};
 
-  // Auto-open the tab when a browser session VISIBLE TO the active
-  // conversation appears (and right away when one is already live). The
-  // evaluation runs on observation publishes AND on sidebar state changes:
-  // the latter covers the sidebar store's async init (its state is
-  // undefined for the first beats after page load) and conversation
-  // switches. The open carries a content seed (`path`): only content opens
-  // land in sight — the sidebar expands the hosting panel for them. While
-  // the panel is OPEN an existing tab is never re-focused — the user may
-  // be reading another page on purpose; while it is collapsed a NEW
-  // session (0→N) nudges the tab back into sight, mirroring how the
-  // floating card used to reappear.
-  const activeVisibleCount = (): number => {
-    const activeId = service.getSnapshot().sessionId;
-    if (activeId === undefined) return 0;
-    return store.getSnapshot().sessions.filter((s) => visibleToScope(s, activeId)).length;
-  };
-  let previousVisible = activeVisibleCount();
-  const evaluate = (): void => {
-    const count = activeVisibleCount();
-    const { state, sessionId } = service.getSnapshot();
-    if (
-      state !== undefined &&
-      sessionId !== undefined &&
-      service.isTabEnabled(OBSERVATION_TAB_TYPE)
-    ) {
-      const open = observationTabOpen(state);
-      if (count > 0 && !open) {
-        service.openTab({ type: OBSERVATION_TAB_TYPE, path: OBSERVATION_TAB_PATH });
-      } else if (previousVisible === 0 && count > 0 && open && state.panelOpen === false) {
-        service.openTab({ type: OBSERVATION_TAB_TYPE, path: OBSERVATION_TAB_PATH });
+  return host.slots.inject(BODY_SLOT, () =>
+    host.slots.inject(TITLE_SLOT, () => {
+      const disposers: (() => void)[] = [];
+      const autoOpened = new Set<string>();
+      const mounted = new Map<string, number>();
+      let disposed = false;
+      let failed = false;
+      let scheduled = false;
+      let disconnect: (() => void) | undefined;
+      let pending:
+        | { sessionId: string; attempts: number; timer?: ReturnType<typeof setTimeout> }
+        | undefined;
+
+      const cancelOpen = () => {
+        clearTimeout(pending?.timer);
+        pending = undefined;
+      };
+      const fallback = () => {
+        cancelOpen();
+        disconnect?.();
+        disconnect = undefined;
+      };
+      const dispose = () => {
+        if (disposed) return;
+        disposed = true;
+        fallback();
+        for (const release of disposers.reverse()) release();
+      };
+      const connect = () => {
+        if (failed) return;
+        disconnect ??= store.presentation.connectSidebar(reveal);
+      };
+      const fail = (error: unknown) => {
+        failed = true;
+        fallback();
+        reportFailure(error);
+      };
+      // The controller can receive an open before its per-session store is
+      // adopted (it deliberately no-ops then). Only retry that initial handoff;
+      // a mounted body/title acknowledges it, stopping retries before normal
+      // observation updates or a user's later close can cause another reveal.
+      const open = (sessionId: string) => {
+        cancelOpen();
+        const request = {
+          sessionId,
+          attempts: 0,
+          timer: undefined as ReturnType<typeof setTimeout> | undefined,
+        };
+        pending = request;
+        const attempt = () => {
+          if (disposed || pending !== request) return;
+          try {
+            if (
+              sessions.getSnapshot().current !== sessionId ||
+              store.presentation.getSnapshot().floating
+            ) {
+              cancelOpen();
+              return;
+            }
+            sidebar.openTabIn(sessionId, OBSERVATION_TAB_KIND);
+          } catch (error) {
+            fail(error);
+            return;
+          }
+          if (mounted.has(sessionId)) {
+            autoOpened.add(sessionId);
+            cancelOpen();
+          }
+          if (pending !== request) return;
+          request.attempts += 1;
+          request.timer = setTimeout(() => {
+            if (pending !== request) return;
+            if (request.attempts < 4) attempt();
+            else fallback();
+          }, 250);
+        };
+        attempt();
+      };
+      function reveal() {
+        try {
+          const current = sessions?.getSnapshot().current;
+          if (current !== undefined) open(current);
+        } catch (error) {
+          fail(error);
+        }
       }
-    }
-    previousVisible = count;
-  };
-  evaluate();
-  const unsubscribe = store.subscribe(evaluate);
-  const unsubscribeState = service.subscribeState?.(evaluate);
+      const acknowledge = (sessionId: string) => {
+        if (disposed) return;
+        mounted.set(sessionId, (mounted.get(sessionId) ?? 0) + 1);
+        autoOpened.add(sessionId);
+        if (pending?.sessionId === sessionId) cancelOpen();
+        connect();
+        return () => {
+          const remaining = (mounted.get(sessionId) ?? 1) - 1;
+          if (remaining === 0) mounted.delete(sessionId);
+          else mounted.set(sessionId, remaining);
+        };
+      };
+      const evaluate = () => {
+        if (disposed) return;
+        const current = sessions.getSnapshot().current;
+        const observations = store.getSnapshot().sessions;
+        for (const id of autoOpened) {
+          if (!observations.some((session) => visibleToScope(session, id))) autoOpened.delete(id);
+        }
+        if (
+          pending !== undefined &&
+          (pending.sessionId !== current || store.presentation.getSnapshot().floating)
+        )
+          cancelOpen();
+        if (
+          current === undefined ||
+          store.presentation.getSnapshot().floating ||
+          pending !== undefined ||
+          autoOpened.has(current)
+        )
+          return;
+        if (observations.some((session) => visibleToScope(session, current))) open(current);
+      };
+      // Host and SSE subscriptions are synchronous. Defer opens out of their
+      // notifications so a navigation cannot recursively re-enter the host.
+      const schedule = () => {
+        if (disposed || scheduled) return;
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          try {
+            evaluate();
+          } catch (error) {
+            fail(error);
+          }
+        });
+      };
 
-  return () => {
-    unsubscribe();
-    unsubscribeState?.();
-    disposeTab();
-    store.release();
-    setSidebarMode(false);
-  };
+      function NativeBody(props: NativeTabProps) {
+        const { tab } = props.useTabInfo();
+        useEffect(() => acknowledge(props.sessionId), [props.sessionId]);
+        return (
+          <ObservationSidebarTab store={store} scopeId={props.sessionId} visible={tab.visible} />
+        );
+      }
+
+      try {
+        disposers.push(
+          host.slots.register({ name: BODY_SLOT, key: OBSERVATION_TAB_ID }, function Body(props) {
+            return (
+              <ObservationBoundary onError={fail}>
+                <NativeBody {...props} />
+              </ObservationBoundary>
+            );
+          }),
+        );
+        disposers.push(
+          host.slots.register({ name: TITLE_SLOT, key: OBSERVATION_TAB_ID }, function Title(props) {
+            useEffect(() => acknowledge(props.sessionId), [props.sessionId]);
+            return <ObservationTitle store={store} scopeId={props.sessionId} />;
+          }),
+        );
+        disposers.push(
+          tabs.register({
+            id: OBSERVATION_TAB_ID,
+            kind: OBSERVATION_TAB_KIND,
+            title: () => TAB_TITLE,
+            guide: [
+              {
+                order: 60,
+                title: () => TAB_TITLE,
+                description: () => "Watch browser activity and control running sessions.",
+                icon: TabIcon,
+              },
+            ],
+          }),
+        );
+        disposers.push(() => store.release());
+        store.acquire();
+        disposers.push(store.subscribe(schedule));
+        disposers.push(sessions.subscribe(schedule));
+        disposers.push(store.presentation.subscribe(schedule));
+        connect();
+        schedule();
+      } catch (error) {
+        dispose();
+        reportFailure(error);
+      }
+      return dispose;
+    }),
+  );
 }

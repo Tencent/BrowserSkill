@@ -135,18 +135,30 @@ the `browser-skill` skill is successfully invoked, either by the model or throug
 
 ## Live browser view
 
-The dsh Web UI shows the plugin's browser sessions in a floating panel. If your
-profile provides the `dsh-better-sidebar` integration, the view appears in a
-**Browser Skill** sidebar tab instead.
+The dsh Web UI prefers a **Browser Skill** tab in DSH's native right sidebar.
+The native tab opens when the current conversation first has a browser session;
+ordinary screenshot and action updates do not switch tabs or reopen a tab you
+closed. You can reopen it from the sidebar's guide.
+
+The native sidebar is optional. Profiles without its services use a floating
+panel, and a failed native integration falls back to that panel. No
+`dsh-better-sidebar` installation is required; it can coexist with BrowserSkill,
+which registers directly with DSH rather than with the third-party sidebar.
 
 - See the current action, elapsed time, and recent screenshot for each session.
 - Select a session to focus on it. The sidebar view follows the current conversation.
+- Use **Use floating view** to move observation into a floating panel, and
+  **Move to sidebar** (or **Show here** in the tab) to return. This choice lasts
+  only until the page reloads; it is not saved in your profile or browser storage.
 - Use **Interrupt** to cancel the current browser command. The agent may continue
   with another action afterward.
 - Drag or resize the floating panel, or use **Pop out** to open a Picture-in-Picture
   window in browsers that support it.
 - Periodic screenshots are requested while a browser observation view is visible.
   Configure the active and idle intervals with the options above.
+
+The floating panel shows all browser sessions managed by this plugin instance;
+the native tab shows the current conversation's browsers and those of its subagents.
 
 The observation endpoints require a loopback address such as `localhost` or
 `127.0.0.1`. Access through a LAN hostname or non-loopback reverse proxy is not supported.

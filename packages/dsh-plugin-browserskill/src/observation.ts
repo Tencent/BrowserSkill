@@ -43,7 +43,7 @@ export interface SessionObservation {
   /**
    * The DSH conversations this session belongs to (the starting agent's
    * session plus its seed-lineage ancestors), recorded at start. Scoped
-   * surfaces (the better-sidebar tab) filter by it; absent means untracked
+   * surfaces (the native sidebar tab) filter by it; absent means untracked
    * ownership — visible only in the global (unscoped) view.
    */
   dshSessionIds?: string[];
