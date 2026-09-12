@@ -667,12 +667,11 @@ async fn forward_one(
     let response = match waited {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => {
-            if job.method == Method::ToolSessionStop
+            if matches!(job.method, Method::ToolSessionStop | Method::ToolTabBorrow)
                 && let ResponseBody::Ok(value) = &resp.body
             {
-                // Teardown crossed its final irreversible boundary before
-                // the cancel landed. Commit the real extension result so the
-                // daemon does not retain a session whose window is gone.
+                // The extension completed teardown or committed the borrow
+                // before cancellation. Preserve its confirmed result.
                 return Ok(value.clone());
             }
             // File transfer commits are irreversible. A late cancel cannot
@@ -716,12 +715,13 @@ async fn forward_one(
         }
         WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
             ResponseBody::Ok(value)
-                if job.method == Method::ToolSessionStop
-                    || is_effect_aware_transfer(&job.method) =>
+                if matches!(
+                    job.method,
+                    Method::ToolSessionStop | Method::ToolTabBorrow | Method::ToolRequestHelp
+                ) || is_effect_aware_transfer(&job.method) =>
             {
-                // The close crossed its irreversible boundary during the
-                // timeout cleanup grace, or the transfer committed before its
-                // deadline cancel settled. Preserve the irreversible result.
+                // Preserve a completed operation or a settled human-help
+                // outcome received during deadline cleanup.
                 return Ok(value);
             }
             ResponseBody::Err(err)
@@ -731,6 +731,13 @@ async fn forward_one(
             }
             ResponseBody::Err(err) if is_effect_aware_transfer(&job.method) => {
                 return Err(timed_out_transfer_error(&err));
+            }
+            _ if matches!(job.method, Method::ToolTabBorrow | Method::ToolRequestHelp) => {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "The human interaction deadline expired; the extension cancelled the request".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
             }
             _ => {
                 return Err(RpcError {
@@ -742,6 +749,9 @@ async fn forward_one(
         },
         WaitOutcome::CleanupTimeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::Timeout,
@@ -761,6 +771,16 @@ async fn forward_one(
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
+            if job.method == Method::ToolRequestHelp {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "request-help timed out and cleanup could not be confirmed".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
+            }
             if matches!(
                 job.method,
                 Method::ToolWheel | Method::ToolScreenshotFullPage
@@ -784,6 +804,9 @@ async fn forward_one(
         }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::ProtocolError));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::ProtocolError,
@@ -800,6 +823,9 @@ async fn forward_one(
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::Timeout,
@@ -823,9 +849,27 @@ async fn forward_one(
 
 // Wheel and full-page screenshots must cancel at the daemon deadline: local
 // deadlines cannot account for transit delays. Keep the queue held for cleanup.
+// Human interaction deadlines also dismiss their pending UI before releasing the queue.
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    matches!(method, Method::ToolWheel | Method::ToolScreenshotFullPage)
-        || is_effect_aware_transfer(method)
+    matches!(
+        method,
+        Method::ToolWheel
+            | Method::ToolScreenshotFullPage
+            | Method::ToolTabBorrow
+            | Method::ToolRequestHelp
+    ) || is_effect_aware_transfer(method)
+}
+
+fn unknown_borrow_error(code: ErrorCode) -> RpcError {
+    RpcError {
+        code,
+        message:
+            "Tab borrow ended without a confirmed outcome; inspect tab state before continuing"
+                .into(),
+        data: Some(
+            serde_json::json!({ "reason": "borrow_outcome_unknown", "effect_state": "unknown" }),
+        ),
+    }
 }
 
 fn is_effect_aware_transfer(method: &Method) -> bool {

@@ -15,6 +15,63 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn parses_unattended_session_without_changing_normal_defaults() {
+    for unattended in [false, true] {
+        let mut argv = vec!["bsk", "session", "start"];
+        if unattended {
+            argv.extend(["--unattended", "--no-focus"]);
+        }
+        let Command::Session(SessionCmd {
+            sub: SessionSub::Start(args),
+        }) = parse(&argv).command
+        else {
+            panic!("expected session start");
+        };
+        assert_eq!(args.unattended, unattended);
+        assert_eq!(args.no_focus, unattended);
+    }
+}
+
+#[test]
+fn parses_single_borrow_override_and_confirmation_timeout() {
+    use bsk::cli::tab::TabSub;
+    for override_confirmation in [false, true] {
+        let mut argv = vec!["bsk", "tab", "borrow", "42", "--session", "s1"];
+        if override_confirmation {
+            argv.extend(["--no-confirm", "--timeout", "120s"]);
+        }
+        let Command::Tab(command) = parse(&argv).command else {
+            panic!("expected tab command");
+        };
+        let TabSub::Borrow(args) = command.sub else {
+            panic!("expected borrow");
+        };
+        assert_eq!(args.no_confirm, override_confirmation);
+        assert_eq!(
+            args.timeout,
+            if override_confirmation {
+                Some(120_000)
+            } else {
+                None
+            }
+        );
+    }
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "tab",
+            "borrow",
+            "42",
+            "--session",
+            "s1",
+            "--timeout",
+            "0ms"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn parses_upload_modes() {
     let cli = parse(&[
         "bsk",

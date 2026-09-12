@@ -81,7 +81,7 @@ async fn handshake_as_ext(
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -158,6 +158,7 @@ async fn session_user_interrupt_event_cancels_inflight_with_user_aborted() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(1),
                         };
                         let reply = ResponseFrame {
@@ -334,6 +335,7 @@ async fn assert_idle_interrupt_rejects(method: Method) {
             if let Frame::Request(req) = frame {
                 if req.method == Method::ToolSessionStart {
                     let result = SessionStartResult {
+                        interaction: None,
                         agent_window_id: Some(1),
                     };
                     let reply = ResponseFrame {
@@ -462,6 +464,7 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(1),
                         })
                         .unwrap(),
@@ -620,6 +623,7 @@ async fn user_interrupt_marker_survives_long_delay_before_next_tool() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(1),
                         })
                         .unwrap(),

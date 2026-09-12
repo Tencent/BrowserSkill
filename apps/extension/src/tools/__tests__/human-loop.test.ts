@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
 import type { RequestHelpParams } from "@/transport/types";
@@ -50,11 +51,13 @@ function installHelpLifecycleChrome() {
   };
 }
 
-function fakeManager(sessionId: string, agentWindowId: number, tabId: number) {
+function fakeManager(sessionId: string, agentWindowId: number, tabId: number, unattended = false) {
   const refStore = new RefStore();
   const mgr = {
     get: (id: string) =>
-      id === sessionId ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map() } : null,
+      id === sessionId
+        ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map(), unattended }
+        : null,
     findByWindowId: (wid: number) => (wid === agentWindowId ? { sessionId } : null),
   } as unknown as SessionManager;
   return mgr;
@@ -84,6 +87,154 @@ describe("handleRequestHelp", () => {
   afterEach(() => {
     resetHelpLifecycleForTests();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    "continued",
+    "cancelled",
+  ])("read failure preserves the human wait and %s decision", async (outcome) => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    let respond!: (value: unknown) => void;
+    const deps = baseDeps({
+      preferences,
+      sendToTab: vi.fn((_tab, message) =>
+        message.type === "bsk-help-request"
+          ? new Promise((resolve) => {
+              respond = resolve;
+            })
+          : Promise.resolve(),
+      ),
+    });
+    let settled = false;
+    const pending = handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps).then(
+      (result) => {
+        settled = true;
+        return result;
+      },
+    );
+    await vi.waitFor(() => expect(respond).toBeTypeOf("function"));
+    expect(settled).toBe(false);
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+    respond({ type: "bsk-help-response", outcome });
+    expect(await pending).toMatchObject({ outcome, tab_id: 5 });
+  });
+
+  it("legacy session metadata cannot disable help on preference read failure", async () => {
+    const preferences = new InteractionPreferenceStore();
+    const ready = vi
+      .spyOn(preferences, "ready")
+      .mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = baseDeps({ preferences });
+    const result = await handleRequestHelp(fakeManager("abcd", 99, 5, true), baseParams(), deps);
+    expect(result).toMatchObject({ outcome: "continued" });
+    expect(ready).toHaveBeenCalledOnce();
+    expect(deps.sendToTab).toHaveBeenCalled();
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+  });
+
+  it.each([false, true])("legacy session metadata cannot disable help (%s)", async (unattended) => {
+    const deps = baseDeps();
+    expect(
+      await handleRequestHelp(fakeManager("abcd", 99, 5, unattended), baseParams(), deps),
+    ).toMatchObject({ outcome: "continued" });
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+  });
+
+  it("the saved help preference prevents all browser UI work", async () => {
+    const preferences = new InteractionPreferenceStore();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockReturnValue({
+      confirmTabBorrow: true,
+      requestHelpEnabled: false,
+    });
+    const deps = baseDeps({ preferences });
+    expect(await handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps)).toMatchObject({
+      outcome: "disabled",
+    });
+    expect(deps.tabsApi.get).not.toHaveBeenCalled();
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+    expect(deps.windows.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "continued",
+    "cancelled",
+  ])("re-enabling help restores the original wait and user %s outcome", async (outcome) => {
+    const preferences = new InteractionPreferenceStore();
+    let enabled = false;
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockImplementation(() => ({
+      confirmTabBorrow: true,
+      requestHelpEnabled: enabled,
+    }));
+    let respond!: (value: unknown) => void;
+    const deps = baseDeps({
+      preferences,
+      sendToTab: vi.fn((_tab, message) => {
+        if (message.type === "bsk-help-request")
+          return new Promise((resolve) => {
+            respond = resolve;
+          });
+        return Promise.resolve();
+      }),
+    });
+    const manager = fakeManager("abcd", 99, 5, true);
+    const disabled = await handleRequestHelp(manager, baseParams(), deps);
+    expect(disabled).toMatchObject({ outcome: "disabled" });
+    expect(disabled).not.toHaveProperty("completed_by");
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+
+    enabled = true;
+    let settled = false;
+    const pending = handleRequestHelp(manager, baseParams(), deps).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.waitFor(() => expect(respond).toBeTypeOf("function"));
+    expect(settled).toBe(false);
+    expect(deps.windows.update).toHaveBeenCalledWith(99, { focused: true });
+    expect(deps.activateTab).toHaveBeenCalledWith(5);
+    respond({ type: "bsk-help-response", outcome, note: "User decision" });
+    expect(await pending).toMatchObject({ outcome, tab_id: 5, note: "User decision" });
+  });
+
+  it("disabling help finishes an already displayed request and removes its overlay", async () => {
+    const preferences = new InteractionPreferenceStore();
+    let enabled = true;
+    let changed!: () => void;
+    const unsubscribe = vi.fn();
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockImplementation(() => ({
+      confirmTabBorrow: true,
+      requestHelpEnabled: enabled,
+    }));
+    vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
+      changed = () => listener(preferences.get());
+      return unsubscribe;
+    });
+    const deps = baseDeps({
+      preferences,
+      sendToTab: vi.fn().mockResolvedValue({ type: "bsk-help-ack", ok: true }),
+    });
+    const pending = handleRequestHelp(fakeManager("abcd", 99, 5), baseParams(), deps);
+    await vi.waitFor(() =>
+      expect(deps.sendToTab).toHaveBeenCalledWith(
+        5,
+        expect.objectContaining({ type: "bsk-help-request" }),
+      ),
+    );
+    enabled = false;
+    changed();
+    expect(await pending).toMatchObject({ outcome: "disabled" });
+    expect(deps.sendToTab).toHaveBeenCalledWith(
+      5,
+      expect.objectContaining({ type: "bsk-help-cancel" }),
+    );
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
   it("rejects unknown session", async () => {
@@ -93,6 +244,57 @@ describe("handleRequestHelp", () => {
       baseDeps(),
     );
     expect("code" in res && res.code).toBe("not_found");
+  });
+
+  it("cleans up late notification and overlay delivery after help is disabled", async () => {
+    const preferences = new InteractionPreferenceStore();
+    let enabled = true;
+    let changed!: () => void;
+    vi.spyOn(preferences, "ready").mockResolvedValue();
+    vi.spyOn(preferences, "get").mockImplementation(() => ({
+      confirmTabBorrow: true,
+      requestHelpEnabled: enabled,
+    }));
+    vi.spyOn(preferences, "subscribe").mockImplementation((listener) => {
+      changed = () => listener(preferences.get());
+      return () => {};
+    });
+    let deliverOverlay!: (response: unknown) => void;
+    let deliverNotification!: (id: string) => void;
+    const notifications = {
+      create: vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            deliverNotification = resolve;
+          }),
+      ),
+      clear: vi.fn().mockResolvedValue(true),
+    };
+    const sendToTab = vi.fn().mockImplementation((_id, message) =>
+      message.type === "bsk-help-request"
+        ? new Promise((resolve) => {
+            deliverOverlay = resolve;
+          })
+        : Promise.resolve(),
+    );
+    const pending = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams(),
+      baseDeps({ preferences, notifications, sendToTab }),
+    );
+    await vi.waitFor(() => expect(deliverOverlay).toBeTypeOf("function"));
+    enabled = false;
+    changed();
+    expect(await pending).toMatchObject({ outcome: "disabled" });
+    await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledTimes(2));
+    deliverOverlay({ type: "bsk-help-ack", ok: true });
+    deliverNotification("late-notification");
+    await vi.waitFor(() => expect(sendToTab).toHaveBeenCalledTimes(3));
+    expect(notifications.clear).toHaveBeenCalledTimes(2);
+    expect(
+      sendToTab.mock.calls.filter(([, message]) => message.type === "bsk-help-request"),
+    ).toHaveLength(1);
+    expect(sendToTab.mock.calls[2][1].type).toBe("bsk-help-cancel");
   });
 
   it("brings the tab to the foreground and returns the user outcome", async () => {

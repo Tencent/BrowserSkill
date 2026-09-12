@@ -173,6 +173,60 @@ Start a new Agent session and write a prompt that needs the browser, for example
 /browser-skill open example.com and summarize what is on the page.
 ```
 
+### Automation settings
+
+The extension popup has two independent **Automation settings**, both enabled by default.
+The user's saved browser settings are authoritative for every session:
+
+| Confirm before borrowing tabs | Allow requests for human help | Behavior |
+| --- | --- | --- |
+| On | On | Borrowing requires approval; help requests show the existing UI. |
+| On | Off | Borrowing requires approval; help requests return `disabled`. |
+| Off | On | Borrowing skips confirmation; help requests show the existing UI. |
+| Off | Off | Borrowing skips confirmation; help requests return `disabled`. |
+
+Settings save automatically for the browser profile and apply to existing and new sessions.
+Turning confirmation off releases pending borrow confirmations; turning help off finishes pending
+help requests as `disabled`. Turning either back on restores its behavior for subsequent operations,
+including sessions created with the legacy `--unattended` flag. Completed borrows are not undone,
+and finished help requests are not reopened. Allowing help makes `request-help` available; it does
+not require every browser action to ask for permission. Task authorization and host approvals still apply.
+
+Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Agent Window.
+For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
+`tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
+deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
+the daemon also logs a notice for its inherited environment setting. Scripts that relied on these
+inputs alone to avoid waiting must now use the browser settings. `session start --json` and
+`session list --json` report the browser's effective `interaction` policy.
+
+When help is disabled, `request-help` returns `disabled` without confirming any human action.
+The skill directs the agent to re-observe and make reasonable efforts to complete authorized steps
+using existing login state, authorized inputs, and available tools. Where task authorization and
+host rules allow, models with image understanding may attempt graphical verification. Phone-only
+QR scans, face verification, unavailable SMS codes, and image-only CAPTCHAs for text-only models
+may remain blocked. A disabled result neither completes the task nor grants additional permission.
+
+If preference loading fails, the runtime retains known values or defaults to both enabled when no
+valid value is available. It does not write fallback defaults or block session creation. Later reads
+and storage events can recover the settings. The popup reports read failures and prevents saving;
+failed writes are not treated as successful. A disconnected browser produces an error, not a local
+`disabled` result based on command-line flags or environment variables.
+
+`tab borrow --timeout 60s` controls the confirmation wait, not whether confirmation is required.
+Protocol 1.3 retains connection compatibility with protocols 1.0–1.2. Ordinary sessions and
+default tab borrowing remain available during staggered upgrades. The popup identifies older
+daemons, while `bsk status` reports protocol differences. Custom borrowing waits require both
+daemon and extension protocol 1.2 or later; only that operation returns an upgrade error when
+unsupported. Older daemons may still have shorter default borrowing waits.
+
+The current CLI requires daemon protocol 1.3 for `request-help`, because older daemons can answer
+locally without consulting the browser. This restriction does not disconnect the browser or stop
+other operations. Update the CLI, running daemon, and extension for full enforcement of the
+settings above. New extensions always enforce their saved settings on requests they receive.
+An older CLI may exit locally for `BSK_REQUEST_HELP=off` before contacting the daemon; mixed-version
+installations retain such legacy behavior, which updating only the extension cannot change.
+
 ## DeepSeek Harness plugin
 
 Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?

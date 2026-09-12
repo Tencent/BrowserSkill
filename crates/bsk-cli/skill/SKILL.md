@@ -51,14 +51,25 @@ When multiple browsers are connected, use `bsk browsers` and start with
 Agent Window does not need to interrupt the user's current work; it is not a flag on other commands.
 Run `bsk doctor` when startup or transport problems persist after one retry.
 
+Start tasks with `bsk session start`. The extension's saved Automation settings decide whether
+borrowing needs confirmation and human help is available; both are enabled by default. Changes apply
+to existing sessions as well as new ones. Disabling human help does not disable borrow confirmation.
+
+`--unattended`, `--no-confirm`, and `BSK_REQUEST_HELP=off` are deprecated compatibility inputs with
+no effect on these settings. Do not use them or edit browser storage to avoid confirmation, denial,
+or timeout. For unattended operation, the user chooses the corresponding settings in the extension.
+`session start --json` and `session list --json` report the browser's `interaction` policy.
+Allowing human help makes `request-help` available; it does not require a handoff for every action.
+Task authorization and host approvals still apply.
+
 ## Work toward one observable goal
 
 - Derive a concrete success condition from the user's request or a supplied trace.
 - Take the shortest purposeful path: observe, act, then make at most one observation to confirm an
   ambiguous result.
 - Once success is visible, do not click, refresh, navigate, switch tabs, or perform extra checks.
-- If a human-only step appears or two attempts make no progress, request help instead of
-  brute-forcing.
+- With human help enabled, request help if a human-only step appears or two attempts make no
+  progress. With help disabled, follow the autonomous handling rules below.
 
 With a trace, follow its semantic target information and values in order, but treat its refs as
 record-local hints. Stop when its purpose or last meaningful effect is satisfied. A trace guides the
@@ -124,18 +135,45 @@ Normal page writes affect only Agent Window tabs. To operate a user tab, first l
 after the relevant step with `bsk tab return <tab-id>`; never invent a tab id or keep a personal tab
 borrowed across unrelated work.
 
+`tab borrow --timeout 120s` changes the confirmation wait (default 60s), not whether approval is
+required. Custom waits need daemon and extension protocol 1.2+. Compatible older peers can still
+start sessions and borrow with their default wait. The current CLI's `request-help` needs daemon
+protocol 1.3; an unsupported operation does not make the connection unusable. Update all three
+components for full browser-setting enforcement; older programs may still end help locally.
+Repeating a completed borrow in the same session returns
+its existing result. Do not repeat pending requests, denied requests, or confirmation timeouts,
+or switch to another browser tool to bypass them. If `reason` is `borrow_outcome_unknown`, inspect
+tab and session state before continuing; the tab may already have moved.
+
 ## Ask the human when needed
 
-Use `bsk request-help` for login, captcha, OTP, payment confirmation, consent, or another step the
-user must complete. Give a precise prompt and pass fresh `--target` refs/selectors when concrete
-controls can be highlighted. Use completion criteria only when the page has a clear stable success
-signal.
+When human help is enabled (the default), use `bsk request-help` for login, captcha, OTP, payment
+confirmation, consent, or another step the user must complete. Give a precise prompt and pass
+fresh `--target` refs/selectors when concrete controls can be highlighted. Use completion criteria
+only when the page has a clear stable success signal.
 
 The result `outcome` is one of `continued`, `completed`, `cancelled`, `timed_out`, or `disabled`
-(`navigated` is deprecated — never treat navigation as a completion signal). Resume only after
-`continued` or `completed`. Treat `cancelled` as rejection, and `timed_out` or `disabled` as a
-blocker rather than a reason to retry. After control returns, run a fresh `bsk observe` before
-reasoning about the page or using refs.
+(`navigated` is deprecated — never treat navigation as a completion signal). After a human handoff,
+resume only after `continued` or `completed`. Treat `cancelled` as rejection and `timed_out` as a
+blocker; do not repeat that request. Observe again after control returns before using refs.
+
+When help is disabled in the extension, make every
+reasonable effort to complete the task autonomously with BrowserSkill. Do not call `request-help`.
+If a call returns `disabled`, no human action was confirmed: re-observe and continue working rather
+than marking the step blocked merely because help is unavailable.
+
+Disabling help adds no permission: keep task authorization and host restrictions in force.
+Use the current page, existing login state, and authorized credentials or codes to complete the
+current step. Where the task authorization and host rules allow, a model with image understanding
+may attempt graphical verification through screenshots and supported interactions. Phone-only QR
+scans, face verification, and unavailable SMS codes may remain blocked; a text-only model may also
+leave an image-only CAPTCHA unresolved. Attempt other authorized steps within available capabilities
+and verify the actual result before concluding they cannot be completed.
+
+After a failed attempt, re-observe and try a different viable approach when available. Do not loop
+on identical failures or repeat an action whose outcome is unknown. Report a specific blocker only
+when required information or capability is missing, or viable approaches are exhausted; continue
+independent work. Do not re-enable help or switch browser backends to work around those limits.
 
 ## Command inventory
 
@@ -216,7 +254,7 @@ Decision sequence when uploading:
 1. Try input mode (the default).
 2. If it returns `reason=file_input_not_activated` with `effect_state=none`, re-observe. When a
    reliable attachment target exists, try `--mode drop` once against that target.
-3. Otherwise fall back to `request-help`.
+3. Otherwise request help if enabled; when disabled, follow the autonomous handling rules above.
 4. **Never** switch mechanisms or repeat when `effect_state` is `unknown` or `committed` — the
    browser may already have applied the file.
 

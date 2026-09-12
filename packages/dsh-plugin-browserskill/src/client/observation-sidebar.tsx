@@ -64,7 +64,12 @@ export interface SidebarSplitLike {
 export type SidebarNodeLike = SidebarLeafLike | SidebarSplitLike;
 
 export interface SidebarStateLike {
-  splits: SidebarNodeLike;
+  /**
+   * Right-column split tree. DSH 0.1.5 (better-sidebar 0.19+) moved the right
+   * column to dsh's native Sidebar and no longer emits this field, so it is
+   * optional here; earlier versions always provide it.
+   */
+  splits?: SidebarNodeLike;
   bottomSplits: SidebarNodeLike;
   /** Whether the right panel is expanded (the merged drawer on narrow screens). */
   panelOpen?: boolean;
@@ -170,7 +175,11 @@ function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
 /** Whether a tab of our type is already open in either sidebar workbench. */
 export function observationTabOpen(state: SidebarStateLike | undefined): boolean {
   if (state === undefined) return false;
+  // A root may be absent even when the snapshot exists: `splits` is gone on
+  // DSH 0.1.5+ (better-sidebar 0.19+), where the right column belongs to dsh's
+  // native Sidebar. Guard before walking so we do not dereference undefined.
   for (const root of [state.splits, state.bottomSplits]) {
+    if (root === undefined) continue;
     for (const leaf of leafNodes(root)) {
       if (leaf.tabs.some((tab) => tab.type === OBSERVATION_TAB_TYPE)) return true;
     }

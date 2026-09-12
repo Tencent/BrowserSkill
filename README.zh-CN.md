@@ -151,6 +151,48 @@ daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只�
 /browser-skill open example.com and summarize what is on the page.
 ```
 
+### 自动化设置与无人值守
+
+插件弹窗提供两个默认开启的独立设置。**用户在插件中保存的设置对所有会话具有最终决定权：**
+
+| 借用标签页前确认 | 允许请求人工协助 | 实际行为 |
+| --- | --- | --- |
+| 开 | 开 | 借用需要确认；求助正常弹窗。 |
+| 开 | 关 | 借用需要确认；求助返回 `disabled`。 |
+| 关 | 开 | 借用免确认；求助正常弹窗。 |
+| 关 | 关 | 借用免确认；求助返回 `disabled`。 |
+
+设置自动保存到当前浏览器配置，对已有和新建会话生效。关闭借用确认会放行待确认请求；
+关闭人工协助会将等待中的求助结束为 `disabled`。重新打开开关后，后续操作恢复对应行为，
+包括通过旧参数 `--unattended` 创建的会话。已完成的借用不会撤销，已结束的求助不会重新弹出。
+允许人工协助意味着 `request-help` 可用，不代表每个浏览器操作都必须先请求许可；任务授权和宿主审批仍然有效。
+
+正常使用 `bsk session start`；需要后台打开 Agent Window 时添加 `--no-focus`。
+无人值守由用户在插件中关闭相应开关。`--unattended`、`tab borrow --no-confirm`、
+`BSK_REQUEST_HELP=off` 保留兼容识别，但已弃用，不能覆盖插件开关。CLI 使用这些输入时会输出说明，
+Daemon 也会为自身继承的旧环境设置记录说明。原先只依靠这些输入避免等待的脚本，现在需要遵循浏览器设置。
+`session start --json` 和 `session list --json` 返回浏览器实际的 `interaction` 策略。
+
+关闭人工协助后，`request-help` 返回 `disabled`，不代表用户已完成操作。技能会引导 Agent
+重新观察页面，利用现有登录态、已授权输入和可用工具尽力完成已授权的步骤。
+任务授权和宿主规则允许时，具备视觉能力的模型可以尝试图形验证。手机扫码、人脸验证、
+无法获取的短信验证码，以及纯文本模型无法识别的图形验证码可以报告受阻。
+关闭协助不增加授权，也不能仅因求助不可用就将任务判为完成或受阻。
+
+偏好读取失败时，后台保留已有有效值；尚无有效值时按两项开启处理，不写回默认值，也不阻止新建会话。
+后续请求会重试读取，存储变更也能恢复策略。弹窗保留读取错误提示并禁止保存；写入失败不会被当作成功。
+浏览器未连接时返回连接错误，不会根据命令行参数或环境变量在本地伪造 `disabled`。
+
+`tab borrow --timeout 60s` 只设置确认等待时间，不决定是否需要确认。
+协议 1.3 保持与协议 1.0–1.2 的连接兼容，分步升级时仍可创建普通会话、使用默认等待时间借用标签页。
+插件会提示旧 Daemon 的兼容限制，`bsk status` 也会显示协议差异。自定义借用等待时间要求 Daemon 和扩展
+都支持协议 1.2 或更高版本；不支持时只限制这次操作，并提示升级。旧 Daemon 的默认借用等待预算可能仍较短。
+
+新版 CLI 的 `request-help` 要求 Daemon 协议 1.3，因为旧 Daemon 可能在本地返回而不询问浏览器。
+该限制不会断开浏览器连接，也不影响其他操作。CLI、实际运行的 Daemon 和扩展都更新后，完整执行上述设置优先级。
+新版扩展始终按保存的开关处理它收到的请求。旧 CLI 可能在连接 Daemon 前就因 `BSK_REQUEST_HELP=off` 本地返回；
+混用版本时保留这类历史行为，只升级扩展无法改变旧可执行文件的行为。
+
 ## DeepSeek Harness 插件
 
 在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它为 Agent 提供原生 `browser_*` 工具，由插件代为调用 `bsk`，并在 Web UI 中实时展示浏览器会话。

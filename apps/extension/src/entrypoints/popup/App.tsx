@@ -1,20 +1,17 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Badge, Button, Input, Label } from "@browser-skill/ui";
-import {
-  RiArrowLeftLine,
-  RiArrowRightSLine,
-  RiCheckLine,
-  RiFileCopyLine,
-  RiInformationLine,
-} from "@remixicon/react";
+import { RiArrowLeftLine, RiArrowRightSLine, RiCheckLine, RiFileCopyLine } from "@remixicon/react";
 import { type ChangeEvent, useEffect, useState } from "react";
 import { AuditPanel } from "@/components/audit-panel";
+import { compareProtocol } from "@/lib/semver";
 import { resolveDaemonWsUrl } from "@/transport/daemon-endpoint";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
+import { InteractionSettings } from "./interaction-settings";
 import { LongScreenshot } from "./long-screenshot";
+import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
@@ -98,6 +95,8 @@ export function App() {
   const connectionLive = statusState === "connected" || isSkewed;
   const daemonVersion = snapshot.handshake?.version ?? "—";
   const daemonProtocol = snapshot.handshake?.protocol_version ?? "—";
+  const interactionProtocolOrder = compareProtocol(daemonProtocol, "1.3");
+  const legacyInteraction = interactionProtocolOrder !== null && interactionProtocolOrder < 0;
   const extensionVersion = snapshot.extensionVersion || "—";
   const instanceId = snapshot.instanceId || "—";
 
@@ -238,10 +237,15 @@ export function App() {
                 className="mt-2 text-xs leading-snug text-muted-foreground"
                 data-slot="popup-version-skew-warning"
               >
-                {t("popup.versionSkewWarning", {
-                  extensionProtocol: PROTOCOL_VERSION,
-                  cliProtocol: daemonProtocol,
-                })}
+                {t(
+                  legacyInteraction
+                    ? "popup.interactionCompatibilityWarning"
+                    : "popup.versionSkewWarning",
+                  {
+                    extensionProtocol: PROTOCOL_VERSION,
+                    cliProtocol: daemonProtocol,
+                  },
+                )}
               </p>
             )}
           </section>
@@ -250,27 +254,17 @@ export function App() {
             className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
             data-slot="popup-control-hints-card"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className="relative flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1">
                 <span className="truncate text-sm font-medium">
                   {t("popup.controlHintsToggleTitle")}
                 </span>
-                <span className="group relative inline-flex shrink-0">
-                  <button
-                    type="button"
-                    aria-label={t("popup.controlHintsInfoLabel")}
-                    data-slot="popup-control-hints-info"
-                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                  >
-                    <RiInformationLine className="size-3.5" aria-hidden />
-                  </button>
-                  <span
-                    role="tooltip"
-                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                  >
-                    {t("popup.controlHintsToggleHint")}
-                  </span>
-                </span>
+                <SettingInfo
+                  label={t("popup.controlHintsInfoLabel")}
+                  data-slot="popup-control-hints-info"
+                >
+                  {t("popup.controlHintsToggleHint")}
+                </SettingInfo>
               </span>
               <Switch
                 checked={!controlHintsHidden}
@@ -281,11 +275,13 @@ export function App() {
             </div>
           </section>
 
+          <InteractionSettings />
+
           <section
             className="rounded-xl border border-border/80 bg-card/60 px-3 py-2.5"
             data-slot="popup-daemon-port-card"
           >
-            <div className="flex items-center justify-between gap-2">
+            <div className="relative flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-1">
                 <Label
                   htmlFor="bh-daemon-port"
@@ -293,22 +289,12 @@ export function App() {
                 >
                   {t("popup.daemonPortLabel")}
                 </Label>
-                <span className="group relative inline-flex shrink-0">
-                  <button
-                    type="button"
-                    aria-label={t("popup.daemonPortInfoLabel")}
-                    data-slot="popup-daemon-port-info"
-                    className="flex size-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-                  >
-                    <RiInformationLine className="size-3.5" aria-hidden />
-                  </button>
-                  <span
-                    role="tooltip"
-                    className="pointer-events-none absolute bottom-full left-0 z-10 mb-1.5 w-56 whitespace-normal rounded-md bg-foreground/65 px-2 py-1 text-[10px] font-medium leading-snug text-background opacity-0 shadow-md backdrop-blur-sm transition-opacity group-hover:opacity-100 group-focus-within:opacity-100"
-                  >
-                    {t("popup.daemonPortHint")}
-                  </span>
-                </span>
+                <SettingInfo
+                  label={t("popup.daemonPortInfoLabel")}
+                  data-slot="popup-daemon-port-info"
+                >
+                  {t("popup.daemonPortHint")}
+                </SettingInfo>
               </span>
               <Input
                 id="bh-daemon-port"

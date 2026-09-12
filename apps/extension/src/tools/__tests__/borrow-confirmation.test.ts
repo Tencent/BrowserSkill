@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import {
   __resetPendingBorrowDecisionsForTest,
   __resetPendingBorrowNotificationsForTest,
@@ -93,6 +94,136 @@ describe("requestBorrowConfirmation", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [true, false],
+    [false, false],
+    [true, true],
+    [false, true],
+  ])("enabled confirmation waits for allow=%s, including after a read failure=%s", async (allowed, readFailed) => {
+    const preferences = new InteractionPreferenceStore();
+    const ready = vi.spyOn(preferences, "ready").mockResolvedValue();
+    if (readFailed) ready.mockRejectedValue(new Error("storage unavailable"));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await preferences.readyOrFallback();
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    let respond!: (value: unknown) => void;
+    tabs.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          respond = resolve;
+        }),
+    );
+    let settled = false;
+    const unsubscribe = vi.fn();
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+      autoAllow: {
+        get: () => !preferences.get().confirmTabBorrow,
+        subscribe: () => unsubscribe,
+      },
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(false);
+    expect(notifications.create).toHaveBeenCalledOnce();
+    expect(windows.update).toHaveBeenCalledWith(10, { focused: true });
+    respond({ type: "borrow-response", allowed });
+    if (allowed) expect(await pending).toBe(true);
+    else
+      expect(await pending).toMatchObject({ code: "cancelled", data: { reason: "user_denied" } });
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("reports unavailable UI immediately when neither content nor notifications can show confirmation", async () => {
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    tabs.sendMessage.mockRejectedValue(new Error("No content listener"));
+    notifications.create.mockRejectedValue(new Error("Notifications unavailable"));
+    expect(
+      await requestBorrowConfirmation(42, { deps: { tabs, windows, notifications } }),
+    ).toMatchObject({ data: { reason: "confirmation_ui_unavailable" } });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still accepts consent at 45 seconds", async () => {
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    let decide!: (value: unknown) => void;
+    tabs.sendMessage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          decide = resolve;
+        }),
+    );
+    const pending = requestBorrowConfirmation(42, { deps: { tabs, windows, notifications } });
+    await vi.advanceTimersByTimeAsync(45_000);
+    decide({ type: "borrow-response", allowed: true });
+    expect(await pending).toBe(true);
+  });
+
+  it("auto-allows without querying windows, focusing, notifying or messaging", async () => {
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+      autoAllow: { get: () => true, subscribe: vi.fn() },
+    });
+    expect(await pending).toBe(true);
+    expect(tabs.get).not.toHaveBeenCalled();
+    expect(tabs.sendMessage).not.toHaveBeenCalled();
+    expect(windows.getLastFocused).not.toHaveBeenCalled();
+    expect(notifications.create).not.toHaveBeenCalled();
+  });
+
+  it("finishes and dismisses the visible prompt when the saved policy disables confirmation", async () => {
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    tabs.sendMessage.mockImplementationOnce(() => new Promise(() => {}));
+    let autoAllow = false;
+    let changed!: () => void;
+    const unsubscribe = vi.fn();
+    const pending = requestBorrowConfirmation(42, {
+      deps: { tabs, windows, notifications },
+      autoAllow: {
+        get: () => autoAllow,
+        subscribe: (listener) => {
+          changed = listener;
+          return unsubscribe;
+        },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    autoAllow = true;
+    changed();
+    expect(await pending).toBe(true);
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(tabs.sendMessage).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ type: "borrow-cancel" }),
+    );
+    expect(notifications.clear).toHaveBeenCalled();
+  });
+
+  it("a notification Allow dismisses a successfully displayed page prompt too", async () => {
+    windows.getLastFocused.mockResolvedValue(userWindowWithActiveTab({ windowId: 10, tabId: 42 }));
+    tabs.sendMessage.mockImplementationOnce(() => new Promise(() => {}));
+    let onButton!: (id: string, index: number) => void;
+    attachBorrowNotificationButtonHandler({
+      onButtonClicked: {
+        addListener: (listener: typeof onButton) => {
+          onButton = listener;
+        },
+        removeListener: vi.fn(),
+      } as never,
+    });
+    const pending = requestBorrowConfirmation(42, { deps: { tabs, windows, notifications } });
+    await vi.advanceTimersByTimeAsync(1);
+    onButton(notifications.create.mock.calls[0][0], 0);
+    expect(await pending).toBe(true);
+    expect(tabs.sendMessage).toHaveBeenCalledWith(
+      42,
+      expect.objectContaining({ type: "borrow-cancel" }),
+    );
   });
 
   it("sends confirmation to the visible active tab when borrow target is inactive", async () => {
@@ -114,7 +245,7 @@ describe("requestBorrowConfirmation", () => {
     const allowed = await pending;
 
     expect(allowed).toBe(true);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const [messageTabId, message] = tabs.sendMessage.mock.calls[0] as [
       number,
       { tabId: number; isActiveTab: boolean; requestId: string; timeoutMs: number },
@@ -180,7 +311,7 @@ describe("requestBorrowConfirmation", () => {
     expect(message.isActiveTab).toBe(true);
   });
 
-  it("returns false when the user explicitly denies", async () => {
+  it("returns user_denied when the user explicitly denies", async () => {
     tabs.get.mockResolvedValueOnce({ id: 42, title: "Tab" });
     windows.getLastFocused.mockResolvedValueOnce(
       userWindowWithActiveTab({ windowId: 11, tabId: 42, url: "https://app.example/" }),
@@ -191,7 +322,7 @@ describe("requestBorrowConfirmation", () => {
       deps: { tabs, windows, notifications },
     });
     await vi.runAllTimersAsync();
-    expect(await pending).toBe(false);
+    expect(await pending).toMatchObject({ data: { reason: "user_denied" } });
   });
 
   it("denies malformed or missing confirmation responses", async () => {
@@ -206,7 +337,7 @@ describe("requestBorrowConfirmation", () => {
         deps: { tabs, windows, notifications },
       });
       await vi.runAllTimersAsync();
-      expect(await pending).toBe(false);
+      expect(await pending).toMatchObject({ data: { reason: "confirmation_ui_unavailable" } });
     }
   });
 
@@ -238,7 +369,7 @@ describe("requestBorrowConfirmation", () => {
     await vi.runAllTimersAsync();
 
     expect(await pending).toBe(true);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const [messageTabId] = tabs.sendMessage.mock.calls[0] as [number];
     // Must NOT pick 5001 (Agent Window's about:blank tab).
     expect(messageTabId).toBe(6001);
@@ -267,7 +398,7 @@ describe("requestBorrowConfirmation", () => {
     await vi.runAllTimersAsync();
 
     expect(await pending).toBe(true);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const [messageTabId] = tabs.sendMessage.mock.calls[0] as [number];
     expect(messageTabId).toBe(333);
   });
@@ -292,8 +423,8 @@ describe("requestBorrowConfirmation", () => {
 
     // Allowed=false from the second candidate must propagate as a real deny:
     // sendMessage failure on candidate #1 is NOT a silent allow.
-    expect(await pending).toBe(false);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
+    expect(await pending).toMatchObject({ data: { reason: "user_denied" } });
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(3);
     expect(tabs.sendMessage.mock.calls[0]?.[0]).toBe(300);
     expect(tabs.sendMessage.mock.calls[1]?.[0]).toBe(301);
   });
@@ -313,7 +444,7 @@ describe("requestBorrowConfirmation", () => {
       .mockRejectedValueOnce(new Error("Could not establish connection #2"));
 
     let resolved = false;
-    let resolvedValue: boolean | undefined;
+    let resolvedValue: Awaited<ReturnType<typeof requestBorrowConfirmation>> | undefined;
     const pending = requestBorrowConfirmation(42, {
       deps: { tabs, windows, notifications },
     }).then((v) => {
@@ -335,8 +466,8 @@ describe("requestBorrowConfirmation", () => {
 
     // The background timeout must resolve the request without authorizing it.
     await vi.advanceTimersByTimeAsync(BACKGROUND_TIMEOUT_MS);
-    expect(await pending).toBe(false);
-    expect(resolvedValue).toBe(false);
+    expect(await pending).toMatchObject({ data: { reason: "confirmation_timeout" } });
+    expect(resolvedValue).toMatchObject({ data: { reason: "confirmation_timeout" } });
 
     const exhaustedWarn = warnSpy.mock.calls.find(
       (call) =>
@@ -381,7 +512,7 @@ describe("requestBorrowConfirmation", () => {
     expect(await pending).toBe(true);
   });
 
-  it("resolves false when the user clicks the notification Deny button — no fail-open", async () => {
+  it("returns user_denied when the user clicks the notification Deny button — no fail-open", async () => {
     const buttonListeners: Array<(notificationId: string, buttonIndex: number) => void> = [];
     const onButtonClicked = {
       addListener: (cb: (notificationId: string, buttonIndex: number) => void) =>
@@ -420,7 +551,7 @@ describe("requestBorrowConfirmation", () => {
 
     // CRITICAL: the user said "Deny" via the notification button. This
     // must NOT be silently flipped to allow.
-    expect(await pending).toBe(false);
+    expect(await pending).toMatchObject({ data: { reason: "user_denied" } });
   });
 
   it("denies when no injectable user window exists at all", async () => {
@@ -442,7 +573,7 @@ describe("requestBorrowConfirmation", () => {
     });
     await vi.runAllTimersAsync();
 
-    expect(await pending).toBe(false);
+    expect(await pending).toMatchObject({ data: { reason: "confirmation_ui_unavailable" } });
     expect(tabs.sendMessage).not.toHaveBeenCalled();
     // No notification either — there's no actionable target window.
     expect(notifications.create).not.toHaveBeenCalled();
@@ -532,7 +663,7 @@ describe("requestBorrowConfirmation", () => {
       deps: { tabs, windows, notifications },
     });
     await vi.advanceTimersByTimeAsync(BACKGROUND_TIMEOUT_MS);
-    expect(await pending).toBe(false);
+    expect(await pending).toMatchObject({ data: { reason: "confirmation_timeout" } });
     // Timeout must dismiss any in-flight overlay so Allow cannot linger.
     expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const cancelMessage = tabs.sendMessage.mock.calls[1][1] as {
@@ -559,7 +690,7 @@ describe("requestBorrowConfirmation", () => {
     controller.abort();
     await vi.runAllTimersAsync();
 
-    expect(await pending).toBe(false);
+    expect(await pending).toMatchObject({ code: "cancelled" });
     expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     const requestMessage = tabs.sendMessage.mock.calls[0][1] as { requestId: string };
     const cancelMessage = tabs.sendMessage.mock.calls[1][1] as {
@@ -590,8 +721,8 @@ describe("requestBorrowConfirmation", () => {
 
     // The user's explicit deny must be honoured — NOT auto-allowed by the
     // earlier tabs.get rejection.
-    expect(allowed).toBe(false);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(allowed).toMatchObject({ data: { reason: "user_denied" } });
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
     expect(notifications.create).toHaveBeenCalledTimes(1);
   });
 
@@ -609,7 +740,7 @@ describe("requestBorrowConfirmation", () => {
     const allowed = await pending;
 
     expect(allowed).toBe(true);
-    expect(tabs.sendMessage).toHaveBeenCalledTimes(1);
+    expect(tabs.sendMessage).toHaveBeenCalledTimes(2);
   });
 });
 

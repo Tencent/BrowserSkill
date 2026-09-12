@@ -44,7 +44,7 @@ async fn connect(addr: std::net::SocketAddr, instance: &str, enabled: bool) -> W
     send(
         &mut ws,
         json!({"id":"handshake", "method":"system.handshake", "params":{
-            "client":"browser-skill-extension", "version":"0.2.1", "protocol_version":"1.1",
+            "client":"browser-skill-extension", "version":"0.2.1", "protocol_version":bsk::daemon::state::PROTOCOL_VERSION,
         "instance_id":instance, "label":"Audit test", "browser":{"name":"chrome","version":"131"},
             "audit_enabled":enabled
         }}),
@@ -88,7 +88,7 @@ async fn records_production_dispatch_and_isolates_browser_history() {
         let server = WsServer::new(Arc::clone(&state)).bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let handler = full_handler(DaemonStatus {
             started_at: Instant::now(), ws_port: server.local_addr.port(),
-            sock_path: temp.path().join("unused"), daemon_version:"0.2.1", protocol_version:"1.1",
+            sock_path: temp.path().join("unused"), daemon_version:"0.2.1", protocol_version:bsk::daemon::state::PROTOCOL_VERSION,
         }, Arc::clone(&state));
         let mut ws = connect(server.local_addr, "aaaaaaaa", true).await;
 

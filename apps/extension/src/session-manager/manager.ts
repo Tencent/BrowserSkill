@@ -172,7 +172,8 @@ export class SessionManager {
    * write after `chrome.tabs.move`.
    */
   tryReserveBorrow(tabId: number, sessionId: string): BorrowReservation | { borrowedBy: string } {
-    const borrowedBy = this.findBorrowingSession(tabId, sessionId);
+    const borrowedBy =
+      this.borrowReservations.get(tabId) ?? this.findBorrowingSession(tabId, sessionId);
     if (borrowedBy) return { borrowedBy };
     this.borrowReservations.set(tabId, sessionId);
     let closed = false;

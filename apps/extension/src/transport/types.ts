@@ -38,6 +38,11 @@ export type RpcErrorReason =
   | "restricted_tab_url"
   | "cdp_extension_access_denied"
   | "borrow_conflict"
+  | "borrow_in_progress"
+  | "user_denied"
+  | "confirmation_timeout"
+  | "confirmation_ui_unavailable"
+  | "borrow_outcome_unknown"
   | "screenshot_capture_failed"
   | "file_input_probe_failed"
   | "file_input_not_activated"
@@ -105,6 +110,11 @@ export function isResponseFrame(f: ProtocolFrame): f is ResponseFrame {
 
 export function isEventFrame(f: ProtocolFrame): f is EventFrame {
   return typeof (f as EventFrame).event === "string";
+}
+
+export interface InteractionPolicy {
+  borrow_confirmation: "always" | "never";
+  request_help: "enabled" | "disabled";
 }
 
 export interface BrowserPeerInfo {

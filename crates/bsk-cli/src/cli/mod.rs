@@ -19,6 +19,7 @@ pub mod get_html;
 pub mod human_loop;
 pub mod install_skill;
 pub mod interaction;
+pub(crate) mod interaction_policy;
 pub mod logs;
 pub mod navigate;
 pub mod network;
