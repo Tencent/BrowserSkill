@@ -74,12 +74,37 @@ const KILL_GRACE_MS = 3000;
 // Windows IPC may spend 5s connecting, 2s cancelling, 2s settling,
 // and up to 5s releasing the entire batch of caller-owned transfers.
 const WINDOWS_KILL_GRACE_MS = 15_000;
+// A killed child that never reports `exit` at all must still release the caller
+// once the forced kill has had its chance.
+const SETTLE_AFTER_KILL_SLACK_MS = 1000;
+// `close` fires only once every stdio pipe has reached EOF, which needs every
+// process holding a copy of the pipe handles to be gone, not just `bsk`. When
+// `bsk` auto-spawns the daemon, the daemon can end up holding those handles
+// (Windows `CreateProcess` inherits every inheritable handle; issue #180), so
+// after `exit` we drain what the pipes still give us and then settle, rather
+// than waiting for a `close` that may never come. `close` normally follows
+// `exit` within the same loop turn, so the wait is only ever paid when
+// something else is holding the pipes. Bytes arriving inside the window can
+// still be the child's own buffered output, so every chunk restarts the window
+// and EXIT_DRAIN_MAX_MS caps the total wait.
+const EXIT_DRAIN_GRACE_MS = 250;
+const EXIT_DRAIN_MAX_MS = 2000;
 const SESSION_BUSY_RETRY_DELAY_MS = 100;
 
+/** One in-flight child plus the bounded shutdown that settles its run. */
+interface LiveRun {
+  tag: string | undefined;
+  requestKill: () => void;
+}
+
 export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): BskRunner {
-  const live = new Map<ChildProcess, string | undefined>();
+  const live = new Map<ChildProcess, LiveRun>();
   const windows = process.platform === "win32";
   const cancelling = new Set<ChildProcess>();
+  const killGraceMs = windows ? WINDOWS_KILL_GRACE_MS : KILL_GRACE_MS;
+  // The kill grace and the settlement deadline stay in step: a Windows
+  // cancellation using its full 15s must not be cut short by a 4s fallback.
+  const settleAfterKillMs = killGraceMs + SETTLE_AFTER_KILL_SLACK_MS;
 
   function killChild(child: ChildProcess): void {
     if (child.exitCode !== null || child.signalCode !== null || cancelling.has(child)) return;
@@ -88,12 +113,9 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
     // send its existing cancel RPC and wait for browser reconciliation.
     if (windows && child.stdin) child.stdin.end();
     else child.kill("SIGINT");
-    const force = setTimeout(
-      () => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      },
-      windows ? WINDOWS_KILL_GRACE_MS : KILL_GRACE_MS,
-    );
+    const force = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, killGraceMs);
     force.unref();
     child.once("close", () => {
       clearTimeout(force);
@@ -132,32 +154,93 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
           reject(error);
           return;
         }
-        live.set(child, options.tag);
 
         let stdout = "";
         let stderr = "";
         let timedOut = false;
         let aborted = false;
-        child.stdout?.on("data", (chunk: Buffer | string) => {
+        const onStdout = (chunk: Buffer | string) => {
           stdout += chunk;
-        });
-        child.stderr?.on("data", (chunk: Buffer | string) => {
+          extendDrain();
+        };
+        const onStderr = (chunk: Buffer | string) => {
           stderr += chunk;
-        });
+          extendDrain();
+        };
+        child.stdout?.on("data", onStdout);
+        child.stderr?.on("data", onStderr);
+
+        let settled = false;
+        let deadline: ReturnType<typeof setTimeout> | undefined;
+        let drainWindow: ReturnType<typeof setTimeout> | undefined;
+        let drainCap: ReturnType<typeof setTimeout> | undefined;
+        let drainCode: number | null = null;
+        // Dropping the listeners stops the collection, but our ends of the pipes
+        // stay open and keep the event loop referenced. When a grandchild holds
+        // the other ends, that would keep the host alive long after the run has
+        // settled, so close them and stop waiting on the child itself.
+        const release = () => {
+          child.stdout?.off("data", onStdout);
+          child.stderr?.off("data", onStderr);
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.stdin?.destroy();
+          child.unref();
+        };
+        const finish = (code: number | null) => {
+          if (settled) return;
+          settled = true;
+          settle();
+          release();
+          resolve({ code, stdout, stderr, timedOut, aborted });
+        };
+        // Wait for `close` after a normal `exit`, but not forever. Output landing
+        // in the window can still be the child's own buffered bytes, so each
+        // chunk reopens it for another EXIT_DRAIN_GRACE_MS and the cap keeps the
+        // total bounded when whatever holds the pipes keeps writing.
+        const extendDrain = () => {
+          if (drainCap === undefined || settled) return;
+          if (drainWindow !== undefined) clearTimeout(drainWindow);
+          drainWindow = setTimeout(() => finish(drainCode), EXIT_DRAIN_GRACE_MS);
+          drainWindow.unref();
+        };
+        const beginDrain = (code: number | null) => {
+          if (drainCap !== undefined) return;
+          drainCode = code;
+          drainCap = setTimeout(() => finish(code), EXIT_DRAIN_MAX_MS);
+          drainCap.unref();
+          extendDrain();
+        };
+        // Kill on our own initiative, then guarantee the promise settles even if
+        // the child never reports back: `exit` normally arrives promptly, and the
+        // deadline covers a child that reports nothing at all after SIGKILL.
+        const requestKill = () => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            // The process is already gone; only pipes held by a grandchild remain.
+            finish(child.exitCode);
+            return;
+          }
+          killChild(child);
+          if (deadline === undefined) {
+            deadline = setTimeout(() => finish(child.exitCode), settleAfterKillMs);
+            deadline.unref();
+          }
+        };
+        live.set(child, { tag: options.tag, requestKill });
 
         const timeoutMs = options.timeoutMs;
         const timer =
           timeoutMs !== undefined && timeoutMs > 0
             ? setTimeout(() => {
                 timedOut = true;
-                killChild(child);
+                requestKill();
               }, timeoutMs)
             : undefined;
         timer?.unref();
 
         const onAbort = () => {
           aborted = true;
-          killChild(child);
+          requestKill();
         };
         if (options.signal?.aborted) {
           onAbort();
@@ -167,28 +250,41 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
 
         const settle = () => {
           if (timer !== undefined) clearTimeout(timer);
+          if (deadline !== undefined) clearTimeout(deadline);
+          if (drainWindow !== undefined) clearTimeout(drainWindow);
+          if (drainCap !== undefined) clearTimeout(drainCap);
           options.signal?.removeEventListener("abort", onAbort);
           live.delete(child);
         };
 
         child.on("error", (error) => {
+          if (settled) return;
+          settled = true;
           settle();
+          release();
           reject(error);
         });
-        child.on("close", (code) => {
-          settle();
-          resolve({ code, stdout, stderr, timedOut, aborted });
+        child.on("close", (code) => finish(code));
+        child.on("exit", (code, signal) => {
+          if (signal !== null || timedOut || aborted) {
+            // Killed on our initiative: nothing left worth draining.
+            finish(code);
+            return;
+          }
+          // Normal exit: keep draining while bytes are still arriving, then
+          // settle even if a grandchild is still holding the pipes open.
+          beginDrain(code);
         });
       });
     },
     killAll() {
-      for (const child of live.keys()) killChild(child);
+      for (const run of live.values()) run.requestKill();
     },
     killFor(tag: string) {
       let killed = 0;
-      for (const [child, childTag] of live) {
-        if (childTag === tag) {
-          killChild(child);
+      for (const run of live.values()) {
+        if (run.tag === tag) {
+          run.requestKill();
           killed += 1;
         }
       }
