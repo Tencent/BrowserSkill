@@ -781,10 +781,17 @@ async fn forward_one(
                     data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
                 });
             }
-            if job.method == Method::ToolWheel {
+            if matches!(
+                job.method,
+                Method::ToolWheel | Method::ToolScreenshotFullPage
+            ) {
                 return Err(RpcError {
                     code: ErrorCode::Timeout,
-                    message: "wheel timed out and extension cleanup could not be confirmed".into(),
+                    message: if job.method == Method::ToolWheel {
+                        "wheel timed out and extension cleanup could not be confirmed".into()
+                    } else {
+                        "full-page screenshot timed out and extension cleanup could not be confirmed".into()
+                    },
                     data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
                 });
             }
@@ -840,13 +847,16 @@ async fn forward_one(
     }
 }
 
-// Wheel must also cancel at the daemon deadline: its extension-local deadline
-// cannot account for a request delayed in transit. Other input tools are unchanged.
+// Wheel and full-page screenshots must cancel at the daemon deadline: local
+// deadlines cannot account for transit delays. Keep the queue held for cleanup.
 // Human interaction deadlines also dismiss their pending UI before releasing the queue.
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolWheel | Method::ToolTabBorrow | Method::ToolRequestHelp
+        Method::ToolWheel
+            | Method::ToolScreenshotFullPage
+            | Method::ToolTabBorrow
+            | Method::ToolRequestHelp
     ) || is_effect_aware_transfer(method)
 }
 

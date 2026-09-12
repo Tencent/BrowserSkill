@@ -10,6 +10,7 @@ import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { InteractionSettings } from "./interaction-settings";
+import { LongScreenshot } from "./long-screenshot";
 import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
@@ -134,9 +135,11 @@ export function App() {
       ? t("popup.launcher.title")
       : view === "record"
         ? t("popup.record.sectionTitle")
-        : view === "audit"
-          ? t("audit.title")
-          : t("popup.brandName");
+        : view === "long-screenshot"
+          ? t("longScreenshot.title")
+          : view === "audit"
+            ? t("audit.title")
+            : t("popup.brandName");
 
   return (
     <main
@@ -156,7 +159,7 @@ export function App() {
             size="icon"
             className="size-7 shrink-0 rounded-md"
             aria-label={t("popup.back")}
-            onClick={() => setView(view === "record" || view === "audit" ? "features" : "main")}
+            onClick={() => setView(view === "features" ? "main" : "features")}
             data-slot="popup-back"
           >
             <RiArrowLeftLine className="size-4" aria-hidden />
@@ -428,6 +431,7 @@ export function App() {
         </section>
       )}
 
+      {view === "long-screenshot" && <LongScreenshot />}
       {view === "audit" && <AuditPanel />}
 
       {view === "record" && (

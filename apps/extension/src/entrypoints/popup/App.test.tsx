@@ -63,6 +63,7 @@ describe("App", () => {
     cleanup();
     await i18n.changeLanguage("zh-CN");
     vi.clearAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("shows status label without helper subtitle", () => {
@@ -126,6 +127,32 @@ describe("App", () => {
 
     expect(screen.getByText("未连接")).toBeTruthy();
     expect(screen.queryByText("录制你的操作，供 Agent 参考")).toBeNull();
+  });
+
+  it("keeps screenshot, recording and audit reachable with consistent back navigation", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({ ok: true, state: null, data: { enabled: false } }),
+      },
+      storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+
+    for (const [title, role, control] of [
+      ["长截图", "button", "开始截图"],
+      ["操作录制", "button", "复制录制指令"],
+      ["操作审计", "switch", "开启操作审计"],
+    ] as const) {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(title) }));
+      expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+      expect(await screen.findByRole(role, { name: control })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+      expect(screen.getByRole("heading", { name: "快捷功能" })).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.getByText("未连接")).toBeTruthy();
   });
 
   it("shows single-line compact metadata and copies the instance id", async () => {

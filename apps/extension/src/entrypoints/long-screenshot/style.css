@@ -1,0 +1,21 @@
+@import "@browser-skill/ui/styles";
+@source "../../";
+@source "../../../../../packages/ui/src";
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: auto;
+}
+
+.preview-canvas {
+  background-image: radial-gradient(var(--border) 1px, transparent 1px);
+  background-size: 12px 12px;
+}
+@media (width <= 520px) {
+  .preview-toolbar {
+    gap: 12px;
+    padding: 12px;
+  }
+}

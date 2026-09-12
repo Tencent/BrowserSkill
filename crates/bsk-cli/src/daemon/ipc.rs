@@ -267,6 +267,9 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolWindowResize
                 | Method::ToolEmulate
                 | Method::ToolScreenshot
+                | Method::ToolScreenshotFullPage
+                | Method::ToolScreenshotRead
+                | Method::ToolScreenshotRelease
                 | Method::ToolConsole
                 | Method::ToolNetwork
                 | Method::ToolSnapshot
@@ -771,7 +774,13 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // Include the UI countdown/fade and Chrome move before deadline cancellation.
         return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
     }
-    tool_dispatch_timeout(params).map(|timeout| {
+    let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
+    {
+        Ok(Duration::from_secs(120))
+    } else {
+        tool_dispatch_timeout(params)
+    };
+    timeout.map(|timeout| {
         if matches!(
             method,
             Method::ToolUpload | Method::ToolDownload | Method::ToolRequestHelp
@@ -1758,15 +1767,53 @@ mod tests {
     }
 
     #[test]
+    fn full_page_screenshot_uses_its_capture_deadline() {
+        assert_eq!(
+            tool_dispatch_transport_timeout(
+                &Method::ToolScreenshotFullPage,
+                &serde_json::json!({})
+            )
+            .unwrap(),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            tool_dispatch_transport_timeout(
+                &Method::ToolScreenshotFullPage,
+                &serde_json::json!({"timeout_ms": 300_000}),
+            )
+            .unwrap(),
+            Duration::from_secs(300)
+        );
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!(null),
+            serde_json::json!("120s"),
+            serde_json::json!(u64::from(u32::MAX) + 1),
+        ] {
+            let err = tool_dispatch_transport_timeout(
+                &Method::ToolScreenshotFullPage,
+                &serde_json::json!({"timeout_ms": invalid}),
+            )
+            .unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+        }
+    }
+
+    #[test]
     fn extension_transport_outlives_the_operation_deadline() {
         let params = serde_json::json!({
             "session_id": "abcd",
             "timeout_ms": 60_000,
         });
-        let dispatch_timeout =
-            tool_dispatch_transport_timeout(&Method::ToolUpload, &params).unwrap();
-
-        assert_eq!(dispatch_timeout, Duration::from_secs(62));
+        for method in [
+            Method::ToolUpload,
+            Method::ToolDownload,
+            Method::ToolRequestHelp,
+        ] {
+            let dispatch_timeout = tool_dispatch_transport_timeout(&method, &params).unwrap();
+            assert_eq!(dispatch_timeout, Duration::from_secs(62));
+        }
     }
 
     #[test]

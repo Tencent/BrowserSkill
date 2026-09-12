@@ -588,6 +588,29 @@ async fn dispatch_returns_session_not_found_for_unknown_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_cleanup() {
+    assert_deadline_waits_for_cleanup(
+        Method::ToolWheel,
+        json!({"delta_y": 120}),
+        json!({"delta_y": 120}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_page_screenshot_deadline_keeps_the_session_busy_until_page_cleanup() {
+    assert_deadline_waits_for_cleanup(
+        Method::ToolScreenshotFullPage,
+        json!({"tab_id": 42}),
+        json!({"export_id": "capture", "width": 800, "height": 2000, "bytes": 1024}),
+    )
+    .await;
+}
+
+async fn assert_deadline_waits_for_cleanup(
+    method: Method,
+    params: serde_json::Value,
+    result: serde_json::Value,
+) {
     for acknowledge_cleanup in [true, false] {
         let (handle, sock) = spawn_daemon().await;
         let mut ws = connect_ext(handle.ws_addr()).await;
@@ -606,15 +629,12 @@ async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_
         let task = {
             let queues = Arc::clone(&queues);
             let sid = sid.clone();
+            let method = method.clone();
+            let mut params = params.clone();
+            params["session_id"] = json!(sid.0);
             tokio::spawn(async move {
                 queues
-                    .dispatch(
-                        &sid,
-                        Method::ToolWheel,
-                        json!({"session_id":sid.0,"delta_y":120}),
-                        Duration::from_millis(20),
-                        None,
-                    )
+                    .dispatch(&sid, method, params, Duration::from_millis(20), None)
                     .await
             })
         };
@@ -629,7 +649,7 @@ async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_
         assert_eq!(cancel_id, format!("deadline-cancel-{rpc_id}"));
         assert_eq!(tag, format!("cancel:{rpc_id}"));
         // Outlive the ordinary response grace: the caller and queue must still
-        // wait for wheel cleanup instead of abandoning the outstanding input.
+        // wait for page cleanup instead of abandoning the outstanding input.
         tokio::time::sleep(Duration::from_millis(1100)).await;
         assert!(!task.is_finished());
         assert!(matches!(
@@ -646,7 +666,7 @@ async fn wheel_deadline_cancels_the_extension_and_keeps_the_session_busy_during_
         ));
         if acknowledge_cleanup {
             // Even a late success cannot turn a daemon deadline into success.
-            reply_tx.send((rpc_id, json!({"delta_y":120}))).unwrap();
+            reply_tx.send((rpc_id, result.clone())).unwrap();
         }
         let Err(DispatchError::Rpc(error)) = tokio::time::timeout(Duration::from_secs(3), task)
             .await

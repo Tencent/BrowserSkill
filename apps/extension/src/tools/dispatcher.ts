@@ -1,5 +1,6 @@
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
+import { ScreenshotExports } from "@/long-screenshot/exports";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
 import type {
@@ -29,7 +30,10 @@ import type {
   RequestHelpParams,
   ResponseFrame,
   RpcError,
+  ScreenshotFullPageParams,
   ScreenshotParams,
+  ScreenshotReadParams,
+  ScreenshotReleaseParams,
   ScrollToParams,
   SelectParams,
   SnapshotParams,
@@ -75,6 +79,7 @@ import {
   handleRecordStop,
   type RecordRuntimeDeps,
 } from "./record";
+import { handleFullPageScreenshot } from "./screenshot-full-page";
 import { handleScrollTo } from "./scroll";
 import {
   handleSessionStart,
@@ -164,6 +169,7 @@ export interface DispatcherDeps {
 export class ToolDispatcher {
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
+  private screenshotExports: ScreenshotExports;
   private readonly cdp?: DispatcherCdpRunner;
   private readonly recording?: RecordRuntimeDeps;
   private readonly onSessionsChanged?: () => void;
@@ -186,6 +192,7 @@ export class ToolDispatcher {
   constructor(deps: DispatcherDeps) {
     this.transport = deps.transport;
     this.sessions = deps.sessions;
+    this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
     this.cdp = deps.cdp;
     this.recording = deps.recording;
     this.onSessionsChanged = deps.onSessionsChanged;
@@ -216,6 +223,9 @@ export class ToolDispatcher {
       }
     }
     this.inflightAbortControllers.clear();
+    const exports = this.screenshotExports;
+    this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
+    void exports.dispose();
   }
 
   private async dispatch(msg: ProtocolFrame): Promise<void> {
@@ -334,6 +344,7 @@ export class ToolDispatcher {
           preferences: this.interactionPreferences,
         });
       case "tool.session_stop": {
+        await this.screenshotExports.releaseSession((req.params as SessionStopParams).session_id);
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
@@ -393,6 +404,22 @@ export class ToolDispatcher {
           req.params as EmulateParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
+      case "tool.screenshot_full_page":
+        if (!this.cdp) return { code: "unsupported", message: "Full-page screenshot requires CDP" };
+        return handleFullPageScreenshot(
+          this.sessions,
+          req.params as ScreenshotFullPageParams,
+          {
+            cdp: this.cdp,
+            tabsApi: chromeTabsApi,
+            exports: this.screenshotExports,
+          },
+          signal,
+        );
+      case "tool.screenshot_read":
+        return this.screenshotExports.read(req.params as ScreenshotReadParams);
+      case "tool.screenshot_release":
+        return this.screenshotExports.release(req.params as ScreenshotReleaseParams);
       case "tool.screenshot":
         return handleScreenshot(
           this.sessions,
@@ -873,6 +900,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.download":
     case "tool.evaluate":
     case "tool.observe":
+    case "tool.screenshot_full_page":
     case "tool.request_help":
     case "tool.record_start": {
       const sessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;

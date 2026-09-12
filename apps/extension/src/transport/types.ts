@@ -343,6 +343,38 @@ export interface ScreenshotResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface ScreenshotFullPageParams {
+  session_id: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+export interface ScreenshotFullPageResult {
+  capture_id: string;
+  width: number;
+  height: number;
+  format: "png";
+  tab_id: number;
+  byte_size: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+export interface ScreenshotReadParams {
+  session_id: string;
+  capture_id: string;
+  offset: number;
+}
+export interface ScreenshotReadResult {
+  data_base64: string;
+  next_offset: number;
+  eof: boolean;
+}
+export interface ScreenshotReleaseParams {
+  session_id: string;
+  capture_id: string;
+}
+export interface ScreenshotReleaseResult {
+  released: boolean;
+}
+
 export interface SnapshotParams {
   session_id: string;
   tab_id?: number;

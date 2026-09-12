@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // This regression owns its browser/profile. It never attaches to a user's Chrome.
-export async function withChrome({ executable, deviceScale, zoom }, run) {
+export async function withChrome(
+  { executable, deviceScale, zoom, extensionPath, headless = true, softwareRendering = false },
+  run,
+) {
   const profile = await mkdtemp(join(tmpdir(), "bsk-snapshot-coordinates-"));
   let chrome;
   let socket;
@@ -21,10 +24,18 @@ export async function withChrome({ executable, deviceScale, zoom }, run) {
     chrome = spawn(
       executable,
       [
-        "--headless=new",
+        ...(headless ? ["--headless=new"] : []),
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-extensions",
+        ...(extensionPath
+          ? [
+              ...(softwareRendering
+                ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+                : ["--disable-gpu"]),
+              `--disable-extensions-except=${extensionPath}`,
+              `--load-extension=${extensionPath}`,
+            ]
+          : ["--disable-extensions"]),
         "--site-per-process",
         "--remote-debugging-port=0",
         "--window-size=1600,1200",
