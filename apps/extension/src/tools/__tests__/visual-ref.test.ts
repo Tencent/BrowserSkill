@@ -4,7 +4,7 @@ import { RefStore, type VisualRefInput } from "@/session-manager/ref-store";
 import { handleDownload } from "../download";
 import { handleRequestHelp, resetHelpLifecycleForTests } from "../human-loop";
 import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "../interaction";
-import { handleGetHtml, handleScreenshot } from "../observation";
+import { handleGetHtml } from "../observation";
 import type { CdpRunner } from "../shared";
 import { lookupRefTarget, lookupSnapshotRef, resolveSnapshotRef } from "../snapshot-ref";
 import { handleUpload } from "../upload";
@@ -117,12 +117,10 @@ describe("typed visual refs", () => {
     "press",
     "select",
     "get_html",
-    "screenshot",
   ])("rejects visual refs in %s before target effects", async (tool) => {
     const { manager, send, cdp, tabsApi } = await setup();
     const params = { session_id: "test", tab_id: 4, ref: "@e1" };
     const deps = { cdp, tabsApi };
-    const captureVisibleTab = vi.fn();
     let result: unknown;
     switch (tool) {
       case "click":
@@ -143,16 +141,9 @@ describe("typed visual refs", () => {
       case "get_html":
         result = await handleGetHtml(manager, params, deps);
         break;
-      case "screenshot":
-        result = await handleScreenshot(manager, params, {
-          ...deps,
-          captureApi: { ...tabsApi, captureVisibleTab },
-        });
-        break;
     }
     expect(result).toMatchObject({ code: "unsupported", data: { reason: "ref_kind_unsupported" } });
     expect(send).not.toHaveBeenCalled();
-    expect(captureVisibleTab).not.toHaveBeenCalled();
   });
 
   it.each([

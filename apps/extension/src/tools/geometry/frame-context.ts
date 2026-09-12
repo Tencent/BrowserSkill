@@ -212,11 +212,16 @@ export class GeometryContext {
     ownerBackendNodeId: number,
     ancestorClips: Polygon[],
     viewport: Size,
+    contentSize?: Size,
   ): Promise<SnapshotProjectionResult> {
     const key = `${cdpTargetKey(source.target)}:${ownerBackendNodeId}`;
     let promise = this.snapshotOwners.get(key);
     if (!promise) {
-      promise = this.snapshotOwner(source.target, ownerBackendNodeId);
+      promise = contentSize
+        ? this.ownerContent(source.target, ownerBackendNodeId).then((quad) =>
+            quad ? { quad, size: contentSize } : null,
+          )
+        : this.snapshotOwner(source.target, ownerBackendNodeId);
       this.snapshotOwners.set(key, promise);
     }
     let owner: { quad: Quad; size: Size } | null;

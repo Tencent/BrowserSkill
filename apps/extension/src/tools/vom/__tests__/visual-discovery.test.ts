@@ -141,6 +141,32 @@ function facts(
 }
 
 describe("Canvas discovery", () => {
+  it("shares frame address paths from existing Facts without changing candidate evidence", async () => {
+    const parent = await document([{ id: 2, parent: 1, tag: "iframe" }]);
+    const child = await document(
+      [
+        { id: 3, parent: 1 },
+        { id: 4, parent: 1 },
+      ],
+      {
+        frame: {
+          frameId: "child",
+          parentFrameId: "main",
+          ownerBackendNodeId: 2,
+          target: { tabId: 1 },
+        },
+      },
+    );
+    const result = await discoverVisualCandidates(facts([child, parent]));
+    expect(result.candidates).toHaveLength(2);
+    const path = result.candidates[0].framePath;
+    expect(path).toBe(result.candidates[1].framePath);
+    expect(path?.document).toBe(child.identity);
+    expect(path?.parent?.ownerBackendNodeId).toBe(2);
+    expect(path?.parent?.frame.document).toBe(parent.identity);
+    expect(path?.parent?.frame.parent).toBeUndefined();
+  });
+
   it("distinguishes visual facts not collected from complete empty discovery and honors cancellation", async () => {
     const empty = facts([]);
     expect(await discoverVisualCandidates(empty)).toMatchObject({

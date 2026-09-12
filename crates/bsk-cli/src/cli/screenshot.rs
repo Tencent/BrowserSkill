@@ -1,5 +1,6 @@
 //! `bsk screenshot` — capture a PNG of the Agent Window's active tab
-//! or a snapshot ref subtree (M6.2). CLI is responsible for decoding
+//! or a DOM element / Canvas region identified by an observation ref.
+//! CLI is responsible for decoding
 //! the base64 returned by the extension and writing the binary to
 //! disk; the wire payload stays human-readable.
 
@@ -26,8 +27,8 @@ pub struct ScreenshotArgs {
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
 
-    /// Optional `@eN` ref from the last `bsk snapshot`. Crops the
-    /// capture to the matching element.
+    /// Optional `@eN` ref from the latest `bsk observe` or `bsk snapshot`.
+    /// Crops the capture to the referenced DOM element or Canvas region.
     #[arg(long = "ref")]
     pub ref_: Option<String>,
 

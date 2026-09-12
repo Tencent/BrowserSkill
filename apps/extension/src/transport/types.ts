@@ -25,6 +25,8 @@ export type RpcErrorReason =
   | "element_not_visible"
   | "ref_not_found"
   | "ref_kind_unsupported"
+  | "visual_target_changed"
+  | "visual_pixel_budget_exceeded"
   | "selector_not_found"
   | "target_not_fillable"
   | "fill_value_invalid"

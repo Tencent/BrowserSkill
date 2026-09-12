@@ -40,6 +40,8 @@ use bsk_protocol::ErrorCode;
 pub mod reason {
     pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
     pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
+    pub const VISUAL_TARGET_CHANGED: &str = "visual_target_changed";
+    pub const VISUAL_PIXEL_BUDGET_EXCEEDED: &str = "visual_pixel_budget_exceeded";
     pub const REF_KIND_UNSUPPORTED: &str = "ref_kind_unsupported";
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
@@ -277,6 +279,18 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             hint: Some(
                 "return the tab from the borrowing session via `bsk tab return <tab-id> --session <id>` or stop that session",
             ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::VISUAL_TARGET_CHANGED) => RenderInfo {
+            summary: "visual target needs a fresh observation",
+            hint: Some(
+                "observe the page again and use the current visual ref; the previous identity or region cannot be used",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::VISUAL_PIXEL_BUDGET_EXCEEDED) => RenderInfo {
+            summary: "visual screenshot exceeds the image size limit",
+            hint: Some("the screenshot could not be reduced within the pixel budget"),
             exit_code: base.exit_code,
         },
         (ErrorCode::Unsupported, reason::REF_KIND_UNSUPPORTED) => RenderInfo {
@@ -701,6 +715,16 @@ mod tests {
         let timeout = serde_json::json!({ "reason": reason::TRANSFER_TIMEOUT });
         let info = info_for_error(ErrorCode::Timeout, Some(&timeout));
         assert!(info.summary.contains("timed out after browser dispatch"));
+    }
+
+    #[test]
+    fn visual_screenshot_failures_have_specific_guidance() {
+        let changed = serde_json::json!({ "reason": reason::VISUAL_TARGET_CHANGED });
+        let info = info_for_error(ErrorCode::NotFound, Some(&changed));
+        assert!(info.hint.unwrap().contains("observe"));
+        let budget = serde_json::json!({ "reason": reason::VISUAL_PIXEL_BUDGET_EXCEEDED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&budget));
+        assert!(info.summary.contains("image size limit"));
     }
 
     #[test]
