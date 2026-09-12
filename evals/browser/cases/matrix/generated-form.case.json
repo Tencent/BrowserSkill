@@ -1,0 +1,77 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "generated-form",
+  "title": "Seeded form structure and hydration variants",
+  "order": 10,
+  "suite": "matrix",
+  "tags": ["dynamic-dom", "form", "hydration", "seeded"],
+  "seed": 20260827,
+  "fixture": { "startPath": "/matrix/generated-form" },
+  "prompts": {
+    "en": "Open {url}. Wait for the seeded form to finish hydrating. Fill Text input with \"seeded-agent\", select the visible option \"Two\", submit with Enter, and report the result marker and seed. Close the browser session.",
+    "zh-CN": "打开 {url}。等待 seeded form 完成 hydration，把 Text input 填成“seeded-agent”，选择可见选项“Two”，用 Enter 提交，并报告结果 marker 和 seed。最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "page.wait",
+    "inspect.observe",
+    "interact.fill",
+    "interact.select",
+    "interact.press"
+  ],
+  "assertions": {
+    "site": [
+      { "label": "generated form hydrated", "type": "matrix.ready", "minCount": 1 },
+      {
+        "label": "Enter was pressed on generated form",
+        "type": "matrix.enter_pressed",
+        "minCount": 1
+      },
+      {
+        "label": "generated values were submitted",
+        "type": "matrix.submitted",
+        "where": { "data.text": "seeded-agent", "data.choice": "two" },
+        "minCount": 1
+      },
+      {
+        "label": "matrix result page was displayed",
+        "type": "page.shown",
+        "where": { "data.path": "/matrix/generated-result" },
+        "minCount": 1
+      }
+    ],
+    "response": [
+      { "label": "reported matrix result", "includes": "MATRIX-OK" },
+      { "label": "reported selected seed", "includes": "SEED-" }
+    ],
+    "adapter": [{ "label": "browser session was closed", "key": "sessionStopped" }]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      {
+        "action": "wait-site-event",
+        "type": "matrix.ready",
+        "timeoutMs": 5000
+      },
+      { "action": "observe" },
+      { "action": "fill", "selector": "[name=text]", "value": "seeded-agent" },
+      { "action": "select", "selector": "[name=choice]", "values": ["two"] },
+      {
+        "action": "press",
+        "key": "Enter",
+        "selector": "button[type=submit]"
+      },
+      {
+        "action": "wait-site-event",
+        "type": "page.shown",
+        "where": { "path": "/matrix/generated-result" }
+      },
+      { "action": "wait", "duration": "200ms" },
+      { "action": "observe" }
+    ]
+  }
+}

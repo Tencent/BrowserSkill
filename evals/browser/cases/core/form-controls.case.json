@@ -1,0 +1,82 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "form-controls",
+  "title": "Form, select, keyboard, and screenshot",
+  "order": 20,
+  "suite": "core",
+  "tags": ["form", "keyboard", "screenshot", "select"],
+  "fixture": { "startPath": "/form" },
+  "prompts": {
+    "en": "Open {url}. Fill Text input with \"agent-parity\" and Textarea with \"BrowserSkill works\". Select the visible option \"Two\" from Dropdown. Capture a screenshot of the form, focus Submit, and press Enter to submit. Confirm that the result says \"Received!\", then close the browser session.",
+    "zh-CN": "打开 {url}。把 Text input 填成“agent-parity”，Textarea 填成“BrowserSkill works”，Dropdown 选择可见选项“Two”。截取表单截图，然后聚焦 Submit 并按 Enter 提交。确认结果页出现“Received!”，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "interact.fill",
+    "interact.select",
+    "interact.press",
+    "inspect.screenshot"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "Enter was pressed on Submit",
+        "type": "form.enter_pressed",
+        "minCount": 1
+      },
+      {
+        "label": "form values were submitted",
+        "type": "form.submitted",
+        "where": {
+          "data.text": "agent-parity",
+          "data.notes": "BrowserSkill works",
+          "data.choice": "two"
+        },
+        "minCount": 1
+      },
+      {
+        "label": "result page was displayed",
+        "type": "page.shown",
+        "where": { "data.path": "/result" },
+        "minCount": 1
+      }
+    ],
+    "response": [{ "label": "confirmed result", "includes": "Received!" }],
+    "adapter": [
+      { "label": "screenshot artifact was created", "key": "screenshotCreated" },
+      { "label": "browser session was closed", "key": "sessionStopped" }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      {
+        "action": "fill",
+        "selector": "#text-input",
+        "value": "agent-parity"
+      },
+      {
+        "action": "fill",
+        "selector": "#notes",
+        "value": "BrowserSkill works"
+      },
+      { "action": "select", "selector": "#choice", "values": ["two"] },
+      {
+        "action": "screenshot",
+        "artifactName": "form.png",
+        "evidence": "screenshotCreated"
+      },
+      { "action": "press", "key": "Enter", "selector": "#submit" },
+      {
+        "action": "wait-site-event",
+        "type": "page.shown",
+        "where": { "path": "/result" }
+      },
+      { "action": "wait", "duration": "200ms" },
+      { "action": "observe" }
+    ]
+  }
+}

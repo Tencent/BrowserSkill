@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NetworkResult",
+  "type": "object",
+  "required": [
+    "next_since",
+    "tab_id"
+  ],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/NetworkEntry"
+      }
+    },
+    "next_since": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "NetworkEntry": {
+      "type": "object",
+      "required": [
+        "kind",
+        "sequence"
+      ],
+      "properties": {
+        "error_text": {
+          "description": "CDP failure reason (`failure` entries only).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/definitions/NetworkEntryKind"
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mime_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "status": {
+          "description": "HTTP status code (`response` entries only).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "status_text": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "truncated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "NetworkEntryKind": {
+      "oneOf": [
+        {
+          "description": "A response was received (`Network.responseReceived`).",
+          "type": "string",
+          "enum": [
+            "response"
+          ]
+        },
+        {
+          "description": "The request failed before completing (`Network.loadingFailed`).",
+          "type": "string",
+          "enum": [
+            "failure"
+          ]
+        }
+      ]
+    }
+  }
+}

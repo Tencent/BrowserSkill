@@ -1,0 +1,133 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ConsoleResult",
+  "type": "object",
+  "required": [
+    "next_since",
+    "tab_id"
+  ],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ConsoleEntry"
+      }
+    },
+    "next_since": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "truncated": {
+      "default": false,
+      "type": "boolean"
+    }
+  },
+  "definitions": {
+    "ConsoleEntry": {
+      "type": "object",
+      "required": [
+        "kind",
+        "level",
+        "sequence",
+        "text"
+      ],
+      "properties": {
+        "column": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "kind": {
+          "$ref": "#/definitions/ConsoleEntryKind"
+        },
+        "level": {
+          "type": "string"
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stack_trace": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ConsoleStackFrame"
+          }
+        },
+        "text": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "truncated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ConsoleEntryKind": {
+      "type": "string",
+      "enum": [
+        "console",
+        "exception",
+        "log"
+      ]
+    },
+    "ConsoleStackFrame": {
+      "type": "object",
+      "properties": {
+        "column": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "function_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "line": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

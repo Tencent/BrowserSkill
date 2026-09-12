@@ -1,0 +1,71 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "tabs",
+  "title": "Create, select, and close a tab",
+  "order": 40,
+  "suite": "core",
+  "tags": ["tabs", "ownership", "lifecycle"],
+  "fixture": { "startPath": "/tabs" },
+  "prompts": {
+    "en": "Open {url}. Create a new browser tab at {baseUrl}/tabs/child?run={runId}, read its token, click \"Mark child visited\", close the child tab, return to the original tab, and close the browser session.",
+    "zh-CN": "打开 {url}。新建一个浏览器标签页并访问 {baseUrl}/tabs/child?run={runId}，读取其中的 token，点击“Mark child visited”，关闭子标签页，回到原标签页，最后关闭浏览器会话。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "interact.click",
+    "tabs.create",
+    "tabs.select",
+    "tabs.close"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "child tab page was displayed",
+        "type": "page.shown",
+        "where": { "data.path": "/tabs/child" },
+        "minCount": 1
+      },
+      {
+        "label": "child tab action ran",
+        "type": "tabs.child_marked",
+        "minCount": 1
+      }
+    ],
+    "response": [{ "label": "reported child token", "includes": "TAB-29" }],
+    "adapter": [
+      { "label": "child tab was closed", "key": "childTabClosed" },
+      { "label": "browser session was closed", "key": "sessionStopped" }
+    ]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate", "saveAs": "original" },
+      { "action": "tab-list" },
+      {
+        "action": "tab-create",
+        "url": "{baseUrl}/tabs/child?run={runId}",
+        "saveAs": "child"
+      },
+      {
+        "action": "navigate",
+        "url": "{baseUrl}/tabs/child?run={runId}",
+        "tabId": "{child.tab_id}"
+      },
+      {
+        "action": "click",
+        "selector": "#mark-child",
+        "tabId": "{child.tab_id}"
+      },
+      { "action": "html", "tabId": "{child.tab_id}" },
+      {
+        "action": "tab-close",
+        "tabId": "{child.tab_id}",
+        "evidence": "childTabClosed"
+      },
+      { "action": "tab-select", "tabId": "{original.tab_id}" }
+    ]
+  }
+}

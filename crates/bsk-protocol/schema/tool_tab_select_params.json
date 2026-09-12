@@ -1,0 +1,18 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TabSelectParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "tab_id"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    }
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://browser-skill.local/schemas/browser-eval-case.schema.json",
+  "title": "BrowserSkill browser evaluation case",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "id",
+    "title",
+    "suite",
+    "tags",
+    "fixture",
+    "prompts",
+    "coverage",
+    "assertions",
+    "smoke"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "title": { "type": "string", "minLength": 1 },
+    "order": { "type": "integer", "minimum": 0 },
+    "suite": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+      "uniqueItems": true
+    },
+    "fixture": {
+      "type": "object",
+      "required": ["startPath"],
+      "properties": { "startPath": { "type": "string", "pattern": "^/" } },
+      "additionalProperties": false
+    },
+    "prompts": {
+      "type": "object",
+      "required": ["en", "zh-CN"],
+      "properties": {
+        "en": { "type": "string", "minLength": 1 },
+        "zh-CN": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "coverage": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "assertions": {
+      "type": "object",
+      "required": ["site", "response", "adapter"],
+      "properties": {
+        "site": { "type": "array", "items": { "type": "object" } },
+        "response": { "type": "array", "items": { "type": "object" } },
+        "adapter": { "type": "array", "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "smoke": {
+      "type": "object",
+      "required": ["steps"],
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["action"],
+            "properties": { "action": { "type": "string" } },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "seed": { "type": "integer" },
+    "source": { "type": "object" }
+  },
+  "additionalProperties": false
+}

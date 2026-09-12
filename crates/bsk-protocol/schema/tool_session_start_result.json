@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStartResult",
+  "type": "object",
+  "properties": {
+    "agent_window_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "interaction": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/InteractionPolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "BorrowConfirmationPolicy": {
+      "type": "string",
+      "enum": [
+        "always",
+        "never"
+      ]
+    },
+    "InteractionPolicy": {
+      "type": "object",
+      "required": [
+        "borrow_confirmation",
+        "request_help"
+      ],
+      "properties": {
+        "borrow_confirmation": {
+          "$ref": "#/definitions/BorrowConfirmationPolicy"
+        },
+        "request_help": {
+          "$ref": "#/definitions/RequestHelpPolicy"
+        }
+      }
+    },
+    "RequestHelpPolicy": {
+      "type": "string",
+      "enum": [
+        "enabled",
+        "disabled"
+      ]
+    }
+  }
+}

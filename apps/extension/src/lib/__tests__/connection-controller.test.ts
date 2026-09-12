@@ -1,0 +1,274 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { MIN_COMPATIBLE_PROTOCOL } from "../../transport/handshake";
+import type { ConnectionStateHandler, FrameHandler, Transport } from "../../transport/transport";
+import type { ConnectionState, HandshakeResult, ProtocolFrame } from "../../transport/types";
+import { __testing__, ConnectionController } from "../connection-controller";
+
+vi.mock("../instance-id", () => ({
+  getOrCreateInstanceId: vi.fn(async () => "a1b2c3d4"),
+  getLabel: vi.fn(async () => "test-label"),
+}));
+
+const { computeConnectedState } = __testing__;
+
+function handshake(
+  daemonProtocol: string,
+  minCompatibleProtocol?: string,
+  daemonAppVersion = "0.1.0",
+): HandshakeResult {
+  return {
+    server: "browser-skill-daemon",
+    version: daemonAppVersion,
+    protocol_version: daemonProtocol,
+    min_compatible_peer: "0.0.0",
+    min_compatible_protocol: minCompatibleProtocol,
+  };
+}
+
+describe("computeConnectedState (protocol-based compat)", () => {
+  it("returns connected when daemon protocol equals extension protocol", () => {
+    expect(computeConnectedState(handshake("1.3", "1.3"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
+      kind: "connected",
+    });
+  });
+
+  it("returns version_skew when daemon protocol minor is newer", () => {
+    expect(computeConnectedState(handshake("1.4", "1.3"))).toEqual({
+      kind: "version_skew",
+    });
+  });
+
+  it("returns version_skew when daemon protocol string differs but floor is satisfied", () => {
+    expect(computeConnectedState(handshake("1.3.0", "1.3"))).toEqual({
+      kind: "version_skew",
+    });
+  });
+
+  it("rejects when protocol major differs", () => {
+    const result = computeConnectedState(handshake("2.0", "1.0"));
+    expect(result.kind).toBe("rejected");
+    if (result.kind === "rejected") {
+      expect(result.reason).toContain("protocol-major mismatch");
+    }
+  });
+
+  it("rejects when extension is below daemon min_compatible_protocol", () => {
+    const result = computeConnectedState(handshake("1.3", "1.5"));
+    expect(result.kind).toBe("rejected");
+    if (result.kind === "rejected") {
+      expect(result.reason).toContain("min_compatible_protocol");
+      expect(result.reason).toContain("1.5");
+    }
+  });
+
+  it("does not reject when min_compatible_protocol is missing (legacy daemon)", () => {
+    const result = computeConnectedState({
+      server: "browser-skill-daemon",
+      version: "0.1.0",
+      protocol_version: "1.3",
+      min_compatible_peer: "0.1.0",
+    });
+    expect(result).toEqual({ kind: "connected" });
+  });
+
+  it.each([
+    "1.0",
+    "1.1",
+    "1.2",
+  ])("keeps a legacy daemon %s connected with compatibility guidance", (protocol) => {
+    for (const floor of [undefined, "1.0"]) {
+      expect(computeConnectedState(handshake(protocol, floor))).toEqual({ kind: "version_skew" });
+    }
+  });
+
+  it("rejects malformed daemon min_compatible_protocol with a daemon-floor reason", () => {
+    const result = computeConnectedState(handshake("1.3", "not-a-protocol"));
+    expect(result.kind).toBe("rejected");
+    if (result.kind === "rejected") {
+      expect(result.reason).toContain("daemon min_compatible_protocol");
+      expect(result.reason).toContain("not-a-protocol");
+    }
+  });
+
+  it("rejects unparseable daemon protocol", () => {
+    const result = computeConnectedState(handshake("oops", "1.0"));
+    expect(result.kind).toBe("rejected");
+  });
+});
+
+function makeMockTransport(initialState: ConnectionState = "disconnected") {
+  let state = initialState;
+  const stateHandlers = new Set<ConnectionStateHandler>();
+  const messageHandlers = new Set<FrameHandler>();
+  const transport = {
+    get state() {
+      return state;
+    },
+    connect: vi.fn(async () => {
+      state = "connected";
+      for (const h of stateHandlers) h("connected");
+    }),
+    disconnect: vi.fn(async () => {
+      state = "disconnected";
+      for (const h of stateHandlers) h("disconnected");
+    }),
+    send: vi.fn(),
+    onMessage: vi.fn((handler: FrameHandler) => {
+      messageHandlers.add(handler);
+      return { dispose: () => messageHandlers.delete(handler) };
+    }),
+    onConnectionStateChange: vi.fn((handler: ConnectionStateHandler) => {
+      stateHandlers.add(handler);
+      return { dispose: () => stateHandlers.delete(handler) };
+    }),
+    emitState(next: ConnectionState) {
+      state = next;
+      for (const h of stateHandlers) h(next);
+    },
+    emitMessage(frame: ProtocolFrame) {
+      for (const handler of messageHandlers) handler(frame);
+    },
+  };
+  return transport as typeof transport & Transport;
+}
+
+describe("ConnectionController connectionEnabled", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each([
+    "1.0",
+    "1.1",
+    "1.2",
+  ])("keeps the live transport and sessions after a %s handshake", async (protocol) => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const onDisconnected = vi.fn();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      onDisconnected,
+    });
+    const request = transport.send.mock.calls[0]?.[0] as { id: string };
+    transport.emitMessage({ id: request.id, result: handshake(protocol, "1.0") });
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe("version_skew"));
+    expect(controller.snapshot().handshake?.protocol_version).toBe(protocol);
+    expect(controller.snapshot().lastError).toBeNull();
+    expect(transport.disconnect).not.toHaveBeenCalled();
+    expect(onDisconnected).not.toHaveBeenCalled();
+  });
+
+  it("does not connect on attach when connection is disabled", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, false);
+
+    expect(transport.connect).not.toHaveBeenCalled();
+    expect(controller.snapshot().connectionEnabled).toBe(false);
+    expect(controller.snapshot().state).toBe("disconnected");
+  });
+
+  it("disconnects when connection is disabled", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    expect(transport.connect).toHaveBeenCalled();
+
+    await controller.setConnectionEnabled(false);
+
+    expect(transport.disconnect).toHaveBeenCalled();
+    expect(controller.snapshot().connectionEnabled).toBe(false);
+    expect(controller.snapshot().handshake).toBeNull();
+    expect(controller.snapshot().lastError).toBeNull();
+  });
+
+  it("runs safe session cleanup before an intentional disconnect", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const order: string[] = [];
+    transport.disconnect.mockImplementation(async () => {
+      order.push("disconnect");
+    });
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      beforeDisconnect: async () => {
+        order.push("cleanup");
+      },
+    });
+
+    await controller.setConnectionEnabled(false);
+
+    expect(order).toEqual(["cleanup", "disconnect"]);
+  });
+
+  it("runs session cleanup when the transport disconnects unexpectedly", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const onDisconnected = vi.fn(async () => {});
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      onDisconnected,
+    });
+
+    transport.emitState("disconnected");
+    await vi.waitFor(() => expect(onDisconnected).toHaveBeenCalledTimes(1));
+  });
+
+  it("reconnects when connection is re-enabled", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, false);
+    await controller.setConnectionEnabled(true);
+
+    expect(transport.connect).toHaveBeenCalled();
+    expect(controller.snapshot().connectionEnabled).toBe(true);
+  });
+
+  it("ignores transport state changes while disabled", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, false);
+
+    transport.emitState("connected");
+
+    expect(controller.snapshot().state).toBe("disconnected");
+  });
+
+  it("disconnects and retries when handshake fails while the socket is still open", async () => {
+    vi.useFakeTimers();
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    const request = transport.send.mock.calls[0]?.[0] as { id: string };
+
+    transport.emitMessage({
+      id: request.id,
+      error: { code: "protocol_error", message: "bad handshake" },
+    });
+    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledTimes(1));
+    expect(controller.snapshot().state).toBe("disconnected");
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(transport.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("binds each handshake to the connection that initiated it", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    const first = transport.send.mock.calls[0]?.[0] as { id: string };
+
+    transport.emitState("disconnected");
+    await vi.waitFor(() => expect(transport.send).toHaveBeenCalledTimes(2));
+    const second = transport.send.mock.calls[1]?.[0] as { id: string };
+    expect(second.id).not.toBe(first.id);
+
+    transport.emitMessage({ id: first.id, result: handshake("1.3", "1.3") });
+    await Promise.resolve();
+    expect(controller.snapshot().state).not.toBe("connected");
+
+    transport.emitMessage({ id: second.id, result: handshake("1.3", "1.3") });
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe("connected"));
+  });
+});

@@ -1,0 +1,643 @@
+import { i18n } from "@browser-skill/i18n";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { SnapshotInfo } from "@/lib/connection-controller";
+import { STORAGE_KEYS } from "@/lib/instance-id";
+import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
+import { EXTENSION_VERSION, PROTOCOL_VERSION } from "@/transport/handshake";
+import { App } from "./App";
+import { useConnectionState } from "./use-connection-state";
+
+vi.mock("./use-connection-state", () => ({
+  useConnectionState: vi.fn(),
+}));
+
+const mockUseConnectionState = vi.mocked(useConnectionState);
+
+/** Arbitrary peer fixture — only used to distinguish daemon vs extension in the UI. */
+const mockDaemonVersion = "daemon-fixture";
+
+const baseSnapshot: SnapshotInfo = {
+  state: "disconnected",
+  instanceId: "",
+  label: "",
+  extensionVersion: EXTENSION_VERSION,
+  handshake: null,
+  lastError: null,
+  connectionEnabled: true,
+};
+
+function openRecordView() {
+  fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+  fireEvent.click(screen.getByRole("button", { name: /操作录制/ }));
+}
+
+describe("App", () => {
+  const setLabel = vi.fn();
+  const setConnectionEnabled = vi.fn();
+
+  beforeEach(() => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: baseSnapshot,
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn().mockReturnValue({
+        matches: false,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }),
+    });
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+  });
+
+  afterEach(async () => {
+    cleanup();
+    await i18n.changeLanguage("zh-CN");
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows status label without helper subtitle", () => {
+    render(<App />);
+
+    expect(screen.getByText("未连接")).toBeTruthy();
+    expect(screen.getByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeTruthy();
+    expect(screen.queryByText("请先打开 BrowserSkill。")).toBeNull();
+  });
+
+  it("keeps the connection switch usable and shows protocol errors when disconnected", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        lastError: "version_too_old: protocol-major mismatch",
+      },
+      statusState: "disconnected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("未连接")).toBeTruthy();
+    expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
+    expect(screen.queryByText("端口不匹配")).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.getByText("version_too_old: protocol-major mismatch")).toBeTruthy();
+    fireEvent.click(screen.getByRole("switch", { name: "BrowserSkill 连接" }));
+    expect(setConnectionEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("does not render record UI on the main view", () => {
+    render(<App />);
+
+    expect(screen.queryByRole("button", { name: "复制录制指令" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "操作录制" })).toBeNull();
+  });
+
+  it("opens the feature list from the launcher and navigates to record", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+
+    expect(screen.getByText("操作录制")).toBeTruthy();
+    expect(screen.getByText("录制你的操作，供 Agent 参考")).toBeTruthy();
+    expect(screen.queryByText("未连接")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /操作录制/ }));
+
+    expect(screen.getByRole("button", { name: "复制录制指令" })).toBeTruthy();
+  });
+
+  it("returns from the feature list to the main view", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+
+    expect(screen.getByText("未连接")).toBeTruthy();
+    expect(screen.queryByText("录制你的操作，供 Agent 参考")).toBeNull();
+  });
+
+  it("keeps screenshot, recording and audit reachable with consistent back navigation", async () => {
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({ ok: true, state: null, data: { enabled: false } }),
+      },
+      storage: { onChanged: { addListener: vi.fn(), removeListener: vi.fn() } },
+    });
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: "快捷功能" }));
+
+    for (const [title, role, control] of [
+      ["长截图", "button", "开始截图"],
+      ["操作录制", "button", "复制录制指令"],
+      ["操作审计", "switch", "开启操作审计"],
+    ] as const) {
+      fireEvent.click(screen.getByRole("button", { name: new RegExp(title) }));
+      expect(screen.getByRole("heading", { name: title })).toBeTruthy();
+      expect(await screen.findByRole(role, { name: control })).toBeTruthy();
+      fireEvent.click(screen.getByRole("button", { name: "返回" }));
+      expect(screen.getByRole("heading", { name: "快捷功能" })).toBeTruthy();
+    }
+
+    fireEvent.click(screen.getByRole("button", { name: "返回" }));
+    expect(screen.getByText("未连接")).toBeTruthy();
+  });
+
+  it("shows single-line compact metadata and copies the instance id", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        instanceId: "03c3e47f",
+        label: "个人 Chrome",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.queryByText(/^扩展 v/)).toBeNull();
+    expect(screen.queryByText(/^daemon v/)).toBeNull();
+    expect(screen.getByTitle("扩展版本").textContent).toBe(`Ext ${EXTENSION_VERSION}`);
+    expect(screen.getByTitle("bsk 版本").textContent).toBe(`CLI ${mockDaemonVersion}`);
+    expect(screen.getByText("03c3e47f")).toBeTruthy();
+
+    const copyButton = screen.getByRole("button", { name: "复制实例 ID" });
+    expect(copyButton.textContent).toBe("");
+
+    fireEvent.click(copyButton);
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("03c3e47f");
+    await waitFor(() => expect(copyButton.getAttribute("title")).toBe("已复制"));
+  });
+
+  it("renders the connection toggle with switch semantics", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connected" },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    const toggle = screen.getByRole("switch", { name: "BrowserSkill 连接" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("calls setConnectionEnabled(false) when the toggle is turned off", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connected" },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "BrowserSkill 连接" }));
+    expect(setConnectionEnabled).toHaveBeenCalledWith(false);
+  });
+
+  it("shows disabled status when connection is turned off", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, connectionEnabled: false },
+      statusState: "disabled",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("连接已关闭")).toBeTruthy();
+    expect(screen.queryByText("无法连接，请确认 daemon 已启动且端口一致。")).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: "BrowserSkill 连接" }).getAttribute("aria-checked"),
+    ).toBe("false");
+  });
+
+  it("copies the record prompt with instance id and --browser when connected", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+    openRecordView();
+
+    fireEvent.change(screen.getByPlaceholderText("例如：发布一篇文章"), {
+      target: { value: "发布 wiki 文档" },
+    });
+
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+
+    fireEvent.click(copyButton);
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain("03c3e47f");
+    expect(copied).toContain("--browser 03c3e47f");
+    expect(copied).toContain('--purpose "发布 wiki 文档"');
+    expect(copied).not.toMatch(/bsk record start[^\n]*--url/);
+    expect(copied).toContain("./trace");
+    expect(copied).toContain("trace.json");
+    expect(copied).toContain("states/");
+    // Button label stays static; a transient toast confirms the copy.
+    expect(copyButton.textContent).toContain("复制录制指令");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("已复制"));
+  });
+
+  it("includes --url in record prompt when a start URL is provided", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+    openRecordView();
+
+    fireEvent.change(screen.getByPlaceholderText("https://…"), {
+      target: { value: "https://example.com/" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "复制录制指令" }));
+
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain("--url https://example.com/");
+    expect(copied).not.toContain("--purpose");
+  });
+
+  it("disables record copy when disconnected", () => {
+    render(<App />);
+    openRecordView();
+
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).not.toBeNull();
+    expect(screen.getByText("连接后可用")).toBeTruthy();
+  });
+
+  it("treats protocol drift as still connected and prompts an upgrade", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "version_skew",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("已连接")).toBeTruthy();
+    expect(screen.getByText("可升级")).toBeTruthy();
+    expect(screen.queryByText("协议不一致")).toBeNull();
+    expect(screen.queryByText("Action needed")).toBeNull();
+    expect(screen.queryByText("兼容")).toBeNull();
+    const warning = screen.getByText(/已连接到旧版 Daemon/);
+    expect(warning.textContent).toContain("协议 v1.0");
+    expect(warning.textContent).toContain("部分自动化设置");
+    expect(
+      screen.getByRole("switch", { name: "借用标签页前确认" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      screen.getByRole("switch", { name: "允许请求人工协助" }).getAttribute("aria-checked"),
+    ).toBe("true");
+
+    openRecordView();
+    const copyButton = screen.getByRole("button", { name: "复制录制指令" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+    fireEvent.click(copyButton);
+    expect(navigator.clipboard.writeText).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the legacy settings warning after the daemon is updated", () => {
+    const connected = (protocol: string) => ({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew" as const,
+        handshake: { server: "bh", version: mockDaemonVersion, protocol_version: protocol },
+      },
+      statusState: "version_skew" as const,
+      setLabel,
+      setConnectionEnabled,
+    });
+    mockUseConnectionState.mockReturnValue(connected("1.2"));
+    const { rerender } = render(<App />);
+    expect(screen.getByText(/部分自动化设置/)).toBeTruthy();
+    mockUseConnectionState.mockReturnValue({
+      ...connected(PROTOCOL_VERSION),
+      statusState: "connected",
+    });
+    rerender(<App />);
+    expect(screen.queryByText(/部分自动化设置/)).toBeNull();
+    expect(screen.getByText("已连接")).toBeTruthy();
+    mockUseConnectionState.mockReturnValue(connected("1.4"));
+    rerender(<App />);
+    expect(screen.queryByText(/部分自动化设置/)).toBeNull();
+    expect(screen.getByText(/协议版本不同，请及时升级/)).toBeTruthy();
+  });
+
+  it("renders Korean upgrade guidance and copies usable recording instructions", async () => {
+    await i18n.changeLanguage("ko-KR");
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "version_skew",
+        instanceId: "03c3e47f",
+        handshake: {
+          server: "bh",
+          version: mockDaemonVersion,
+          protocol_version: "1.0",
+        },
+      },
+      statusState: "version_skew",
+      setLabel,
+      setConnectionEnabled,
+    });
+
+    render(<App />);
+
+    expect(screen.getByText("연결됨")).toBeTruthy();
+    expect(screen.getByText("업그레이드 가능")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "이전 Daemon에 연결되었습니다(프로토콜 v1.0). 자동화 설정을 완전히 지원하려면 CLI와 Daemon을 업데이트하세요.",
+      ),
+    ).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "빠른 작업" }));
+    fireEvent.click(screen.getByRole("button", { name: /작업 기록/ }));
+    fireEvent.change(screen.getByPlaceholderText("예: 게시물 작성"), {
+      target: { value: "게시물 작성" },
+    });
+    const copyButton = screen.getByRole("button", { name: "기록 지침 복사" });
+    expect(copyButton.getAttribute("disabled")).toBeNull();
+    fireEvent.click(copyButton);
+
+    const copied = vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0] ?? "";
+    expect(copied).toContain('bsk record start --browser 03c3e47f --purpose "게시물 작성"');
+    expect(copied).toContain("\n\n단계:\n1.");
+    expect(copied).toContain("`./trace`");
+    expect(copied).toContain("`trace.json` + `states/`");
+    expect(copied).not.toContain("{{");
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("복사됨"));
+  });
+});
+
+describe("control hints toggle", () => {
+  function stubChromeStorage(initial: Record<string, unknown> = {}) {
+    const store = { ...initial };
+    vi.stubGlobal("chrome", {
+      runtime: { lastError: undefined },
+      storage: {
+        local: {
+          get: (keys: string | string[], cb: (items: Record<string, unknown>) => void) => {
+            const items: Record<string, unknown> = {};
+            for (const k of Array.isArray(keys) ? keys : [keys]) {
+              if (k in store) items[k] = store[k];
+            }
+            cb(items);
+          },
+          set: (items: Record<string, unknown>, cb?: () => void) => {
+            Object.assign(store, items);
+            cb?.();
+          },
+        },
+        onChanged: {
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+        },
+      },
+    });
+    return store;
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the control hints toggle on when no preference is stored", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("reflects the stored hidden preference", async () => {
+    stubChromeStorage({ [STORAGE_KEYS.CONTROL_HINTS_HIDDEN]: true });
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+  });
+
+  it("persists the hidden preference when the toggle is turned off", async () => {
+    const store = stubChromeStorage();
+
+    render(<App />);
+
+    const toggle = await screen.findByRole("switch", { name: "控制提示" });
+    fireEvent.click(toggle);
+
+    expect(store[STORAGE_KEYS.CONTROL_HINTS_HIDDEN]).toBe(true);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("keeps the hint copy in an accessible info tooltip", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const info = await screen.findByRole("button", { name: "控制提示说明" });
+    expect(info).toBeTruthy();
+    const tooltip = screen.getByText("Agent 控制页面时显示提示条和橙色闪光。");
+    expect(tooltip.getAttribute("role")).toBe("tooltip");
+    // Hidden until the info button is hovered or focused.
+    expect(tooltip.className).toContain("opacity-0");
+  });
+
+  it("uses the same switch component and size for both settings rows", async () => {
+    stubChromeStorage();
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connected" },
+      statusState: "connected",
+      setLabel: vi.fn(),
+      setConnectionEnabled: vi.fn(),
+    });
+
+    render(<App />);
+
+    const hintsToggle = await screen.findByRole("switch", { name: "控制提示" });
+    const connectionToggle = screen.getByRole("switch", { name: "BrowserSkill 连接" });
+    // One shared Switch component, one size — hierarchy comes from copy and
+    // the info icon, not control size. Both rows default to checked, so the
+    // class strings must be identical.
+    expect(hintsToggle.className).toContain("h-5 w-9");
+    expect(hintsToggle.className).toBe(connectionToggle.className);
+  });
+});
+
+describe("daemon port input", () => {
+  function stubChromeStorage(initial: Record<string, unknown> = {}) {
+    const store = { ...initial };
+    vi.stubGlobal("chrome", {
+      runtime: { lastError: undefined },
+      storage: {
+        local: {
+          get: (keys: string | string[], cb: (items: Record<string, unknown>) => void) => {
+            const items: Record<string, unknown> = {};
+            for (const k of Array.isArray(keys) ? keys : [keys]) {
+              if (k in store) items[k] = store[k];
+            }
+            cb(items);
+          },
+          set: (items: Record<string, unknown>, cb?: () => void) => {
+            Object.assign(store, items);
+            cb?.();
+          },
+        },
+        onChanged: {
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+        },
+      },
+    });
+    return store;
+  }
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("prefills the port from storage", async () => {
+    stubChromeStorage({ [STORAGE_KEYS.DAEMON_PORT]: 53200 });
+
+    render(<App />);
+
+    const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).value).toBe("53200"));
+  });
+
+  it("persists a valid port with the save button", async () => {
+    const store = stubChromeStorage();
+
+    render(<App />);
+
+    const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "53200" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
+
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200));
+    expect((input as HTMLInputElement).value).toBe("53200");
+  });
+
+  it("persists a valid port on Enter", async () => {
+    const store = stubChromeStorage();
+
+    render(<App />);
+
+    const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "53200" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200));
+  });
+
+  it("shows an error and does not write invalid ports", async () => {
+    const store = stubChromeStorage();
+
+    render(<App />);
+
+    const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
+
+    expect(screen.getByText("请输入 1 到 65535 之间的端口号。")).toBeTruthy();
+    expect(store[STORAGE_KEYS.DAEMON_PORT]).toBeUndefined();
+  });
+
+  it("stores the default port when the field is cleared", async () => {
+    const store = stubChromeStorage({ [STORAGE_KEYS.DAEMON_PORT]: 53200 });
+
+    render(<App />);
+
+    const input = await screen.findByRole("textbox", { name: "连接端口" });
+    await waitFor(() => expect((input as HTMLInputElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存端口" }));
+
+    await waitFor(() => expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(DEFAULT_DAEMON_PORT));
+    expect((input as HTMLInputElement).value).toBe(String(DEFAULT_DAEMON_PORT));
+  });
+
+  it("keeps the port hint copy in an accessible info tooltip", async () => {
+    stubChromeStorage();
+
+    render(<App />);
+
+    const info = await screen.findByRole("button", { name: "连接端口说明" });
+    expect(info).toBeTruthy();
+    const tooltip = screen.getByText(
+      "通过此端口连接本机 daemon，请先启动 daemon 并让其监听此端口。此设置仅更改扩展的连接地址，不会修改本地 CLI 配置。保存修改会结束当前会话，并在连接开关开启时重新连接。",
+    );
+    expect(tooltip.getAttribute("role")).toBe("tooltip");
+    expect(tooltip.className).toContain("opacity-0");
+  });
+});

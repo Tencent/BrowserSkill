@@ -1,0 +1,27 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WindowResizeParams",
+  "type": "object",
+  "required": [
+    "height",
+    "session_id",
+    "width"
+  ],
+  "properties": {
+    "height": {
+      "description": "New Agent Window outer height in CSS pixels (100..=7680).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "width": {
+      "description": "New Agent Window outer width in CSS pixels (100..=7680).",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  }
+}

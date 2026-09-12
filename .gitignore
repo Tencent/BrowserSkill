@@ -1,0 +1,27 @@
+# Rust
+target/
+
+# Node
+node_modules/
+dist/
+.output/
+.wxt/
+.web-extension-id
+.pnpm-store/
+
+# Git worktrees
+.worktrees/
+
+# Logs
+*.log
+
+# Local browser evaluation artifacts
+evals/browser/results/
+evals/browser/agents.local.json
+
+# macOS
+.DS_Store
+
+# Environment
+.env.local
+.env.*.local

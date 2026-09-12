@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "oopif-scrollbars",
+  "title": "Nested OOPIFs with occupied scrollbars and clipped controls",
+  "suite": "regression",
+  "tags": ["geometry", "iframe", "scroll"],
+  "fixture": { "startPath": "/oopif-scrollbars" },
+  "prompts": {
+    "en": "Open {url}, observe the page and its frames, report the OOPIF-SCROLLBARS marker, then close the session.",
+    "zh-CN": "打开 {url}，观察页面及其 iframe，报告 OOPIF-SCROLLBARS 标记，然后关闭会话。"
+  },
+  "coverage": ["session.start", "session.stop", "page.navigate", "inspect.observe"],
+  "assertions": {
+    "site": [
+      {
+        "label": "nested frame fixture settled",
+        "type": "geometry.ready",
+        "where": { "data.root": true },
+        "minCount": 1
+      },
+      {
+        "label": "both child frames have occupied scrollbars",
+        "type": "geometry.scrollbars",
+        "where": { "data.vertical": true, "data.horizontal": true },
+        "minCount": 2
+      }
+    ],
+    "response": [{ "label": "observed the fixture marker", "includes": "OOPIF-SCROLLBARS" }],
+    "adapter": [{ "label": "browser session was closed", "key": "sessionStopped" }]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      { "action": "wait-site-event", "type": "geometry.ready", "where": { "root": true } },
+      { "action": "observe" }
+    ]
+  }
+}

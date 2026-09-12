@@ -1,0 +1,67 @@
+{
+  "$schema": "../../schemas/case.schema.json",
+  "schemaVersion": 1,
+  "id": "navigation-history",
+  "title": "Navigation, history, and reload",
+  "order": 10,
+  "suite": "core",
+  "tags": ["navigation", "history", "reload"],
+  "fixture": { "startPath": "/navigation/start" },
+  "prompts": {
+    "en": "Open {url}. Read the main heading, follow the Details link, and report the code shown there. Then go back, go forward, reload the page, and close the browser session. Use only the browser capability for page operations.",
+    "zh-CN": "打开 {url}。读取页面主标题，点击“详情”，并报告详情页上的代码。然后依次后退、前进、刷新页面，最后关闭浏览器会话。页面操作只使用浏览器能力。"
+  },
+  "coverage": [
+    "session.start",
+    "session.stop",
+    "page.navigate",
+    "page.back",
+    "page.forward",
+    "page.reload",
+    "interact.click"
+  ],
+  "assertions": {
+    "site": [
+      {
+        "label": "details link was clicked",
+        "type": "navigation.detail.clicked",
+        "minCount": 1
+      },
+      {
+        "label": "back returned to the start page",
+        "type": "page.shown",
+        "where": { "data.path": "/navigation/start" },
+        "minCount": 2
+      },
+      {
+        "label": "forward returned to the detail page",
+        "type": "page.shown",
+        "where": { "data.path": "/navigation/detail" },
+        "minCount": 2
+      },
+      {
+        "label": "detail page was reloaded",
+        "type": "page.shown",
+        "where": {
+          "data.path": "/navigation/detail",
+          "data.navigationType": "reload"
+        },
+        "minCount": 1
+      }
+    ],
+    "response": [{ "label": "reported detail code", "includes": "NAV-42" }],
+    "adapter": [{ "label": "browser session was closed", "key": "sessionStopped" }]
+  },
+  "smoke": {
+    "steps": [
+      { "action": "navigate" },
+      { "action": "observe" },
+      { "action": "snapshot" },
+      { "action": "click", "selector": "#details-link" },
+      { "action": "html" },
+      { "action": "back" },
+      { "action": "forward" },
+      { "action": "reload" }
+    ]
+  }
+}

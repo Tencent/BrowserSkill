@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StatusParams",
+  "description": "`system.status` request payload.",
+  "type": "object",
+  "properties": {
+    "wait_for_browser_ms": {
+      "description": "When set, the daemon polls the browser registry for up to this many milliseconds before returning a snapshot. Only applies while zero browsers are registered; an existing connection returns immediately.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

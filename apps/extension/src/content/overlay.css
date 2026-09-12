@@ -1,0 +1,23 @@
+@import "tailwindcss";
+@source "../content";
+
+:host([data-bsk-overlay-surface]) {
+  position: fixed !important;
+  inset: 0 !important;
+  display: block !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+}
+
+:host([data-bsk-overlay-surface][data-bsk-overlay-blocking]) {
+  pointer-events: auto !important;
+}
+
+/* Screenshot suppression: the host lives in the main DOM, so hiding it
+   removes the whole shadow subtree from compositing and captured frames
+   only contain page content. */
+:host([data-bsk-capture-hidden]) {
+  display: none !important;
+}

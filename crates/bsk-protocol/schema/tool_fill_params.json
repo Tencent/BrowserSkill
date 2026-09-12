@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "FillParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "value"
+  ],
+  "properties": {
+    "clear_before": {
+      "description": "Clear the field before typing. Defaults to `true`; pass `false` to append instead of replacing.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "value": {
+      "type": "string"
+    }
+  }
+}

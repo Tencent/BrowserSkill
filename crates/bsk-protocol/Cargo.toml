@@ -1,0 +1,24 @@
+[package]
+name = "bsk-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "browser-skill wire protocol — JSON-RPC frames, tool payloads, and JSON Schemas"
+readme = "README.md"
+keywords = ["browser", "automation", "json-rpc", "protocol", "websocket"]
+categories = ["web-programming", "api-bindings"]
+repository.workspace = true
+homepage = "https://github.com/Tencent/BrowserSkill"
+documentation = "https://docs.rs/bsk-protocol"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+schemars = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "dump-schema"
+path = "src/bin/dump-schema.rs"

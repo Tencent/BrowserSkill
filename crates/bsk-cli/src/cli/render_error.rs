@@ -1,0 +1,789 @@
+//! Single source of truth for the human-readable summary, repair
+//! hint, and exit code attached to every [`ErrorCode`] variant.
+//!
+//! Keeping the table in one place means:
+//!   * the renderer in [`super::error::render`] never invents
+//!     ad-hoc copy or exit codes,
+//!   * `bsk-cli` subcommands that surface their own bespoke
+//!     `eprintln!("error: ...")` lines are obvious anomalies during
+//!     review, and
+//!   * the M10.3 unit tests can lock in `ErrorCode → exit_code` so a
+//!     silent regression bumps a test failure rather than escaping
+//!     into shell scripts that depend on the documented contract.
+//!
+//! Exit code mapping follows design §3.1:
+//!   * `0` — success (never produced by this module),
+//!   * `1` — user error (parameters / sandbox / missing entity),
+//!   * `2` — protocol or transport error (incl. `cancelled`),
+//!   * `3` — browser / CDP failure,
+//!   * `4` — timeout,
+//!   * `5` — version mismatch.
+//!
+//! Strings are in English: the CLI is consumed by agents and other
+//! automated tooling, so all user-facing copy uses English. Command
+//! names, flags, field names, and `ErrorCode` literal values are
+//! also English so the wire / CLI contract stays unambiguous. There
+//! is no i18n framework wired up yet; if we ever introduce one, the
+//! `summary` and `hint` strings here are the obvious extraction
+//! candidates (one key per `ErrorCode` variant).
+//!
+//! `cancelled` is intentionally not in the design's enumerated table
+//! but currently lands on `2` to keep parity with M3.5 behaviour and
+//! the existing exit-code unit test. Tests that want to discriminate
+//! cancellation should match on `ErrorCode::Cancelled` directly.
+
+use bsk_protocol::ErrorCode;
+
+/// Stable `RpcError.data.reason` values emitted by the extension for
+/// finer-grained CLI rendering. Kept as string literals on the wire so
+/// older peers can ignore unknown reasons and fall back to code-based copy.
+pub mod reason {
+    pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
+    pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
+    pub const VISUAL_TARGET_CHANGED: &str = "visual_target_changed";
+    pub const VISUAL_PIXEL_BUDGET_EXCEEDED: &str = "visual_pixel_budget_exceeded";
+    pub const REF_KIND_UNSUPPORTED: &str = "ref_kind_unsupported";
+    pub const REF_NOT_FOUND: &str = "ref_not_found";
+    pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
+    pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
+    pub const FILL_VALUE_INVALID: &str = "fill_value_invalid";
+    pub const FILL_TARGET_CHANGED: &str = "fill_target_changed";
+    pub const FILL_FOCUS_LOST: &str = "fill_focus_lost";
+    pub const FILL_VALUE_MISMATCH: &str = "fill_value_mismatch";
+    pub const FILL_FAILED: &str = "fill_failed";
+    pub const TARGET_NOT_SELECT: &str = "target_not_select";
+    pub const OPTION_NOT_FOUND: &str = "option_not_found";
+    pub const SINGLE_SELECT_VALUE_COUNT: &str = "single_select_value_count";
+    pub const TAB_NOT_ACTIVE: &str = "tab_not_active";
+    pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
+    pub const BORROW_CONFLICT: &str = "borrow_conflict";
+    pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
+    pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
+    pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
+    pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
+    pub const UPLOAD_MECHANISM_UNSUPPORTED: &str = "upload_mechanism_unsupported";
+    pub const FILE_DROP_TARGET_UNAVAILABLE: &str = "file_drop_target_unavailable";
+    pub const FILE_DROP_FAILED: &str = "file_drop_failed";
+    pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
+    pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
+    pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
+    pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
+    pub const RECORD_START_PAGE_UNREACHABLE: &str = "record_start_page_unreachable";
+}
+
+/// Per-code rendering metadata. The `summary` is what the CLI prints
+/// after the leading `error: ` token; the `hint` (when present) is
+/// what we print on the next line as `hint: ...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderInfo {
+    pub summary: &'static str,
+    pub hint: Option<&'static str>,
+    pub exit_code: u8,
+}
+
+/// Look up the rendering info for a given error code.
+pub fn info_for(code: ErrorCode) -> RenderInfo {
+    match code {
+        ErrorCode::UnknownMethod => RenderInfo {
+            summary: "daemon does not recognise this RPC method",
+            hint: Some(
+                "upgrade both bsk CLI and the browser-skill extension; CLI and daemon may be on mismatched protocol versions",
+            ),
+            // Design §3.1 maps version / protocol incompatibility to
+            // exit 5 and the design notes call out `unknown_method`
+            // as the canonical "method-shape mismatch" path (review
+            // I4: was previously 1 which is reserved for user-input
+            // errors).
+            exit_code: 5,
+        },
+        ErrorCode::Unsupported => RenderInfo {
+            summary: "this operation is not supported by the current build",
+            hint: Some(
+                "check `bsk --version` and the bsk changelog to confirm whether the feature is available",
+            ),
+            exit_code: 1,
+        },
+        ErrorCode::InvalidParams => RenderInfo {
+            summary: "invalid command parameters",
+            hint: Some(
+                "check your command arguments; run `bsk <cmd> --help` to see the expected format",
+            ),
+            exit_code: 1,
+        },
+        ErrorCode::NotFound => RenderInfo {
+            summary: "requested resource does not exist",
+            hint: Some(
+                "the session, tab, or browser may have stopped; run `bsk session list` / `bsk browsers` to see current state",
+            ),
+            exit_code: 1,
+        },
+        ErrorCode::PermissionDenied => RenderInfo {
+            summary: "operation denied by the Agent Window sandbox",
+            hint: Some(
+                "tabs outside an Agent Window must first be borrowed via `bsk tab borrow <tab-id> --session <id>`",
+            ),
+            exit_code: 1,
+        },
+        ErrorCode::Timeout => RenderInfo {
+            summary: "operation timed out",
+            hint: Some(
+                "retry the command; if timeouts persist, check `bsk logs` and confirm the browser is still responding",
+            ),
+            exit_code: 4,
+        },
+        ErrorCode::CdpFailed => RenderInfo {
+            summary: "browser rejected the underlying CDP call",
+            hint: Some(
+                "confirm the tab is still in a loaded state and retry; reloading the tab usually resets a stuck DevTools session",
+            ),
+            exit_code: 3,
+        },
+        ErrorCode::ProtocolError => RenderInfo {
+            summary: "protocol error communicating with bsk daemon",
+            hint: Some(
+                "ensure CLI and daemon protocol versions match — check `protocol version` in `bsk status`",
+            ),
+            exit_code: 2,
+        },
+        ErrorCode::Cancelled => RenderInfo {
+            summary: "operation cancelled",
+            hint: Some(
+                "the previous command was interrupted (Ctrl-C or a remote `cancel` request)",
+            ),
+            exit_code: 2,
+        },
+        ErrorCode::UserAborted => RenderInfo {
+            summary: "operation interrupted by user",
+            hint: Some(
+                "the user requested an interrupt (e.g. via the agent window's stop button); rerun if this was unintended",
+            ),
+            exit_code: 2,
+        },
+        ErrorCode::VersionTooOld => RenderInfo {
+            summary: "peer version is too old to communicate with this build",
+            hint: Some(
+                "upgrade both bsk CLI and the browser-skill extension so both sides satisfy `min_compatible_protocol`",
+            ),
+            exit_code: 5,
+        },
+        ErrorCode::MultipleBrowsersOnline => RenderInfo {
+            summary: "multiple browsers are online",
+            hint: Some(
+                "use `--browser <instance_id-or-label>` to target a specific browser (run `bsk browsers` to list online browsers)",
+            ),
+            exit_code: 1,
+        },
+        ErrorCode::NoBrowserConnected => RenderInfo {
+            summary: "no browser is connected to the daemon",
+            hint: Some(
+                "open the browser-skill extension in your browser and wait for the popup to show \"connected\"",
+            ),
+            exit_code: 1,
+        },
+    }
+}
+
+/// Convenience accessor used by [`super::error::render`] when it
+/// needs only the exit code.
+pub fn exit_code_for(code: ErrorCode) -> u8 {
+    info_for(code).exit_code
+}
+
+/// Convenience accessor used by [`super::error::render`] when it
+/// needs only the hint.
+pub fn hint_for_code(code: ErrorCode) -> Option<&'static str> {
+    info_for(code).hint
+}
+
+/// Convenience accessor for the human summary; useful when the CLI
+/// wants a friendly first line independent of the daemon's
+/// machine-oriented message.
+pub fn summary_for(code: ErrorCode) -> &'static str {
+    info_for(code).summary
+}
+
+/// Extract `data.reason` when present and a non-empty string.
+pub fn reason_for_data(data: Option<&serde_json::Value>) -> Option<&str> {
+    data?.get("reason")?.as_str().filter(|s| !s.is_empty())
+}
+
+/// Look up rendering info using `(code, data.reason)` when a reason-
+/// specific override exists; otherwise fall back to [`info_for`].
+pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> RenderInfo {
+    let base = info_for(code);
+    let Some(reason) = reason_for_data(data) else {
+        return base;
+    };
+    match (code, reason) {
+        (_, "user_denied") => RenderInfo {
+            summary: "the user denied the tab borrow",
+            hint: Some("do not repeat the same authorization request"),
+            ..base
+        },
+        (_, "confirmation_timeout") => RenderInfo {
+            summary: "timed out waiting for human confirmation",
+            hint: Some(
+                "report the blocked step; do not automatically repeat the request or switch browser tools",
+            ),
+            ..base
+        },
+        (_, "confirmation_ui_unavailable") => RenderInfo {
+            summary: "the browser could not display a confirmation request",
+            hint: Some(
+                "report the unavailable confirmation UI; unattended users can change Automation settings in the extension",
+            ),
+            ..base
+        },
+        (_, "borrow_in_progress") => RenderInfo {
+            summary: "this tab already has a pending borrow request",
+            hint: Some("wait for the existing request; do not issue another borrow"),
+            ..base
+        },
+        (_, "borrow_outcome_unknown") => RenderInfo {
+            summary: "the final tab borrow state could not be confirmed",
+            hint: Some(
+                "inspect tab and session state before continuing; do not blindly retry the borrow",
+            ),
+            ..base
+        },
+        (ErrorCode::CdpFailed, reason::CDP_EXTENSION_ACCESS_DENIED) => RenderInfo {
+            summary: "Chrome blocked CDP access to another extension's content in this tab",
+            hint: Some(
+                "a web page can contain a restricted extension frame; disable the conflicting extension and reload, or use `bsk navigate <url>` to leave this page; reconnecting BrowserSkill alone does not remove the restriction",
+            ),
+            exit_code: base.exit_code,
+        },
+        (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
+            summary: "the file transfer outcome could not be confirmed",
+            hint: Some(
+                "do not retry the transfer: the browser may already have applied it; inspect the page or stop safely",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout, reason::TRANSFER_TIMEOUT) => RenderInfo {
+            summary: "the file transfer timed out after browser dispatch",
+            hint: Some(
+                "do not retry when effect_state is unknown or committed; inspect the page before taking another action",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::ELEMENT_NOT_VISIBLE) => RenderInfo {
+            summary: "target element has no visible geometry",
+            hint: Some(
+                "rerun snapshot and choose a visible child ref, or wait/scroll/reload before retrying",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::PermissionDenied, reason::BORROW_CONFLICT) => RenderInfo {
+            summary: "tab is borrowed by another session",
+            hint: Some(
+                "return the tab from the borrowing session via `bsk tab return <tab-id> --session <id>` or stop that session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, "visual_capture_stale") => RenderInfo {
+            summary: "Canvas screenshot capture is no longer usable",
+            hint: Some(
+                "run `bsk observe`, screenshot the current Canvas ref, and use its new capture_id",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, "visual_capture_invalid" | "visual_coordinate_invalid") => {
+            RenderInfo {
+                summary: "invalid screenshot-bound Canvas click",
+                hint: Some(
+                    "provide a visual ref, --capture, --image-x and --image-y in the original PNG dimensions",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
+        (ErrorCode::NotFound, reason::VISUAL_TARGET_CHANGED) => RenderInfo {
+            summary: "visual target needs a fresh observation",
+            hint: Some(
+                "observe the page again and use the current visual ref; the previous identity or region cannot be used",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::VISUAL_PIXEL_BUDGET_EXCEEDED) => RenderInfo {
+            summary: "visual screenshot exceeds the image size limit",
+            hint: Some("the screenshot could not be reduced within the pixel budget"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::REF_KIND_UNSUPPORTED) => RenderInfo {
+            summary: "this tool does not support the ref target type",
+            hint: Some(
+                "use a DOM ref for DOM operations; visual-region refs require an available visual screenshot path",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::REF_NOT_FOUND) => RenderInfo {
+            summary: "observation ref was not found for this tab",
+            hint: Some("rerun `bsk observe` for the current tab and use one of the returned refs"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::NotFound, reason::SELECTOR_NOT_FOUND) => RenderInfo {
+            summary: "selector did not match any element",
+            hint: Some("verify the CSS selector or wait for the element to appear before retrying"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::TARGET_NOT_FILLABLE) => RenderInfo {
+            summary: "target element is not fillable",
+            hint: Some(
+                "observe the page and choose an enabled, editable text input, textarea, or contenteditable; use the appropriate interaction for other control types",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::FILL_VALUE_INVALID) => RenderInfo {
+            summary: "the requested text does not fit the field constraints",
+            hint: Some(
+                "check the field's input type and maxlength; use a compatible value without silently truncating or changing the user's intended data",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_TARGET_CHANGED) => RenderInfo {
+            summary: "the fill target changed during the action",
+            hint: Some(
+                "observe the current page and field value; if the intended result is missing, use a fresh editable target before retrying",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_FOCUS_LOST) => RenderInfo {
+            summary: "the page moved focus away from the fill target",
+            hint: Some(
+                "observe the page for a dialog or rerender and resolve it before retrying; fill manages field focus and does not require bringing the browser to the foreground",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_VALUE_MISMATCH) => RenderInfo {
+            summary: "the fill result could not be confirmed",
+            hint: Some(
+                "observe the field before retrying; the page may have formatted the value. Continue if the visible result satisfies the user's intent; otherwise correct the remaining difference. Do not blindly repeat fill or immediately request human help",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::FILL_FAILED) => RenderInfo {
+            summary: "fill encountered a browser or page-script error",
+            hint: Some(
+                "observe the page before retrying because the field may already have changed; retry only if the intended result is missing and the target is still available",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::TARGET_NOT_SELECT) => RenderInfo {
+            summary: "target element is not a <select>",
+            hint: Some(
+                "choose a native <select> ref or selector from the latest snapshot, or use `bsk click` / `bsk fill` for other controls",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::OPTION_NOT_FOUND) => RenderInfo {
+            summary: "option value not found in <select>",
+            hint: Some(
+                "rerun `bsk snapshot` or `bsk get-html` to list valid option values, then pass them via `--value`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::SINGLE_SELECT_VALUE_COUNT) => RenderInfo {
+            summary: "single-select requires exactly one option value",
+            hint: Some(
+                "pass exactly one `--value` for a regular <select>; repeat `--value` only for <select multiple>",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, reason::TAB_NOT_ACTIVE) => RenderInfo {
+            summary: "screenshot requires the visible active tab",
+            hint: Some(
+                "select the tab with `bsk tab select <tab-id> --session <id>` or omit `--tab-id` to capture the Agent Window's active tab",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout, reason::SESSION_BUSY) => RenderInfo {
+            summary: "previous session command is still running",
+            hint: Some(
+                "wait for the current command to finish, cancel it with Ctrl-C, or stop/restart the session",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
+            summary: "the browser could not capture the tab image",
+            hint: Some(
+                "both the visible-tab capture and the CDP compositor fallback failed inside the browser; this points at a browser-side rendering/readback issue — try reloading the tab, restarting the browser, or upgrading/downgrading Chrome",
+            ),
+            exit_code: base.exit_code,
+        },
+        (
+            ErrorCode::CdpFailed | ErrorCode::Timeout | ErrorCode::InvalidParams,
+            reason::RECORD_START_PAGE_UNREACHABLE,
+        ) => RenderInfo {
+            summary: "default start page https://example.com/ could not be opened",
+            hint: Some(
+                "that site may be unreachable from your network. Pass --url with a page you can open, e.g. `bsk record start --url https://<site>/`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::FILE_INPUT_NOT_ACTIVATED) => RenderInfo {
+            summary: "the upload trigger did not activate a file input",
+            hint: Some(
+                "the page may use a non-input picker such as showOpenFilePicker(); when effect_state is none, re-observe and use `--mode drop` once only for a reliably identified attachment-receiving area — otherwise use `bsk request-help` with the exact original local path",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_INPUT_PROBE_FAILED) => {
+            RenderInfo {
+                summary: "the browser upload transaction could not be established",
+                hint: Some(
+                    "do not retry the same upload blindly; use `bsk request-help` when human help is available",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::SET_FILE_INPUT_FAILED) => RenderInfo {
+            summary: "the browser could not attach the staged file to the input",
+            hint: Some(
+                "check that BrowserSkill has Chrome's 'Allow access to file URLs' permission; otherwise use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::UPLOAD_MECHANISM_UNSUPPORTED) => RenderInfo {
+            summary: "the browser does not support native file-drop upload",
+            hint: Some(
+                "do not retry the same drop; use a standard file-input target or `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (
+            ErrorCode::PermissionDenied | ErrorCode::Timeout | ErrorCode::CdpFailed,
+            reason::FILE_DROP_TARGET_UNAVAILABLE,
+        ) => RenderInfo {
+            summary: "the file-drop target could not be safely resolved",
+            hint: Some(
+                "rerun observe and select the attachment-receiving editor or drop zone itself; do not guess another target — no file was delivered when effect_state is none",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Timeout | ErrorCode::CdpFailed, reason::FILE_DROP_FAILED) => RenderInfo {
+            summary: "the browser could not complete the native file drop",
+            hint: Some(
+                "do not retry when effect_state is unknown; observe the page first, otherwise use `bsk request-help`",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::DOWNLOAD_CAPTURE_FAILED) => RenderInfo {
+            summary: "the browser download could not be attributed or completed",
+            hint: Some(
+                "do not retry blindly; the target browser may not expose a reliable download intent signal",
+            ),
+            exit_code: base.exit_code,
+        },
+        _ => base,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lock the exit-code mapping for every `ErrorCode` variant so a
+    /// silent regression flips a test instead of escaping into shell
+    /// scripts that depend on the documented values.
+    #[test]
+    fn exit_codes_match_design_table() {
+        // Design §3.1 — exit-code buckets:
+        //   1 user error (parameters / sandbox / missing entity)
+        //   2 protocol error (daemon ↔ extension transport)
+        //   3 browser / CDP failure
+        //   4 timeout
+        //   5 version incompatibility
+        assert_eq!(exit_code_for(ErrorCode::InvalidParams), 1);
+        assert_eq!(exit_code_for(ErrorCode::NotFound), 1);
+        assert_eq!(exit_code_for(ErrorCode::PermissionDenied), 1);
+        assert_eq!(exit_code_for(ErrorCode::NoBrowserConnected), 1);
+        assert_eq!(exit_code_for(ErrorCode::MultipleBrowsersOnline), 1);
+        assert_eq!(exit_code_for(ErrorCode::Unsupported), 1);
+
+        assert_eq!(exit_code_for(ErrorCode::ProtocolError), 2);
+        assert_eq!(exit_code_for(ErrorCode::Cancelled), 2);
+        assert_eq!(exit_code_for(ErrorCode::UserAborted), 2);
+
+        assert_eq!(exit_code_for(ErrorCode::CdpFailed), 3);
+        assert_eq!(exit_code_for(ErrorCode::Timeout), 4);
+        // Review I4: `unknown_method` joins `version_too_old` in the
+        // version-incompatibility bucket. The error code is the
+        // canonical "method shape mismatch" symptom of a CLI/daemon
+        // version drift, so it must NOT be filed under generic user
+        // errors (exit 1).
+        assert_eq!(exit_code_for(ErrorCode::UnknownMethod), 5);
+        assert_eq!(exit_code_for(ErrorCode::VersionTooOld), 5);
+    }
+
+    /// Every code must carry a non-empty summary; an empty `summary`
+    /// would render `error: ` with nothing after it.
+    #[test]
+    fn every_code_has_a_summary() {
+        for code in EVERY_CODE {
+            let info = info_for(*code);
+            assert!(
+                !info.summary.is_empty(),
+                "summary missing for {code:?}: {info:?}"
+            );
+        }
+    }
+
+    /// Every code should at least *try* to provide a hint; a missing
+    /// hint is allowed but at the time of writing every variant has
+    /// one. This guards against accidental drift where a new variant
+    /// lands without thinking about UX.
+    #[test]
+    fn every_code_has_a_hint_today() {
+        for code in EVERY_CODE {
+            let info = info_for(*code);
+            assert!(info.hint.is_some(), "hint missing for {code:?}");
+        }
+    }
+
+    /// Exhaustive list used by the table-driven assertions above. Kept
+    /// here (rather than in bsk-protocol) so a test failure shows up
+    /// next to the rendering data the test is guarding.
+    const EVERY_CODE: &[ErrorCode] = &[
+        ErrorCode::UnknownMethod,
+        ErrorCode::Unsupported,
+        ErrorCode::InvalidParams,
+        ErrorCode::NotFound,
+        ErrorCode::PermissionDenied,
+        ErrorCode::Timeout,
+        ErrorCode::CdpFailed,
+        ErrorCode::ProtocolError,
+        ErrorCode::Cancelled,
+        ErrorCode::UserAborted,
+        ErrorCode::VersionTooOld,
+        ErrorCode::MultipleBrowsersOnline,
+        ErrorCode::NoBrowserConnected,
+    ];
+
+    #[test]
+    fn fill_reasons_provide_recovery_without_changing_exit_codes() {
+        for (code, reason, hint_fragment) in [
+            (
+                ErrorCode::InvalidParams,
+                reason::TARGET_NOT_FILLABLE,
+                "enabled, editable",
+            ),
+            (
+                ErrorCode::InvalidParams,
+                reason::FILL_VALUE_INVALID,
+                "maxlength",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_TARGET_CHANGED,
+                "fresh editable target",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_FOCUS_LOST,
+                "does not require bringing the browser",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_VALUE_MISMATCH,
+                "Continue if the visible result satisfies",
+            ),
+            (
+                ErrorCode::CdpFailed,
+                reason::FILL_FAILED,
+                "may already have changed",
+            ),
+        ] {
+            let data = serde_json::json!({ "reason": reason });
+            let info = info_for_error(code, Some(&data));
+            assert!(info.hint.unwrap().contains(hint_fragment), "{reason}");
+            assert_eq!(info.exit_code, info_for(code).exit_code);
+        }
+        let mismatch = serde_json::json!({ "reason": reason::FILL_VALUE_MISMATCH });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&mismatch));
+        assert_eq!(info.summary, "the fill result could not be confirmed");
+        assert!(info.hint.unwrap().contains("Do not blindly repeat fill"));
+        let unknown = serde_json::json!({ "reason": "future_fill_reason" });
+        assert_eq!(
+            info_for_error(ErrorCode::CdpFailed, Some(&unknown)),
+            info_for(ErrorCode::CdpFailed)
+        );
+    }
+
+    #[test]
+    fn element_not_visible_overrides_permission_denied_copy() {
+        let data = serde_json::json!({ "reason": reason::ELEMENT_NOT_VISIBLE });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&data));
+        assert_eq!(info.summary, "target element has no visible geometry");
+        assert!(
+            info.hint.unwrap().contains("rerun snapshot"),
+            "expected geometry-specific hint"
+        );
+        assert!(!info.summary.contains("sandbox"));
+    }
+
+    #[test]
+    fn extension_access_denied_explains_the_frame_restriction_and_navigation_recovery() {
+        let data = serde_json::json!({ "reason": reason::CDP_EXTENSION_ACCESS_DENIED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert!(info.summary.contains("another extension"));
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("restricted extension frame"));
+        assert!(hint.contains("bsk navigate <url>"));
+        assert!(hint.contains("disable the conflicting extension"));
+        assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn session_busy_overrides_timeout_copy() {
+        let data = serde_json::json!({ "reason": reason::SESSION_BUSY });
+        let info = info_for_error(ErrorCode::Timeout, Some(&data));
+        assert_eq!(info.summary, "previous session command is still running");
+        assert!(
+            info.hint.unwrap().contains("wait for the current command"),
+            "expected session-busy-specific hint"
+        );
+        assert_eq!(info.exit_code, 4);
+    }
+
+    #[test]
+    fn record_start_page_unreachable_overrides_cdp_failed_copy() {
+        let data = serde_json::json!({ "reason": reason::RECORD_START_PAGE_UNREACHABLE });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(
+            info.summary,
+            "default start page https://example.com/ could not be opened"
+        );
+        assert!(
+            info.hint.unwrap().contains("--url"),
+            "expected --url hint, got {:?}",
+            info.hint
+        );
+        assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn screenshot_capture_failed_overrides_cdp_failed_copy() {
+        let data = serde_json::json!({ "reason": reason::SCREENSHOT_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&data));
+        assert_eq!(info.summary, "the browser could not capture the tab image");
+        assert!(
+            info.hint.unwrap().contains("CDP compositor fallback"),
+            "expected screenshot-specific hint, got {:?}",
+            info.hint
+        );
+        // Still the browser/CDP failure bucket.
+        assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
+    fn file_transfer_reasons_render_actionable_fallbacks() {
+        let unsupported = serde_json::json!({ "reason": reason::FILE_INPUT_NOT_ACTIVATED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported));
+        assert_eq!(
+            info.summary,
+            "the upload trigger did not activate a file input"
+        );
+        let hint = info.hint.unwrap();
+        assert!(hint.contains("--mode drop"));
+        assert!(hint.contains("reliably identified attachment-receiving area"));
+        assert!(hint.contains("exact original local path"));
+
+        let control = serde_json::json!({ "reason": reason::FILE_INPUT_PROBE_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&control));
+        assert!(
+            info.summary
+                .contains("transaction could not be established")
+        );
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let unsupported_drop =
+            serde_json::json!({ "reason": reason::UPLOAD_MECHANISM_UNSUPPORTED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported_drop));
+        assert_eq!(
+            info.summary,
+            "the browser does not support native file-drop upload"
+        );
+        assert!(info.hint.unwrap().contains("standard file-input"));
+
+        let unavailable_target =
+            serde_json::json!({ "reason": reason::FILE_DROP_TARGET_UNAVAILABLE });
+        let info = info_for_error(ErrorCode::PermissionDenied, Some(&unavailable_target));
+        assert_eq!(
+            info.summary,
+            "the file-drop target could not be safely resolved"
+        );
+        assert!(info.hint.unwrap().contains("effect_state is none"));
+
+        let failed_drop = serde_json::json!({ "reason": reason::FILE_DROP_FAILED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&failed_drop));
+        assert!(info.summary.contains("native file drop"));
+        assert!(info.hint.unwrap().contains("effect_state is unknown"));
+
+        let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
+        assert!(info.summary.contains("download could not be attributed"));
+
+        let unknown = serde_json::json!({ "reason": reason::TRANSFER_OUTCOME_UNKNOWN });
+        let info = info_for_error(ErrorCode::ProtocolError, Some(&unknown));
+        assert!(info.summary.contains("outcome could not be confirmed"));
+        assert!(info.hint.unwrap().contains("do not retry"));
+
+        let timeout = serde_json::json!({ "reason": reason::TRANSFER_TIMEOUT });
+        let info = info_for_error(ErrorCode::Timeout, Some(&timeout));
+        assert!(info.summary.contains("timed out after browser dispatch"));
+    }
+
+    #[test]
+    fn visual_screenshot_failures_have_specific_guidance() {
+        let changed = serde_json::json!({ "reason": reason::VISUAL_TARGET_CHANGED });
+        let info = info_for_error(ErrorCode::NotFound, Some(&changed));
+        assert!(info.hint.unwrap().contains("observe"));
+        let budget = serde_json::json!({ "reason": reason::VISUAL_PIXEL_BUDGET_EXCEEDED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&budget));
+        assert!(info.summary.contains("image size limit"));
+    }
+
+    #[test]
+    fn visual_ref_type_error_has_specific_guidance() {
+        let data = serde_json::json!({ "reason": reason::REF_KIND_UNSUPPORTED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&data));
+        assert!(info.summary.contains("ref target type"));
+        assert!(info.hint.unwrap().contains("DOM ref"));
+        assert_eq!(info.exit_code, info_for(ErrorCode::Unsupported).exit_code);
+    }
+
+    #[test]
+    fn ref_not_found_overrides_not_found_copy() {
+        let data = serde_json::json!({ "reason": reason::REF_NOT_FOUND });
+        let info = info_for_error(ErrorCode::NotFound, Some(&data));
+        assert_eq!(info.summary, "observation ref was not found for this tab");
+        assert!(info.hint.unwrap().contains("bsk observe"));
+    }
+
+    #[test]
+    fn target_not_select_overrides_invalid_params_copy() {
+        let data = serde_json::json!({ "reason": reason::TARGET_NOT_SELECT });
+        let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
+        assert_eq!(info.summary, "target element is not a <select>");
+        assert!(info.hint.unwrap().contains("native <select>"));
+    }
+
+    #[test]
+    fn option_not_found_overrides_invalid_params_copy() {
+        let data = serde_json::json!({ "reason": reason::OPTION_NOT_FOUND });
+        let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
+        assert_eq!(info.summary, "option value not found in <select>");
+        assert!(info.hint.unwrap().contains("--value"));
+    }
+
+    #[test]
+    fn single_select_value_count_overrides_invalid_params_copy() {
+        let data = serde_json::json!({ "reason": reason::SINGLE_SELECT_VALUE_COUNT });
+        let info = info_for_error(ErrorCode::InvalidParams, Some(&data));
+        assert_eq!(
+            info.summary,
+            "single-select requires exactly one option value"
+        );
+        assert!(info.hint.unwrap().contains("exactly one"));
+    }
+}

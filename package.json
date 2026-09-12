@@ -1,0 +1,23 @@
+{
+  "name": "browser-skill",
+  "private": true,
+  "packageManager": "pnpm@10.17.0",
+  "scripts": {
+    "cli:build": "cargo run -p bsk-protocol --bin dump-schema --locked && pnpm -r build",
+    "eval:browser": "node evals/browser/cli.mjs",
+    "eval:browser:check": "node evals/browser/cli.mjs validate && node --test evals/browser/tests/*.test.mjs",
+    "eval:browser:test": "node --test evals/browser/tests/*.test.mjs",
+    "ext:build": "pnpm --filter @browser-skill/extension build",
+    "ext:build:zip": "pnpm --filter @browser-skill/extension zip",
+    "ext:dev": "pnpm --filter @browser-skill/extension dev",
+    "ext:test": "pnpm --filter @browser-skill/extension test",
+    "vom:test": "pnpm --filter @browser-skill/vom test",
+    "lint": "biome check . && stylelint \"**/*.css\" && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.14",
+    "stylelint": "^16.0.0",
+    "stylelint-config-standard": "^37.0.0"
+  }
+}

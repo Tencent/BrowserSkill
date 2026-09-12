@@ -1,0 +1,57 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NavigateParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "url"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's currently active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the wait; the extension also enforces its own AbortController hookup (M7 stops listening for further lifecycle events once exceeded). Defaults to 30s if omitted.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "url": {
+      "type": "string"
+    },
+    "wait_until": {
+      "description": "Lifecycle phase to wait on. Defaults to [`WaitUntil::Load`].",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/WaitUntil"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "WaitUntil": {
+      "description": "Page-lifecycle checkpoint a navigation should wait on.\n\nMapping to CDP `Page.lifecycleEvent` names: * `Load` → `load` * `DomContentLoaded` → `DOMContentLoaded` * `NetworkIdle` → `networkIdle` * `Commit` → `commit` (earliest event after the navigation actually commits to a new document)",
+      "type": "string",
+      "enum": [
+        "load",
+        "domcontentloaded",
+        "networkidle",
+        "commit"
+      ]
+    }
+  }
+}

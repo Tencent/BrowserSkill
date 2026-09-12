@@ -1,0 +1,6 @@
+{
+  "app": {
+    "name": "browser-skill",
+    "description": "Drive your logged-in browser from AI agents via the bsk CLI"
+  }
+}

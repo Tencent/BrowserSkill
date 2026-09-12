@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "UploadParams",
+  "type": "object",
+  "required": [
+    "files",
+    "session_id"
+  ],
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/UploadFile"
+      }
+    },
+    "mode": {
+      "$ref": "#/definitions/UploadMode"
+    },
+    "ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "UploadFile": {
+      "type": "object",
+      "required": [
+        "name",
+        "transfer_id"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "staged_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "transfer_id": {
+          "type": "string"
+        }
+      }
+    },
+    "UploadMode": {
+      "type": "string",
+      "enum": [
+        "input",
+        "drop"
+      ]
+    }
+  }
+}
