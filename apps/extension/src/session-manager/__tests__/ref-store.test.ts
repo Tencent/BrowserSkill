@@ -23,11 +23,12 @@ describe("RefStore", () => {
     s.set("@e1", 1);
     s.set("@e2", 2);
     s.replace([
-      ["e10", { backendNodeId: 10, tabId: 1 }],
+      ["e10", { backendNodeId: 10, tabId: 1, name: "Save" }],
       ["@e11", { backendNodeId: 11, tabId: 1 }],
     ]);
     expect(s.resolve("@e1")).toBeNull();
     expect(s.resolve("@e10")).toBe(10);
+    expect(s.resolveEntry("e10")).toMatchObject({ kind: "dom", name: "Save" });
     expect(s.resolve("@e10", { tabId: 1 })).toBe(10);
     expect(s.resolve("@e10", { tabId: 2 })).toBeNull();
     expect(s.resolve("@e11")).toBe(11);

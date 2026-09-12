@@ -2,6 +2,7 @@ import type { CdpRunner } from "../shared";
 import { sendToCdpTarget } from "../shared";
 import { isAbortError, throwIfAborted } from "./capture-abort";
 import type { DocumentIdentity } from "./facts";
+import type { VisualCandidate } from "./visual-discovery";
 
 /** Compare the snapshot root with the current root in that exact frame.
  * Deep serialization supplies the backend ID without a separate describeNode. */
@@ -9,6 +10,24 @@ export async function verifyDocumentIdentity(
   cdp: CdpRunner,
   identity: DocumentIdentity,
   signal?: AbortSignal,
+): Promise<"current" | "changed" | "unavailable"> {
+  return verifyIdentity(cdp, identity, signal);
+}
+
+/** Verify the visual anchor in its original frame; geometry is checked by screenshot execution. */
+export async function verifyVisualTargetIdentity(
+  cdp: CdpRunner,
+  candidate: VisualCandidate,
+  signal?: AbortSignal,
+): Promise<"current" | "changed" | "unavailable"> {
+  return verifyIdentity(cdp, candidate.document, signal, candidate.backendNodeId);
+}
+
+async function verifyIdentity(
+  cdp: CdpRunner,
+  identity: DocumentIdentity,
+  signal?: AbortSignal,
+  anchorBackendNodeId?: number,
 ): Promise<"current" | "changed" | "unavailable"> {
   const attached = () => cdp.getAttachmentId?.(identity.target.tabId) === identity.attachmentId;
   throwIfAborted(signal);
@@ -23,17 +42,36 @@ export async function verifyDocumentIdentity(
       frameId: identity.frameId,
       worldName: "bsk-document-identity",
     });
-    const reply = await send<{
+    const serializationOptions = {
+      serialization: "deep",
+      additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
+    };
+    type RootReply = {
       result?: { deepSerializedValue?: { type: string; value?: { backendNodeId?: number } } };
-    }>("Runtime.evaluate", {
-      expression: "document.documentElement",
-      contextId: world.executionContextId,
-      objectGroup,
-      serializationOptions: {
-        serialization: "deep",
-        additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
-      },
-    });
+    };
+    let reply: RootReply;
+    if (anchorBackendNodeId === undefined) {
+      reply = await send<RootReply>("Runtime.evaluate", {
+        expression: "document.documentElement",
+        contextId: world.executionContextId,
+        objectGroup,
+        serializationOptions,
+      });
+    } else {
+      const anchor = await send<{ object?: { objectId?: string } }>("DOM.resolveNode", {
+        backendNodeId: anchorBackendNodeId,
+        executionContextId: world.executionContextId,
+        objectGroup,
+      });
+      if (!anchor.object?.objectId) return "unavailable";
+      reply = await send<RootReply>("Runtime.callFunctionOn", {
+        objectId: anchor.object.objectId,
+        functionDeclaration:
+          "function() { return this.isConnected && this.ownerDocument === document ? document.documentElement : null; }",
+        objectGroup,
+        serializationOptions,
+      });
+    }
     if (!attached()) return "changed";
     const root = reply.result?.deepSerializedValue;
     if (root?.type === "null") return "changed";
