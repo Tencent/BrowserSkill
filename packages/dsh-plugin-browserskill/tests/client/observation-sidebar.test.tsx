@@ -117,7 +117,7 @@ function withTabOpened(state: SidebarStateLike, type: string): SidebarStateLike 
     }
     return { ...node, children: node.children.map(walk) };
   };
-  return { ...state, splits: walk(state.splits) };
+  return { ...state, splits: state.splits === undefined ? undefined : walk(state.splits) };
 }
 
 function makeSidebar(
@@ -279,6 +279,16 @@ describe("observationTabOpen", () => {
       },
     };
     expect(observationTabOpen(inBottom)).toBe(true);
+  });
+
+  it("does not crash when the right-column tree is absent (DSH 0.1.5+)", () => {
+    // better-sidebar 0.19+ no longer emits `splits` (the right column moved to
+    // dsh's native Sidebar); the walk must skip absent roots, not dereference.
+    const noSplits: SidebarStateLike = {
+      bottomSplits: { kind: "leaf", id: "p2", active: null, tabs: [] },
+    };
+    expect(() => observationTabOpen(noSplits)).not.toThrow();
+    expect(observationTabOpen(noSplits)).toBe(false);
   });
 });
 
