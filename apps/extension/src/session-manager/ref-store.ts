@@ -36,6 +36,10 @@ export class RefStore {
   private map = new Map<string, RefEntry>();
   private generation = 0;
 
+  get revision(): number {
+    return this.generation;
+  }
+
   size(): number {
     return this.map.size;
   }
@@ -87,6 +91,7 @@ export class RefStore {
   }
 
   clear(): void {
+    this.generation++;
     this.map.clear();
   }
 

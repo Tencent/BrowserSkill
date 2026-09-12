@@ -156,6 +156,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       tabId: TAB_ID_PARAM,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
+      cursor: {
+        type: "string",
+        description: "Observe continuation cursor; use current refs before continuing.",
+      },
       ref: { type: "string", description: "Fresh ref for scoped html or cropped screenshot." },
       maxBytes: { type: "integer", description: "HTML byte cap." },
       since: { type: "integer", description: "Console/network sequence cursor." },

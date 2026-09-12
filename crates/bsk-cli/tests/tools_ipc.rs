@@ -474,6 +474,7 @@ async fn observe_returns_semantic_text_and_ref_count() {
         let _: ObserveParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(ObserveResult {
+                next_cursor: None,
                 text: "@vom 1\n  @e1 button \"Products\" [hover: Shoes]\n".into(),
                 ref_count: 1,
                 tab_id: 13,
@@ -491,6 +492,7 @@ async fn observe_returns_semantic_text_and_ref_count() {
         &sock,
         Method::ToolObserve,
         ObserveParams {
+            cursor: None,
             session_id,
             tab_id: None,
             max_depth: None,

@@ -10,9 +10,16 @@ use tempfile::NamedTempFile;
 
 /// All readers that may replace a skill hold this lock until their writes finish.
 /// Keep the lock file in place: deleting it could let two processes lock different
-/// files at the same path. Closing the handle releases the OS lock.
+/// files at the same path. Explicitly unlock on drop: a concurrently spawned
+/// child may still hold an inherited handle until exec, delaying close-only release.
 pub(super) struct SkillLock {
     _file: File,
+}
+
+impl Drop for SkillLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self._file);
+    }
 }
 
 impl SkillLock {
@@ -152,5 +159,19 @@ mod tests {
         drop(lock);
         assert!(dir.path().join(".bsk.lock").exists());
         assert!(SkillLock::try_acquire(dir.path()).unwrap().is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_guard_releases_lock_with_a_duplicate_handle_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = SkillLock::acquire(dir.path()).unwrap();
+        // dup shares the open file description, as an inherited fd does between
+        // fork and exec in a concurrently spawned child process.
+        let duplicate = lock._file.try_clone().unwrap();
+        assert!(SkillLock::try_acquire(dir.path()).unwrap().is_none());
+        drop(lock);
+        assert!(SkillLock::try_acquire(dir.path()).unwrap().is_some());
+        drop(duplicate);
     }
 }

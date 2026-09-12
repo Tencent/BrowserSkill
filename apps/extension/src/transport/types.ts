@@ -354,11 +354,13 @@ export interface SnapshotResult {
 }
 
 export interface ObserveParams extends SnapshotParams {
+  cursor?: string;
   debug_surfaces?: boolean;
   probe_hover?: boolean;
 }
 
 export interface ObserveResult extends SnapshotResult {
+  next_cursor?: string;
   hover_probe?: {
     performed: boolean;
     revealed_content: boolean;

@@ -109,3 +109,16 @@ Continue from returned sequence cursors instead of rereading the same buffer.
 
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported. Do not
 invent tools or route around those limits.
+
+## Canvas and continued observations
+
+`@eN canvas [visual:screenshot]` supports only `browser_inspect` action=screenshot with that
+ref. Names are optional; do not invent Canvas contents from nearby controls. First observe
+returns text. If you cannot understand images, tell the user to switch to an image-capable
+model and continue with available semantics; BrowserSkill does not detect model capabilities.
+
+No token cap applies by default. With explicit maxTokens, follow nextCursor using
+browser_inspect action=observe and cursor. Use current refs first: each response replaces
+previous refs and may contain many Canvas entries. Continuation reads the same observation,
+without recapture; do not change depth. New observe/snapshot or DOM identity changes invalidate
+it. Use fresh observe for updated content.
