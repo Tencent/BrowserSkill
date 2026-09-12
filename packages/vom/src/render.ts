@@ -777,6 +777,7 @@ function shouldSkipRedundantChildren(node: VomNode, state: RenderState): boolean
 }
 
 interface RenderState {
+  visualAncestors: Set<number>;
   lines: string[];
   refs: RenderedRef[];
   nextRef: number;
@@ -785,7 +786,6 @@ interface RenderState {
   maxTokens: number;
   redactValues: boolean;
   truncated: boolean;
-  stopped: boolean;
   children: Map<number | null, VomNode[]>;
   parentMap: Map<number, number | null>;
   nodesById: Map<number, VomNode>;
@@ -795,33 +795,13 @@ interface RenderState {
   scopeMap: Map<number, ActiveScopeBlock>;
 }
 
-function emitActiveScopeBlock(scope: ActiveScopeBlock, depth: number, state: RenderState): void {
-  if (state.stopped || scope.lines.length === 0) return;
-  const indent = "  ".repeat(depth);
-  const header = `${indent}[§ active: ${scope.label}]`;
-  const headerTokens = estimateTokens(header);
-  if (state.tokens + headerTokens > state.maxTokens) {
-    state.truncated = true;
-    state.stopped = true;
-    return;
-  }
-  state.lines.push(header);
-  state.tokens += headerTokens;
-
-  for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
-    if (state.stopped) return;
-    const clean = cleaned(text);
-    if (!clean) continue;
-    const line = `${indent}  ${clean}`;
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
-      state.truncated = true;
-      state.stopped = true;
-      return;
-    }
-    state.lines.push(line);
-    state.tokens = nextTokens;
-  }
+export interface RenderRow {
+  context?: string;
+  frameId?: string;
+  text: string;
+  ref?: RenderedRef;
+  /** Minimal complete visual entry when a long label cannot fit. */
+  minimal?: string;
 }
 
 function pushRenderChildren(
@@ -834,69 +814,97 @@ function pushRenderChildren(
   }
 }
 
-function renderTree(children: Map<number | null, VomNode[]>, state: RenderState): void {
+function* renderTreeRows(
+  children: Map<number | null, VomNode[]>,
+  state: RenderState,
+  observation = false,
+  representedSources?: ReadonlySet<number>,
+): Generator<RenderRow> {
   const stack: Array<{ node: VomNode; depth: number }> = [];
   pushRenderChildren(stack, children.get(null) ?? [], 1);
 
-  while (stack.length > 0 && !state.stopped) {
+  while (stack.length > 0) {
     const { node, depth } = stack.pop() as { node: VomNode; depth: number };
 
-    if (!shouldRender(node)) {
+    if (representedSources?.has(node.id) || (node.visualKey === undefined && !shouldRender(node))) {
       pushRenderChildren(stack, children.get(node.id) ?? [], depth);
       continue;
     }
 
-    if (depth > state.maxDepth) {
+    if (depth > state.maxDepth && node.visualKey === undefined) {
       state.truncated = true;
+      if (observation && state.visualAncestors.has(node.id))
+        pushRenderChildren(stack, children.get(node.id) ?? [], depth);
       continue;
     }
 
-    const ref = isVomReferenceNode(node) ? `e${state.nextRef}` : undefined;
-    const context = ref ? handleContext(node, state) : [];
+    const visual = node.visualKey !== undefined;
+    const ref = visual || isVomReferenceNode(node) ? `e${state.nextRef++}` : undefined;
+    const context = ref && !visual ? handleContext(node, state) : [];
     const surface = state.surfaceMap.get(node.id);
-    const line = renderNodeLine(node, depth, ref, context, surface, state.redactValues);
-    const nextTokens = state.tokens + estimateTokens(line);
-    if (nextTokens > state.maxTokens) {
-      state.truncated = true;
-      state.stopped = true;
-      break;
-    }
-
-    state.lines.push(line);
-    state.tokens = nextTokens;
-    if (ref) {
-      const name = cleaned(node.name);
-      state.refs.push({
-        ref,
-        backendNodeId: node.backendNodeId ?? node.id,
-        ...(node.frameId ? { frameId: node.frameId } : {}),
-        ...(node.role ? { role: node.role } : {}),
-        ...(name ? { name } : {}),
-        ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
-        line: state.lines.length - 1,
-      });
-      state.nextRef += 1;
-    }
-
+    const indent = "  ".repeat(Math.min(depth, state.maxDepth, 32));
+    const minimal = visual ? `${indent}@${ref} canvas [visual:screenshot]` : undefined;
+    const label = cleaned(node.name);
+    const text = visual
+      ? label
+        ? `${indent}@${ref} canvas ${JSON.stringify(Array.from(label).slice(0, 160).join(""))} [visual:screenshot]`
+        : minimal!
+      : renderNodeLine(node, depth, ref, context, surface, state.redactValues);
+    const parent = node.parentId === null ? undefined : state.nodesById.get(node.parentId);
+    const parentLabel = parent ? cleaned(parent.name) : undefined;
+    yield {
+      ...(parent
+        ? {
+            context: `@context ${parent.role ?? parent.tag}${parentLabel ? ` ${JSON.stringify(Array.from(parentLabel).slice(0, 80).join(""))}` : ""}`,
+          }
+        : {}),
+      frameId: node.frameId,
+      text,
+      ...(minimal ? { minimal } : {}),
+      ...(ref
+        ? {
+            ref: {
+              ref,
+              backendNodeId: node.backendNodeId ?? node.id,
+              ...(visual ? { visualKey: node.visualKey } : {}),
+              ...(node.frameId ? { frameId: node.frameId } : {}),
+              ...(node.role ? { role: node.role } : {}),
+              ...(label ? { name: label } : {}),
+              ...(context.length > 0 ? { ctx: context.join(" > ") } : {}),
+              line: 0,
+            },
+          }
+        : {}),
+    };
     const scope = state.scopeMap.get(node.id);
-    if (scope) emitActiveScopeBlock(scope, depth + 1, state);
+    if (scope?.lines.length) {
+      yield { text: `${"  ".repeat(depth + 1)}[§ active: ${scope.label}]` };
+      for (const text of scope.lines.slice(0, MAX_SCOPE_LINES)) {
+        const clean = cleaned(text);
+        if (clean) yield { text: `${"  ".repeat(depth + 2)}${clean}` };
+      }
+    }
 
-    if ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state)) {
+    if (
+      (!observation || !state.visualAncestors.has(node.id)) &&
+      ((ref && shouldSkipRedundantRefChildren(node)) || shouldSkipRedundantChildren(node, state))
+    ) {
       continue;
     }
     pushRenderChildren(stack, children.get(node.id) ?? [], depth + 1);
   }
 }
 
-function renderNodes(
+function createRenderState(
   nodes: VomNode[],
   options: VomOptions,
   initialLines: string[],
-  surfaces: CondSurface[] = [],
-  activeScopeBlocks: ActiveScopeBlock[] = [],
+  surfaces: CondSurface[],
+  activeScopeBlocks: ActiveScopeBlock[],
 ): RenderState {
   const children = buildChildren(nodes);
   const state: RenderState = {
+    visualAncestors: new Set(),
     lines: [...initialLines],
     refs: [],
     nextRef: 1,
@@ -905,7 +913,6 @@ function renderNodes(
     maxTokens: options.maxTokens ?? DEFAULT_MAX_TOKENS,
     redactValues: options.redactValues ?? false,
     truncated: false,
-    stopped: false,
     children,
     parentMap: buildParentMap(nodes),
     nodesById: new Map(nodes.map((node) => [node.id, node])),
@@ -915,7 +922,36 @@ function renderNodes(
     scopeMap: new Map(activeScopeBlocks.map((scope) => [scope.triggerId, scope])),
   };
 
-  renderTree(children, state);
+  for (const node of nodes) {
+    if (node.visualKey === undefined) continue;
+    let id = node.parentId;
+    while (id !== null && !state.visualAncestors.has(id)) {
+      state.visualAncestors.add(id);
+      id = state.parentMap.get(id) ?? null;
+    }
+  }
+  return state;
+}
+
+function renderNodes(
+  nodes: VomNode[],
+  options: VomOptions,
+  initialLines: string[],
+  surfaces: CondSurface[] = [],
+  activeScopeBlocks: ActiveScopeBlock[] = [],
+): RenderState {
+  const state = createRenderState(nodes, options, initialLines, surfaces, activeScopeBlocks);
+  const children = state.children;
+  for (const row of renderTreeRows(children, state)) {
+    const cost = estimateTokens(row.text);
+    if (state.tokens + cost > state.maxTokens) {
+      state.truncated = true;
+      break;
+    }
+    if (row.ref) state.refs.push({ ...row.ref, line: state.lines.length });
+    state.lines.push(row.text);
+    state.tokens += cost;
+  }
 
   return state;
 }
@@ -1073,7 +1109,11 @@ function collectDescendants(nodes: VomNode[], roots: Set<number>): Set<number> {
   return included;
 }
 
-function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
+function applyActiveRegionPolicy(
+  nodes: VomNode[],
+  scene: VomScene,
+  visualSources?: ReadonlyMap<number, VomNode>,
+): VomNode[] {
   const parentMap = buildParentMap(nodes);
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
@@ -1091,10 +1131,10 @@ function applyActiveRegionPolicy(nodes: VomNode[], scene: VomScene): VomNode[] {
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {
-    if (!isVomReferenceNode(target)) continue;
+    if (target.visualKey === undefined && !isVomReferenceNode(target)) continue;
     const blocked = candidates.some((candidate) =>
       isBlockedByRegion(
-        target,
+        visualSources?.get(target.id) ?? target,
         candidate.node,
         parentMap,
         nodesById,
@@ -1159,4 +1199,160 @@ export function renderVom(scene: VomScene, options: VomOptions = {}): VomResult 
     refs: state.refs,
     truncated: state.truncated,
   };
+}
+
+/** Prepare semantics once; the iterator retains traversal position, never raw capture facts. */
+export function prepareObservationRender(
+  scene: VomScene,
+  options: VomOptions = {},
+): {
+  headers: string[];
+  rows: Iterator<RenderRow>;
+  truncated: () => boolean;
+} {
+  const recovered = applyVomInteractionRecovery(scene.nodes);
+  const layer = detectBlockingLayer(recovered, scene.viewport, scene.rootFrameId);
+  const recoveredById = new Map(recovered.map((n) => [n.id, n]));
+  let nextId = recovered.reduce((max, n) => Math.max(max, n.id), 0) + 1;
+  // Scope targets participate in existing filtering, never in blocker detection.
+  // Keep the exact source as parent so an excluded source cannot reappear via fallback.
+  const visualTargets: VomNode[] = (scene.visuals ?? []).map((v) => ({
+    id: nextId++,
+    parentId: v.sourceId ?? v.parentId,
+    frameId: v.frameId,
+    visualKey: v.key,
+    tag: "canvas",
+    rect: v.rect ?? (v.sourceId === undefined ? null : recoveredById.get(v.sourceId)?.rect) ?? null,
+    paintOrder:
+      v.paintOrder ??
+      (v.sourceId === undefined ? undefined : recoveredById.get(v.sourceId)?.paintOrder) ??
+      0,
+    position: "static",
+    pointerEvents: "none",
+    referenceable: false,
+  }));
+  const visualSources = new Map<number, VomNode>();
+  for (let i = 0; i < visualTargets.length; i++) {
+    const sourceId = scene.visuals![i].sourceId;
+    const source = sourceId === undefined ? undefined : recoveredById.get(sourceId);
+    if (source) visualSources.set(visualTargets[i].id, { ...source, rect: visualTargets[i].rect });
+  }
+  const scopeNodes = [...recovered, ...visualTargets];
+  const members = layer ? new Set(layer.members) : undefined;
+  if (members && layer) {
+    const blocker = recoveredById.get(layer.rootId)!;
+    for (let i = 0; i < visualTargets.length; i++) {
+      const target = visualTargets[i];
+      const v = scene.visuals![i];
+      if (
+        v.sourceId === undefined &&
+        v.paintOrder !== undefined &&
+        target.frameId === blocker.frameId &&
+        target.paintOrder >= blocker.paintOrder
+      )
+        members.add(target.id);
+    }
+  }
+  const included = members ? collectDescendants(scopeNodes, members) : undefined;
+  const scoped = included
+    ? scopeNodes.filter((n) => included.has(n.id))
+    : options.activeRegionPolicy
+      ? applyActiveRegionPolicy(scopeNodes, scene, visualSources)
+      : scopeNodes;
+  const allowedVisuals = new Set(
+    scoped.filter((n) => n.visualKey !== undefined).map((n) => n.visualKey),
+  );
+  const visible = scoped.filter((n) => n.visualKey === undefined);
+  const byId = new Map(visible.map((n) => [n.id, n]));
+  const ids = new Set(byId.keys());
+  const before = new Map<number, VomNode[]>();
+  const tail: VomNode[] = [];
+  const fallbackGroups = new Map<string, number>();
+  const representedSources = new Set<number>();
+  for (const v of scene.visuals ?? []) {
+    if (!allowedVisuals.has(v.key)) continue;
+    const source = v.sourceId === undefined ? undefined : byId.get(v.sourceId);
+    // Only suppress an exact passive Canvas description already carried by the visual line.
+    // Action refs and distinct semantic content remain separate.
+    if (
+      source &&
+      normalizedTag(source) === "canvas" &&
+      normalizedRole(source) === "canvas" &&
+      !isVomReferenceNode(source) &&
+      !source.value &&
+      !source.text &&
+      (!cleaned(source.name) || cleaned(source.name) === cleaned(v.label))
+    ) {
+      representedSources.add(source.id);
+    }
+
+    const node: VomNode = {
+      id: nextId++,
+      parentId: v.parentId !== null && ids.has(v.parentId) ? v.parentId : null,
+      tag: "canvas",
+      role: "canvas",
+      name: v.label,
+      frameId: v.frameId,
+      visualKey: v.key,
+      rect: null,
+      paintOrder: 0,
+      position: "static",
+      pointerEvents: "none",
+      referenceable: false,
+    };
+    if (node.parentId === null) {
+      const label = v.fallbackContext ?? "Unplaced Canvas regions";
+      let groupId = fallbackGroups.get(label);
+      if (groupId === undefined) {
+        groupId = nextId++;
+        fallbackGroups.set(label, groupId);
+        tail.push({
+          id: groupId,
+          parentId: null,
+          tag: "section",
+          role: "group",
+          name: label,
+          rect: null,
+          paintOrder: 0,
+          position: "static",
+          pointerEvents: "none",
+          referenceable: false,
+        });
+      }
+      node.parentId = groupId;
+    }
+    if (
+      v.beforeId !== undefined &&
+      ids.has(v.beforeId) &&
+      byId.get(v.beforeId)?.parentId === node.parentId
+    ) {
+      const list = before.get(v.beforeId) ?? [];
+      list.push(node);
+      before.set(v.beforeId, list);
+    } else tail.push(node);
+  }
+  const nodes = visible.flatMap((n) => [...(before.get(n.id) ?? []), n]).concat(tail);
+  const headers = [
+    "@vom 1",
+    `@view ${scene.viewport.width}x${scene.viewport.height}`,
+    `@layers ${layer ? 2 : 1} focus=L1`,
+    layer ? `L1 ${layer.kind} cover=${Math.round(layer.coverage * 100)}%` : "L1 page",
+  ];
+  const state = createRenderState(
+    nodes,
+    options,
+    [],
+    scene.surfaces ?? [],
+    scene.activeScopeBlocks ?? [],
+  );
+  function* rows(): Generator<RenderRow> {
+    yield* renderTreeRows(state.children, state, true, representedSources);
+    if (layer)
+      yield {
+        text: renderPageOcclusionLine(
+          countRenderable(recovered.filter((n) => !included!.has(n.id))),
+        ),
+      };
+  }
+  return { headers, rows: rows(), truncated: () => state.truncated };
 }

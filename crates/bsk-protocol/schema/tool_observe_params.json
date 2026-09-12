@@ -7,6 +7,13 @@
     "session_id"
   ],
   "properties": {
+    "cursor": {
+      "description": "Continue a retained observation; does not recapture the page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "debug_surfaces": {
       "description": "Include implementation diagnostics for conditional surface probes.",
       "default": false,

@@ -1,3 +1,17 @@
+import { parsePngDimensions } from "./png";
+import { clearVisualCapture, issueVisualCapture } from "./visual-capture";
+import { captureVisualScreenshot } from "./visual-screenshot";
+import { deduplicateVisualCandidates } from "./vom/visual-dedup";
+import { discoverVisualCandidates } from "./vom/visual-discovery";
+import {
+  clearObservationContinuation,
+  type ObservationOutput,
+  prepareVisualObservation,
+  publishObservationPage,
+} from "./vom/visual-observation";
+
+export { parsePngDimensions } from "./png";
+
 import type { CapturedSceneInput } from "./vom/facts";
 // Observation handlers — `tool.snapshot`, `tool.get_html`, `tool.screenshot`,
 // and semantic `tool.observe` (design §7). Each handler resolves the target
@@ -48,7 +62,7 @@ import {
   normaliseRef as sharedNormaliseRef,
   type ToolEffect,
 } from "./shared";
-import { resolveSnapshotRef } from "./snapshot-ref";
+import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
@@ -99,38 +113,6 @@ export const normaliseRef = sharedNormaliseRef;
 export function stripDataUrlPrefix(dataUrl: string): string {
   const m = /^data:image\/[a-z+]+;base64,/i.exec(dataUrl);
   return m ? dataUrl.slice(m[0].length) : dataUrl;
-}
-
-/**
- * Parse a PNG's IHDR chunk and return `(width, height)`. Returns
- * `null` on any malformed input so callers fall back to `0/0` instead
- * of throwing.
- *
- * PNG layout: 8-byte signature, then a 4-byte length, 4-byte type
- * ("IHDR"), then the chunk data — width is bytes 16-19 BE, height is
- * 20-23 BE.
- */
-export function parsePngDimensions(base64: string): { width: number; height: number } | null {
-  try {
-    // atob is available in MV3 service workers.
-    const head = base64.length > 64 ? base64.slice(0, 64) : base64;
-    const bin = atob(head);
-    if (bin.length < 24) return null;
-    if (bin.charCodeAt(0) !== 0x89 || bin.charCodeAt(1) !== 0x50 || bin.charCodeAt(2) !== 0x4e) {
-      return null;
-    }
-    const u32 = (off: number) =>
-      (bin.charCodeAt(off) << 24) |
-      (bin.charCodeAt(off + 1) << 16) |
-      (bin.charCodeAt(off + 2) << 8) |
-      bin.charCodeAt(off + 3);
-    const width = u32(16) >>> 0;
-    const height = u32(20) >>> 0;
-    if (width === 0 || height === 0) return null;
-    return { width, height };
-  } catch {
-    return null;
-  }
 }
 
 export interface ScreenshotDeps {
@@ -307,6 +289,33 @@ export async function handleScreenshot(
   if (ref) {
     if (!deps.cdp) {
       return { code: "cdp_failed", message: "screenshot ref capture requires CDP" };
+    }
+    const entry = lookupRefTarget(ctx, ref, target.tabId);
+    if (entry?.kind === "visual-region") {
+      clearVisualCapture(ctx.refStore, ref);
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const captured = await withExtensionOverlayHidden(
+        target.tabId,
+        () => captureVisualScreenshot(deps.cdp!, entry.candidate, signal),
+        deps.sendToTab,
+      );
+      if (isRpcError(captured)) return captured;
+      const { mapping, ...image } = captured;
+      const captureId = mapping
+        ? issueVisualCapture(ctx.refStore, ref, entry, mapping, image.width, image.height)
+        : undefined;
+      return withShotDialogs({
+        ...image,
+        format: "png",
+        tab_id: target.tabId,
+        ...(captureId
+          ? { capture_id: captureId }
+          : {
+              capture_unavailable:
+                image.capture_unavailable ??
+                "observation replaced during capture; observe and screenshot again",
+            }),
+      });
     }
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;
@@ -880,6 +889,7 @@ async function runHoverProbes(
 }
 
 export interface CaptureVomObservationOptions extends VomOptions {
+  includeVisualFacts?: boolean;
   conditionalSurfaceProbe?: boolean;
   hoverProbeBypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   signal?: AbortSignal;
@@ -890,11 +900,13 @@ export async function captureVomObservation(
   tabId: number,
   url: string | undefined,
   options: CaptureVomObservationOptions = {},
-): Promise<CaptureVomObservationResult> {
+): Promise<CaptureVomObservationResult & { visualOutput?: ObservationOutput }> {
   throwIfAborted(options.signal, "observation");
   await cdp.ensureAttachedToUrl?.(tabId, url);
   throwIfAborted(options.signal, "observation");
-  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url);
+  const facts = await captureObservationFacts<CdpAxNode>(cdp, tabId, options.signal, url, {
+    includeVisualFacts: options.includeVisualFacts,
+  });
   const { captured, documents: normalizedDocuments } = semanticCapture(facts);
   throwIfAborted(options.signal, "observation");
   const semanticGraph = buildSemanticGraph({
@@ -913,11 +925,10 @@ export async function captureVomObservation(
     options,
   );
   throwIfAborted(options.signal, "observation");
-  const scene = projectSemanticGraph(
-    normalizeSemanticStructure(
-      resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
-    ),
+  const structured = normalizeSemanticStructure(
+    resolveSemanticGraph(semanticGraph, { supplementalNames: hoverProbes.tooltipNames }),
   );
+  const scene = projectSemanticGraph(structured);
   const decoratedScene = attachCapturedSceneAnnotations(
     scene,
     normalizedDocuments,
@@ -950,6 +961,39 @@ export async function captureVomObservation(
     notices.push(
       "@warning document identity unverified: some retained documents could not be checked for changes during capture.",
     );
+  if (options.includeVisualFacts) {
+    const discovery = await deduplicateVisualCandidates(
+      await discoverVisualCandidates(facts, options.signal),
+      options.signal,
+    );
+    const identities = new Map(
+      facts.documents.flatMap((doc) =>
+        doc.identity ? [[doc.frame.frameId, doc.identity] as const] : [],
+      ),
+    );
+    const visualOutput = prepareVisualObservation(
+      decoratedScene,
+      structured,
+      discovery,
+      identities,
+      captured.rootFrameId ?? "root",
+      notices,
+      options,
+    );
+    return {
+      ...projectRecordSafeObservation({
+        rootFrameId: captured.rootFrameId ?? "root",
+        frameDocuments: normalizedDocuments,
+        rendered: { text: "", refs: [], truncated: false },
+        surfaceProbes: hoverProbes.surfaceProbes,
+        hoverProbe: {
+          performed: hoverProbes.performed,
+          revealedContent: hoverProbes.revealedContent,
+        },
+      }),
+      visualOutput,
+    };
+  }
   const captureNotice = notices.join("\n");
   const rendered = renderVom(decoratedScene, {
     maxDepth: options.maxDepth,
@@ -1005,7 +1049,29 @@ async function handleVomObservation(
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
     const effectiveConditionalSurfaceProbe =
       deps.conditionalSurfaceProbe ?? conditionalSurfaceProbe;
+    const cursor = toolName === "observe" ? (params as ObserveParams).cursor : undefined;
+    if (cursor) {
+      if (
+        params.max_depth !== undefined ||
+        (params as ObserveParams).probe_hover ||
+        (params as ObserveParams).debug_surfaces
+      )
+        return {
+          code: "invalid_params",
+          message: "cursor cannot change depth or request hover/debug probes",
+        };
+      const page = await publishObservationPage(
+        ctx.refStore,
+        deps.cdp,
+        target.tabId,
+        { cursor, maxTokens: params.max_tokens },
+        signal,
+      );
+      return isRpcError(page) ? page : attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
+    }
+    clearObservationContinuation(ctx.refStore);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
+      includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
       maxTokens: params.max_tokens,
       activeRegionPolicy: true,
@@ -1014,6 +1080,40 @@ async function handleVomObservation(
       signal,
     });
     throwIfAborted(signal, toolName);
+    if (observation.visualOutput) {
+      const page = await publishObservationPage(
+        ctx.refStore,
+        deps.cdp,
+        target.tabId,
+        { output: observation.visualOutput },
+        signal,
+      );
+      if (isRpcError(page)) return page;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        ...page,
+        ...(observation.hoverProbe?.performed
+          ? {
+              hover_probe: {
+                performed: true,
+                revealed_content: observation.hoverProbe.revealedContent,
+              },
+            }
+          : {}),
+        ...((params as ObserveParams).debug_surfaces
+          ? {
+              debug: {
+                surface_probes: (observation.surfaceProbes ?? []).map((probe) => ({
+                  trigger_backend_node_id: probe.triggerBackendNodeId,
+                  trigger_action: probe.triggerAction,
+                  sub_items: probe.subItems,
+                  ...(probe.triggerPoint ? { trigger_point: probe.triggerPoint } : {}),
+                  ...(probe.confidence ? { confidence: probe.confidence } : {}),
+                })),
+              },
+            }
+          : {}),
+      });
+    }
     const targetByFrameId = new Map(
       observation.frames.map((frame) => [frame.frameId, frame.target]),
     );
@@ -1060,6 +1160,8 @@ async function handleVomObservation(
         : {}),
     });
   } catch (err) {
+    // Fresh observations clear their predecessor before capture. Continuation owns
+    // invalidation; cancellation must preserve its unpublished page for retry.
     if (isAbortError(err)) return cancelled(toolName);
     return {
       code: "cdp_failed",

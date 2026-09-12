@@ -128,6 +128,38 @@ Escalate page reading only as needed:
 Do not start with raw HTML or screenshots merely to discover ordinary controls. When interaction is
 needed, obtain a fresh observation before acting on screenshot or HTML findings.
 
+## Canvas and observation continuation
+
+`observe` may place `@eN canvas [visual:screenshot]` near related page controls. Names are
+optional: do not infer a table title or controls inside Canvas from adjacent labels. Visual refs
+support `screenshot --ref`; point clicks additionally require its `capture_id` and image coordinates.
+They do not support fill/hover or HTML extraction. First observe returns text,
+not an image. Use the surrounding semantics to decide whether a Canvas screenshot is needed.
+If you cannot receive and understand images in this session, tell the user the Canvas contents
+cannot be interpreted and ask them to switch to an image-capable model; continue with available
+semantic information. BrowserSkill does not detect the model's capabilities.
+
+There is no default token cap. With an explicit `--max-tokens` limit, an observation may return
+`next_cursor` and an `@more` instruction. Use current refs before calling
+`bsk observe --cursor <token> --session <id>`: each response replaces the ref map, so refs from
+previous pages must not be reused. A response can contain many Canvas entries. Follow cursors
+when relevant content remains, rather than repeatedly reading the same prefix.
+Continuation reads the same captured observation; it does not refresh or hover the page. Do not
+combine it with depth changes or hover probing. A new observe/snapshot replaces the continuation;
+if the page identity changed, observe again. Screenshot execution checks current target identity
+and geometry, but permits Canvas repainting and does not freeze pixels.
+
+A Canvas screenshot can return `capture_id`. To click a point you identified in that image, use
+`bsk click eN --capture <id> --image-x <x> --image-y <y> --session <id>`.
+Use original PNG pixels (returned width/height), not resized display or viewport coordinates.
+Captures are single-use, expire after two minutes, and are invalidated by a newer screenshot of
+that ref or observation/continuation. With `capture_unavailable`, view the image but observe and
+screenshot again before clicking. Click counts 1/2, buttons and modifiers are supported.
+After clicking, observe or screenshot to verify the result; use DOM refs for revealed controls.
+A completed click does not prove business success. Canvas repainting is allowed; changed identity,
+geometry or hit target is rejected. If `effect_state=unknown`, inspect before retrying with a new
+capture. Do not infer cell-editing, IME, drag or hover support from point-click capability.
+
 ## Respect the Agent Window boundary
 
 Normal page writes affect only Agent Window tabs. To operate a user tab, first list it with

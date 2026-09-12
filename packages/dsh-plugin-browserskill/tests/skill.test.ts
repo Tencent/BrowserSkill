@@ -50,7 +50,9 @@ describe("registerBskSkill", () => {
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
-    expect(content.length).toBeLessThan(6_000);
+    expect(content.length).toBeLessThan(7_000);
+    expect(content).toContain("[visual:screenshot]");
+    expect(content).toContain("nextCursor");
     expect(skill.source).toBe("bundled");
     // Source frontmatter is registration metadata and must not leak into the body.
     expect(content.startsWith("---")).toBe(false);

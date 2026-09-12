@@ -1,4 +1,5 @@
-//! `bsk screenshot` — viewport/ref PNGs and disk-streamed full-page captures.
+//! `bsk screenshot` — viewport, DOM element / Canvas region ref PNGs,
+//! and disk-streamed full-page captures.
 //! The CLI alone owns the final output path; full-page image bytes arrive in
 //! bounded chunks and become visible only after a complete atomic write.
 
@@ -30,8 +31,8 @@ pub struct ScreenshotArgs {
     #[arg(long = "tab-id")]
     pub tab_id: Option<i64>,
 
-    /// Optional `@eN` ref from the last `bsk snapshot`. Crops the
-    /// capture to the matching element.
+    /// Optional `@eN` ref from the latest `bsk observe` or `bsk snapshot`.
+    /// Crops the capture to the referenced DOM element or Canvas region.
     #[arg(long = "ref")]
     pub ref_: Option<String>,
 
@@ -74,7 +75,7 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
         .map_err(CliError::Local)?;
     match format {
         Format::Json => {
-            let json = serde_json::json!({
+            let mut json = serde_json::json!({
                 "tab_id": reply.tab_id,
                 "width": reply.width,
                 "height": reply.height,
@@ -82,6 +83,12 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
                 "path": out_path.to_string_lossy(),
                 "byte_size": bytes.len(),
             });
+            if let Some(id) = &reply.capture_id {
+                json["capture_id"] = serde_json::json!(id);
+            }
+            if let Some(reason) = &reply.capture_unavailable {
+                json["capture_unavailable"] = serde_json::json!(reason);
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json)
@@ -90,6 +97,15 @@ fn run(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<(), CliErr
         }
         Format::Human => {
             println!("{}", out_path.display());
+            if let Some(id) = &reply.capture_id {
+                println!(
+                    "capture: {id} ({}x{} original PNG pixels; single use)",
+                    reply.width, reply.height
+                );
+            }
+            if let Some(reason) = &reply.capture_unavailable {
+                println!("capture unavailable: {reason}");
+            }
             print_dialog_summaries(&reply.dialogs);
         }
     }

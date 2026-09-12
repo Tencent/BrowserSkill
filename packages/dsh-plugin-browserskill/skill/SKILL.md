@@ -109,3 +109,17 @@ Continue from returned sequence cursors instead of rereading the same buffer.
 
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported. Do not
 invent tools or route around those limits.
+
+## Canvas and continuation
+
+[visual:screenshot] means screenshot that ref first; names are optional, not inferred from
+nearby controls. If needed images cannot be understood, ask to switch models and use semantics.
+Click via browser_interact(action=click,target=ref,captureId=...,imageX=...,imageY=...), using
+ORIGINAL PNG pixels. Captures are single-use, last two minutes, and expire on ref replacement
+or a new screenshot of that ref. captureUnavailable means view only; observe and screenshot
+again. Counts 1/2 and buttons/modifiers work, not Canvas fill/IME/drag/hover. Repainting is allowed:
+verify results; use DOM refs for revealed controls. Inspect before retrying effect_state=unknown.
+
+No default token cap. With maxTokens, follow nextCursor via observe(cursor=...); each page can
+contain many Canvas refs and replaces previous refs. This reads the same observation without
+recapture or depth changes. New observe/snapshot or DOM identity changes invalidate continuation.

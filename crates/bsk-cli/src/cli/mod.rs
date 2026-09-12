@@ -141,7 +141,7 @@ pub enum Command {
     /// Emulate a mobile device environment (viewport, UA, touch) on a tab.
     Emulate(EmulateArgs),
 
-    /// Capture a viewport, full-page, or snapshot ref PNG.
+    /// Capture a PNG of the viewport, full page, DOM element or Canvas region.
     Screenshot(ScreenshotArgs),
 
     /// Produce an indented aria-snapshot with @eN refs.

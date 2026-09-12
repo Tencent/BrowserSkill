@@ -5,12 +5,15 @@ import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { captureVomObservation } from "../../observation";
 import type { CdpRunner } from "../../shared";
 import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
-import { buildSemanticGraph } from "../semantic-graph/build";
-import { REQUESTED_STYLES, type SnapshotReply } from "../snapshot";
+import { buildSemanticGraph, buildSemanticVomScene } from "../semantic-graph";
+import { REQUESTED_STYLES, type SnapshotReply, VISUAL_STYLES } from "../snapshot";
+import { deduplicateVisualCandidates } from "../visual-dedup";
+import { discoverVisualCandidates } from "../visual-discovery";
 
 function fixture(
   options: {
     frames?: CdpFrame[];
+    canvas?: boolean;
     after?: Record<string, { element?: number; missing?: boolean; unreadable?: boolean }>;
     fail?: string;
     missingIdentity?: boolean;
@@ -78,23 +81,28 @@ function fixture(
       if (method === "Page.getLayoutMetrics")
         result = {
           visualViewport: { clientWidth: 1000 },
-          cssVisualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
         };
       if (method === "DOMSnapshot.captureSnapshot") {
         snapshots++;
-        expect((params as { computedStyles: unknown }).computedStyles).toEqual(REQUESTED_STYLES);
+        const requested = (params as { computedStyles: readonly string[] }).computedStyles;
+        expect([REQUESTED_STYLES, VISUAL_STYLES]).toContainEqual(requested);
         result = {
           strings: [
             "#document",
             "html",
-            "button",
+            options.canvas ? "canvas" : "button",
             OVERLAY_HOST_MARKER_ATTR,
             "",
             "visible",
             "1",
             "static",
             "auto",
+            "block",
+            "none",
+            "0px",
+            "normal",
           ],
           documents: frames
             .filter(
@@ -144,10 +152,18 @@ function fixture(
                     [0, 0, 1000, 800],
                     [10, 20, 100, 40],
                   ],
-                  styles: [
-                    [7, 8, 8, 5, 6],
-                    [7, 8, 8, 5, 6],
+                  clientRects: [
+                    [0, 0, 1000, 800],
+                    [0, 0, 100, 40],
                   ],
+                  styles: Array.from({ length: 2 }, () =>
+                    requested.map(
+                      (name) =>
+                        [7, 8, 8, 5, 6, 9, 5, 5, 10, 6, 10, 10, 10, 10, 10, 8, 10, 5, 12, 11][
+                          VISUAL_STYLES.indexOf(name as (typeof VISUAL_STYLES)[number])
+                        ],
+                    ),
+                  ),
                 },
               };
             }),
@@ -193,7 +209,7 @@ describe("captureObservationFacts", () => {
       if (method === "Page.getLayoutMetrics")
         return {
           visualViewport: { clientWidth: 2000 },
-          cssVisualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 1000, clientHeight: 800, pageX: 999, pageY: 999 },
         } as never;
       const reply = await original(target, method, params);
@@ -659,7 +675,7 @@ describe("OOPIF capture", () => {
       if (method === "Page.getLayoutMetrics") {
         return {
           visualViewport: { clientWidth: 1000 },
-          cssVisualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 300, clientHeight: 200, pageX: 0, pageY: 0 },
         };
       }
@@ -685,7 +701,7 @@ describe("OOPIF capture", () => {
         if (method === "Page.getLayoutMetrics") {
           return {
             visualViewport: { clientWidth: 1000 },
-            cssVisualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000, scale: 1 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
           };
         }
@@ -767,7 +783,7 @@ describe("OOPIF capture", () => {
       if (method === "Page.getLayoutMetrics")
         return {
           visualViewport: { clientWidth: 1000 },
-          cssVisualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 300, clientHeight: 200 },
         };
       if (method === "DOMSnapshot.captureSnapshot")
@@ -829,7 +845,7 @@ describe("OOPIF capture", () => {
         if (method === "Page.getLayoutMetrics") {
           return {
             visualViewport: { clientWidth: 1000 },
-            cssVisualViewport: { clientWidth: 1000 },
+            cssVisualViewport: { clientWidth: 1000, scale: 1 },
             cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
           };
         }
@@ -919,7 +935,7 @@ function siblingCaptureFixture(
       if (method === "Page.getLayoutMetrics")
         return {
           visualViewport: { clientWidth: 1000 },
-          cssVisualViewport: { clientWidth: 1000 },
+          cssVisualViewport: { clientWidth: 1000, scale: 1 },
           cssLayoutViewport: { clientWidth: 1000, clientHeight: 800 },
         };
       if (method === "DOM.getBoxModel")
@@ -1127,7 +1143,7 @@ describe("snapshot document provenance", () => {
           : method === "Page.getLayoutMetrics"
             ? {
                 visualViewport: { clientWidth: 1000 },
-                cssVisualViewport: { clientWidth: 1000 },
+                cssVisualViewport: { clientWidth: 1000, scale: 1 },
                 cssLayoutViewport: { clientWidth: 200, clientHeight: 100 },
               }
             : {}) as T,
@@ -1361,5 +1377,103 @@ describe("AX frame scheduling", () => {
     }
     expect(peak).toBe(4);
     expect(active).toBe(0);
+  });
+});
+
+describe("visual facts integration", () => {
+  it("defaults to base facts across targets and shares semantic behavior with visual capture", async () => {
+    const base = fixture({ canvas: true });
+    const visual = fixture({ canvas: true });
+    const baseFacts = await captureObservationFacts(base.cdp, 4);
+    const visualFacts = await captureObservationFacts(visual.cdp, 4, undefined, undefined, {
+      includeVisualFacts: true,
+    });
+    expect(baseFacts.visualFactsCollected).toBe(false);
+    expect(visualFacts.visualFactsCollected).toBe(true);
+    expect(baseFacts.documents).toHaveLength(4);
+    expect(visualFacts.documents).toHaveLength(4);
+    for (const doc of baseFacts.documents) {
+      expect(doc.geometry).toBeUndefined();
+      expect(doc.index.ancestryComplete).toBeUndefined();
+      for (const node of doc.index.nodes.values()) {
+        expect(node.parentMissing).toBeUndefined();
+        expect(node.layout?.clientRect).toBeUndefined();
+        if (node.layout) expect(Object.keys(node.layout.styles)).toEqual([...REQUESTED_STYLES]);
+      }
+    }
+    // This fixture has no child frame projection measurements. Enabling visual
+    // collection must preserve that missing evidence, not invent geometry.
+    expect(
+      visualFacts.documents.find((doc) => doc.frame.frameId === "main")?.geometry,
+    ).toBeDefined();
+    expect(visualFacts.documents.filter((doc) => doc.geometry)).toHaveLength(1);
+    for (const doc of visualFacts.documents) {
+      expect(doc.index.ancestryComplete).toBeDefined();
+      for (const node of doc.index.nodes.values())
+        if (node.layout) {
+          expect(Object.keys(node.layout.styles)).toEqual([...VISUAL_STYLES]);
+          expect(Object.keys(node.layout.styles).some((key) => key.includes("radius"))).toBe(false);
+        }
+    }
+    for (const [capture, expected] of [
+      [base, REQUESTED_STYLES],
+      [visual, VISUAL_STYLES],
+    ] as const) {
+      const calls = capture.logs.filter((c) => c.method === "DOMSnapshot.captureSnapshot");
+      expect(calls).toHaveLength(2);
+      for (const call of calls) expect(call.params.computedStyles).toEqual(expected);
+    }
+    expect(base.logs.map((c) => [c.target, c.method])).toEqual(
+      visual.logs.map((c) => [c.target, c.method]),
+    );
+    const scene = (input: typeof baseFacts) =>
+      buildSemanticVomScene({
+        documents: semanticCapture(input).documents,
+        viewport: input.viewport,
+        rootFrameId: input.rootFrameId,
+        excludedBackendNodeIds: semanticCapture(input).captured.excludedBackendNodeIds,
+      });
+    expect(scene(baseFacts)).toEqual(scene(visualFacts));
+    const before = base.logs.length;
+    expect(await discoverVisualCandidates(baseFacts)).toMatchObject({
+      complete: false,
+      candidates: [],
+      issues: [{ reason: "visual-facts-not-collected" }],
+    });
+    expect(base.logs).toHaveLength(before);
+  });
+
+  it("passes actual snapshot styles, client units, projection and identity to pure discovery without additional CDP", async () => {
+    const { cdp, logs } = fixture({
+      canvas: true,
+      frames: [{ frameId: "main", target: { tabId: 4 } }],
+    });
+    const facts = await captureObservationFacts(cdp, 4, undefined, undefined, {
+      includeVisualFacts: true,
+    });
+    const before = logs.length;
+    const result = await discoverVisualCandidates(facts);
+    expect(logs).toHaveLength(before);
+    expect(logs.filter((call) => call.method === "DOMSnapshot.captureSnapshot")).toHaveLength(1);
+    expect(result.complete).toBe(true);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({
+      document: { frameId: "main", documentElementBackendNodeId: 1 },
+      region: { crop: { x: 10, y: 20, width: 100, height: 40 } },
+    });
+    const deduplicated = await deduplicateVisualCandidates(result);
+    expect(deduplicated.candidates).toEqual(result.candidates);
+    expect(deduplicated.candidates[0]).toBe(result.candidates[0]);
+    expect(deduplicated).toMatchObject({
+      candidateCount: 1,
+      deduplicatedCount: 0,
+      dedupDegraded: false,
+    });
+    expect(logs).toHaveLength(before);
+    expect(facts.documents[0].index.nodes.get(2)?.layout?.clientRect).toEqual([0, 0, 100, 40]);
+    expect(facts.documents[0].geometry?.pageScale).toBe(1);
+    const baseline = fixture({ frames: [{ frameId: "main", target: { tabId: 4 } }] });
+    await captureObservationFacts(baseline.cdp, 4);
+    expect(logs.map((call) => call.method)).toEqual(baseline.logs.map((call) => call.method));
   });
 });

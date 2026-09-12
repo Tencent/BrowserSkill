@@ -63,6 +63,9 @@ pub struct SnapshotResult {
 /// page state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ObserveParams {
+    /// Continue a retained observation; does not recapture the page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     pub session_id: String,
     /// Optional target tab. Defaults to the Agent Window's currently
     /// active tab.
@@ -126,6 +129,9 @@ pub struct HoverProbeReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ObserveResult {
+    /// Continue omitted content from this same observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
     /// Semantic VOM observation text. Refs are rendered as `@e<N>` so
     /// the agent can copy them into subsequent interaction tools.
     pub text: String,
@@ -220,6 +226,12 @@ pub struct ScreenshotParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotResult {
+    /// Single-use visual point-click capture, in the original PNG coordinate space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    /// Image remains viewable but cannot authorize a point click.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_unavailable: Option<String>,
     /// Base64-encoded PNG payload (no `data:` prefix).
     pub image_base64: String,
     /// Pixel width parsed from the PNG IHDR. May be `0` when parsing
@@ -365,6 +377,8 @@ mod tests {
     #[test]
     fn screenshot_result_round_trips_with_image_fields() {
         let r = ScreenshotResult {
+            capture_id: None,
+            capture_unavailable: None,
             image_base64: "iVBORw0KGgo=".into(),
             width: 800,
             height: 600,
@@ -380,6 +394,7 @@ mod tests {
     #[test]
     fn observe_result_round_trips_with_ref_count() {
         let r = ObserveResult {
+            next_cursor: None,
             text: "@vom 1\n  @e1 button \"submit\"\n".into(),
             ref_count: 1,
             tab_id: 42,
@@ -395,6 +410,25 @@ mod tests {
     }
 
     #[test]
+    fn observe_cursor_round_trips_without_changing_snapshot() {
+        let params: ObserveParams = serde_json::from_value(json!({
+            "session_id": "s1", "cursor": "next-page", "max_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(params.cursor.as_deref(), Some("next-page"));
+        assert_eq!(serde_json::to_value(params).unwrap()["cursor"], "next-page");
+        let result: ObserveResult = serde_json::from_value(json!({
+            "text": "@more", "ref_count": 0, "tab_id": 4,
+            "truncated": true, "next_cursor": "next-page"
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(result).unwrap()["next_cursor"],
+            "next-page"
+        );
+    }
+
+    #[test]
     fn observe_params_default_to_no_hover_probing() {
         let params: ObserveParams =
             serde_json::from_value(serde_json::json!({ "session_id": "s1" })).unwrap();
@@ -404,6 +438,7 @@ mod tests {
     #[test]
     fn observe_result_round_trips_with_hover_probe_report() {
         let r = ObserveResult {
+            next_cursor: None,
             text: "@vom 1\n".into(),
             ref_count: 0,
             tab_id: 42,

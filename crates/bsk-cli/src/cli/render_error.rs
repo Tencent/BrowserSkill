@@ -40,6 +40,9 @@ use bsk_protocol::ErrorCode;
 pub mod reason {
     pub const AGENT_WINDOW_SCOPE: &str = "agent_window_scope";
     pub const ELEMENT_NOT_VISIBLE: &str = "element_not_visible";
+    pub const VISUAL_TARGET_CHANGED: &str = "visual_target_changed";
+    pub const VISUAL_PIXEL_BUDGET_EXCEEDED: &str = "visual_pixel_budget_exceeded";
+    pub const REF_KIND_UNSUPPORTED: &str = "ref_kind_unsupported";
     pub const REF_NOT_FOUND: &str = "ref_not_found";
     pub const SELECTOR_NOT_FOUND: &str = "selector_not_found";
     pub const TARGET_NOT_FILLABLE: &str = "target_not_fillable";
@@ -278,9 +281,44 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::NotFound, "visual_capture_stale") => RenderInfo {
+            summary: "Canvas screenshot capture is no longer usable",
+            hint: Some(
+                "run `bsk observe`, screenshot the current Canvas ref, and use its new capture_id",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::InvalidParams, "visual_capture_invalid" | "visual_coordinate_invalid") => {
+            RenderInfo {
+                summary: "invalid screenshot-bound Canvas click",
+                hint: Some(
+                    "provide a visual ref, --capture, --image-x and --image-y in the original PNG dimensions",
+                ),
+                exit_code: base.exit_code,
+            }
+        }
+        (ErrorCode::NotFound, reason::VISUAL_TARGET_CHANGED) => RenderInfo {
+            summary: "visual target needs a fresh observation",
+            hint: Some(
+                "observe the page again and use the current visual ref; the previous identity or region cannot be used",
+            ),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::CdpFailed, reason::VISUAL_PIXEL_BUDGET_EXCEEDED) => RenderInfo {
+            summary: "visual screenshot exceeds the image size limit",
+            hint: Some("the screenshot could not be reduced within the pixel budget"),
+            exit_code: base.exit_code,
+        },
+        (ErrorCode::Unsupported, reason::REF_KIND_UNSUPPORTED) => RenderInfo {
+            summary: "this tool does not support the ref target type",
+            hint: Some(
+                "use a DOM ref for DOM operations; visual-region refs require an available visual screenshot path",
+            ),
+            exit_code: base.exit_code,
+        },
         (ErrorCode::NotFound, reason::REF_NOT_FOUND) => RenderInfo {
-            summary: "snapshot ref was not found for this tab",
-            hint: Some("rerun `bsk snapshot` for the current tab and use one of the returned refs"),
+            summary: "observation ref was not found for this tab",
+            hint: Some("rerun `bsk observe` for the current tab and use one of the returned refs"),
             exit_code: base.exit_code,
         },
         (ErrorCode::NotFound, reason::SELECTOR_NOT_FOUND) => RenderInfo {
@@ -696,11 +734,30 @@ mod tests {
     }
 
     #[test]
+    fn visual_screenshot_failures_have_specific_guidance() {
+        let changed = serde_json::json!({ "reason": reason::VISUAL_TARGET_CHANGED });
+        let info = info_for_error(ErrorCode::NotFound, Some(&changed));
+        assert!(info.hint.unwrap().contains("observe"));
+        let budget = serde_json::json!({ "reason": reason::VISUAL_PIXEL_BUDGET_EXCEEDED });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&budget));
+        assert!(info.summary.contains("image size limit"));
+    }
+
+    #[test]
+    fn visual_ref_type_error_has_specific_guidance() {
+        let data = serde_json::json!({ "reason": reason::REF_KIND_UNSUPPORTED });
+        let info = info_for_error(ErrorCode::Unsupported, Some(&data));
+        assert!(info.summary.contains("ref target type"));
+        assert!(info.hint.unwrap().contains("DOM ref"));
+        assert_eq!(info.exit_code, info_for(ErrorCode::Unsupported).exit_code);
+    }
+
+    #[test]
     fn ref_not_found_overrides_not_found_copy() {
         let data = serde_json::json!({ "reason": reason::REF_NOT_FOUND });
         let info = info_for_error(ErrorCode::NotFound, Some(&data));
-        assert_eq!(info.summary, "snapshot ref was not found for this tab");
-        assert!(info.hint.unwrap().contains("bsk snapshot"));
+        assert_eq!(info.summary, "observation ref was not found for this tab");
+        assert!(info.hint.unwrap().contains("bsk observe"));
     }
 
     #[test]

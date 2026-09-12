@@ -1,19 +1,11 @@
-/**
- * Per-session map from `@e<N>` snapshot refs to a CDP node address.
- *
- * Each fresh `tool.snapshot` resets the store: M6 will call
- * `replace(...)` with the new ref → node address pairs. A node address
- * includes the owning flat CDP session/frame when the element lives in
- * an OOPIF; tools resolve live geometry from that identity at call time.
- *
- * Refs are session-scoped (§7): looking up a ref in the wrong session
- * returns `null`, never silently leaks. Storing values in different
- * sessions is fine; they live in independent `RefStore` instances
- * inside the `SessionContext`.
- */
+import type { VisualCandidate } from "@/tools/vom/visual-discovery";
+
+/** Session-local refs describe the latest observation. Reusing eN does not identify
+ * which observation a caller read; generation is internal bookkeeping only. */
 export type BackendNodeId = number;
 
-export interface RefEntry {
+export interface DomRefEntry {
+  readonly kind: "dom";
   name?: string;
   backendNodeId: BackendNodeId;
   tabId: number | null;
@@ -22,7 +14,15 @@ export interface RefEntry {
   generation: number;
 }
 
+export interface VisualRefInput {
+  readonly kind: "visual-region";
+  readonly candidate: VisualCandidate;
+}
+
+export type RefEntry = DomRefEntry | (VisualRefInput & { readonly generation: number });
+
 export type RefInput =
+  | VisualRefInput
   | BackendNodeId
   | {
       name?: string;
@@ -33,8 +33,12 @@ export type RefInput =
     };
 
 export class RefStore {
-  private readonly map = new Map<string, RefEntry>();
+  private map = new Map<string, RefEntry>();
   private generation = 0;
+
+  get revision(): number {
+    return this.generation;
+  }
 
   size(): number {
     return this.map.size;
@@ -46,7 +50,7 @@ export class RefStore {
 
   resolve(ref: string, opts: { tabId?: number } = {}): BackendNodeId | null {
     const entry = this.map.get(normaliseRef(ref));
-    if (!entry) return null;
+    if (!entry || entry.kind !== "dom") return null;
     if (opts.tabId !== undefined && entry.tabId !== opts.tabId) return null;
     return entry.backendNodeId;
   }
@@ -60,9 +64,11 @@ export class RefStore {
    * Used after every fresh `tool.snapshot`.
    */
   replace(entries: Iterable<readonly [string, RefInput]>): void {
-    this.map.clear();
-    this.generation += 1;
-    for (const [ref, input] of entries) this.map.set(normaliseRef(ref), this.entry(input));
+    const generation = this.generation + 1;
+    const next = new Map<string, RefEntry>();
+    for (const [ref, input] of entries) next.set(normaliseRef(ref), this.entry(input, generation));
+    this.map = next;
+    this.generation = generation;
   }
 
   set(
@@ -75,6 +81,7 @@ export class RefStore {
     } = {},
   ): void {
     this.map.set(normaliseRef(ref), {
+      kind: "dom",
       backendNodeId: id,
       tabId: opts.tabId ?? null,
       ...(opts.frameId ? { frameId: opts.frameId } : {}),
@@ -84,6 +91,7 @@ export class RefStore {
   }
 
   clear(): void {
+    this.generation++;
     this.map.clear();
   }
 
@@ -91,21 +99,38 @@ export class RefStore {
     return this.map.entries();
   }
 
-  private entry(input: RefInput): RefEntry {
+  private entry(input: RefInput, generation: number): RefEntry {
+    if (typeof input !== "number" && "kind" in input) {
+      const { document } = input.candidate;
+      if (
+        !document?.attachmentId ||
+        !document.frameId ||
+        !Number.isSafeInteger(document.target?.tabId) ||
+        !Number.isSafeInteger(document.documentElementBackendNodeId) ||
+        document.documentElementBackendNodeId <= 0 ||
+        !Number.isSafeInteger(input.candidate.backendNodeId) ||
+        input.candidate.backendNodeId <= 0
+      )
+        throw new TypeError("visual ref requires a verified DOM identity and anchor");
+      // Preserve the read-only evidence and shared clipping chain; do not clone ancestors per ref.
+      return { kind: "visual-region", candidate: input.candidate, generation };
+    }
     if (typeof input === "number") {
       return {
+        kind: "dom",
         backendNodeId: input,
         tabId: null,
-        generation: this.generation,
+        generation,
       };
     }
     return {
+      kind: "dom",
       ...(input.name ? { name: input.name } : {}),
       backendNodeId: input.backendNodeId,
       tabId: input.tabId,
       ...(input.frameId ? { frameId: input.frameId } : {}),
       ...(input.cdpSessionId ? { cdpSessionId: input.cdpSessionId } : {}),
-      generation: this.generation,
+      generation,
     };
   }
 }
