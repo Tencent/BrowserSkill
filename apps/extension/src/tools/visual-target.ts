@@ -22,11 +22,14 @@ import {
   resolveVisualRegion,
   type VisualClipSource,
   type VisualContext,
+  viewportOverflowSource,
   visualProjectionIssue,
 } from "./vom/visual-region";
 
 interface LiveRow {
   node: number;
+  isBody?: boolean;
+  parentIsElement?: boolean;
   tag: string;
   box: ViewportRect;
   client: ViewportRect;
@@ -43,14 +46,19 @@ interface LiveFrame {
   rows: LiveRow[]; // Anchor first, root last.
 }
 
-// Read only one current ancestry, including shadow hosts, in the verified isolated world.
-const READ_ANCESTRY = `function(styleNames) {
+// Follow the rendered ancestry, including slot distribution, in the verified world.
+// Closed slots supplied by CDP are rechecked here against the current assignment.
+const READ_ANCESTRY = `function(styleNames, ...closedSlots) {
   if (!this.isConnected || this.ownerDocument !== document) return null;
   const rows = [];
-  for (let node = this; node; node = node.parentElement || node.getRootNode().host) {
+  const parent = node => node.assignedSlot ||
+    closedSlots.find(slot => slot.isConnected && slot.ownerDocument === document &&
+      slot.getRootNode().host === node.parentElement && slot.assignedElements().includes(node)) ||
+    node.parentElement || node.getRootNode().host;
+  for (let node = this; node; node = parent(node)) {
     if (!(node instanceof Element)) return null;
     const s = getComputedStyle(node), r = node.getBoundingClientRect();
-    rows.push({ node, tag: node.localName,
+    rows.push({ node, tag: node.localName, isBody: node === document.body, parentIsElement: !!node.parentElement,
       box: { x:r.x, y:r.y, width:r.width, height:r.height },
       client: { x:r.x+node.clientLeft, y:r.y+node.clientTop, width:node.clientWidth, height:node.clientHeight },
       contentSize: { width:node.clientWidth-parseFloat(s.paddingLeft)-parseFloat(s.paddingRight), height:node.clientHeight-parseFloat(s.paddingTop)-parseFloat(s.paddingBottom) },
@@ -64,12 +72,21 @@ interface DeepValue {
   value?: unknown;
 }
 /** This read returns JSON primitives plus DOM nodes (backend IDs), never remote object handles. */
-function decode(value: DeepValue): unknown {
-  if (value.type === "node") return (value.value as { backendNodeId?: number })?.backendNodeId;
-  if (value.type === "array") return (value.value as DeepValue[]).map(decode);
+function decode(value: DeepValue, closedHosts: Set<number>): unknown {
+  if (value.type === "node") {
+    const node = value.value as {
+      backendNodeId?: number;
+      shadowRoot?: { value?: { mode?: string } };
+    };
+    if (node?.backendNodeId && node.shadowRoot?.value?.mode === "closed")
+      closedHosts.add(node.backendNodeId);
+    return node?.backendNodeId;
+  }
+  if (value.type === "array")
+    return (value.value as DeepValue[]).map((item) => decode(item, closedHosts));
   if (value.type === "object")
     return Object.fromEntries(
-      (value.value as [string, DeepValue][]).map(([key, item]) => [key, decode(item)]),
+      (value.value as [string, DeepValue][]).map(([key, item]) => [key, decode(item, closedHosts)]),
     );
   if (value.type === "null") return null;
   if (["string", "number", "boolean"].includes(value.type)) return value.value;
@@ -130,34 +147,69 @@ async function readFrame(
   const verified = await resolveVerifiedNode(cdp, document, anchor, signal);
   if (verified.status !== "current") return stale(`visual DOM identity ${verified.status}`);
   try {
-    throwIfAborted(signal);
-    const reply = await sendToCdpTarget<{
-      result?: { deepSerializedValue?: DeepValue };
-      exceptionDetails?: unknown;
-    }>(cdp, document.target, "Runtime.callFunctionOn", {
-      objectId: verified.objectId,
-      objectGroup: verified.objectGroup,
-      functionDeclaration: READ_ANCESTRY,
-      arguments: [{ value: VISUAL_STYLES }],
-      serializationOptions: {
-        serialization: "deep",
-        additionalParameters: { maxNodeDepth: 0, includeShadowTree: "none" },
-      },
-    });
-    throwIfAborted(signal);
-    if (reply.exceptionDetails || !reply.result?.deepSerializedValue)
-      return stale("visual ancestry unavailable");
-    const result = decode(reply.result.deepSerializedValue) as LiveFrame | null;
-    if (
-      !result?.rows?.length ||
-      result.rows[0].node !== anchor ||
-      result.rows.at(-1)?.node !== document.documentElementBackendNodeId ||
-      !result.rows.every((row) => Number.isSafeInteger(row.node) && row.node > 0)
-    )
-      return stale("visual ancestry incomplete");
-    if (cdp.getAttachmentId?.(document.target.tabId) !== document.attachmentId)
-      return stale("visual attachment changed");
-    return result;
+    const slots = new Map<number, string>();
+    while (true) {
+      throwIfAborted(signal);
+      const reply = await sendToCdpTarget<{
+        result?: { deepSerializedValue?: DeepValue };
+        exceptionDetails?: unknown;
+      }>(cdp, document.target, "Runtime.callFunctionOn", {
+        objectId: verified.objectId,
+        objectGroup: verified.objectGroup,
+        functionDeclaration: READ_ANCESTRY,
+        arguments: [
+          { value: VISUAL_STYLES },
+          ...Array.from(slots.values(), (objectId) => ({ objectId })),
+        ],
+        serializationOptions: {
+          serialization: "deep",
+          // At depth zero only shadow-root metadata is included, never its descendants.
+          additionalParameters: { maxNodeDepth: 0, includeShadowTree: "all" },
+        },
+      });
+      throwIfAborted(signal);
+      if (reply.exceptionDetails || !reply.result?.deepSerializedValue)
+        return stale("visual ancestry unavailable");
+      const closedHosts = new Set<number>();
+      const result = decode(reply.result.deepSerializedValue, closedHosts) as LiveFrame | null;
+      if (
+        !result?.rows?.length ||
+        result.rows[0].node !== anchor ||
+        result.rows.at(-1)?.node !== document.documentElementBackendNodeId ||
+        !result.rows.every((row) => Number.isSafeInteger(row.node) && row.node > 0)
+      )
+        return stale("visual ancestry incomplete");
+      if (cdp.getAttachmentId?.(document.target.tabId) !== document.attachmentId)
+        return stale("visual attachment changed");
+      // assignedSlot is null for light children of a closed shadow host. Query only
+      // these missing edges, then reread geometry and validate the assignment together.
+      const missing = result.rows.filter(
+        (row, i) => row.parentIsElement && closedHosts.has(result.rows[i + 1]?.node),
+      );
+      if (!missing.length) return result;
+      for (const row of missing) {
+        if (slots.has(row.node)) return stale("visual slot assignment changed");
+        throwIfAborted(signal);
+        const described = await sendToCdpTarget<{
+          node?: { assignedSlot?: { backendNodeId?: number } };
+        }>(cdp, document.target, "DOM.describeNode", { backendNodeId: row.node, depth: 0 });
+        const backendNodeId = described.node?.assignedSlot?.backendNodeId;
+        if (!backendNodeId) return stale("visual slot assignment unavailable");
+        throwIfAborted(signal);
+        const resolved = await sendToCdpTarget<{ object?: { objectId?: string } }>(
+          cdp,
+          document.target,
+          "DOM.resolveNode",
+          {
+            backendNodeId,
+            executionContextId: verified.executionContextId,
+            objectGroup: verified.objectGroup,
+          },
+        );
+        if (!resolved.object?.objectId) return stale("visual slot unavailable");
+        slots.set(row.node, resolved.object.objectId);
+      }
+    }
   } finally {
     await sendToCdpTarget(cdp, document.target, "Runtime.releaseObjectGroup", {
       objectGroup: verified.objectGroup,
@@ -275,6 +327,16 @@ export async function resolveVisualRegionNow(
         height: live.height ?? viewport.height,
       },
     });
+    const overflowElement = (row: LiveRow | undefined) =>
+      row && {
+        backendNodeId: row.node,
+        tag: row.tag,
+        styles: row.styles,
+      };
+    const overflowSource = viewportOverflowSource(
+      overflowElement(live.rows.at(-1)),
+      overflowElement(live.rows.find((row) => row.isBody)),
+    );
     for (let j = live.rows.length - 1; j >= 0; j--) {
       const row = live.rows[j];
       const isAnchor = j === 0;
@@ -287,7 +349,7 @@ export async function resolveVisualRegionNow(
       context = extendVisualContext(
         context,
         node,
-        !isAnchor && row.tag !== "iframe" && row.tag !== "frame",
+        !isAnchor && row.tag !== "iframe" && row.tag !== "frame" && row.node !== overflowSource,
       );
     }
     if (i < path.length - 1) {

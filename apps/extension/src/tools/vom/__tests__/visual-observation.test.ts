@@ -490,6 +490,8 @@ it("observe discovers and registers visual refs from its single production captu
               zoom: "1",
               clip: "auto",
               "overflow-clip-margin": "0px",
+              "content-visibility": "visible",
+              "container-type": "normal",
             } as Record<string, string>
           )[key] ?? "none",
         ),
@@ -561,7 +563,7 @@ it("observe discovers and registers visual refs from its single production captu
   expect(send.mock.calls.some((c) => c[1] === "Page.captureScreenshot")).toBe(false);
   await handleSnapshot(manager, { session_id: "test" }, deps);
   const captures = send.mock.calls.filter((c) => c[1] === "DOMSnapshot.captureSnapshot");
-  expect(captures[0][2]?.computedStyles).toHaveLength(18);
+  expect(captures[0][2]?.computedStyles).toHaveLength(20);
   expect(captures[1][2]?.computedStyles).toHaveLength(5);
   expect([...ctx.refStore.entries()].some(([, entry]) => entry.kind === "visual-region")).toBe(
     false,
