@@ -9,9 +9,30 @@ export const REQUESTED_STYLES = [
   "visibility",
   "opacity",
 ] as const;
-const STYLE_COL = Object.fromEntries(
-  REQUESTED_STYLES.map((name, index) => [name, index]),
-) as Record<(typeof REQUESTED_STYLES)[number], number>;
+export const VISUAL_STYLES = [
+  ...REQUESTED_STYLES,
+  "display",
+  "overflow-x",
+  "overflow-y",
+  "transform",
+  "zoom",
+  "clip-path",
+  "mask-image",
+  "rotate",
+  "scale",
+  "perspective",
+  "clip",
+  "contain",
+  "overflow-clip-margin",
+] as const;
+
+/** The same profile owns request columns, decoding and visual-only derived facts. */
+export const BASIC_SNAPSHOT = {
+  includeVisualFacts: false,
+  computedStyles: REQUESTED_STYLES,
+} as const;
+export const VISUAL_SNAPSHOT = { includeVisualFacts: true, computedStyles: VISUAL_STYLES } as const;
+export type SnapshotProfile = typeof BASIC_SNAPSHOT | typeof VISUAL_SNAPSHOT;
 /** Sparse array format Chrome uses for infrequently-set per-node fields. */
 interface SparseArray {
   index: number[];
@@ -49,6 +70,7 @@ export interface SnapshotDocument {
     nodeIndex?: number[];
     styles?: number[][];
     bounds?: number[][];
+    clientRects?: number[][];
     paintOrders?: number[];
   };
 }
@@ -103,6 +125,7 @@ export async function decodeDocument(
   doc: SnapshotDocument,
   strings: string[],
   signal?: AbortSignal,
+  profile: SnapshotProfile = BASIC_SNAPSHOT,
 ): Promise<DecodedDocument> {
   const checkpoint = createCaptureCheckpoint(signal);
   const dn = doc.nodes;
@@ -170,13 +193,17 @@ export async function decodeDocument(
     const li = layoutByNode.get(n);
     const styleRow = li === undefined ? [] : (dl?.styles?.[li] ?? []);
     const styles: Record<string, string> = {};
-    for (const name of REQUESTED_STYLES) styles[name] = str(strings, styleRow[STYLE_COL[name]]);
+    for (let i = 0; i < profile.computedStyles.length; i++)
+      styles[profile.computedStyles[i]] = str(strings, styleRow[i]);
     const layout =
       li === undefined
         ? undefined
         : {
             boundsSpace: "snapshot-document-layout" as const,
             bounds: dl?.bounds?.[li],
+            ...(profile.includeVisualFacts && dl?.clientRects?.[li]
+              ? { clientRect: dl.clientRects[li] }
+              : {}),
             styles,
           };
 
@@ -200,6 +227,10 @@ export async function decodeDocument(
       backendNodeId,
       nodeType: dn.nodeType?.[n],
       parentBackendNodeId,
+      ...(profile.includeVisualFacts &&
+      (dn.parentIndex?.[n] === undefined || (parentIdx >= 0 && parentBackendNodeId === null))
+        ? { parentMissing: true }
+        : {}),
 
       tag,
       attrs,
