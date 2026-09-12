@@ -40,6 +40,13 @@ pub enum MouseButton {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ClickParams {
+    /// Single-use capture returned by a visual-ref screenshot; requires image coordinates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_x: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_y: Option<f64>,
     pub session_id: String,
     /// Optional `@e<N>` ref allocated by the last `tool.snapshot`.
     /// Mutually exclusive with `selector` (caller must supply exactly
@@ -356,6 +363,9 @@ mod tests {
     #[test]
     fn click_params_serialise_ref_field_name() {
         let p = ClickParams {
+            capture_id: None,
+            image_x: None,
+            image_y: None,
             session_id: "abcd".into(),
             ref_: Some("@e3".into()),
             selector: None,

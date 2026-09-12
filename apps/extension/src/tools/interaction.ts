@@ -1,3 +1,6 @@
+import { consumeVisualCapture, isVisualPointRequest } from "./visual-capture";
+import { resolveVisualRegionNow, sameVisualMapping, verifyVisualHit } from "./visual-target";
+import { isAbortError } from "./vom/capture-abort";
 // DOM interaction tools — click, hover, focus/blur, fill, press, and select.
 //
 // All interaction tools:
@@ -460,6 +463,7 @@ export async function handleClick(
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "click");
   if (denied) return denied;
+  if (isVisualPointRequest(params)) return clickVisualPoint(ctx, target, params, deps);
   const resolved = await resolveActionTarget(deps.cdp, ctx, target, params, "click");
   if (isRpcError(resolved)) return resolved;
   return clickResolvedTarget(ctx, resolved, params, deps);
@@ -496,13 +500,10 @@ export async function clickResolvedTarget(
     return { code: "cancelled", message: "click aborted" };
   }
 
-  const button: MouseButton = params.button ?? "left";
   const clickCount = params.click_count ?? 1;
   if (clickCount < 1) {
     return { code: "invalid_params", message: "click_count must be greater than zero" };
   }
-  const modifiers = modifiersBitfield(params.modifiers);
-
   const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
   let automationBypassEnabled = false;
   if (overlayBlocking && deps.bypassOverlay) {
@@ -515,52 +516,8 @@ export async function clickResolvedTarget(
   }
 
   try {
-    // Move first so hover state activates, then press → release.
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: centre.x,
-      y: centre.y,
-      modifiers,
-    });
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "click aborted" };
-    }
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mousePressed",
-      x: centre.x,
-      y: centre.y,
-      button,
-      clickCount,
-      modifiers,
-    });
-    if (throwIfAborted(deps.signal)) {
-      try {
-        await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x: centre.x,
-          y: centre.y,
-          button,
-          clickCount,
-          modifiers,
-        });
-      } catch (err) {
-        console.debug("[bsk interaction] best-effort mouseReleased after abort failed", err);
-      }
-      return { code: "cancelled", message: "click aborted" };
-    }
-    await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseReleased",
-      x: centre.x,
-      y: centre.y,
-      button,
-      clickCount,
-      modifiers,
-    });
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    const error = await dispatchClickAtPoint(target.tabId, centre, params, deps);
+    if (error) return error;
   } finally {
     if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
       try {
@@ -578,6 +535,153 @@ export async function clickResolvedTarget(
     x: centre.x,
     y: centre.y,
   });
+}
+
+/** Shared mouse lifecycle; visual clicks additionally verify after move and emit full double clicks. */
+async function dispatchClickAtPoint(
+  tabId: number,
+  point: { x: number; y: number },
+  params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
+  deps: InteractionDeps,
+  beforePress?: () => Promise<RpcError | null>,
+): Promise<RpcError | null> {
+  const button = params.button ?? "left",
+    modifiers = modifiersBitfield(params.modifiers);
+  let releaseNeeded = false,
+    attempted = false,
+    moved = false,
+    count = params.click_count ?? 1;
+  const release = () =>
+    deps.cdp.send(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      ...point,
+      button,
+      clickCount: count,
+      modifiers,
+    });
+  const failure = (error: RpcError): RpcError =>
+    beforePress
+      ? {
+          ...error,
+          data: {
+            ...error.data,
+            effect_state: attempted ? "unknown" : "none",
+            pointer_moved: moved,
+          },
+        }
+      : error;
+  try {
+    if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+    moved = true;
+    await deps.cdp.send(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      ...point,
+      modifiers,
+    });
+    if (beforePress) {
+      const error = await beforePress();
+      if (error) return failure(error);
+    }
+    const counts = beforePress
+      ? Array.from({ length: params.click_count ?? 1 }, (_, i) => i + 1)
+      : [count];
+    for (count of counts) {
+      if (beforePress && count > 1) {
+        const error = await beforePress();
+        if (error) return failure(error);
+      }
+      if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      attempted = true;
+      releaseNeeded = true;
+      await deps.cdp.send(tabId, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        ...point,
+        button,
+        clickCount: count,
+        modifiers,
+      });
+      await release();
+      releaseNeeded = false;
+    }
+    if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+    return null;
+  } catch (error) {
+    return failure({
+      code: deps.signal?.aborted || isAbortError(error) ? "cancelled" : "cdp_failed",
+      message: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (releaseNeeded) await release().catch(() => {});
+  }
+}
+
+async function clickVisualPoint(
+  ctx: SessionContext,
+  target: ResolvedTargetTab,
+  params: ClickParams,
+  deps: InteractionDeps,
+): Promise<ClickResult | RpcError> {
+  const consumed = consumeVisualCapture(ctx.refStore, target.tabId, params);
+  if (isRpcError(consumed)) return consumed;
+  const { capture, point } = consumed;
+  const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+  const changed = () =>
+    rpcError(
+      "not_found",
+      "visual_capture_stale",
+      "visual target, mapping or hit target changed; observe and screenshot again",
+    );
+  const validate = async (): Promise<RpcError | null> => {
+    if (
+      ctx.refStore.resolveEntry(capture.ref) !== capture.entry ||
+      ctx.refStore.revision !== capture.generation
+    )
+      return changed();
+    const current = await resolveVisualRegionNow(deps.cdp, capture.entry.candidate, deps.signal);
+    if (isRpcError(current)) return current;
+    if (
+      !sameVisualMapping(capture.mapping, current) ||
+      !(await verifyVisualHit(deps.cdp, current, point, deps.signal))
+    )
+      return changed();
+    if (
+      ctx.refStore.resolveEntry(capture.ref) !== capture.entry ||
+      ctx.refStore.revision !== capture.generation ||
+      current.mappings.some(
+        (m) => deps.cdp.getAttachmentId?.(target.tabId) !== m.document.attachmentId,
+      )
+    )
+      return changed();
+    return null;
+  };
+  let bypass = false;
+  try {
+    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    if (deps.bypassOverlay) {
+      await deps.bypassOverlay(target.tabId, true);
+      bypass = true;
+    }
+    const invalid = await validate();
+    if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
+    const error = await dispatchClickAtPoint(target.tabId, point, params, deps, async () => {
+      await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
+      return validate();
+    });
+    if (error) return error;
+    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      tab_id: target.tabId,
+      used_ref: capture.ref,
+      ...point,
+    });
+  } catch (error) {
+    return {
+      code: deps.signal?.aborted || isAbortError(error) ? "cancelled" : "cdp_failed",
+      message: error instanceof Error ? error.message : String(error),
+      data: { effect_state: "none" },
+    };
+  } finally {
+    if (bypass) await deps.bypassOverlay!(target.tabId, false).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------

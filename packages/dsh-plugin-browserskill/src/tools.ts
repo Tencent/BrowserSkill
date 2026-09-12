@@ -585,6 +585,16 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           description: "Snapshot ref (@e3 / e3) or CSS selector of the element to click.",
         },
         session: SESSION_PARAM,
+        captureId: {
+          type: "string",
+          description: "Single-use capture from a Canvas screenshot; requires imageX/imageY.",
+        },
+        imageX: { type: "number", description: "X in the original screenshot PNG pixels." },
+        imageY: { type: "number", description: "Y in the original screenshot PNG pixels." },
+        modifiers: {
+          type: "array",
+          items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
+        },
         button: {
           type: "string",
           enum: ["left", "middle", "right"],
@@ -619,6 +629,23 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         const cmdArgs = ["click", "--session", sessionId];
         if (args.button !== undefined) cmdArgs.push("--button", args.button);
         if (args.clickCount !== undefined) cmdArgs.push("--click-count", String(args.clickCount));
+        if (
+          args.captureId !== undefined ||
+          args.imageX !== undefined ||
+          args.imageY !== undefined
+        ) {
+          if (!args.captureId || !Number.isFinite(args.imageX) || !Number.isFinite(args.imageY))
+            throw new Error("Canvas click requires captureId, imageX and imageY");
+          cmdArgs.push(
+            "--capture",
+            args.captureId,
+            "--image-x",
+            String(args.imageX),
+            "--image-y",
+            String(args.imageY),
+          );
+        }
+        if (args.modifiers?.length) cmdArgs.push("--modifiers", args.modifiers.join(","));
         cmdArgs.push(args.target);
         const reply = (await runBsk(deps, exec, cmdArgs, "click", sessionId)) as {
           tab_id: number;
@@ -789,6 +816,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             width: { type: "integer", required: true },
             height: { type: "integer", required: true },
             byteSize: { type: "integer", required: true },
+            captureId: { type: "string" },
+            captureUnavailable: { type: "string" },
             image: {
               type: "object",
               additionalProperties: false,
@@ -812,7 +841,12 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             value.image !== undefined
               ? `[session ${value.session}] screenshot of tab ${value.tabId} (${value.width}x${value.height}px)`
               : `[session ${value.session}] screenshot saved to ${value.path} (${value.width}x${value.height}px, ${value.byteSize} bytes) — this deployment cannot inline images; read the file to view it`;
-          const blocks: ContentBlock[] = [{ type: "text", text }];
+          const captureText = value.captureId
+            ? `; captureId=${value.captureId}, single-use click with original PNG imageX/imageY`
+            : value.captureUnavailable
+              ? `; capture unavailable: ${value.captureUnavailable}`
+              : "";
+          const blocks: ContentBlock[] = [{ type: "text", text: text + captureText }];
           if (value.image !== undefined) {
             blocks.push({
               type: "image",
@@ -851,6 +885,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             height: number;
             path: string;
             byte_size: number;
+            capture_id?: string;
+            capture_unavailable?: string;
           };
           writtenPath = reply.path;
           const data = await readFile(reply.path);
@@ -864,6 +900,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             width: reply.width,
             height: reply.height,
             byteSize: reply.byte_size,
+            ...(reply.capture_id ? { captureId: reply.capture_id } : {}),
+            ...(reply.capture_unavailable ? { captureUnavailable: reply.capture_unavailable } : {}),
             ...(ref !== undefined
               ? {
                   image: {

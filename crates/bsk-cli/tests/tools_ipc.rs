@@ -234,6 +234,8 @@ async fn screenshot_returns_image_base64_with_dimensions() {
         let _: ScreenshotParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(ScreenshotResult {
+                capture_id: None,
+                capture_unavailable: None,
                 image_base64: "iVBORw0KGgo=".into(),
                 width: 800,
                 height: 600,
@@ -282,6 +284,8 @@ async fn screenshot_forwards_ref_to_extension() {
         assert_eq!(params.ref_.as_deref(), Some("@e5"));
         ResponseBody::Ok(
             serde_json::to_value(ScreenshotResult {
+                capture_id: Some("capture-test".into()),
+                capture_unavailable: None,
                 image_base64: "iVBORw0KGgo=".into(),
                 width: 100,
                 height: 60,
@@ -305,6 +309,7 @@ async fn screenshot_forwards_ref_to_extension() {
     )
     .await
     .expect("screenshot with ref ok");
+    assert_eq!(result.capture_id.as_deref(), Some("capture-test"));
     assert_eq!(result.width, 100);
     assert_eq!(result.height, 60);
     handle.shutdown().await;

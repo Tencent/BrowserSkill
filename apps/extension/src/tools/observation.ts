@@ -1,4 +1,5 @@
 import { parsePngDimensions } from "./png";
+import { clearVisualCapture, issueVisualCapture } from "./visual-capture";
 import { captureVisualScreenshot } from "./visual-screenshot";
 import { deduplicateVisualCandidates } from "./vom/visual-dedup";
 import { discoverVisualCandidates } from "./vom/visual-discovery";
@@ -291,6 +292,7 @@ export async function handleScreenshot(
     }
     const entry = lookupRefTarget(ctx, ref, target.tabId);
     if (entry?.kind === "visual-region") {
+      clearVisualCapture(ctx.refStore, ref);
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
       const captured = await withExtensionOverlayHidden(
         target.tabId,
@@ -298,7 +300,22 @@ export async function handleScreenshot(
         deps.sendToTab,
       );
       if (isRpcError(captured)) return captured;
-      return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });
+      const { mapping, ...image } = captured;
+      const captureId = mapping
+        ? issueVisualCapture(ctx.refStore, ref, entry, mapping, image.width, image.height)
+        : undefined;
+      return withShotDialogs({
+        ...image,
+        format: "png",
+        tab_id: target.tabId,
+        ...(captureId
+          ? { capture_id: captureId }
+          : {
+              capture_unavailable:
+                image.capture_unavailable ??
+                "observation replaced during capture; observe and screenshot again",
+            }),
+      });
     }
     const node = resolveSnapshotRef(ctx, ref, target.tabId);
     if (isRpcError(node)) return node;

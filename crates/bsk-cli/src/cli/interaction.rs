@@ -103,6 +103,15 @@ pub(crate) fn split_target(
 
 #[derive(Debug, Clone, Args)]
 pub struct ClickArgs {
+    /// Bind a Canvas point click to the image returned by screenshot --ref.
+    #[arg(long = "capture", requires_all = ["image_x", "image_y"], conflicts_with = "selector")]
+    pub capture_id: Option<String>,
+    /// X coordinate in the original screenshot PNG, not viewport CSS pixels.
+    #[arg(long, requires = "capture_id")]
+    pub image_x: Option<f64>,
+    /// Y coordinate in the original screenshot PNG.
+    #[arg(long, requires = "capture_id")]
+    pub image_y: Option<f64>,
     /// Snapshot ref (`@e3`, `e3`) or CSS selector. Optional when `--ref`/`--selector` is used.
     pub target: Option<String>,
 
@@ -150,6 +159,9 @@ pub fn dispatch_click(args: ClickArgs, format: Format) -> Result<(), CliError> {
     let modifiers = parse_modifiers(&args.modifiers)
         .map_err(|e| CliError::Local(anyhow::anyhow!("--modifiers: {e}")))?;
     let params = ClickParams {
+        capture_id: args.capture_id.clone(),
+        image_x: args.image_x,
+        image_y: args.image_y,
         session_id: args.session.clone(),
         ref_,
         selector,
