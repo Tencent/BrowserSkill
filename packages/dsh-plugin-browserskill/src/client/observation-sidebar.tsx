@@ -164,12 +164,17 @@ export function ObservationSidebarTab({
   return <div className={css["sidebar-tab"]}>{body}</div>;
 }
 
-function* leafNodes(node: SidebarNodeLike): Generator<SidebarLeafLike> {
+function* leafNodes(node: SidebarNodeLike | undefined): Generator<SidebarLeafLike> {
+  // The host snapshot is untrusted at runtime: a root can be absent on DSH
+  // 0.1.5+ and a stored tree may carry a hole where a child should be. Walking
+  // must stay total, otherwise one malformed node blanks the whole sidebar
+  // through the host's render error boundary.
+  if (node === undefined) return;
   if (node.kind === "leaf") {
     yield node;
     return;
   }
-  for (const child of node.children) yield* leafNodes(child);
+  for (const child of node.children ?? []) yield* leafNodes(child);
 }
 
 /** Whether a tab of our type is already open in either sidebar workbench. */

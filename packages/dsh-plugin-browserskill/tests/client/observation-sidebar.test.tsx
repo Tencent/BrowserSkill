@@ -290,6 +290,42 @@ describe("observationTabOpen", () => {
     expect(() => observationTabOpen(noSplits)).not.toThrow();
     expect(observationTabOpen(noSplits)).toBe(false);
   });
+
+  it("does not crash when the tree carries a missing child node", () => {
+    // A hole in a persisted split tree used to dereference `undefined.kind`
+    // inside the walker and blank the sidebar; the walk is expected to stay
+    // total and simply skip the missing node.
+    const holed = {
+      kind: "split",
+      id: "s1",
+      dir: "row",
+      sizes: [1],
+      children: [undefined, { kind: "leaf", id: "p3", active: null, tabs: [] }],
+    } as unknown as SidebarNodeLike;
+    expect(() => observationTabOpen({ bottomSplits: holed })).not.toThrow();
+    expect(observationTabOpen({ bottomSplits: holed })).toBe(false);
+  });
+
+  it("still finds the tab when a sibling node is missing", () => {
+    // Guarding the walk must not degrade it into "give up on the whole tree":
+    // a tab sitting next to the hole is still found.
+    const holedWithTab = {
+      kind: "split",
+      id: "s2",
+      dir: "row",
+      sizes: [1],
+      children: [
+        undefined,
+        {
+          kind: "leaf",
+          id: "p4",
+          active: OBSERVATION_TAB_TYPE,
+          tabs: [{ id: OBSERVATION_TAB_TYPE, type: OBSERVATION_TAB_TYPE, title: "Observation" }],
+        },
+      ],
+    } as unknown as SidebarNodeLike;
+    expect(observationTabOpen({ bottomSplits: holedWithTab })).toBe(true);
+  });
 });
 
 describe("ObservationSidebarTab", () => {
