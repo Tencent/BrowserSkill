@@ -16,6 +16,16 @@ are explicitly borrowed.
 Do not use this skill for tasks with no browser, for extension installation, or when the user only
 wants instructions. Never extract credentials, cookies, tokens, or other secrets from pages.
 
+## Prerequisites
+
+Installing this skill alone does not install the `bsk` CLI or browser extension.
+If `bsk` is not found, check `PATH` (the default install directory is `~/.local/bin`), then
+use the official [installation guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md)
+if setup is needed. Verify CLI availability with `bsk --version`.
+
+If the extension is not connected, direct the user to the same guide to install or enable it
+in their browser, then run `bsk doctor` to verify readiness before starting a session.
+
 ## Required lifecycle
 
 Every browser task owns a bounded session:
