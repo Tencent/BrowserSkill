@@ -8,6 +8,8 @@ export interface OverlayState {
   activeHelp: HelpRequestData | null;
   activeRecord: RecordRequestData | null;
   controlVisible: boolean;
+  /** The `paused` hold pill is showing (see {@link OverlayController.isPausedVisible}). */
+  pausedVisible: boolean;
   interrupting: boolean;
   activeSessionId: string | null;
   controlMode: OverlayMode;
@@ -26,7 +28,7 @@ export interface OverlayState {
   controlHintsHidden: boolean;
 }
 
-type MutableOverlayState = Omit<OverlayState, "controlVisible">;
+type MutableOverlayState = Omit<OverlayState, "controlVisible" | "pausedVisible">;
 
 /**
  * Owns overlay state by rendering scope. User-tab overlays survive Agent
@@ -49,12 +51,21 @@ export class OverlayController {
     return {
       ...this.state,
       controlVisible: this.isControlVisible(),
+      pausedVisible: this.isPausedVisible(),
       borrowRequests: [...this.state.borrowRequests],
     };
   }
 
   isControlVisible(): boolean {
     return this.state.activeSessionId !== null && this.state.controlMode === "control";
+  }
+
+  /**
+   * The user is operating the page by hand. Unlike `control`, the paused pill
+   * carries no input blocker — only the note field and the return button.
+   */
+  isPausedVisible(): boolean {
+    return this.state.activeSessionId !== null && this.state.controlMode === "paused";
   }
 
   addBorrowRequest(request: BorrowRequestData): void {
@@ -159,13 +170,28 @@ export class OverlayController {
   }
 }
 
-/** Control mask ("Agent 正在控制") must hide while help/record overlays own the chrome. */
-export function shouldShowAgentControlOverlay(state: OverlayState): boolean {
+/** Pill chrome is allowed while the session owns a tab and nothing else owns it. */
+function controlChromeAllowed(state: OverlayState): boolean {
   return (
-    state.controlVisible &&
+    state.activeSessionId !== null &&
     !state.controlHintsHidden &&
     !state.suppressControlAfterRecord &&
     state.activeHelp === null &&
     state.activeRecord === null
   );
+}
+
+/** Control mask ("Agent 正在控制") must hide while help/record overlays own the chrome. */
+export function shouldShowAgentControlOverlay(state: OverlayState): boolean {
+  return state.controlVisible && controlChromeAllowed(state);
+}
+
+/**
+ * The take-over request is in flight: the pill stays put with its disabled
+ * 「接管中…」button (and its blocker) until the background flips the session to
+ * `paused` — the user must not be able to click through a page the agent may
+ * still be driving.
+ */
+export function shouldShowInterruptingOverlay(state: OverlayState): boolean {
+  return state.controlMode === "interrupting" && controlChromeAllowed(state);
 }

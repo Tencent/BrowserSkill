@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStatusResult",
+  "description": "`session.status` response payload. Non-consuming: reading the takeover state never clears the held flag nor the return receipt.",
+  "type": "object",
+  "required": [
+    "control",
+    "pending_interrupt",
+    "session_id"
+  ],
+  "properties": {
+    "control": {
+      "$ref": "#/definitions/SessionControl"
+    },
+    "held_for_ms": {
+      "description": "How long the user has held control, in milliseconds. `None` while `control` is `agent`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "last_return": {
+      "description": "Most recent return receipt, until it is consumed by `session.wait_control`.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionReturnReceipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pending_interrupt": {
+      "description": "Whether the one-shot user-interrupt marker is still pending.",
+      "type": "boolean"
+    },
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "SessionControl": {
+      "description": "Who currently owns a session's page control.\n\n`Agent` is the default: the daemon routes the agent's tool calls into the Agent Window. `User` (“held”) means the user pressed “Take over” in the Agent Window; interrupt-gated tool calls are rejected with `ErrorCode::UserAborted` until control is returned.",
+      "type": "string",
+      "enum": [
+        "agent",
+        "user"
+      ]
+    },
+    "SessionReturnReceipt": {
+      "description": "Receipt recorded when the user returns control to the agent.",
+      "type": "object",
+      "required": [
+        "held_ms",
+        "note",
+        "returned_at"
+      ],
+      "properties": {
+        "held_ms": {
+          "description": "How long the user held control, in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "note": {
+          "description": "Free-form note the user typed before returning control. May be empty when the user returned control without a message.",
+          "type": "string"
+        },
+        "returned_at": {
+          "description": "RFC 3339 (UTC) timestamp of the return.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

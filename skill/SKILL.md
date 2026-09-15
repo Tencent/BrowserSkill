@@ -189,6 +189,17 @@ The result `outcome` is one of `continued`, `completed`, `cancelled`, `timed_out
 resume only after `continued` or `completed`. Treat `cancelled` as rejection and `timed_out` as a
 blocker; do not repeat that request. Observe again after control returns before using refs.
 
+### User takeover
+
+The user can press "Take over" in the Agent Window at any time. Then the session is held
+(`control=user`) and every browser-input tool call is rejected with `tool dispatch rejected: the
+user has taken over this session (control=user)`. That rejection means **stop acting**: do not
+retry, and do not route around it through another tool. Run
+`bsk session wait-control --session <id>`; it blocks until the user returns control and prints the
+user's `note` (read it — it says what they changed). `bsk session status --session <id>` shows the
+current state without blocking. Control returning does not restore your assumptions: re-snapshot
+before continuing, because the user may have navigated, filled, or submitted something.
+
 When help is disabled in the extension, make every
 reasonable effort to complete the task autonomously with BrowserSkill. Do not call `request-help`.
 If a call returns `disabled`, no human action was confirmed: re-observe and continue working rather
@@ -213,7 +224,7 @@ This list of names is complete. Never invent a command outside it; read
 `bsk <command...> --help` for flags instead of guessing them.
 
 ```text
-session start|stop|list   browsers   status   doctor   update   logs
+session start|stop|list|status|wait-control   browsers   status   doctor   update   logs
 navigate   navigate-back   navigate-forward   reload   wait-for-navigation   wait-ms
 observe   snapshot   get-html   screenshot   console   network
 click   hover   wheel   scroll-to   focus   blur   fill   select   press   evaluate

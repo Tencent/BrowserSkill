@@ -5,17 +5,34 @@ import { flushSync } from "react-dom";
 import ReactDOM from "react-dom/client";
 import { BorrowConfirmationOverlay } from "@/content/BorrowConfirmationOverlay";
 import { ControlOverlay } from "@/content/ControlOverlay";
+import { CursorOverlay, type CursorState } from "@/content/CursorOverlay";
 import { createCaptureSuppressController } from "@/content/capture-suppress";
 import { HelpRequestOverlay } from "@/content/HelpRequestOverlay";
 import { createHelpRequestData } from "@/content/help-request";
 import overlayCss from "@/content/overlay.css?inline";
-import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
+import {
+  OverlayController,
+  shouldShowAgentControlOverlay,
+  shouldShowInterruptingOverlay,
+} from "@/content/overlay-controller";
 import { RecordOverlay } from "@/content/RecordOverlay";
+import {
+  ACTION_STATUS_MSG,
+  type ActionStatusAck,
+  type ActionStatusMessage,
+  isActionStatusMessage,
+} from "@/lib/action-status-bridge";
 import {
   type CaptureSuppressAck,
   type CaptureSuppressMessage,
   isCaptureSuppressMessage,
 } from "@/lib/capture-suppress-bridge";
+import {
+  CURSOR_MSG,
+  type CursorAck,
+  type CursorMessage,
+  isCursorMessage,
+} from "@/lib/cursor-bridge";
 import {
   HELP_ACK,
   HELP_FINISH,
@@ -38,7 +55,7 @@ import {
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
 } from "@/lib/overlay-bridge";
-import { sendInterrupt } from "@/lib/overlay-interrupt-client";
+import { sendInterrupt, sendReturnControl } from "@/lib/overlay-interrupt-client";
 import {
   isRecordCancelMessage,
   isRecordStartMessage,
@@ -75,6 +92,9 @@ export default defineContentScript({
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
     let activeAgentState: OverlayAgentStateMessage | null = null;
+    let cursorState: CursorState | null = null;
+    let actionStatus: { tool: string; target?: string } | null = null;
+    let cursorRippleId = 0;
     let hostLossReported = false;
     let remountInProgress = false;
 
@@ -166,14 +186,18 @@ export default defineContentScript({
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
       const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      const interruptingOverlayVisible = shouldShowInterruptingOverlay(overlayState);
       const interactiveOverlayVisible =
+        overlayState.pausedVisible ||
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
         overlayState.activeRecord !== null;
       setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
+      // A hold pill carries no blocker, so the host must not swallow page input.
+      const blockingControlOverlay = controlOverlayVisible || interruptingOverlayVisible;
       setOverlaySurfaceState(
-        controlOverlayVisible,
-        controlOverlayVisible && overlayState.automationBypassCount === 0,
+        blockingControlOverlay || overlayState.pausedVisible,
+        blockingControlOverlay && overlayState.automationBypassCount === 0,
       );
       const root = reactRoot;
       if (!root) return;
@@ -190,11 +214,16 @@ export default defineContentScript({
               }),
               React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
               React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(CursorOverlay, { state: cursorState }),
               React.createElement(ControlOverlay, {
-                visible: controlOverlayVisible,
+                visible:
+                  controlOverlayVisible || interruptingOverlayVisible || overlayState.pausedVisible,
+                mode: overlayState.controlMode,
                 interrupting: overlayState.interrupting,
                 automationBypass: overlayState.automationBypassCount > 0,
+                currentAction: actionStatus,
                 onInterrupt: handleInterrupt,
+                onReturnControl: handleReturnControl,
               }),
             ),
           ),
@@ -220,6 +249,12 @@ export default defineContentScript({
     function applyOverlayState(state: OverlayAgentStateMessage): void {
       activeAgentState = state;
       overlays.applyAgentControlMode(state.sessionId, state.mode);
+      // A session that is no longer in control cannot be driving input, so a
+      // lingering cosmetic cursor would be stale.
+      if (!overlays.isControlVisible() && !overlays.isPausedVisible()) {
+        cursorState = null;
+        actionStatus = null;
+      }
       renderAll();
     }
 
@@ -229,6 +264,50 @@ export default defineContentScript({
         void sendHelpFinish(previousHelp.id, "cancelled");
       }
       activeRecordRequestId = null;
+      cursorState = null;
+      actionStatus = null;
+      renderAll();
+    }
+
+    /**
+     * Cosmetic agent cursor. `move` glides to a viewport point, `click`
+     * ripples there (keeping the position), `hide` clears it. Every branch
+     * acks synchronously so the background's await resolves without waiting
+     * on the animation.
+     */
+    function handleCursorMessage(message: CursorMessage): void {
+      switch (message.action) {
+        case "move":
+          cursorState = {
+            x: message.x,
+            y: message.y,
+            durationMs: message.durationMs,
+            ...(message.label ? { label: message.label } : {}),
+          };
+          break;
+        case "click":
+          cursorRippleId += 1;
+          cursorState = {
+            x: message.x,
+            y: message.y,
+            durationMs: cursorState?.durationMs ?? 0,
+            ...(cursorState?.label ? { label: cursorState.label } : {}),
+            ripple: { id: cursorRippleId, button: message.button ?? "left" },
+          };
+          break;
+        case "hide":
+          cursorState = null;
+          break;
+      }
+      renderAll();
+    }
+
+    /** Cosmetic "what is the agent doing" line for the control pill. */
+    function handleActionStatusMessage(message: ActionStatusMessage): void {
+      actionStatus =
+        message.phase === "start"
+          ? { tool: message.tool, ...(message.target ? { target: message.target } : {}) }
+          : null;
       renderAll();
     }
 
@@ -250,6 +329,24 @@ export default defineContentScript({
       });
     }
 
+    /**
+     * Hand control back to the agent with the user's optional note. The
+     * background re-shows the pill + blocker; when the session is gone it
+     * replies `{ ok: false }` and we clear the hold overlay locally.
+     */
+    function handleReturnControl(note: string) {
+      const sessionId = overlays.snapshot().activeSessionId;
+      if (!sessionId) {
+        console.warn("[bsk overlay] return requested with no active session id");
+        return;
+      }
+      void sendReturnControl((msg) => chrome.runtime.sendMessage(msg), sessionId, note).then(
+        (reply) => {
+          if (!reply.ok) resetAgentOverlayState(sessionId);
+        },
+      );
+    }
+
     const onMessage = (
       message:
         | BorrowRequestMessage
@@ -257,17 +354,41 @@ export default defineContentScript({
         | HelpRequestMessage
         | HelpCancelMessage
         | CaptureSuppressMessage
+        | CursorMessage
         | RecordStartMessage
         | RecordStopMessage
         | RecordCancelMessage
+        | ActionStatusMessage
         | OverlayAgentOverlayResetMessage
         | OverlayAgentStateMessage
         | OverlayAutomationBypassMessage,
       _sender: chrome.runtime.MessageSender,
-      sendResponse: (response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck) => void,
+      sendResponse: (
+        response:
+          | BorrowResponseMessage
+          | HelpAckMessage
+          | CaptureSuppressAck
+          | CursorAck
+          | ActionStatusAck,
+      ) => void,
     ) => {
       if (isCaptureSuppressMessage(message)) {
         return captureSuppress.handleMessage(message, sendResponse);
+      }
+
+      if (isActionStatusMessage(message)) {
+        handleActionStatusMessage(message);
+        (sendResponse as unknown as (response: ActionStatusAck) => void)({
+          type: ACTION_STATUS_MSG,
+          ok: true,
+        });
+        return false;
+      }
+
+      if (isCursorMessage(message)) {
+        handleCursorMessage(message);
+        (sendResponse as unknown as (response: CursorAck) => void)({ type: CURSOR_MSG, ok: true });
+        return false;
       }
 
       if (isRecordStartMessage(message)) {
@@ -519,6 +640,7 @@ export default defineContentScript({
       chrome.storage.onChanged.removeListener(onStorageChange);
       window.removeEventListener("pageshow", onPageShow);
       activeRecordRequestId = null;
+      actionStatus = null;
     });
   },
 });

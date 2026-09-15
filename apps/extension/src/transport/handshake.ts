@@ -7,7 +7,14 @@ import type {
   ResponseFrame,
 } from "./types";
 
-export const PROTOCOL_VERSION = "1.3";
+/**
+ * Wire protocol version. Bumped to `1.4` by the user-takeover feature, which
+ * adds the `session.control_taken` / `session.control_returned` events and the
+ * `session.status` / `session.wait_control` methods. Must stay in sync with
+ * the daemon's `PROTOCOL_VERSION`; an older daemon drops the new events as
+ * unparseable frames, so the popup must be able to surface the skew.
+ */
+export const PROTOCOL_VERSION = "1.4";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).

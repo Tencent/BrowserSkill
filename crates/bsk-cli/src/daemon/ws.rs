@@ -507,6 +507,12 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             bsk_protocol::EventKind::SessionUserInterrupt => {
                 handle_session_user_interrupt(state, &client.id, &ev.payload);
             }
+            bsk_protocol::EventKind::SessionControlTaken => {
+                handle_session_control_taken(state, &client.id, &ev.payload);
+            }
+            bsk_protocol::EventKind::SessionControlReturned => {
+                handle_session_control_returned(state, &client.id, &ev.payload);
+            }
             other => {
                 debug!(event = ?other, "event received (no handler yet)");
             }
@@ -706,6 +712,137 @@ fn handle_session_user_interrupt(
     state.session_interrupts.mark(&sid);
 }
 
+/// Largest `note` the daemon keeps from a `session.control_returned`.
+///
+/// The note is free-form user text that sits in the interrupt registry
+/// until a `session.wait_control` waiter consumes it, and is echoed back
+/// over IPC. A browser must not be able to park an unbounded string
+/// there, so anything longer is cut.
+pub(crate) const MAX_RETURN_NOTE_BYTES: usize = 4096;
+
+/// Cut `note` to [`MAX_RETURN_NOTE_BYTES`] on a UTF-8 character boundary,
+/// so the stored value is always valid UTF-8 and a multi-byte character
+/// is never split in half.
+pub(crate) fn truncate_return_note(note: &str) -> String {
+    if note.len() <= MAX_RETURN_NOTE_BYTES {
+        return note.to_string();
+    }
+    let mut end = MAX_RETURN_NOTE_BYTES;
+    while end > 0 && !note.is_char_boundary(end) {
+        end -= 1;
+    }
+    note[..end].to_string()
+}
+
+/// Extension-originated "the user pressed 接管/Take over". Cancels every
+/// inflight + queued `tool.*` call for the session (same path as
+/// `session.user_interrupt`, including the one-shot marker for older
+/// flows) and then parks the session in the `held` control state so
+/// every subsequent interrupt-gated call is rejected until the user
+/// explicitly returns control.
+fn handle_session_control_taken(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    payload: &serde_json::Value,
+) {
+    let Some(sid) = extract_session_id(payload) else {
+        warn!("session.control_taken event missing session_id");
+        return;
+    };
+    // An unknown session id is rejected outright: the control registry is
+    // keyed by session and nothing else would ever clean up an entry for a
+    // session that does not exist, so accepting one lets a browser grow the
+    // registry without bound.
+    let Some(session) = state.sessions.get(&sid) else {
+        warn!(
+            session = %sid,
+            sender = %sender,
+            "ignoring session.control_taken for an unknown session"
+        );
+        return;
+    };
+    // Same ownership guard as user_interrupt / window_closed: a browser
+    // must not be able to freeze another browser's session by claiming a
+    // takeover of a foreign session_id.
+    if session.browser_id != *sender {
+        warn!(
+            session = %sid,
+            sender = %sender,
+            owner = %session.browser_id,
+            "ignoring session.control_taken from a browser that does not own this session"
+        );
+        return;
+    }
+    let snapshots = state.tool_inflight.cancel_session(&sid);
+    info!(session = %sid, count = snapshots.len(), "user takeover: cancelled inflight tools");
+    for snap in snapshots {
+        if let (Some(browser_id), Some(ws_rpc_id)) = (snap.browser_id, snap.ws_rpc_id)
+            && let Err(err) =
+                super::cancel_forward::forward_cancel_to_browser(state, &browser_id, &ws_rpc_id)
+        {
+            warn!(
+                browser = %browser_id,
+                ws_rpc_id = %ws_rpc_id,
+                %err,
+                "failed to forward takeover cancel to extension"
+            );
+        }
+    }
+    state.audit.marker(&sid.0, "control_taken");
+    // Keep the legacy one-shot marker so older/racing tool flows (and any
+    // extension that only knows the stop button) still observe a stop.
+    state.session_interrupts.mark(&sid);
+    state.session_interrupts.take_control(&sid);
+}
+
+/// Extension-originated "the user pressed 交还/Return to agent". Clears
+/// the `held` state *and* the legacy one-shot interrupt marker (so the
+/// agent's next input tool is not rejected once after the return),
+/// stores the return receipt (note + hold duration) for
+/// `session.wait_control`, and wakes every waiter.
+fn handle_session_control_returned(
+    state: &Arc<DaemonState>,
+    sender: &BrowserId,
+    payload: &serde_json::Value,
+) {
+    let Some(sid) = extract_session_id(payload) else {
+        warn!("session.control_returned event missing session_id");
+        return;
+    };
+    let Some(session) = state.sessions.get(&sid) else {
+        warn!(
+            session = %sid,
+            sender = %sender,
+            "ignoring session.control_returned for an unknown session"
+        );
+        return;
+    };
+    if session.browser_id != *sender {
+        warn!(
+            session = %sid,
+            sender = %sender,
+            owner = %session.browser_id,
+            "ignoring session.control_returned from a browser that does not own this session"
+        );
+        return;
+    }
+    // Malformed `note` (present but not a string) is a warn-and-ignore,
+    // matching the other handlers. A missing / empty note is valid. An
+    // over-long note is cut rather than rejected: the user's text is the
+    // point of the feature, so losing the tail beats losing the note.
+    let note = match payload.get("note") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(text)) => Some(truncate_return_note(text)),
+        Some(_) => {
+            warn!(session = %sid, "session.control_returned note is not a string; ignoring it");
+            None
+        }
+    };
+    state.audit.marker(&sid.0, "control_returned");
+    let was_held = state.session_interrupts.release_control(&sid, note);
+    info!(session = %sid, was_held, "user returned control to agent");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -881,6 +1018,307 @@ mod session_user_interrupt_tests {
             state.sessions.get(&sid).is_none(),
             "owning browser may close its own session"
         );
+    }
+
+    #[test]
+    fn handle_session_control_taken_holds_session_for_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            state.session_interrupts.is_held(&sid),
+            "owning browser may take control of its own session"
+        );
+    }
+
+    #[test]
+    fn handle_session_control_taken_keeps_one_shot_marker() {
+        // Old flows only understand the one-shot `mark`. A takeover must
+        // keep setting it so a racing tool dispatch is still rejected.
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            state.session_interrupts.try_consume(&sid),
+            "takeover must also set the legacy one-shot interrupt marker"
+        );
+        assert!(
+            state.session_interrupts.is_held(&sid),
+            "consuming the marker must not clear the held state"
+        );
+    }
+
+    #[test]
+    fn handle_session_control_taken_cancels_inflight_for_target_session() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid_a = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session a");
+        let sid_b = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 1)
+            .expect("reserved session b");
+        assert_ne!(sid_a, sid_b, "the two sessions must be distinct");
+        let g_a = state
+            .tool_inflight
+            .register("a".into(), sid_a.clone())
+            .unwrap();
+        let g_b = state
+            .tool_inflight
+            .register("b".into(), sid_b.clone())
+            .unwrap();
+
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid_a.0}));
+
+        assert_eq!(g_a.entry().cancel_reason(), Some(CancelReason::UserAborted));
+        assert!(g_b.entry().cancel_reason().is_none());
+    }
+
+    #[test]
+    fn handle_session_control_taken_ignores_an_unknown_session() {
+        // Nothing would ever clean up a control entry for a session that
+        // does not exist, so an unknown id must not create one.
+        let state = test_only_daemon_state();
+        handle_session_control_taken(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": "ghost"}),
+        );
+        assert_eq!(state.session_interrupts.inner_control_len(), 0);
+        assert_eq!(state.session_interrupts.inner_pending_len(), 0);
+    }
+
+    #[test]
+    fn handle_session_control_returned_ignores_an_unknown_session() {
+        let state = test_only_daemon_state();
+        handle_session_control_returned(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": "ghost", "note": "orphan"}),
+        );
+        assert_eq!(state.session_interrupts.inner_control_len(), 0);
+    }
+
+    #[test]
+    fn handle_session_control_returned_truncates_an_over_long_note() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        // Multi-byte padding so a naive byte cut would split a character and
+        // the `String` build would panic.
+        let huge = "\u{4f60}".repeat(MAX_RETURN_NOTE_BYTES);
+        handle_session_control_returned(
+            &state,
+            &owner,
+            &serde_json::json!({"session_id": sid.0, "note": huge}),
+        );
+
+        let receipt = state
+            .session_interrupts
+            .snapshot(&sid)
+            .last_return
+            .expect("receipt stored");
+        assert!(
+            receipt.note.len() <= MAX_RETURN_NOTE_BYTES,
+            "note kept {} bytes, over the {MAX_RETURN_NOTE_BYTES} cap",
+            receipt.note.len()
+        );
+        assert!(
+            receipt.note.chars().all(|c| c == '\u{4f60}'),
+            "the cut must land on a character boundary"
+        );
+    }
+
+    #[test]
+    fn truncate_return_note_keeps_short_notes_verbatim() {
+        assert_eq!(truncate_return_note(""), "");
+        assert_eq!(truncate_return_note("filled the form"), "filled the form");
+        let exact = "a".repeat(MAX_RETURN_NOTE_BYTES);
+        assert_eq!(truncate_return_note(&exact), exact);
+    }
+
+    #[test]
+    fn handle_session_control_taken_ignored_from_non_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let attacker = BrowserId("attacker-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        let guard = state
+            .tool_inflight
+            .register("rpc-1".into(), sid.clone())
+            .unwrap();
+
+        handle_session_control_taken(&state, &attacker, &serde_json::json!({"session_id": sid.0}));
+
+        assert!(
+            !state.session_interrupts.is_held(&sid),
+            "non-owning browser must not be able to hold another session"
+        );
+        assert!(
+            guard.entry().cancel_reason().is_none(),
+            "non-owning browser must not cancel another session's tools"
+        );
+        assert!(
+            !state.session_interrupts.try_consume(&sid),
+            "non-owning browser must not set the interrupt marker"
+        );
+    }
+
+    #[test]
+    fn handle_session_control_taken_missing_session_id_is_ignored() {
+        let state = test_only_daemon_state();
+        handle_session_control_taken(&state, &BrowserId("sender".into()), &serde_json::json!({}));
+        handle_session_control_taken(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": ""}),
+        );
+        handle_session_control_taken(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"session_id": 42}),
+        );
+        assert_eq!(state.session_interrupts.inner_control_len(), 0);
+    }
+
+    #[test]
+    fn handle_session_control_returned_clears_held_and_stores_note() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+        handle_session_control_returned(
+            &state,
+            &owner,
+            &serde_json::json!({"session_id": sid.0, "note": "filled the form"}),
+        );
+
+        let snap = state.session_interrupts.snapshot(&sid);
+        assert_eq!(
+            snap.control,
+            bsk_protocol::SessionControl::Agent,
+            "returning control must clear the held state"
+        );
+        assert!(
+            !snap.pending_interrupt,
+            "returning control must also drop the takeover's one-shot marker"
+        );
+        assert!(
+            !state.session_interrupts.try_consume(&sid),
+            "no one-shot interrupt may fire after a return"
+        );
+        let receipt = snap.last_return.expect("return receipt stored");
+        assert_eq!(receipt.note, "filled the form");
+    }
+
+    #[test]
+    fn handle_session_control_returned_accepts_missing_or_empty_note() {
+        for note in [
+            None,
+            Some(serde_json::json!("")),
+            Some(serde_json::json!(null)),
+        ] {
+            let state = test_only_daemon_state();
+            let owner = BrowserId("owner-browser".into());
+            let sid = state
+                .sessions
+                .reserve_id(owner.clone(), 8, || 0)
+                .expect("reserved session id");
+            let mut payload = serde_json::json!({"session_id": sid.0});
+            if let Some(note) = note {
+                payload["note"] = note;
+            }
+            handle_session_control_returned(&state, &owner, &payload);
+            let receipt = state
+                .session_interrupts
+                .snapshot(&sid)
+                .last_return
+                .expect("receipt even without a note");
+            assert_eq!(receipt.note, "");
+        }
+    }
+
+    #[test]
+    fn handle_session_control_returned_ignores_non_string_note() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        handle_session_control_returned(
+            &state,
+            &owner,
+            &serde_json::json!({"session_id": sid.0, "note": 42}),
+        );
+        let receipt = state
+            .session_interrupts
+            .snapshot(&sid)
+            .last_return
+            .expect("receipt still recorded");
+        assert_eq!(receipt.note, "");
+    }
+
+    #[test]
+    fn handle_session_control_returned_ignored_from_non_owning_browser() {
+        let state = test_only_daemon_state();
+        let owner = BrowserId("owner-browser".into());
+        let attacker = BrowserId("attacker-browser".into());
+        let sid = state
+            .sessions
+            .reserve_id(owner.clone(), 8, || 0)
+            .expect("reserved session id");
+        handle_session_control_taken(&state, &owner, &serde_json::json!({"session_id": sid.0}));
+
+        handle_session_control_returned(
+            &state,
+            &attacker,
+            &serde_json::json!({"session_id": sid.0, "note": "attacker"}),
+        );
+
+        assert!(
+            state.session_interrupts.is_held(&sid),
+            "non-owning browser must not release another session"
+        );
+        let snap = state.session_interrupts.snapshot(&sid);
+        assert!(snap.last_return.is_none(), "no receipt from the attacker");
+    }
+
+    #[test]
+    fn handle_session_control_returned_missing_session_id_is_ignored() {
+        let state = test_only_daemon_state();
+        handle_session_control_returned(
+            &state,
+            &BrowserId("sender".into()),
+            &serde_json::json!({"note": "orphan"}),
+        );
+        assert_eq!(state.session_interrupts.inner_control_len(), 0);
     }
 
     #[test]

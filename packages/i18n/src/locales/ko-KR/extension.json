@@ -118,8 +118,26 @@
   },
   "controlOverlay": {
     "status": "에이전트가 제어 중",
-    "interrupt": "중단",
-    "interrupting": "중단 중…"
+    "takeOver": "제어 가져오기",
+    "takingOver": "제어 가져오는 중…",
+    "pausedStatus": "직접 조작 중이며 에이전트가 일시중지되었습니다",
+    "notePlaceholder": "에이전트에게 남길 메모(선택)",
+    "returnControl": "에이전트에게 반환",
+    "action": {
+      "idle": "다음 명령을 기다리는 중",
+      "working": "실행 중…",
+      "click": "클릭",
+      "hover": "호버",
+      "fill": "입력",
+      "press": "키 입력",
+      "navigate": "이동",
+      "scroll": "스크롤",
+      "select": "선택",
+      "upload": "업로드",
+      "download": "다운로드",
+      "evaluate": "스크립트 실행",
+      "reload": "새로고침"
+    }
   },
   "borrowConfirmation": {
     "title": "탭 사용을 허용할까요?",

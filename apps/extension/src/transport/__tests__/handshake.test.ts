@@ -66,7 +66,11 @@ function deferredFakeTransport(): { transport: Transport; emit: (frame: Protocol
 
 describe("performHandshake", () => {
   it("advertises the protocol compatibility boundary", () => {
-    expect(PROTOCOL_VERSION).toBe("1.3");
+    // Must match the daemon's `PROTOCOL_VERSION` in
+    // `crates/bsk-cli/src/daemon/state.rs`. `1.4` added the user-takeover
+    // events and RPCs; an older peer drops those frames as unparseable, so
+    // the skew has to be visible in the handshake.
+    expect(PROTOCOL_VERSION).toBe("1.4");
     expect(MIN_COMPATIBLE_PROTOCOL).toBe("1.0");
   });
 

@@ -23,8 +23,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bsk_protocol::system::{
-    BrowserListParams, BrowserStatusEntry, SessionStatusEntry, StatusParams, StatusResult,
-    VersionSkewEntry,
+    BrowserListParams, BrowserStatusEntry, DEFAULT_WAIT_CONTROL_MS, MAX_WAIT_CONTROL_MS,
+    SessionControl, SessionStatusEntry, SessionStatusParams, SessionStatusResult,
+    SessionWaitControlParams, SessionWaitControlResult, StatusParams, StatusResult,
+    VersionSkewEntry, WaitControlOutcome,
 };
 use bsk_protocol::tools::{
     DownloadParams, DownloadResult, ReturnFailure, TransferBeginParams, TransferIdParams,
@@ -42,6 +44,7 @@ use tracing::{debug, warn};
 
 use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
+use super::session_interrupt::WaitControlResolution;
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
     start_session, stop_session,
@@ -72,6 +75,11 @@ const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
 // only needs to cover the stop RPC itself and IPC scheduling grace.
 const DEFAULT_SESSION_STOP_TIMEOUT: Duration =
     Duration::from_secs(DEFAULT_TOOL_TIMEOUT.as_secs() + DEFAULT_RPC_TIMEOUT.as_secs() + 5);
+
+/// Exact rejection message emitted when a tool dispatch is gated by a
+/// user takeover (`control=user`). Locked by a test because agents parse
+/// it to discover the `wait-control` recovery path.
+pub const USER_TAKEOVER_REJECTION: &str = "tool dispatch rejected: the user has taken over this session (control=user). Do not retry; run `bsk session wait-control --session <id>` and continue only after it returns control=agent.";
 
 /// Snapshot of daemon-side bookkeeping needed to answer `system.status`.
 ///
@@ -249,6 +257,16 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Err(e) => ResponseBody::Err(e),
                 },
                 Method::SessionList => handle_session_list(&state),
+                Method::SessionStatus => match handle_session_status(&state, params) {
+                    Ok(v) => ResponseBody::Ok(v),
+                    Err(e) => ResponseBody::Err(e),
+                },
+                Method::SessionWaitControl => {
+                    match handle_session_wait_control(&state, rpc_id, params).await {
+                        Ok(v) => ResponseBody::Ok(v),
+                        Err(e) => ResponseBody::Err(e),
+                    }
+                }
                 Method::BrowserList => match handle_browser_list(&state, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -362,6 +380,22 @@ async fn handle_tool_dispatch(
     // page state before asking the user, or from cleanly tearing down the
     // session. Classification lives on `Method::effect()` so adding a new
     // tool variant requires an explicit classification call.
+    //
+    // Checked *before* the one-shot marker: a takeover is a standing
+    // instruction, so it must win over (and not be consumed by) the
+    // legacy marker. The held flag is deliberately NOT consumed here —
+    // it clears only on `session.control_returned` or session teardown.
+    if method.requires_interrupt_gate() && state.session_interrupts.is_held(&session_id) {
+        return ResponseBody::Err(RpcError {
+            code: ErrorCode::UserAborted,
+            message: USER_TAKEOVER_REJECTION.into(),
+            data: Some(serde_json::json!({
+                "reason": "user_takeover",
+                "control": "user",
+                "session_id": session_id.0,
+            })),
+        });
+    }
     if method.requires_interrupt_gate() && state.session_interrupts.try_consume(&session_id) {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::UserAborted,
@@ -1238,6 +1272,151 @@ fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
 }
 
+/// `session.status`: non-consuming read of a session's takeover state.
+///
+/// Daemon-local (never forwarded to the extension) so it works while
+/// the extension is busy or the session is held. Returns `not_found` for
+/// an unknown session id so the caller can distinguish "agent in
+/// control" from "session gone" — both of which have
+/// `control = agent`.
+fn handle_session_status(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
+    let params: SessionStatusParams = serde_json::from_value(params).map_err(|err| RpcError {
+        code: ErrorCode::InvalidParams,
+        message: format!("session.status requires {{session_id}}: {err}"),
+        data: None,
+    })?;
+    if params.session_id.is_empty() {
+        return Err(invalid_params(
+            "session.status requires a non-empty session_id",
+        ));
+    }
+    let sid = SessionId(params.session_id.clone());
+    if state.sessions.get(&sid).is_none() {
+        return Err(RpcError {
+            code: ErrorCode::NotFound,
+            message: format!("session {} unknown", params.session_id),
+            data: Some(serde_json::json!({
+                "reason": "session_gone",
+                "session_id": params.session_id,
+            })),
+        });
+    }
+    let snap = state.session_interrupts.snapshot(&sid);
+    let result = SessionStatusResult {
+        session_id: params.session_id,
+        control: snap.control,
+        pending_interrupt: snap.pending_interrupt,
+        held_for_ms: snap.held_for_ms,
+        last_return: snap.last_return,
+    };
+    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+}
+
+/// `session.wait_control`: block until control returns to `agent`,
+/// the timeout expires, or the session disappears.
+///
+/// Registered against [`AbortRegistry`] under the CLI's `rpc_id` so a
+/// SIGINT-driven `cancel { rpc_id }` (the same path `request-help`
+/// uses) can unblock the waiter instead of leaving the CLI hanging.
+///
+/// `released` consumes the return receipt, so the user's note reaches the
+/// agent exactly once. A winner/timed-out race is resolved inside the
+/// registry under one lock, so two concurrent waiters can never both
+/// report `released`.
+async fn handle_session_wait_control(
+    state: &Arc<DaemonState>,
+    rpc_id: RpcId,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params: SessionWaitControlParams =
+        serde_json::from_value(params).map_err(|err| RpcError {
+            code: ErrorCode::InvalidParams,
+            message: format!("session.wait_control requires {{session_id, timeout_ms?}}: {err}"),
+            data: None,
+        })?;
+    if params.session_id.is_empty() {
+        return Err(invalid_params(
+            "session.wait_control requires a non-empty session_id",
+        ));
+    }
+    let timeout_ms = params.timeout_ms.unwrap_or(DEFAULT_WAIT_CONTROL_MS);
+    if timeout_ms > MAX_WAIT_CONTROL_MS {
+        return Err(invalid_params(format!(
+            "timeout_ms {timeout_ms} exceeds the {} ms maximum",
+            MAX_WAIT_CONTROL_MS
+        )));
+    }
+    let sid = SessionId(params.session_id.clone());
+    // A timeout of zero (or a session that is already gone) resolves as a
+    // fast snapshot rather than parking a task.
+    if state.sessions.get(&sid).is_none() {
+        let snap = state.session_interrupts.snapshot(&sid);
+        let result = SessionWaitControlResult {
+            outcome: WaitControlOutcome::SessionGone,
+            control: snap.control,
+            note: None,
+            held_ms: None,
+        };
+        return Ok(serde_json::to_value(result).unwrap_or(Value::Null));
+    }
+    let abort_guard = state
+        .abort_registry
+        .register(rpc_id)
+        .map_err(|err| RpcError {
+            code: ErrorCode::ProtocolError,
+            message: format!("session.wait_control cancellation registration failed: {err:?}"),
+            data: None,
+        })?;
+    let cancel = abort_guard.token().clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+    let sessions = Arc::clone(&state.sessions);
+    let sid_for_exists = sid.clone();
+    let resolution = tokio::select! {
+        resolution = state.session_interrupts.wait_for_release(&sid, deadline, move || {
+            sessions.get(&sid_for_exists).is_some()
+        }) => resolution,
+        _ = cancel.cancelled() => {
+            drop(abort_guard);
+            return Err(RpcError {
+                code: ErrorCode::Cancelled,
+                message: "session.wait_control cancelled".into(),
+                data: None,
+            });
+        }
+    };
+    drop(abort_guard);
+    // `session_gone` needs no hold/receipt data; re-read the (possibly
+    // removed) control entry only for the remaining outcomes.
+    let snap = state.session_interrupts.snapshot(&sid);
+    let result = match resolution {
+        WaitControlResolution::Released(receipt) => SessionWaitControlResult {
+            outcome: WaitControlOutcome::Released,
+            control: SessionControl::Agent,
+            note: Some(receipt.note),
+            held_ms: Some(receipt.held_ms),
+        },
+        WaitControlResolution::AlreadyAgent => SessionWaitControlResult {
+            outcome: WaitControlOutcome::AlreadyAgent,
+            control: SessionControl::Agent,
+            note: None,
+            held_ms: None,
+        },
+        WaitControlResolution::TimedOut { held_for_ms } => SessionWaitControlResult {
+            outcome: WaitControlOutcome::TimedOut,
+            control: SessionControl::User,
+            note: None,
+            held_ms: Some(held_for_ms),
+        },
+        WaitControlResolution::SessionGone => SessionWaitControlResult {
+            outcome: WaitControlOutcome::SessionGone,
+            control: snap.control,
+            note: None,
+            held_ms: None,
+        },
+    };
+    Ok(serde_json::to_value(result).unwrap_or(Value::Null))
+}
+
 async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {
     let params: BrowserListParams = parse_params_or_default(params)?;
     maybe_wait_for_browser(state, params.wait_for_browser_ms).await;
@@ -2030,5 +2209,457 @@ mod tests {
         drop(reader);
         let _ = tx.send(());
         let _ = server.await;
+    }
+
+    // ----- user-takeover gate + session.status / session.wait_control -----
+
+    /// Build a `DaemonState` with one live session (id `abcd`) owned by a
+    /// browser that is *not* registered, so nothing can be forwarded to an
+    /// extension — which is exactly what lets these tests assert "rejected
+    /// without reaching the extension".
+    fn state_with_session() -> (Arc<DaemonState>, SessionId) {
+        use crate::daemon::start::DaemonConfig;
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        // Reserve under a browser id; `get` only checks the session table.
+        let sid = state
+            .sessions
+            .reserve_id(crate::daemon::browsers::BrowserId("b-1".into()), 8, || 0)
+            .expect("reserved session id");
+        (state, sid)
+    }
+
+    #[test]
+    fn user_takeover_rejection_message_is_locked() {
+        // Agents parse this string to discover the `wait-control` recovery
+        // path; lock it verbatim.
+        assert_eq!(
+            USER_TAKEOVER_REJECTION,
+            "tool dispatch rejected: the user has taken over this session (control=user). Do not retry; run `bsk session wait-control --session <id>` and continue only after it returns control=agent."
+        );
+    }
+
+    #[tokio::test]
+    async fn held_session_rejects_input_tool_with_exact_message() {
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        for method in [
+            Method::ToolClick,
+            Method::ToolObserve,
+            Method::ToolScreenshotFullPage,
+            Method::ToolNavigate,
+        ] {
+            let body = handle_tool_dispatch(
+                &state,
+                "rpc-held".into(),
+                method.clone(),
+                serde_json::json!({"session_id": sid.0}),
+            )
+            .await;
+            match body {
+                ResponseBody::Err(err) => {
+                    assert_eq!(err.code, ErrorCode::UserAborted, "method {method:?}");
+                    assert_eq!(err.message, USER_TAKEOVER_REJECTION, "method {method:?}");
+                    let data = err.data.expect("structured takeover payload");
+                    assert_eq!(data["reason"], serde_json::json!("user_takeover"));
+                    assert_eq!(data["control"], serde_json::json!("user"));
+                }
+                other => panic!("expected held rejection for {method:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn returned_control_clears_the_one_shot_marker_so_the_next_input_tool_passes() {
+        // Real-session bug: the takeover handshake sets *both* the held flag
+        // and the legacy one-shot marker, then `control_returned` cleared
+        // only the flag. The agent's first input tool after the return was
+        // therefore rejected once with "pending user interrupt" even though
+        // `wait_control` had already told it control=agent.
+        let (state, sid) = state_with_session();
+        state.session_interrupts.mark(&sid);
+        state.session_interrupts.take_control(&sid);
+        state
+            .session_interrupts
+            .release_control(&sid, Some("done".into()));
+
+        assert!(
+            !state.session_interrupts.is_pending(&sid),
+            "returning control must drop the one-shot marker"
+        );
+        assert!(!state.session_interrupts.is_held(&sid));
+
+        // `session.status` agrees: control=agent, no pending interrupt.
+        let value = handle_session_status(&state, serde_json::json!({"session_id": sid.0}))
+            .expect("status for a live session");
+        let result: SessionStatusResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.control, SessionControl::Agent);
+        assert!(!result.pending_interrupt);
+
+        // The gate must now pass. Whatever failure comes back (no dispatch
+        // queue / no owning browser) must be neither of the two rejections.
+        let body = handle_tool_dispatch(
+            &state,
+            "rpc-after-return".into(),
+            Method::ToolClick,
+            serde_json::json!({"session_id": sid.0}),
+        )
+        .await;
+        if let ResponseBody::Err(err) = &body {
+            assert_ne!(err.code, ErrorCode::UserAborted, "gate must pass: {err:?}");
+            assert!(
+                !err.message.contains("pending user interrupt"),
+                "no leftover marker may fire after a return: {err:?}"
+            );
+            assert_ne!(err.message, USER_TAKEOVER_REJECTION);
+        }
+    }
+
+    #[tokio::test]
+    async fn held_rejection_is_not_consuming() {
+        // Unlike the one-shot marker, the held flag must survive an
+        // unbounded number of rejected dispatches and only clear on an
+        // explicit `control_returned`.
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        for i in 0..5 {
+            let body = handle_tool_dispatch(
+                &state,
+                format!("rpc-held-{i}"),
+                Method::ToolClick,
+                serde_json::json!({"session_id": sid.0}),
+            )
+            .await;
+            assert!(
+                matches!(body, ResponseBody::Err(ref e) if e.code == ErrorCode::UserAborted),
+                "rejection {i} must be UserAborted"
+            );
+            assert!(
+                state.session_interrupts.is_held(&sid),
+                "held flag must survive rejection {i}"
+            );
+        }
+        state
+            .session_interrupts
+            .release_control(&sid, Some("done".into()));
+        assert!(!state.session_interrupts.is_held(&sid));
+    }
+
+    #[tokio::test]
+    async fn held_session_lets_passive_read_pass() {
+        // Passive reads must stay transparent: the agent needs to observe
+        // the page before asking the user a coherent question.
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        // `tool.snapshot` is a passive read; it must NOT be rejected by the
+        // takeover gate. It will fail later for lack of a dispatch queue,
+        // but never with the takeover message.
+        let body = handle_tool_dispatch(
+            &state,
+            "rpc-passive".into(),
+            Method::ToolSnapshot,
+            serde_json::json!({"session_id": sid.0}),
+        )
+        .await;
+        if let ResponseBody::Err(err) = &body {
+            assert_ne!(
+                err.message, USER_TAKEOVER_REJECTION,
+                "passive reads must not be takeover-gated"
+            );
+            assert_ne!(err.code, ErrorCode::UserAborted);
+        }
+    }
+
+    #[tokio::test]
+    async fn one_shot_marker_still_rejects_with_interrupt_message() {
+        // Regression guard: the legacy marker path must keep working and
+        // keep its own message after the takeover gate was inserted before it.
+        let (state, sid) = state_with_session();
+        state.session_interrupts.mark(&sid);
+        let body = handle_tool_dispatch(
+            &state,
+            "rpc-once".into(),
+            Method::ToolClick,
+            serde_json::json!({"session_id": sid.0}),
+        )
+        .await;
+        match body {
+            ResponseBody::Err(err) => {
+                assert_eq!(err.code, ErrorCode::UserAborted);
+                assert!(
+                    err.message
+                        .starts_with("tool dispatch rejected: pending user interrupt")
+                );
+                assert_ne!(err.message, USER_TAKEOVER_REJECTION);
+            }
+            other => panic!("expected interrupt rejection, got {other:?}"),
+        }
+        assert!(
+            !state.session_interrupts.is_pending(&sid),
+            "one-shot marker is consumed by the rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn control_taken_supersedes_pending_interrupt_marker() {
+        // A takeover sets both the held flag and the one-shot marker. The
+        // takeover message must win and the marker must remain set, so that
+        // once control returns an old pending stop still fires.
+        let (state, sid) = state_with_session();
+        state.session_interrupts.mark(&sid);
+        state.session_interrupts.take_control(&sid);
+        let body = handle_tool_dispatch(
+            &state,
+            "rpc-both".into(),
+            Method::ToolClick,
+            serde_json::json!({"session_id": sid.0}),
+        )
+        .await;
+        match body {
+            ResponseBody::Err(err) => assert_eq!(err.message, USER_TAKEOVER_REJECTION),
+            other => panic!("expected takeover rejection, got {other:?}"),
+        }
+        assert!(
+            state.session_interrupts.is_pending(&sid),
+            "takeover rejection must not consume the one-shot marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_status_reports_agent_by_default() {
+        let (state, sid) = state_with_session();
+        let value = handle_session_status(&state, serde_json::json!({"session_id": sid.0}))
+            .expect("status for a live session");
+        let result: SessionStatusResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.control, SessionControl::Agent);
+        assert!(!result.pending_interrupt);
+        assert!(result.held_for_ms.is_none());
+        assert!(result.last_return.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_status_is_non_consuming() {
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        state
+            .session_interrupts
+            .release_control(&sid, Some("looked at the page".into()));
+        // A standalone Stop marker set *after* the return is unrelated to the
+        // takeover, so it must survive repeated status reads. (The takeover's
+        // own marker is dropped by `release_control`.)
+        state.session_interrupts.mark(&sid);
+
+        for _ in 0..3 {
+            let value = handle_session_status(&state, serde_json::json!({"session_id": sid.0}))
+                .expect("status");
+            let result: SessionStatusResult = serde_json::from_value(value).unwrap();
+            assert_eq!(result.control, SessionControl::Agent);
+            assert!(
+                result.pending_interrupt,
+                "status must not consume the marker"
+            );
+            let receipt = result.last_return.as_ref().expect("receipt still visible");
+            assert_eq!(receipt.note, "looked at the page");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_status_reports_hold_duration_while_held() {
+        let (state, sid) = state_with_session();
+        state
+            .session_interrupts
+            .force_held_since(&sid, 1_600_000_000_000);
+        let value = handle_session_status(&state, serde_json::json!({"session_id": sid.0}))
+            .expect("status");
+        let result: SessionStatusResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.control, SessionControl::User);
+        assert!(result.held_for_ms.is_some_and(|ms| ms > 0));
+    }
+
+    #[tokio::test]
+    async fn session_status_unknown_session_is_not_found() {
+        let (state, _sid) = state_with_session();
+        let err = handle_session_status(&state, serde_json::json!({"session_id": "ghost"}))
+            .expect_err("unknown session must be not_found");
+        assert_eq!(err.code, ErrorCode::NotFound);
+        assert_eq!(
+            err.data.unwrap()["reason"],
+            serde_json::json!("session_gone")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_status_requires_session_id() {
+        let (state, _sid) = state_with_session();
+        for params in [serde_json::json!({}), serde_json::json!({"session_id": ""})] {
+            let err = handle_session_status(&state, params).expect_err("invalid params");
+            assert_eq!(err.code, ErrorCode::InvalidParams);
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_control_returns_already_agent_when_not_held() {
+        let (state, sid) = state_with_session();
+        let value = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": sid.0, "timeout_ms": 50}),
+        )
+        .await
+        .expect("wait_control");
+        let result: SessionWaitControlResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.outcome, WaitControlOutcome::AlreadyAgent);
+        assert_eq!(result.control, SessionControl::Agent);
+        assert!(result.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_control_released_path_returns_note() {
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        let state_for_release = Arc::clone(&state);
+        let sid_for_release = sid.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            state_for_release
+                .session_interrupts
+                .release_control(&sid_for_release, Some("handled the captcha".into()));
+        });
+        let value = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": sid.0, "timeout_ms": 2_000}),
+        )
+        .await
+        .expect("wait_control");
+        let result: SessionWaitControlResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.outcome, WaitControlOutcome::Released);
+        assert_eq!(result.control, SessionControl::Agent);
+        assert_eq!(result.note.as_deref(), Some("handled the captcha"));
+        assert!(result.held_ms.is_some());
+
+        // The receipt is delivered exactly once.
+        let second = handle_session_wait_control(
+            &state,
+            "rpc-wait-2".into(),
+            serde_json::json!({"session_id": sid.0, "timeout_ms": 50}),
+        )
+        .await
+        .expect("wait_control");
+        let second: SessionWaitControlResult = serde_json::from_value(second).unwrap();
+        assert_eq!(second.outcome, WaitControlOutcome::AlreadyAgent);
+        assert!(second.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_control_timeout_path_keeps_hold() {
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        let value = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": sid.0, "timeout_ms": 50}),
+        )
+        .await
+        .expect("wait_control");
+        let result: SessionWaitControlResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.outcome, WaitControlOutcome::TimedOut);
+        assert_eq!(result.control, SessionControl::User);
+        assert!(result.held_ms.is_some_and(|ms| ms <= 5_000));
+        assert!(
+            state.session_interrupts.is_held(&sid),
+            "timeout must not clear the user's hold"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_control_session_gone_path() {
+        let (state, _sid) = state_with_session();
+        let value = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": "ghost", "timeout_ms": 50}),
+        )
+        .await
+        .expect("wait_control");
+        let result: SessionWaitControlResult = serde_json::from_value(value).unwrap();
+        assert_eq!(result.outcome, WaitControlOutcome::SessionGone);
+    }
+
+    #[tokio::test]
+    async fn wait_control_cancel_unblocks_the_waiter() {
+        let (state, sid) = state_with_session();
+        state.session_interrupts.take_control(&sid);
+        let waiter = {
+            let state = Arc::clone(&state);
+            let sid = sid.clone();
+            tokio::spawn(async move {
+                handle_session_wait_control(
+                    &state,
+                    "rpc-wait".into(),
+                    serde_json::json!({"session_id": sid.0, "timeout_ms": 30_000}),
+                )
+                .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(state.abort_registry.cancel(&"rpc-wait".to_string()));
+        let value = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("cancel must unblock the waiter promptly")
+            .unwrap()
+            .expect_err("cancelled wait returns an error");
+        assert_eq!(value.code, ErrorCode::Cancelled);
+        assert!(
+            state.abort_registry.is_empty(),
+            "abort guard must clean up on the cancel path"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_control_enforces_the_30_minute_maximum() {
+        let (state, sid) = state_with_session();
+        let err = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": sid.0, "timeout_ms": MAX_WAIT_CONTROL_MS + 1}),
+        )
+        .await
+        .expect_err("over-max timeout rejected");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+        assert!(err.message.contains("exceeds"));
+        assert!(state.abort_registry.is_empty(), "no token leaked");
+    }
+
+    #[tokio::test]
+    async fn wait_control_defaults_to_five_minutes() {
+        assert_eq!(DEFAULT_WAIT_CONTROL_MS, 5 * 60 * 1_000);
+        assert_eq!(MAX_WAIT_CONTROL_MS, 30 * 60 * 1_000);
+        // A request without `timeout_ms` must be accepted (and must not be
+        // rejected for exceeding the cap).
+        let (state, sid) = state_with_session();
+        let value = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"session_id": sid.0}),
+        )
+        .await;
+        // Session is `agent`, so this resolves immediately rather than
+        // waiting the full default.
+        let result: SessionWaitControlResult =
+            serde_json::from_value(value.expect("default timeout accepted")).unwrap();
+        assert_eq!(result.outcome, WaitControlOutcome::AlreadyAgent);
+    }
+
+    #[tokio::test]
+    async fn wait_control_requires_session_id() {
+        let (state, _sid) = state_with_session();
+        let err = handle_session_wait_control(
+            &state,
+            "rpc-wait".into(),
+            serde_json::json!({"timeout_ms": 10}),
+        )
+        .await
+        .expect_err("missing session_id");
+        assert_eq!(err.code, ErrorCode::InvalidParams);
     }
 }

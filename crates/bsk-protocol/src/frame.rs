@@ -56,6 +56,14 @@ pub enum EventKind {
     SessionWindowClosed,
     #[serde(rename = "session.user_interrupt")]
     SessionUserInterrupt,
+    /// The user pressed "Take over" in the Agent Window and now owns the
+    /// page. Payload: `{ "session_id": "..." }`.
+    #[serde(rename = "session.control_taken")]
+    SessionControlTaken,
+    /// The user pressed "Return to agent" in the Agent Window. Payload:
+    /// `{ "session_id": "...", "note": "optional string" }`.
+    #[serde(rename = "session.control_returned")]
+    SessionControlReturned,
     #[serde(rename = "session.interaction_changed")]
     SessionInteractionChanged,
     #[serde(rename = "browser.disconnected")]
@@ -264,6 +272,35 @@ mod tests {
     fn session_user_interrupt_serialises_as_snake_case() {
         let v = serde_json::to_value(EventKind::SessionUserInterrupt).unwrap();
         assert_eq!(v, serde_json::json!("session.user_interrupt"));
+    }
+
+    #[test]
+    fn session_control_events_serialise_as_dotted_names() {
+        // The extension hardcodes these literals when the user presses
+        // Take over / Return to agent; lock the wire names here so a
+        // rename cannot silently break the takeover handshake.
+        assert_eq!(
+            serde_json::to_value(EventKind::SessionControlTaken).unwrap(),
+            serde_json::json!("session.control_taken")
+        );
+        assert_eq!(
+            serde_json::to_value(EventKind::SessionControlReturned).unwrap(),
+            serde_json::json!("session.control_returned")
+        );
+    }
+
+    #[test]
+    fn session_control_returned_frame_round_trips_with_note() {
+        let wire = serde_json::json!({
+            "event": "session.control_returned",
+            "payload": { "session_id": "sess-1", "note": "filled the form" }
+        });
+        let frame: EventFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(frame.event, EventKind::SessionControlReturned);
+        assert_eq!(
+            frame.payload.get("note").and_then(|v| v.as_str()),
+            Some("filled the form"),
+        );
     }
 
     #[test]

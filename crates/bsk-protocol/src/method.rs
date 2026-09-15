@@ -39,6 +39,12 @@ pub enum Method {
     SessionStopAll,
     #[serde(rename = "session.list")]
     SessionList,
+    /// Daemon-local: read the session's takeover control state.
+    #[serde(rename = "session.status")]
+    SessionStatus,
+    /// Daemon-local: block until the user returns control (or timeout).
+    #[serde(rename = "session.wait_control")]
+    SessionWaitControl,
 
     #[serde(rename = "browser.list")]
     BrowserList,
@@ -220,11 +226,18 @@ impl Method {
             | Method::ToolRecordStop
             | Method::ToolRecordAwait => MethodEffect::PassiveRead,
 
-            // Session lifecycle — not gated.
+            // Session lifecycle — not gated. Neither takeover
+            // observation (`session.status`) nor the release wait
+            // (`session.wait_control`) may be blocked by the held gate:
+            // they are the very RPCs the agent uses to learn that the
+            // user still holds control, and gating them would make the
+            // documented recovery path unreachable.
             Method::SessionStart
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
+            | Method::SessionStatus
+            | Method::SessionWaitControl
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
@@ -263,6 +276,38 @@ mod tests {
     use super::*;
     use crate::{CancelParams, CancelResult};
     use serde_json::json;
+
+    #[test]
+    fn session_status_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("session.status")).unwrap();
+        assert_eq!(method, Method::SessionStatus);
+        assert_eq!(
+            serde_json::to_value(method).unwrap(),
+            json!("session.status")
+        );
+    }
+
+    #[test]
+    fn session_wait_control_method_round_trips() {
+        let method: Method = serde_json::from_value(json!("session.wait_control")).unwrap();
+        assert_eq!(method, Method::SessionWaitControl);
+        assert_eq!(
+            serde_json::to_value(method).unwrap(),
+            json!("session.wait_control")
+        );
+    }
+
+    #[test]
+    fn takeover_observation_methods_are_control_plane_and_ungated() {
+        // The held gate keys off `requires_interrupt_gate()`; both
+        // takeover RPCs must stay outside it so an agent holding only a
+        // `control=user` instruction can still poll and wait.
+        for method in [Method::SessionStatus, Method::SessionWaitControl] {
+            assert_eq!(method.effect(), MethodEffect::ControlPlane);
+            assert!(!method.requires_interrupt_gate());
+            assert!(!method.is_mutating());
+        }
+    }
 
     #[test]
     fn cancel_method_round_trips() {

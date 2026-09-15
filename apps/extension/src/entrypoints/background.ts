@@ -17,12 +17,15 @@ import {
   OVERLAY_AUTOMATION_BYPASS,
   OVERLAY_MSG_INTERRUPT,
   OVERLAY_MSG_READY,
+  OVERLAY_MSG_RETURN_CONTROL,
   OVERLAY_MSG_WHO_AM_I,
   type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
   type OverlayInterruptResponse,
   type OverlayMessage,
   type OverlayMode,
+  type OverlayReturnControlRequest,
+  type OverlayReturnControlResponse,
 } from "@/lib/overlay-bridge";
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
@@ -207,6 +210,10 @@ export default defineBackground(() => {
   function onBrowserControlResumed(sessionId: string): void {
     const ctx = sessions.get(sessionId);
     if (!ctx) return;
+    // A user hold is released only by the return button. A passive read
+    // (snapshot, get_html) still reaches the extension while the daemon blocks
+    // agent input, and must not un-pause the UI behind the user's back.
+    if (!shouldControlResumeOnBrowserActivity(controlModes.get(sessionId))) return;
     setControlMode(sessionId, "control");
   }
 
@@ -449,12 +456,30 @@ export default defineBackground(() => {
       const ctx = sessions.get(req.sessionId);
       if (ctx) setControlMode(req.sessionId, "interrupting");
       void handleOverlayInterrupt(transport, req.sessionId).then((reply) => {
-        if (reply.ok && sessions.get(req.sessionId)) {
-          setControlMode(req.sessionId, "paused");
+        // A failed take-over must roll the mode back: `interrupting` is sticky
+        // (`shouldControlResumeOnBrowserActivity`), so leaving it set would
+        // strand the user behind a blocker with a disabled button and no
+        // return control.
+        if (sessions.get(req.sessionId)) {
+          setControlMode(req.sessionId, controlModeAfterTakeOver(reply.ok));
         }
         sendResponse(reply);
       });
       return true; // keep channel open
+    }
+
+    if (msg.kind === OVERLAY_MSG_RETURN_CONTROL) {
+      sendResponse(
+        handleOverlayReturnControlRequest(
+          {
+            hasSession: (sessionId) => sessions.get(sessionId) !== null,
+            transport,
+            setControlMode,
+          },
+          msg as OverlayReturnControlRequest,
+        ),
+      );
+      return false;
     }
     return false;
   });
@@ -514,6 +539,9 @@ export default defineBackground(() => {
  * connected, etc.). The daemon-side cancellation is fire-and-forget
  * — a failure here just means the user will need to retry the
  * interrupt; no daemon state is left half-updated.
+ *
+ * This is the user *taking over*: the daemon also starts rejecting agent
+ * input tools until a matching `session.control_returned` arrives.
  */
 export async function handleOverlayInterrupt(
   transport: Pick<Transport, "send">,
@@ -524,11 +552,80 @@ export async function handleOverlayInterrupt(
       event: "session.user_interrupt",
       payload: { session_id: sessionId },
     });
+    transport.send({
+      event: "session.control_taken",
+      payload: { session_id: sessionId },
+    });
     return { ok: true };
   } catch (err) {
     console.warn("[browser-skill] failed to send session.user_interrupt", err);
     return { ok: false };
   }
+}
+
+/**
+ * Hand control back to the agent. `note` (may be "") is carried to the daemon
+ * so the agent learns what the user did while it was paused. Same all-or-nothing
+ * contract as {@link handleOverlayInterrupt}: `{ ok: false }` means the daemon
+ * never saw the frame (the caller keeps the user in control and retries).
+ */
+export function handleOverlayReturnControl(
+  transport: Pick<Transport, "send">,
+  sessionId: string,
+  note: string,
+): OverlayReturnControlResponse {
+  try {
+    transport.send({
+      event: "session.control_returned",
+      payload: { session_id: sessionId, note },
+    });
+    return { ok: true };
+  } catch (err) {
+    console.warn("[browser-skill] failed to send session.control_returned", err);
+    return { ok: false };
+  }
+}
+
+/**
+ * Whether a browser-control RPC arriving for `sessionId` may un-pause its
+ * overlay. `interrupting` (the take-over request is still in flight) and
+ * `paused` (the user holds control) are both sticky: only the return button
+ * releases them. Every other mode — including `undefined` for a session whose
+ * mode was never recorded — resumes as before.
+ */
+export function shouldControlResumeOnBrowserActivity(mode: OverlayMode | undefined): boolean {
+  return mode !== "paused" && mode !== "interrupting";
+}
+
+/**
+ * Mode to settle on once the `session.control_taken` frame resolves. A failed
+ * send must roll back to `control`: `interrupting` is sticky (see
+ * {@link shouldControlResumeOnBrowserActivity}), so leaving it set strands the
+ * user behind the input blocker with a disabled button and no return control.
+ */
+export function controlModeAfterTakeOver(sent: boolean): OverlayMode {
+  return sent ? "paused" : "control";
+}
+
+/**
+ * Background half of `overlay.return_control`: verify the session still exists,
+ * tell the daemon the user handed control back (with their optional note) and
+ * re-show the normal pill + blocker. An unknown session replies `{ ok: false }`
+ * so the content script clears its overlay instead of showing a dead hold.
+ */
+export function handleOverlayReturnControlRequest(
+  deps: {
+    hasSession: (sessionId: string) => boolean;
+    transport: Pick<Transport, "send">;
+    setControlMode: (sessionId: string, mode: OverlayMode) => void;
+  },
+  req: OverlayReturnControlRequest,
+): OverlayReturnControlResponse {
+  if (!deps.hasSession(req.sessionId)) return { ok: false };
+  const note = typeof req.note === "string" ? req.note : "";
+  const reply = handleOverlayReturnControl(deps.transport, req.sessionId, note);
+  if (reply.ok) deps.setControlMode(req.sessionId, "control");
+  return reply;
 }
 
 function makeBorrowNotificationCopy(): BorrowNotificationCopy {

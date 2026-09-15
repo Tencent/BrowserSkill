@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionWaitControlParams",
+  "description": "`session.wait_control` request payload.",
+  "type": "object",
+  "required": [
+    "session_id"
+  ],
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "timeout_ms": {
+      "description": "Maximum block in milliseconds. Defaults to [`DEFAULT_WAIT_CONTROL_MS`]; values above [`MAX_WAIT_CONTROL_MS`] are rejected as `invalid_params`.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}
