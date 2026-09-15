@@ -14,6 +14,12 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type CursorPoint,
+  type CursorVisualizer,
+  createCursorVisualizer,
+  cursorMoveDuration,
+} from "@/lib/cursor-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -61,6 +67,12 @@ export interface InteractionDeps {
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   /** Keep hover hit-testing active for the caller's next observation/action. */
   keepOverlayBypassAfterHover?: boolean;
+  /**
+   * Cosmetic in-page cursor driven before the real CDP input fires. Optional
+   * and never load-bearing: a missing visualizer (or a failing one) must leave
+   * the tool result unchanged.
+   */
+  cursor?: CursorVisualizer;
 }
 
 export interface ResolvedActionTarget {
@@ -75,12 +87,84 @@ export interface ResolvedActionTarget {
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_HOVER_SETTLE_MS = 200;
 
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
+let defaultDeps: {
+  cdp: ChromiumCdp;
+  tabsApi: ChromeTabsApi;
+  cursor: CursorVisualizer;
+} | null = null;
+function getDefaultDeps(): {
+  cdp: ChromiumCdp;
+  tabsApi: ChromeTabsApi;
+  cursor: CursorVisualizer;
+} {
   if (!defaultDeps) {
-    defaultDeps = { cdp: new ChromiumCdp(), tabsApi: chromeTabsApi };
+    defaultDeps = {
+      cdp: new ChromiumCdp(),
+      tabsApi: chromeTabsApi,
+      cursor: createCursorVisualizer(),
+    };
   }
   return defaultDeps;
+}
+
+/**
+ * Last cosmetic-cursor position per tab, used to size the next glide. Purely
+ * advisory. The CDP attachment id is stored alongside it: a fresh attachment
+ * (page load, detach/reattach) means the recorded point no longer describes
+ * this document, so the next glide starts from scratch.
+ */
+const lastCursorPoints = new Map<number, { point: CursorPoint; attachmentId?: string }>();
+
+/** Selector labels are cosmetic; keep the bridge message small. */
+const MAX_CURSOR_LABEL_CHARS = 60;
+
+function cursorLabel(source: { usedRef?: string; usedSelector?: string }): string | undefined {
+  if (source.usedRef) return source.usedRef;
+  const selector = source.usedSelector;
+  if (!selector) return undefined;
+  return selector.length > MAX_CURSOR_LABEL_CHARS
+    ? `${selector.slice(0, MAX_CURSOR_LABEL_CHARS)}…`
+    : selector;
+}
+
+/**
+ * Glide the virtual cursor to `point` so a human watching the Agent Window
+ * sees the action before it happens. Never throws and never changes the tool
+ * result; the caller re-checks the abort signal right after this returns.
+ */
+async function moveCursor(
+  deps: InteractionDeps,
+  tabId: number,
+  point: CursorPoint,
+  label?: string,
+): Promise<void> {
+  const cursor = deps.cursor;
+  if (!cursor) return;
+  const attachmentId = deps.cdp.getAttachmentId?.(tabId);
+  const previous = lastCursorPoints.get(tabId);
+  const from = previous && previous.attachmentId === attachmentId ? previous.point : null;
+  lastCursorPoints.set(tabId, {
+    point: { x: point.x, y: point.y },
+    ...(attachmentId ? { attachmentId } : {}),
+  });
+  const durationMs = cursorMoveDuration(from, point);
+  try {
+    await cursor.move(tabId, point, { durationMs, ...(label ? { label } : {}) });
+  } catch (err) {
+    console.debug("[bsk interaction] cursor move failed", err);
+  }
+}
+
+/** Fire-and-forget click ripple; cosmetic failures never surface. */
+function rippleCursor(
+  deps: InteractionDeps,
+  tabId: number,
+  point: CursorPoint,
+  button: MouseButton,
+): void {
+  void deps.cursor?.click(tabId, point, { button }).catch((err) => {
+    console.debug("[bsk interaction] cursor click failed", err);
+  });
 }
 
 /**
@@ -516,8 +600,16 @@ export async function clickResolvedTarget(
   }
 
   try {
+    // Glide the cosmetic cursor first so a human watching the Agent Window
+    // sees where the click is going before it lands. Cosmetic only: the
+    // result is unchanged whether this succeeds, fails, or is skipped.
+    await moveCursor(deps, target.tabId, centre, cursorLabel(resolved));
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "click aborted" };
+    }
     const error = await dispatchClickAtPoint(target.tabId, centre, params, deps);
     if (error) return error;
+    rippleCursor(deps, target.tabId, centre, params.button ?? "left");
   } finally {
     if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
       try {
@@ -663,11 +755,18 @@ async function clickVisualPoint(
     }
     const invalid = await validate();
     if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
+    // Same cosmetic glide as a ref/selector click: the point already comes
+    // from the verified mapping, so no extra geometry resolution is needed.
+    await moveCursor(deps, target.tabId, point, capture.ref);
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "click aborted", data: { effect_state: "none" } };
+    }
     const error = await dispatchClickAtPoint(target.tabId, point, params, deps, async () => {
       await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
       return validate();
     });
     if (error) return error;
+    rippleCursor(deps, target.tabId, point, params.button ?? "left");
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       tab_id: target.tabId,
       used_ref: capture.ref,
@@ -739,6 +838,10 @@ export async function handleHover(
   }
 
   try {
+    await moveCursor(deps, target.tabId, centre, cursorLabel(node));
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "hover aborted" };
+    }
     await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: centre.x,
@@ -1015,6 +1118,11 @@ export async function handleFill(
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
+    // No cursor move here on purpose: this path never resolves element
+    // geometry (it focuses via `DOM.focus` and types via `Input.insertText`),
+    // and resolving a quad just to place a cosmetic cursor would add a CDP
+    // round trip to every fill. `clickResolvedTarget` glides before any
+    // pointer-driven fill/upload/download trigger.
   } catch (err) {
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
   }
@@ -1687,4 +1795,6 @@ export const __testing__ = {
   DEFAULT_TIMEOUT_MS,
   resolveBackendNode,
   isFillable,
+  /** Drop the advisory per-tab cursor positions (tests only). */
+  clearCursorPositions: () => lastCursorPoints.clear(),
 };

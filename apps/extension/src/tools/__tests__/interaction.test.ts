@@ -1,7 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import {
+  __testing__,
   handleBlur,
   handleClick,
   handleFill,
@@ -1260,5 +1261,194 @@ describe("handleSelect", () => {
     );
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
+  });
+});
+
+describe("cosmetic cursor wiring", () => {
+  afterEach(() => {
+    // The last-cursor-position map is module state: keep tests independent.
+    __testing__.clearCursorPositions();
+  });
+
+  function fakeCursor() {
+    return {
+      move: vi.fn(
+        async (
+          _tabId: number,
+          _point: { x: number; y: number },
+          _opts?: { durationMs?: number; label?: string },
+        ) => {},
+      ),
+      click: vi.fn(
+        async (_tabId: number, _point: { x: number; y: number }, _opts?: { button?: string }) => {},
+      ),
+      hide: vi.fn(async (_tabId: number) => {}),
+    };
+  }
+
+  it("moves the cursor to the click centre before the CDP mouse events", async () => {
+    const order: string[] = [];
+    const cursor = fakeCursor();
+    cursor.move.mockImplementation(async () => {
+      order.push("cursor-move");
+    });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Input.dispatchMouseEvent": () => {
+        order.push("mouse");
+        return {};
+      },
+    });
+
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", ref: "@e3", button: "right" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(cursor.move).toHaveBeenCalledWith(
+      4,
+      { x: 60, y: 40 },
+      expect.objectContaining({ durationMs: 0, label: "e3" }),
+    );
+    expect(cursor.click).toHaveBeenCalledWith(4, { x: 60, y: 40 }, { button: "right" });
+    expect(order[0]).toBe("cursor-move");
+    expect(order.filter((entry) => entry === "mouse")).toHaveLength(3);
+  });
+
+  it("sizes the next glide from the previous cursor position", async () => {
+    __testing__.clearCursorPositions();
+    const cursor = fakeCursor();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      // 100px wide first, then 90px further right: 90px * 0.6 = 54 → clamp 120.
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 100, 0, 100, 100, 0, 100]] }),
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+    const deps = { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor };
+
+    await handleClick(sm, { session_id: "aa11", ref: "@e3" }, deps);
+    await handleClick(sm, { session_id: "aa11", ref: "@e3" }, deps);
+
+    expect(cursor.move.mock.calls[0]?.[2]).toMatchObject({ durationMs: 0 });
+    expect(cursor.move.mock.calls[1]?.[2]).toMatchObject({ durationMs: 120 });
+  });
+
+  it("keeps the click result when the cursor visualizer rejects", async () => {
+    const cursor = {
+      move: vi.fn(async (_tabId: number, _point: { x: number; y: number }) => {
+        throw new Error("no content script");
+      }),
+      click: vi.fn(async (_tabId: number, _point: { x: number; y: number }) => {
+        throw new Error("no content script");
+      }),
+      hide: vi.fn(async (_tabId: number) => {}),
+    };
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor },
+    );
+
+    expect(res).toMatchObject({ tab_id: 4, x: 60, y: 40 });
+  });
+
+  it("moves the cursor before the hover mouseMoved", async () => {
+    const order: string[] = [];
+    const cursor = fakeCursor();
+    cursor.move.mockImplementation(async () => {
+      order.push("cursor-move");
+    });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Input.dispatchMouseEvent": () => {
+        order.push("mouse");
+        return {};
+      },
+    });
+
+    const res = await handleHover(
+      sm,
+      { session_id: "aa11", ref: "@e3", settle_ms: 0 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(order).toEqual(["cursor-move", "mouse"]);
+    // Hover never ripples.
+    expect(cursor.click).not.toHaveBeenCalled();
+  });
+
+  it("does not move the cursor when the signal aborts during the glide", async () => {
+    const abort = new AbortController();
+    const cursor = fakeCursor();
+    cursor.move.mockImplementation(async () => {
+      abort.abort();
+    });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+
+    const res = await handleClick(
+      sm,
+      { session_id: "aa11", ref: "@e3" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor, signal: abort.signal },
+    );
+
+    expect(res).toMatchObject({ code: "cancelled" });
+    expect(fake.sent.some((call) => call.method === "Input.dispatchMouseEvent")).toBe(false);
+    expect(cursor.click).not.toHaveBeenCalled();
+  });
+
+  it("moves to the selector-derived centre and labels it with the selector", async () => {
+    const cursor = fakeCursor();
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+      "DOM.querySelector": () => ({ nodeId: 99 }),
+      "DOM.describeNode": () => ({ node: { backendNodeId: 7777 } }),
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[0, 0, 50, 0, 50, 50, 0, 50]] }),
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+
+    await handleClick(
+      sm,
+      { session_id: "aa11", selector: ".btn-go" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi, cursor },
+    );
+
+    expect(cursor.move).toHaveBeenCalledWith(
+      4,
+      { x: 25, y: 25 },
+      expect.objectContaining({ label: ".btn-go" }),
+    );
   });
 });
