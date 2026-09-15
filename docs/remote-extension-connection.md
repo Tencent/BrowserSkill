@@ -4,6 +4,10 @@ An Agent can run on a server while the BrowserSkill extension controls a browser
 
 `bsk` includes device pairing, connection authentication, credential renewal and revocation. No account system or authentication gateway is required. Alternatively, the extension can pair with a third-party gateway implementing the protocol below.
 
+If a server is already configured or you have a pairing link, go to
+[Pair and verify](#pair-and-verify). The browser computer needs only the extension;
+the Agent, CLI and daemon belong on the server.
+
 ## Local mode
 
 The existing local workflow remains the default:
@@ -19,6 +23,10 @@ It listens on loopback. Existing CLI commands and extension port settings contin
 
 Run the Agent, CLI and daemon under the same OS user on the server. Automation commands continue to use the existing local IPC socket; the public listener accepts only authenticated extension connections and credential exchanges.
 
+Confirm server access, a browser-reachable public hostname/port, and trusted
+certificate paths or an existing [TLS reverse proxy](#tls-reverse-proxy). If any
+prerequisite is missing, tell the user what is needed before attempting deployment.
+
 With a certificate and private key for `browser.example.com`:
 
 ```sh
@@ -33,22 +41,9 @@ Use a certificate trusted by the user's browser. The certificate's hostname must
 
 Set `BSK_AUTO_START=0` in the Agent environment so a stopped managed server is reported as unavailable. Keep `BSK_HOME` consistent between the daemon and its CLI clients. Persist this private directory across service restarts and container replacements: it contains device grants and local IPC metadata. Do not share it between independent running servers or untrusted OS users.
 
-In another shell on the server:
-
-```sh
-bsk daemon pair
-```
-
-Copy the resulting pairing link into the extension's **Remote connection** field and save it. The link is a secret, expires after five minutes and can be used once. Saving it switches the connection and ends existing tasks. BrowserSkill then replaces the pairing secret with a device credential generated in the extension.
-
-Once connected, run the existing commands on the server:
-
-```sh
-bsk status
-bsk session start
-```
-
-With multiple paired browsers, select the browser using the existing `--browser` option. Each device receives its own stable browser identity; it cannot select another device's identity through its handshake.
+Once the server is configured, follow [Pair and verify](#pair-and-verify).
+Each paired device receives its own stable browser identity; it cannot select
+another device's identity through its handshake.
 
 Manage grants from the server's local CLI:
 
@@ -90,6 +85,64 @@ Forward both `/extension` and `/extension/authorize` to `127.0.0.1:52800`, prese
 Behind a reverse proxy, the server sees the proxy's IP, so its per-peer authorization rate is shared by the proxied clients. Configure per-client rate limits at the proxy and size `--authorize-rate-limit` for the expected aggregate traffic. The server does not trust `X-Forwarded-For` or other client-IP headers.
 
 Without native TLS, the listener must be on loopback. Plain `ws://` public URLs are allowed only for loopback development. Non-loopback browser connections require WSS. Changing the configured public URL requires revoking existing grants and generating new pairing links.
+
+## Pair and verify
+
+1. **Server operator:** if a pairing link has not been provided, generate one when
+   the browser user is ready. In another server shell, use the daemon's OS user and
+   `BSK_HOME` for this and all subsequent CLI commands:
+
+   ```sh
+   BSK_AUTO_START=0 bsk daemon pair
+   ```
+
+2. **Browser user:** [install the extension](../AGENT_INSTALL.md#4-connect-the-browser-extension)
+   if needed. Open its popup, select **Remote connection**, paste the complete
+   pairing link and save it. The link
+   is secret, single-use and expires after five minutes by default. Saving it
+   switches the connection and ends existing tasks. The extension replaces the
+   pairing secret with a device credential; wait for its connected status.
+
+3. **Agent on the server:** confirm the intended browser appears in:
+
+   ```sh
+   BSK_AUTO_START=0 bsk status --json
+   ```
+
+   A generated link or a saved pairing alone is not proof of an active connection.
+   If the Agent cannot access the server, report server-side verification as pending.
+
+4. **Verify first use:** for CLI agents, use the browser's `instance_id` from
+   `status` as `<browser-id>` and retain the returned `session_id`:
+
+   ```sh
+   BSK_AUTO_START=0 bsk session start --browser <browser-id> --no-focus --json
+   ```
+
+   Replace `<id>` below with that session ID. Read a page and stop the test session
+   on success or failure; report any cleanup error:
+
+   ```sh
+   BSK_AUTO_START=0 bsk navigate https://example.com --session <id>
+   BSK_AUTO_START=0 bsk observe --session <id>
+   BSK_AUTO_START=0 bsk session stop <id>
+   ```
+
+   With DSH, perform the same start, navigate, observe and stop lifecycle through
+   its injected browser tools. Server setup and pairing remain operator steps.
+
+Report only the stage verified by evidence:
+
+| Evidence | Feedback to the user |
+| --- | --- |
+| Pairing link generated | Link ready; waiting for browser pairing. |
+| Server lists the intended connected browser | Browser connected; first-use verification pending. |
+| Page read and test session stopped successfully | Remote first-use verification complete. |
+| A step failed or could not be checked | State the last verified stage, the observed error or missing access, and the next action. |
+
+For an expired or already-used link, obtain a fresh one from the server operator.
+For other connection failures, follow the popup error and check endpoint/TLS/proxy
+configuration; do not assume that every failure means the link has expired.
 
 ## Third-party gateway protocol
 
