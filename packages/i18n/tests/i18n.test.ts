@@ -39,9 +39,10 @@ describe("shipped language detection", () => {
 
   it.each([
     ["en-GB", "en-US", "Connected"],
-    ["zh-Hant", "zh-CN", "已连接"],
-    ["fr-FR", "en-US", "Connected"],
-  ])("preserves the fallback for %s", async (language, resolved, label) => {
+    ["zh-Hant", "zh-TW", "已連線"],
+    ["fr-FR", "fr-FR", "Connecté"],
+    ["ru-RU", "en-US", "Connected"],
+  ])("resolves %s to the %s resource", async (language, resolved, label) => {
     const { i18n } = await loadI18n(language);
     expect(i18n.resolvedLanguage).toBe(resolved);
     expect(i18n.t("popup.stateLabel.connected", { ns: "extension" })).toBe(label);
