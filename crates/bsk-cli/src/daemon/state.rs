@@ -17,7 +17,12 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.3";
+/// Wire protocol version. Bumped to `1.4` by the user-takeover feature,
+/// which adds the `session.control_taken` / `session.control_returned`
+/// events and the `session.status` / `session.wait_control` methods. An
+/// older peer drops the new events as unparseable frames, so the skew
+/// must be visible in the handshake and in `bsk doctor`.
+pub const PROTOCOL_VERSION: &str = "1.4";
 /// Base wire compatibility. New interaction semantics are checked per operation.
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`

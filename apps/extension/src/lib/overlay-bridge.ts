@@ -12,11 +12,16 @@
  *      every inflight + queued tool call for that session with
  *      `ErrorCode::UserAborted`. The Agent Window, CDP attachment,
  *      and conversation context are preserved.
+ *  - `{ kind: "overlay.return_control", sessionId, note }` → the user
+ *      is done operating the page by hand; the background tells the daemon
+ *      (`session.control_returned`) to unblock the agent, then re-shows the
+ *      control pill + input blocker.
  */
 
 export const OVERLAY_MSG_WHO_AM_I = "overlay.who_am_i";
 export const OVERLAY_MSG_READY = "overlay.ready";
 export const OVERLAY_MSG_INTERRUPT = "overlay.interrupt";
+export const OVERLAY_MSG_RETURN_CONTROL = "overlay.return_control";
 
 /**
  * WXT shadow-host element name (`createShadowRootUi({ name })`) and the marker
@@ -84,6 +89,18 @@ export interface OverlayInterruptResponse {
   ok: boolean;
 }
 
+/** Content script → background: the user hands the page back to the agent. */
+export interface OverlayReturnControlRequest {
+  kind: typeof OVERLAY_MSG_RETURN_CONTROL;
+  sessionId: string;
+  /** Free-form note for the agent; may be "". */
+  note: string;
+}
+
+export interface OverlayReturnControlResponse {
+  ok: boolean;
+}
+
 /** Background → content: temporarily disable overlay click blocker for CDP clicks. */
 export const OVERLAY_AUTOMATION_BYPASS = "bh-automation-bypass";
 
@@ -127,4 +144,8 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
   );
 }
 
-export type OverlayMessage = OverlayWhoAmIRequest | OverlayReadyRequest | OverlayInterruptRequest;
+export type OverlayMessage =
+  | OverlayWhoAmIRequest
+  | OverlayReadyRequest
+  | OverlayInterruptRequest
+  | OverlayReturnControlRequest;

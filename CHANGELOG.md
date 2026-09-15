@@ -11,6 +11,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 - [Scroll-to element primitive](docs/scroll-to.md) across CLI, Extension and DSH Plugin,
   with ancestor-clipped visible bounds, iframe support and cooperative cancellation
+- Extension: virtual agent cursor that glides to the target and ripples on click before the
+  real input is dispatched, plus a current-action line on the control pill naming the tool
+  and its target
+- User takeover across CLI, Extension and daemon: "Take over" / "Return to agent" buttons with
+  an optional note for the agent, agent input blocked while the user holds control, and
+  `bsk session status` / `bsk session wait-control` for the agent to observe and wait out the hold
 
 ## [0.2.1] - 2026-09-09
 

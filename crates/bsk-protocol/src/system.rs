@@ -599,6 +599,210 @@ pub struct StatusResult {
     pub version_skew_browsers: Vec<VersionSkewEntry>,
 }
 
+/// Maximum `session.wait_control` block, in milliseconds (30 minutes).
+///
+/// Shared by the daemon (hard limit) and the CLI (early validation) so
+/// both sides reject the same inputs.
+pub const MAX_WAIT_CONTROL_MS: u64 = 30 * 60 * 1_000;
+
+/// `session.wait_control` default block when `timeout_ms` is omitted
+/// (5 minutes).
+pub const DEFAULT_WAIT_CONTROL_MS: u64 = 5 * 60 * 1_000;
+
+/// Who currently owns a session's page control.
+///
+/// `Agent` is the default: the daemon routes the agent's tool calls into
+/// the Agent Window. `User` (“held”) means the user pressed “Take
+/// over” in the Agent Window; interrupt-gated tool calls are rejected
+/// with `ErrorCode::UserAborted` until control is returned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionControl {
+    #[default]
+    Agent,
+    User,
+}
+
+impl SessionControl {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::User => "user",
+        }
+    }
+}
+
+/// Receipt recorded when the user returns control to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionReturnReceipt {
+    /// Free-form note the user typed before returning control. May be
+    /// empty when the user returned control without a message.
+    pub note: String,
+    /// How long the user held control, in milliseconds.
+    pub held_ms: u64,
+    /// RFC 3339 (UTC) timestamp of the return.
+    pub returned_at: String,
+}
+
+/// `session.status` request payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionStatusParams {
+    pub session_id: String,
+}
+
+/// `session.status` response payload. Non-consuming: reading the
+/// takeover state never clears the held flag nor the return receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionStatusResult {
+    pub session_id: String,
+    pub control: SessionControl,
+    /// Whether the one-shot user-interrupt marker is still pending.
+    pub pending_interrupt: bool,
+    /// How long the user has held control, in milliseconds. `None` while
+    /// `control` is `agent`.
+    pub held_for_ms: Option<u64>,
+    /// Most recent return receipt, until it is consumed by
+    /// `session.wait_control`.
+    pub last_return: Option<SessionReturnReceipt>,
+}
+
+/// `session.wait_control` request payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWaitControlParams {
+    pub session_id: String,
+    /// Maximum block in milliseconds. Defaults to
+    /// [`DEFAULT_WAIT_CONTROL_MS`]; values above [`MAX_WAIT_CONTROL_MS`]
+    /// are rejected as `invalid_params`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Why `session.wait_control` returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitControlOutcome {
+    /// The user returned control while we waited; `note` / `held_ms`
+    /// carry the consumed return receipt.
+    Released,
+    /// Control was already `agent` when the call started (or a racing
+    /// waiter consumed the receipt first).
+    AlreadyAgent,
+    /// The wait expired with control still held by the user.
+    TimedOut,
+    /// The session disappeared before/while waiting.
+    SessionGone,
+}
+
+impl WaitControlOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Released => "released",
+            Self::AlreadyAgent => "already_agent",
+            Self::TimedOut => "timed_out",
+            Self::SessionGone => "session_gone",
+        }
+    }
+}
+
+/// `session.wait_control` response payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionWaitControlResult {
+    pub outcome: WaitControlOutcome,
+    pub control: SessionControl,
+    /// Note from the return receipt. Only `released` delivers it, and
+    /// only once — the receipt is consumed by that call.
+    pub note: Option<String>,
+    /// Duration the user held control, in milliseconds.
+    pub held_ms: Option<u64>,
+}
+
+#[cfg(test)]
+mod session_control_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn session_control_serialises_as_snake_case() {
+        assert_eq!(
+            serde_json::to_value(SessionControl::Agent).unwrap(),
+            json!("agent")
+        );
+        assert_eq!(
+            serde_json::to_value(SessionControl::User).unwrap(),
+            json!("user")
+        );
+    }
+
+    #[test]
+    fn session_control_defaults_to_agent() {
+        assert_eq!(SessionControl::default(), SessionControl::Agent);
+    }
+
+    #[test]
+    fn wait_control_outcomes_serialise_as_snake_case() {
+        for (outcome, name) in [
+            (WaitControlOutcome::Released, "released"),
+            (WaitControlOutcome::AlreadyAgent, "already_agent"),
+            (WaitControlOutcome::TimedOut, "timed_out"),
+            (WaitControlOutcome::SessionGone, "session_gone"),
+        ] {
+            assert_eq!(serde_json::to_value(outcome).unwrap(), json!(name));
+            assert_eq!(outcome.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn status_result_keeps_explicit_nulls_for_absent_fields() {
+        // The agent reads these fields positionally; an absent key and an
+        // explicit `null` must not be conflated by a consumer.
+        let result = SessionStatusResult {
+            session_id: "abcd".into(),
+            control: SessionControl::Agent,
+            pending_interrupt: false,
+            held_for_ms: None,
+            last_return: None,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["control"], json!("agent"));
+        assert!(value.get("held_for_ms").is_some_and(|v| v.is_null()));
+        assert!(value.get("last_return").is_some_and(|v| v.is_null()));
+        let back: SessionStatusResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn wait_control_result_round_trips_released_receipt() {
+        let result = SessionWaitControlResult {
+            outcome: WaitControlOutcome::Released,
+            control: SessionControl::Agent,
+            note: Some("filled the form".into()),
+            held_ms: Some(12_000),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(value["outcome"], json!("released"));
+        assert_eq!(value["note"], json!("filled the form"));
+        assert_eq!(value["held_ms"], json!(12_000));
+        let back: SessionWaitControlResult = serde_json::from_value(value).unwrap();
+        assert_eq!(back, result);
+    }
+
+    #[test]
+    fn wait_control_params_omit_absent_timeout() {
+        let params = SessionWaitControlParams {
+            session_id: "abcd".into(),
+            timeout_ms: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            json!({"session_id": "abcd"})
+        );
+        let back: SessionWaitControlParams =
+            serde_json::from_value(json!({ "session_id": "abcd" }))
+                .expect("timeout_ms is optional");
+        assert_eq!(back.timeout_ms, None);
+    }
+}
+
 #[cfg(test)]
 mod status_compat_tests {
     use super::*;

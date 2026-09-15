@@ -503,6 +503,71 @@ fn session_start_window_size_defaults_to_none() {
 }
 
 #[test]
+fn parses_session_status_and_wait_control() {
+    let cli = parse(&["bsk", "session", "status", "--session", "s1"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Status(args),
+    }) = cli.command
+    else {
+        panic!("expected session status subcommand");
+    };
+    assert_eq!(args.session, "s1");
+
+    // `wait-control` defaults to 5 minutes and accepts the shared
+    // `5m` / `300s` / `300000ms` grammar.
+    let cli = parse(&["bsk", "session", "wait-control", "--session", "s1"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::WaitControl(args),
+    }) = cli.command
+    else {
+        panic!("expected session wait-control subcommand");
+    };
+    assert_eq!(args.session, "s1");
+    assert_eq!(args.timeout, 300_000);
+
+    for (raw, expected) in [("5m", 300_000), ("300s", 300_000), ("300000ms", 300_000)] {
+        let cli = parse(&[
+            "bsk",
+            "session",
+            "wait-control",
+            "--session",
+            "s1",
+            "--timeout",
+            raw,
+        ]);
+        let Command::Session(SessionCmd {
+            sub: SessionSub::WaitControl(args),
+        }) = cli.command
+        else {
+            panic!("expected session wait-control subcommand");
+        };
+        assert_eq!(args.timeout, expected, "timeout grammar {raw}");
+    }
+
+    for bad in ["0", "0ms", "abc", "-5s"] {
+        assert!(
+            Cli::try_parse_from([
+                "bsk",
+                "session",
+                "wait-control",
+                "--session",
+                "s1",
+                "--timeout",
+                bad
+            ])
+            .is_err(),
+            "timeout {bad} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn session_status_requires_session_flag() {
+    assert!(Cli::try_parse_from(["bsk", "session", "status"]).is_err());
+    assert!(Cli::try_parse_from(["bsk", "session", "wait-control"]).is_err());
+}
+
+#[test]
 fn rejects_out_of_range_session_start_window_size() {
     assert!(Cli::try_parse_from(["bsk", "session", "start", "--width", "99"]).is_err());
     assert!(Cli::try_parse_from(["bsk", "session", "start", "--height", "7681"]).is_err());

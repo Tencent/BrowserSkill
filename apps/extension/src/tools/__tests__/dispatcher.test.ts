@@ -342,7 +342,7 @@ describe("ToolDispatcher", () => {
   });
 
   it("bypasses and restores the control overlay for an upload trigger click", async () => {
-    const sendMessage = vi.fn(async () => undefined);
+    const sendMessage = vi.fn(async (_tabId: number, _message: unknown) => undefined);
     vi.stubGlobal("chrome", {
       tabs: {
         get: vi.fn(async () => ({ id: 7, windowId: 4242, active: true })),
@@ -432,14 +432,25 @@ describe("ToolDispatcher", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
 
     expect(sent[0]).toMatchObject({ result: { tab_id: 7, file_names: ["test.png"] } });
-    expect(sendMessage).toHaveBeenNthCalledWith(1, 7, {
-      type: "bh-automation-bypass",
-      enabled: true,
-    });
-    expect(sendMessage).toHaveBeenNthCalledWith(2, 7, {
-      type: "bh-automation-bypass",
-      enabled: false,
-    });
+    // The trigger click also drives the cosmetic cursor; bypass messages are
+    // still bracketed around it in the order below. The action-status messages
+    // that wrap the whole RPC sit outside them.
+    expect(sendMessage.mock.calls.map((call) => call[1])).toEqual([
+      { type: "bsk/action-status", phase: "start", tool: "tool.upload", target: "@e1" },
+      { type: "bh-automation-bypass", enabled: true },
+      {
+        type: "bsk/cursor",
+        action: "move",
+        x: 10,
+        y: 10,
+        durationMs: 0,
+        label: "e1",
+      },
+      { type: "bsk/cursor", action: "click", x: 10, y: 10, button: "left" },
+      { type: "bh-automation-bypass", enabled: false },
+      { type: "bsk/action-status", phase: "end", tool: "tool.upload" },
+    ]);
+    expect(sendMessage.mock.calls.every((call) => call[0] === 7)).toBe(true);
   });
 
   it("detaches CDP state before stopping a session", async () => {
@@ -765,6 +776,159 @@ describe("ToolDispatcher", () => {
     await flushMicrotasks();
     expect(onBrowserControlResumed).toHaveBeenCalledWith("aa11");
     expect(onAgentTabClaimed).toHaveBeenCalledWith(7, 1);
+  });
+
+  it("brackets a click with action-status start/end for the resolved tab", async () => {
+    const sendMessage = vi.fn(async (_tabId: number, _message: unknown) => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => ({ id: 7, windowId: 4242, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 4242, active: true }]),
+        sendMessage,
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e3", 42, { tabId: 7 });
+    const cdp = {
+      send: vi.fn(async (_tabId: number, method: string) => {
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        if (method === "DOM.resolveNode") return { object: { objectId: "node-1" } };
+        return {};
+      }),
+      detachSession: vi.fn(async () => {}),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.click", { session_id: "aa11", ref: "e3" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    const statuses = sendMessage.mock.calls
+      .map(([, message]) => message as { type?: string })
+      .filter((message) => message?.type === "bsk/action-status");
+    expect(statuses).toEqual([
+      { type: "bsk/action-status", phase: "start", tool: "tool.click", target: "@e3" },
+      { type: "bsk/action-status", phase: "end", tool: "tool.click" },
+    ]);
+    // The end must land after the tool finished, i.e. after the reply.
+    const replyIndex = sendMessage.mock.calls.findIndex(
+      (call) => (call[1] as { phase?: string })?.phase === "end",
+    );
+    expect(replyIndex).toBe(sendMessage.mock.calls.length - 1);
+    dispatcher.stop();
+  });
+
+  it("sends the action-status end even when the tool throws", async () => {
+    const sendMessage = vi.fn(async (_tabId: number, _message: unknown) => undefined);
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => ({ id: 7, windowId: 4242, active: true })),
+        query: vi.fn(async () => [{ id: 7, windowId: 4242, active: true }]),
+        sendMessage,
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const cdp = {
+      send: vi.fn(async () => {
+        throw new Error("cdp blew up");
+      }),
+      detachSession: vi.fn(async () => {}),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.navigate", { session_id: "aa11", url: "https://example.test/a" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    await flushMicrotasks();
+
+    const statuses = sendMessage.mock.calls
+      .map(([, message]) => message as { type?: string })
+      .filter((message) => message?.type === "bsk/action-status");
+    expect(statuses[0]).toEqual({
+      type: "bsk/action-status",
+      phase: "start",
+      tool: "tool.navigate",
+      target: "https://example.test/a",
+    });
+    expect(statuses.at(-1)).toEqual({
+      type: "bsk/action-status",
+      phase: "end",
+      tool: "tool.navigate",
+    });
+    dispatcher.stop();
+  });
+
+  it("announces nothing for non-input tools", async () => {
+    const sendMessage = vi.fn(async (_tabId: number, _message: unknown) => undefined);
+    const tab = { id: 7, windowId: 4242, active: true, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        sendMessage,
+      },
+    });
+    const { transport, sent, deliver } = fakeTransport();
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => 4242),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    await sessions.start("aa11");
+    const cdp = {
+      send: vi.fn(async () => ({ cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } })),
+      detachSession: vi.fn(async () => {}),
+      ensureConsoleCapture: vi.fn(async () => {}),
+      ensureNetworkCapture: vi.fn(async () => {}),
+      networkEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      consoleEntriesSince: vi.fn(() => ({
+        tab_id: 7,
+        entries: [],
+        next_since: 0,
+        truncated: false,
+      })),
+      setDeviceMetricsOverride: vi.fn(async () => {}),
+      clearDeviceMetricsOverride: vi.fn(async () => {}),
+      setUserAgentOverride: vi.fn(async () => {}),
+      setTouchEmulationEnabled: vi.fn(async () => {}),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.console", { session_id: "aa11" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(
+      sendMessage.mock.calls.filter(
+        ([, message]) => (message as { type?: string })?.type === "bsk/action-status",
+      ),
+    ).toEqual([]);
+    dispatcher.stop();
   });
 
   it("reasserts remembered hover before follow-up work and releases only after actions", async () => {

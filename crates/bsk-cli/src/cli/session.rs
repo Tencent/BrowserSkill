@@ -11,7 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use bsk_protocol::system::{BrowserStatusEntry, SessionStatusEntry};
+use bsk_protocol::system::{
+    BrowserStatusEntry, MAX_WAIT_CONTROL_MS, SessionControl, SessionReturnReceipt,
+    SessionStatusEntry, WaitControlOutcome,
+};
 use bsk_protocol::tools::ReturnFailure;
 use bsk_protocol::{ErrorCode, Method};
 use clap::{Args, Subcommand};
@@ -19,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{self, CliError, Format, RenderExtras};
+use crate::cli::navigate::parse_timeout_ms;
 use crate::daemon::browsers::EXTENSION_CONNECT_WAIT;
 
 const SESSION_STOP_IPC_TIMEOUT: Duration = Duration::from_secs(60 * 60);
@@ -46,6 +50,30 @@ pub enum SessionSub {
     Stop(SessionStopArgs),
     /// List active sessions.
     List,
+    /// Show who currently controls a session (agent or the user).
+    Status(SessionStatusArgs),
+    /// Block until the user returns control to the agent.
+    #[command(name = "wait-control")]
+    WaitControl(SessionWaitControlArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SessionStatusArgs {
+    /// Session id to inspect.
+    #[arg(long)]
+    pub session: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct SessionWaitControlArgs {
+    /// Session id to wait on.
+    #[arg(long)]
+    pub session: String,
+
+    /// How long to block waiting for the user (default 5m, max 30m).
+    /// Accepts `5m`, `300s`, `300000ms`.
+    #[arg(long, default_value = "5m", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -155,7 +183,40 @@ struct ListReply {
     sessions: Vec<SessionStatusEntry>,
 }
 
-pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
+#[derive(Debug, Serialize)]
+struct SessionStatusParams {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionStatusReply {
+    session_id: String,
+    control: SessionControl,
+    #[serde(default)]
+    pending_interrupt: bool,
+    #[serde(default)]
+    held_for_ms: Option<u64>,
+    #[serde(default)]
+    last_return: Option<SessionReturnReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+struct SessionWaitControlParams {
+    session_id: String,
+    timeout_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionWaitControlReply {
+    outcome: WaitControlOutcome,
+    control: SessionControl,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    held_ms: Option<u64>,
+}
+
+pub fn dispatch(cmd: SessionCmd, format: Format, quiet: bool) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
@@ -164,6 +225,150 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
         }
         SessionSub::Stop(args) => run_stop(info.sock_path, args, format),
         SessionSub::List => run_list(info.sock_path, format),
+        SessionSub::Status(args) => run_status(info.sock_path, args, format),
+        SessionSub::WaitControl(args) => run_wait_control(info.sock_path, args, format, quiet),
+    }
+}
+
+/// `bsk session status --session <id>`: non-consuming read of the
+/// takeover state. Human output is a single `control=…` line (plus the
+/// last return note when present) so an agent can grep it cheaply.
+fn run_status(sock: PathBuf, args: SessionStatusArgs, format: Format) -> Result<(), CliError> {
+    let reply: SessionStatusReply = call(
+        sock,
+        Method::SessionStatus,
+        Some(SessionStatusParams {
+            session_id: args.session,
+        }),
+        Duration::from_secs(5),
+    )?;
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "session_id": reply.session_id,
+                    "control": reply.control,
+                    "pending_interrupt": reply.pending_interrupt,
+                    "held_for_ms": reply.held_for_ms,
+                    "last_return": reply.last_return,
+                }))
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            print!("control={}", reply.control.as_str());
+            if reply.control == SessionControl::User {
+                if let Some(held) = reply.held_for_ms {
+                    print!(" (held {})", format_short_duration(held));
+                } else {
+                    print!(" (held)");
+                }
+            }
+            println!();
+            if let Some(receipt) = &reply.last_return
+                && !receipt.note.is_empty()
+            {
+                println!("last note: {}", receipt.note);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `bsk session wait-control --session <id> [--timeout 5m]`: block until
+/// control returns to the agent, then print the result (including the
+/// user's note, which this call consumes exactly once).
+///
+/// Exit codes follow the existing `request-help` convention:
+/// `released` / `already_agent` are success, `timed_out` maps to the
+/// timeout bucket (4) and `session_gone` to the missing-entity bucket (1).
+fn run_wait_control(
+    sock: PathBuf,
+    args: SessionWaitControlArgs,
+    format: Format,
+    quiet: bool,
+) -> Result<(), CliError> {
+    if u64::from(args.timeout) > MAX_WAIT_CONTROL_MS {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--timeout {} exceeds the {} maximum",
+            format_short_duration(u64::from(args.timeout)),
+            format_short_duration(MAX_WAIT_CONTROL_MS),
+        )));
+    }
+    // Reassure the human that the command is parked on purpose rather than
+    // hung. Machine consumers (`--json`) and `--quiet` stay silent.
+    if matches!(format, Format::Human) && !quiet {
+        eprintln!("waiting for the user to return control…");
+    }
+    let timeout_ms = u64::from(args.timeout);
+    let reply: SessionWaitControlReply = call(
+        sock,
+        Method::SessionWaitControl,
+        Some(SessionWaitControlParams {
+            session_id: args.session,
+            timeout_ms,
+        }),
+        // Same slack rule as `request-help`: the client must not tear the
+        // connection down before the daemon's (long) wait resolves.
+        Duration::from_millis(timeout_ms).saturating_add(Duration::from_secs(15)),
+    )?;
+    match format {
+        Format::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "outcome": reply.outcome,
+                    "control": reply.control,
+                    "note": reply.note,
+                    "held_ms": reply.held_ms,
+                }))
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            print!(
+                "outcome={} control={}",
+                reply.outcome.as_str(),
+                reply.control.as_str()
+            );
+            if let Some(note) = &reply.note {
+                print!(" note={note:?}");
+            }
+            println!();
+        }
+    }
+    match reply.outcome {
+        WaitControlOutcome::Released | WaitControlOutcome::AlreadyAgent => Ok(()),
+        WaitControlOutcome::TimedOut => Err(CliError::RenderedExit {
+            exit_code: error::exit_code_for(ErrorCode::Timeout),
+        }),
+        WaitControlOutcome::SessionGone => Err(CliError::RenderedExit {
+            exit_code: error::exit_code_for(ErrorCode::NotFound),
+        }),
+    }
+}
+
+/// Human-friendly short duration for `control=user (held 12s)`.
+fn format_short_duration(ms: u64) -> String {
+    let secs = ms / 1_000;
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3_600 {
+        let (m, s) = (secs / 60, secs % 60);
+        if s == 0 {
+            format!("{m}m")
+        } else {
+            format!("{m}m{s}s")
+        }
+    } else {
+        let (h, rem) = (secs / 3_600, secs % 3_600);
+        let m = rem / 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
     }
 }
 
@@ -569,6 +774,32 @@ fn run_skill_sync_for_session_start(format: Format) {
     }
     for (harness, msg) in &report.errors {
         tracing::warn!(harness = harness.cli_name(), error = %msg, "skill sync failed");
+    }
+}
+
+#[cfg(test)]
+mod takeover_cli_tests {
+    use super::*;
+    use crate::cli::error::exit_code_for;
+
+    #[test]
+    fn short_duration_renders_seconds_minutes_hours() {
+        assert_eq!(format_short_duration(0), "0s");
+        assert_eq!(format_short_duration(11_800), "11s");
+        assert_eq!(format_short_duration(60_000), "1m");
+        assert_eq!(format_short_duration(72_000), "1m12s");
+        assert_eq!(format_short_duration(3_600_000), "1h");
+        assert_eq!(format_short_duration(5_400_000), "1h30m");
+    }
+
+    #[test]
+    fn wait_control_exit_codes_follow_request_help_convention() {
+        // `request-help` treats a non-`continued` outcome as a non-success
+        // CLI status. `wait-control` mirrors that: timed_out maps to the
+        // timeout bucket (4) and session_gone to the missing-entity
+        // bucket (1). `released`/`already_agent` return `Ok`.
+        assert_eq!(exit_code_for(ErrorCode::Timeout), 4);
+        assert_eq!(exit_code_for(ErrorCode::NotFound), 1);
     }
 }
 

@@ -1,3 +1,9 @@
+import {
+  type ActionStatusNotifier,
+  createActionStatusNotifier,
+  truncateActionTarget,
+} from "@/lib/action-status-bridge";
+import { type CursorVisualizer, createCursorVisualizer } from "@/lib/cursor-bridge";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
@@ -149,6 +155,10 @@ export interface DispatcherDeps {
   interactionPreferences?: InteractionPreferenceStore;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
+  /** Cosmetic in-page cursor shared by every input tool. */
+  cursor?: CursorVisualizer;
+  /** Reports the in-flight input/navigation action to the control pill. */
+  actionStatus?: ActionStatusNotifier;
 }
 
 /**
@@ -179,6 +189,10 @@ export class ToolDispatcher {
   private readonly approveBorrow?: BorrowConfirmationApprover;
   private readonly interactionPreferences?: InteractionPreferenceStore;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
+  /** Cosmetic agent cursor; one instance shared by all input tools. */
+  private readonly cursor: CursorVisualizer;
+  /** Cosmetic "current action" reporter for the control pill. */
+  private readonly actionStatus: ActionStatusNotifier;
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
@@ -202,6 +216,8 @@ export class ToolDispatcher {
     this.approveBorrow = deps.approveBorrow;
     this.interactionPreferences = deps.interactionPreferences;
     this.helpNotificationCopy = deps.helpNotificationCopy;
+    this.cursor = deps.cursor ?? createCursorVisualizer();
+    this.actionStatus = deps.actionStatus ?? createActionStatusNotifier();
   }
 
   start(): void {
@@ -263,6 +279,9 @@ export class ToolDispatcher {
       req.method === "tool.session_start" || req.method === "tool.session_stop";
     const ac = new AbortController();
     this.inflightAbortControllers.set(req.id, ac);
+    // Bracket the actual page input with a cosmetic "current action" line for
+    // the Agent Window's control pill. Resolution failures just mean no line.
+    const actionStatus = await this.beginActionStatus(req);
     let body: ResponseFrame;
     let startedSession: string | null = null;
     try {
@@ -301,6 +320,7 @@ export class ToolDispatcher {
       }
     } finally {
       this.inflightAbortControllers.delete(req.id);
+      await actionStatus?.finish();
     }
     let sent = true;
     try {
@@ -565,6 +585,7 @@ export class ToolDispatcher {
                     tabsApi: chromeTabsApi,
                     signal,
                     bypassOverlay,
+                    cursor: this.cursor,
                   }
                 : undefined,
             ),
@@ -583,6 +604,7 @@ export class ToolDispatcher {
                 bypassOverlay: (tabId, enabled) =>
                   this.setHoverBypass((req.params as HoverParams).session_id, tabId, enabled),
                 keepOverlayBypassAfterHover: true,
+                cursor: this.cursor,
               }
             : undefined,
         );
@@ -642,7 +664,14 @@ export class ToolDispatcher {
             handleFill(
               this.sessions,
               req.params as FillParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? {
+                    cdp: this.cdp,
+                    tabsApi: chromeTabsApi,
+                    signal,
+                    cursor: this.cursor,
+                  }
+                : undefined,
             ),
           signal,
         );
@@ -678,6 +707,7 @@ export class ToolDispatcher {
                   tabsApi: chromeTabsApi,
                   signal,
                   bypassOverlay,
+                  cursor: this.cursor,
                 })
               : Promise.resolve({
                   code: "unsupported",
@@ -695,6 +725,7 @@ export class ToolDispatcher {
                   tabsApi: chromeTabsApi,
                   signal,
                   bypassOverlay,
+                  cursor: this.cursor,
                 })
               : Promise.resolve({
                   code: "unsupported",
@@ -824,11 +855,65 @@ export class ToolDispatcher {
     tab_id?: number;
   }): Promise<HoverLatchScope> {
     if (params.tab_id !== undefined) return params;
-    const ctx = lookupSession(this.sessions, params, "hover latch");
-    if (isRpcError(ctx)) return params;
-    const target = await resolveTargetTab(this.sessions, ctx, undefined, chromeTabsApi);
-    if (isRpcError(target)) return params;
-    return { session_id: params.session_id, tab_id: target.tabId };
+    const tabId = await this.resolveSessionTabId(params);
+    return tabId === null ? params : { session_id: params.session_id, tab_id: tabId };
+  }
+
+  /**
+   * Resolve `session_id` (+ optional `tab_id`) to the concrete tab the action
+   * runs against — the same single lookup path every tool handler uses
+   * (`lookupSession` + `resolveTargetTab`). Returns `null` when the session is
+   * unknown or the tab cannot be resolved.
+   */
+  private async resolveSessionTabId(params: {
+    session_id: string;
+    tab_id?: number;
+  }): Promise<number | null> {
+    const ctx = lookupSession(this.sessions, params, "target tab");
+    if (isRpcError(ctx)) return null;
+    const target = await resolveTargetTab(this.sessions, ctx, params.tab_id, chromeTabsApi);
+    if (isRpcError(target)) return null;
+    return target.tabId;
+  }
+
+  /**
+   * Announce the in-flight browser input so the control pill can say what the
+   * agent is doing. Cosmetic and best-effort: an unknown session, an
+   * unresolvable tab or a missing content script all collapse to "no line",
+   * and a surprise failure never reaches the tool result.
+   */
+  private async beginActionStatus(req: RequestFrame): Promise<{ finish(): Promise<void> } | null> {
+    if (!ACTION_STATUS_METHODS.has(req.method)) return null;
+    const params = (req.params ?? {}) as {
+      session_id?: unknown;
+      tab_id?: number;
+      ref?: unknown;
+      selector?: unknown;
+      url?: unknown;
+      key?: unknown;
+    };
+    const sessionId = params.session_id;
+    if (typeof sessionId !== "string" || sessionId.length === 0) return null;
+    try {
+      const tabId = await this.resolveSessionTabId({
+        session_id: sessionId,
+        ...(typeof params.tab_id === "number" ? { tab_id: params.tab_id } : {}),
+      });
+      if (tabId === null) return null;
+      await this.actionStatus.start(tabId, req.method, actionStatusTarget(params));
+      return {
+        finish: async () => {
+          try {
+            await this.actionStatus.end(tabId);
+          } catch (err) {
+            console.debug("[bsk dispatcher] action status end failed", err);
+          }
+        },
+      };
+    } catch (err) {
+      console.debug("[bsk dispatcher] action status start failed", err);
+      return null;
+    }
   }
 
   private hoverLatchesForRequest(params: { session_id: string; tab_id?: number }): HoverLatch[] {
@@ -889,6 +974,48 @@ function recordingRuntimeUnavailable(): RpcError {
     code: "protocol_error",
     message: "recording runtime is unavailable",
   };
+}
+
+/**
+ * Tool methods whose page input / navigation the pill narrates. Mirrors the
+ * `sessionIdForBrowserControlMethod` classification, minus the browser-state
+ * tools (tab management, observe, screenshots, help, record) where the pill
+ * would only claim the agent is "working".
+ */
+const ACTION_STATUS_METHODS = new Set([
+  "tool.click",
+  "tool.dblclick",
+  "tool.hover",
+  "tool.fill",
+  "tool.press",
+  "tool.select",
+  "tool.scroll",
+  "tool.scroll_to",
+  "tool.wheel",
+  "tool.navigate",
+  "tool.navigate_back",
+  "tool.navigate_forward",
+  "tool.reload",
+  "tool.upload",
+  "tool.download",
+  "tool.evaluate",
+]);
+
+/** `ref` → `selector` → `url` → `key`, truncated to the pill's budget. */
+function actionStatusTarget(params: {
+  ref?: unknown;
+  selector?: unknown;
+  url?: unknown;
+  key?: unknown;
+}): string | undefined {
+  const ref = typeof params.ref === "string" ? params.ref.trim() : "";
+  if (ref) return truncateActionTarget(ref.startsWith("@") ? ref : `@${ref}`);
+  for (const candidate of [params.selector, params.url, params.key]) {
+    if (typeof candidate === "string" && candidate.length > 0) {
+      return truncateActionTarget(candidate);
+    }
+  }
+  return undefined;
 }
 
 function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {

@@ -118,8 +118,26 @@
   },
   "controlOverlay": {
     "status": "Agent controlling",
-    "interrupt": "Interrupt",
-    "interrupting": "Interrupting…"
+    "takeOver": "Take over",
+    "takingOver": "Taking over…",
+    "pausedStatus": "You are in control, agent paused",
+    "notePlaceholder": "Note for the agent (optional)",
+    "returnControl": "Return to agent",
+    "action": {
+      "idle": "Waiting for the next instruction",
+      "working": "Working…",
+      "click": "Click",
+      "hover": "Hover",
+      "fill": "Type into",
+      "press": "Press",
+      "navigate": "Navigate to",
+      "scroll": "Scroll",
+      "select": "Select",
+      "upload": "Upload to",
+      "download": "Download from",
+      "evaluate": "Run script",
+      "reload": "Reload"
+    }
   },
   "borrowConfirmation": {
     "title": "Allow tab borrow?",

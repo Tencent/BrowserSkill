@@ -118,8 +118,26 @@
   },
   "controlOverlay": {
     "status": "Agent 正在控制",
-    "interrupt": "中断",
-    "interrupting": "中断中…"
+    "takeOver": "接管",
+    "takingOver": "接管中…",
+    "pausedStatus": "你正在操作，Agent 已暂停",
+    "notePlaceholder": "给 Agent 的备注（可选）",
+    "returnControl": "交还给 Agent",
+    "action": {
+      "idle": "等待下一步指令",
+      "working": "正在执行…",
+      "click": "点击",
+      "hover": "悬停",
+      "fill": "输入",
+      "press": "按键",
+      "navigate": "导航",
+      "scroll": "滚动",
+      "select": "选择",
+      "upload": "上传",
+      "download": "下载",
+      "evaluate": "执行脚本",
+      "reload": "刷新"
+    }
   },
   "borrowConfirmation": {
     "title": "允许借用标签页？",
