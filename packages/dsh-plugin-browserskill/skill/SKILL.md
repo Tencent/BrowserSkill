@@ -8,6 +8,8 @@ description: Browser automation through six injected domain tools.
 All browser work must use the injected tools directly, in an Agent Window with existing logins.
 Do not control the browser through another process. Use the loaded action schemas for parameters.
 
+For remote setup or pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md) before using these tools.
+
 ## Mandatory workflow
 
 1. Define success. Start a session and retain `sessionId`. For a new page:

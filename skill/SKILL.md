@@ -13,6 +13,8 @@ Use `bsk` to work in an **Agent Window** with the user's existing logins. User t
 require explicit borrowing. This skill does not install the extension or handle
 advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 
+For remote setup or pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md) before starting a task.
+
 ## Task workflow
 
 1. Define success from the user's request. Start `bsk session start --json` and
@@ -121,7 +123,7 @@ full settings support. A feature's version error does not disable other operatio
 Remote content reads/actions require task-created or borrowed tabs. Page-opened
 popups gain no control automatically; an unowned tab inside the Agent Window
 needs the user to move it to a user window before borrowing. Remote upload/download
-are unsupported; screenshots work. See the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
+are unsupported; screenshots work.
 
 ## Human steps and recovery
 
