@@ -47,14 +47,14 @@ export async function handleDownload(
       signal: deps.signal,
       expectedFrameId: address.frameId,
       expectedUrl,
-      trigger: () => clickResolvedTarget(ctx, address, {}, deps),
+      trigger: (observer) => clickResolvedTarget(ctx, address, {}, deps, undefined, observer),
     });
     if (isRpcError(capture)) return capture;
-    const { click, item } = capture;
+    const { item } = capture;
     return {
       tab_id: target.tabId,
-      used_ref: click.used_ref,
-      used_selector: click.used_selector,
+      used_ref: address.usedRef,
+      used_selector: address.usedSelector,
       suggested_filename: item.filename.split(/[\\/]/).pop() ?? "download",
       byte_size: item.fileSize >= 0 ? item.fileSize : item.totalBytes,
       mime: item.mime || undefined,

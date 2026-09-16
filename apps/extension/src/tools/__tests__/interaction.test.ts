@@ -3,6 +3,7 @@ import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
 import {
+  clickResolvedTarget,
   handleBlur,
   handleClick,
   handleFill,
@@ -179,6 +180,49 @@ describe("handleClick", () => {
       button: "left",
       clickCount: 2,
     });
+  });
+
+  it("notifies an optional observer immediately around mouse press dispatch", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const lifecycle: string[] = [];
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Input.dispatchMouseEvent": (params) => {
+        lifecycle.push((params as { type: string }).type);
+        return {};
+      },
+    });
+
+    const result = await clickResolvedTarget(
+      ctx,
+      {
+        tab: { tabId: 4, windowId: 100, active: true },
+        backendNodeId: 1234,
+        cdpTarget: { tabId: 4 },
+        usedRef: "e3",
+      },
+      {},
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+      undefined,
+      {
+        beforePressDispatch: () => {
+          lifecycle.push("beforePressDispatch");
+          return null;
+        },
+        afterPressDispatch: () => lifecycle.push("afterPressDispatch"),
+      },
+    );
+
+    expect(result).toMatchObject({ tab_id: 4, used_ref: "e3" });
+    expect(lifecycle).toEqual([
+      "mouseMoved",
+      "beforePressDispatch",
+      "mousePressed",
+      "afterPressDispatch",
+      "mouseReleased",
+    ]);
   });
 
   it("resolves frame refs in their CDP session and dispatches input in top coordinates", async () => {
