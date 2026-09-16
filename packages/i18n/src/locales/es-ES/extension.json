@@ -20,7 +20,7 @@
       "disconnected": "En espera",
       "connecting": "Iniciando",
       "connected": "Listo",
-      "version_skew": "Actualización disponible",
+      "version_skew": "Actualizable",
       "disabled": "Desactivado"
     },
     "connectionToggleTitle": "Conexión de BrowserSkill",
@@ -37,7 +37,7 @@
     "daemonPortWriteFailed": "No se pudo guardar el puerto. Inténtalo de nuevo.",
     "daemonUnreachable": "No se puede conectar. Comprueba que el daemon esté en ejecución y que el puerto coincida.",
     "versionSkewWarning": "Protocolo de la extensión v{{extensionProtocol}}, protocolo de la CLI v{{cliProtocol}}. Las versiones de protocolo son diferentes — actualiza, por favor.",
-    "upgradeAvailable": "Actualización disponible",
+    "upgradeAvailable": "Actualizable",
     "launcher": {
       "title": "Acciones rápidas"
     },
