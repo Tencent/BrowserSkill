@@ -53,6 +53,16 @@ bsk session start --name "整理本周待办"
 
 审计接口仅由扩展页面经后台服务访问，网页内容脚本不能调用。服务按已连接的浏览器实例隔离列表、详情和删除操作，不采用请求参数中的浏览器身份。本地模式沿用本地连接的信任模型；远程模式使用已配对设备的连接身份。daemon 主机上的文件不构成对同一系统账户下恶意进程的安全边界。
 
+## 站点记忆：存什么、不存什么
+
+`bsk site` 把一次探索沉淀成本机私有的站点记忆，与审计同在 `BSK_HOME` 下（`~/.bsk/sites/`），因此遵守同等的目录与脱敏承诺：macOS/Linux 上目录 `0700`、文件 `0600`；不提供任何导出或同步命令，不上传云端。目录权限逐级生效，`.drafts/` 与 `.drafts/<taskId>/` 同样是 `0700`——task id 本身就说明用户在做什么，不能让同机其它账户枚举；仓库锁文件 `.lock` 是 `0600`。
+
+**会写入**：归一后的站点 host；`SITE.md` 里每条带 `[verified YYYY-MM-DD]` 的散文事实与 `references/*.md` 详情页；workflow 的语义步骤（`role` / `name` / `ctx` 三元组、导航目标 URL、按键名、`<select>` 的 option value）；参数名与参数说明；候选观察的 claim/evidence/consequence；每次 checkpoint 的 revision 与路径清单。revision 与 journal 按 host 分开存放在 `sites/<host>/.revision` 与 `sites/<host>/.journal.jsonl`，一个站点的提交不会牵动另一个站点的草稿。
+
+**不会写入**：`@eN` 元素引用（录制会话内的句柄，派生时强制剥除）；用户在表单里输入的值（`fill` 默认一律转成参数，`--inline-values` 才内联，且疑似凭证、邮箱、手机号或长文本仍会转参数）；录制 `states[]` 的页面正文；cookie、token、密码等凭证材料——`SITE.md`、`references/*.md` 与候选文本都会做秘密特征扫描，命中即拒绝写入。`<select>` 的 option value 是站点自己定义的常量而非录制者的数据，因此默认内联；命中秘密特征时仍转成参数。
+
+银行、SSO、密码管理器等凭证界面的 host 在所有入口（`context` / `workflow save` / `workflow show` / `workflow verify` / `candidate add` / `candidate list` / `checkpoint`）一律拒绝，不会为这类站点建立任何记忆。
+
 ## 接口概要
 
 握手可携带 `audit_enabled`，服务返回可选能力 `audit_version: 1` 与 `audit_ready`。旧版本扩展保持默认关闭；新扩展连接旧服务时显示不支持提示。

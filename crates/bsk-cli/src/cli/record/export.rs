@@ -466,7 +466,7 @@ struct BundleTrace<'a> {
     steps: &'a [bsk_protocol::tools::StepV3],
 }
 
-pub(super) fn write_trace_bundle(output_dir: &Path, trace: &TraceV3) -> Result<PathBuf, CliError> {
+pub(crate) fn write_trace_bundle(output_dir: &Path, trace: &TraceV3) -> Result<PathBuf, CliError> {
     let states_dir = states_dir_for_output(output_dir);
     let trace_path = trace_json_path(output_dir);
 

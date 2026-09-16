@@ -192,19 +192,30 @@ export function attachRecordFrameAgent(): () => void {
     return true;
   };
   chrome.runtime.onMessage.addListener(onMessage);
-  void chrome.runtime
-    .sendMessage({ type: RECORD_FRAME_QUERY })
-    .then((response: RecordFrameQueryResponse | undefined) => {
-      if (!response?.active || !response.requestId || response.startedAtMs === undefined) return;
-      return agent.start({
-        type: RECORD_FRAME_START,
-        requestId: response.requestId,
-        startedAtMs: response.startedAtMs,
-      });
-    })
-    .catch(() => {});
+  const armFromBackground = () =>
+    chrome.runtime
+      .sendMessage({ type: RECORD_FRAME_QUERY })
+      .then((response: RecordFrameQueryResponse | undefined) => {
+        if (!response?.active || !response.requestId || response.startedAtMs === undefined) return;
+        return agent.start({
+          type: RECORD_FRAME_START,
+          requestId: response.requestId,
+          startedAtMs: response.startedAtMs,
+        });
+      })
+      .catch(() => {});
+  void armFromBackground();
+  // Entering the back/forward cache disconnects the recording port, which tears
+  // capture down in this Document. The content script does not run again on
+  // restore, so the restored Document has to re-arm itself. `start` is a no-op
+  // while the same recording is already active.
+  const onPageShow = (event: PageTransitionEvent) => {
+    if (event.persisted) void armFromBackground();
+  };
+  window.addEventListener("pageshow", onPageShow);
   return () => {
     chrome.runtime.onMessage.removeListener(onMessage);
+    window.removeEventListener("pageshow", onPageShow);
     agent.dispose();
   };
 }

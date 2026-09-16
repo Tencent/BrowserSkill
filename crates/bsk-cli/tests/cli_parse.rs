@@ -473,6 +473,38 @@ fn parses_record_start_without_url() {
 }
 
 #[test]
+fn parses_record_start_detach() {
+    let cli = parse(&[
+        "bsk",
+        "record",
+        "start",
+        "--detach",
+        "--url",
+        "https://x",
+        "--output",
+        "rec",
+    ]);
+    let Command::Record(RecordCmd {
+        sub: RecordSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected record start subcommand");
+    };
+    assert!(args.detach);
+    assert_eq!(args.output, std::path::PathBuf::from("rec"));
+
+    // The blocking path stays the default so existing use is unchanged.
+    let cli = parse(&["bsk", "record", "start"]);
+    let Command::Record(RecordCmd {
+        sub: RecordSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected record start subcommand");
+    };
+    assert!(!args.detach);
+}
+
+#[test]
 fn parses_session_start_with_window_size() {
     use bsk::cli::session::{SessionCmd, SessionSub};
     let cli = parse(&[
@@ -803,4 +835,306 @@ fn canvas_click_requires_complete_capture_coordinates() {
         argv.extend(extra);
         assert!(Cli::try_parse_from(argv).is_err());
     }
+}
+
+// --- bsk site ---------------------------------------------------------------
+
+#[test]
+fn parses_site_context_with_optional_task() {
+    use bsk::cli::site::{SiteSub, WorkflowSub};
+
+    let Command::Site(cmd) = parse(&["bsk", "site", "context", "--host", "corp.example"]).command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Context(args) = cmd.sub else {
+        panic!("expected site context");
+    };
+    assert_eq!(args.host, "corp.example");
+    assert_eq!(args.task, None);
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "context",
+        "--host",
+        "corp.example",
+        "--task",
+        "T1",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Context(args) = cmd.sub else {
+        panic!("expected site context");
+    };
+    assert_eq!(args.task.as_deref(), Some("T1"));
+
+    // `--host` is the only required flag; `workflow list` may omit it.
+    let Command::Site(cmd) = parse(&["bsk", "site", "workflow", "list"]).command else {
+        panic!("expected site command");
+    };
+    let SiteSub::Workflow(cmd) = cmd.sub else {
+        panic!("expected site workflow");
+    };
+    let WorkflowSub::List(args) = cmd.sub else {
+        panic!("expected workflow list");
+    };
+    assert_eq!(args.host, None);
+}
+
+#[test]
+fn parses_site_workflow_save_and_show() {
+    use bsk::cli::site::{SiteSub, WorkflowSub};
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "workflow",
+        "save",
+        "--from",
+        "rec/trace.json",
+        "--id",
+        "submit-ticket",
+        "--host",
+        "ticket.corp.example",
+        "--purpose",
+        "submit a ticket",
+        "--task",
+        "T1",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Workflow(cmd) = cmd.sub else {
+        panic!("expected site workflow");
+    };
+    let WorkflowSub::Save(args) = cmd.sub else {
+        panic!("expected workflow save");
+    };
+    assert_eq!(args.from, std::path::PathBuf::from("rec/trace.json"));
+    assert_eq!(args.id, "submit-ticket");
+    assert_eq!(args.host.as_deref(), Some("ticket.corp.example"));
+    assert_eq!(args.purpose.as_deref(), Some("submit a ticket"));
+    assert_eq!(args.task.as_deref(), Some("T1"));
+
+    // `--from` and `--id` are both required.
+    assert!(
+        Cli::try_parse_from(["bsk", "site", "workflow", "save", "--id", "x"]).is_err(),
+        "workflow save must require --from"
+    );
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "workflow",
+        "show",
+        "submit-ticket",
+        "--host",
+        "corp.example",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Workflow(cmd) = cmd.sub else {
+        panic!("expected site workflow");
+    };
+    let WorkflowSub::Show(args) = cmd.sub else {
+        panic!("expected workflow show");
+    };
+    assert_eq!(args.id, "submit-ticket");
+    assert_eq!(args.host, "corp.example");
+}
+
+#[test]
+fn site_workflow_verify_requires_exactly_one_outcome() {
+    use bsk::cli::site::model::CandidateKind;
+    use bsk::cli::site::{SiteSub, WorkflowSub};
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "workflow",
+        "verify",
+        "submit-ticket",
+        "--host",
+        "corp.example",
+        "--pass",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Workflow(cmd) = cmd.sub else {
+        panic!("expected site workflow");
+    };
+    let WorkflowSub::Verify(args) = cmd.sub else {
+        panic!("expected workflow verify");
+    };
+    assert!(args.pass && !args.fail);
+    assert_eq!(args.kind, CandidateKind::RepeatedMistake);
+
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "site",
+            "workflow",
+            "verify",
+            "x",
+            "--host",
+            "corp.example",
+        ])
+        .is_err(),
+        "verify must require --pass or --fail"
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "site",
+            "workflow",
+            "verify",
+            "x",
+            "--host",
+            "corp.example",
+            "--pass",
+            "--fail",
+        ])
+        .is_err(),
+        "--pass and --fail are mutually exclusive"
+    );
+}
+
+#[test]
+fn parses_site_candidate_commands_with_enum_values() {
+    use bsk::cli::site::model::{CandidateKind, CandidateStatus};
+    use bsk::cli::site::{CandidateSub, SiteSub};
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "candidate",
+        "add",
+        "--host",
+        "corp.example",
+        "--kind",
+        "high_consequence",
+        "--claim",
+        "delete has no confirm",
+        "--evidence",
+        "the row vanished",
+        "--consequence",
+        "data loss",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Candidate(cmd) = cmd.sub else {
+        panic!("expected site candidate");
+    };
+    let CandidateSub::Add(args) = cmd.sub else {
+        panic!("expected candidate add");
+    };
+    assert_eq!(args.kind, CandidateKind::HighConsequence);
+    assert_eq!(args.claim, "delete has no confirm");
+    assert_eq!(args.evidence.as_deref(), Some("the row vanished"));
+    assert_eq!(args.consequence.as_deref(), Some("data loss"));
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "candidate",
+        "list",
+        "--host",
+        "corp.example",
+        "--kind",
+        "better_path",
+        "--status",
+        "pending",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Candidate(cmd) = cmd.sub else {
+        panic!("expected site candidate");
+    };
+    let CandidateSub::List(args) = cmd.sub else {
+        panic!("expected candidate list");
+    };
+    assert_eq!(args.kind, Some(CandidateKind::BetterPath));
+    assert_eq!(args.status, Some(CandidateStatus::Pending));
+
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "site",
+            "candidate",
+            "add",
+            "--host",
+            "corp.example",
+            "--kind",
+            "not_a_kind",
+            "--claim",
+            "x",
+        ])
+        .is_err(),
+        "an unknown candidate kind must be rejected"
+    );
+}
+
+#[test]
+fn parses_site_checkpoint_with_repeatable_dispositions() {
+    use bsk::cli::site::SiteSub;
+    use bsk::cli::site::model::CheckpointReason;
+
+    let Command::Site(cmd) = parse(&[
+        "bsk",
+        "site",
+        "checkpoint",
+        "--host",
+        "corp.example",
+        "--task",
+        "T1",
+        "--reason",
+        "candidate_ingestion",
+        "--expected-revision",
+        "7",
+        "--ingest",
+        "c1",
+        "--ingest",
+        "c2",
+        "--reject",
+        "c3",
+    ])
+    .command
+    else {
+        panic!("expected site command");
+    };
+    let SiteSub::Checkpoint(args) = cmd.sub else {
+        panic!("expected site checkpoint");
+    };
+    assert_eq!(args.reason, CheckpointReason::CandidateIngestion);
+    assert_eq!(args.expected_revision, Some(7));
+    assert_eq!(args.ingest, vec!["c1".to_string(), "c2".to_string()]);
+    assert_eq!(args.reject, vec!["c3".to_string()]);
+
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "site",
+            "checkpoint",
+            "--host",
+            "corp.example",
+            "--task",
+            "T1",
+            "--reason",
+            "nope",
+        ])
+        .is_err(),
+        "an unknown checkpoint reason must be rejected"
+    );
 }

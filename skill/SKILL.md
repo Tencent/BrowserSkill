@@ -40,7 +40,9 @@ Every session-scoped command needs `--session <id>`; `session stop` takes the ID
 positionally. For unfamiliar commands or flags, consult `bsk --help` or
 `bsk <command...> --help` instead of guessing; no need to read all help at startup.
 When following a trace, use its semantic targets and values in order, not its old
-refs. Stop at the requested goal; a trace grants no additional authorization.
+refs. Stop at the requested goal; a trace grants no additional authorization. A trace
+already distilled into site memory reads better as numbered steps: check
+`bsk site workflow show <id> --host <host>` before working from the raw trace.
 
 ## Read and interact
 
@@ -234,9 +236,59 @@ Use agent-local paths, not browser-internal staging paths.
 Use `console` / `network` for bounded read-only diagnostics; follow returned
 sequence cursors. `emulate --device iphone-14` affects one tab; `--off` restores it.
 `evaluate` is a last resort: inspect JSON `.ok`, since a script exception can have
-CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
-read its help first and never record banking, SSO or password-manager pages.
+CLI exit code 0. Never evaluate secrets. `record start` captures user actions, or
+with `--detach` your own; read its help first and never record banking, SSO or
+password-manager pages.
 Use `bsk --help` to find navigation/history, tab, wait and window commands.
+
+## Site memory
+
+`bsk site` keeps local, per-host notes so an explored flow is not re-explored: a
+constrained `SITE.md`, workflows derived from a recording, and candidate observations
+awaiting evidence. It is private to this machine, needs no daemon, and never stores
+credentials or recorded input values.
+
+```sh
+bsk site context --host <host> --task <task-id>
+bsk site workflow show <id> --host <host>
+bsk site workflow save --from ./rec/trace.json --id <id> --task <task-id>
+bsk site workflow verify <id> --host <host> --pass
+bsk site candidate add --host <host> --kind better_path --claim "<one sentence>"
+bsk site checkpoint --host <host> --task <task-id> --reason direct_correction
+```
+
+- **Read before acting.** When a task names a site, run `bsk site context` first and
+  follow what it already knows.
+- **Never explore to learn.** Record only what the task itself revealed; no extra
+  pages or detours to make memory "more complete".
+- **Learning never fails the task.** These commands are advisory: on failure report
+  one line and continue the user's goal. Do not retry or let it block the task.
+
+To leave memory behind for the task you are already doing, record your own run:
+
+```sh
+bsk record start --detach --url <start-url> --output ./rec --json   # prints session_id
+bsk observe --session <id>                                          # do the real task
+bsk fill @e4 --value "<text>" --session <id>
+bsk press Enter --session <id>
+bsk record stop --output ./rec                                      # exports trace.json
+bsk site workflow save --from ./rec/trace.json --id <id> --task <task-id>
+bsk site checkpoint --host <host> --task <task-id> --reason direct_correction
+```
+
+`--detach` returns once recording is armed, so the session accepts your commands;
+without it `record start` holds the session and every command returns `session_busy`.
+`record stop` also ends that session. Reusing a workflow needs no recording: read it,
+run it, then `workflow verify --pass`, which clears NEEDS REVIEW.
+
+`workflow save` writes into a per-task draft; `checkpoint` publishes it. Revisions are
+per host. A `conflict` result means another writer committed first: re-run
+`bsk site context`, which re-seeds the draft's `SITE.md` from the published revision
+(your draft edits are gone and must be replayed; staged workflows are kept), then
+checkpoint again. Retry a conflict only once. Recorded `fill` values become named
+parameters and are never stored; pass `--inline-values` only when the values belong
+to the flow, not to the person who recorded it. `<select>` option values are site
+constants and stay inline. Banking, SSO and password-manager hosts are refused.
 
 ## Startup problems
 

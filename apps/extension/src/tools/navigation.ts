@@ -200,6 +200,30 @@ interface LifecycleWait {
 export interface LifecycleWaitGuard {
   loaderId?: string | (() => string | null | undefined);
   beforeLoaderId?: string | null;
+  /**
+   * Accept `Page.navigatedWithinDocument` as the end of the wait. A history
+   * entry that only differs in its fragment reuses the current Document, so no
+   * loader is created and no lifecycle event will ever arrive.
+   */
+  acceptSameDocument?: boolean;
+}
+
+/** `lastLifecycle` value reported when a navigation stayed in one Document. */
+export const SAME_DOCUMENT_LIFECYCLE = "same_document";
+
+function fragmentlessUrl(url: string): string {
+  const hash = url.indexOf("#");
+  return hash < 0 ? url : url.slice(0, hash);
+}
+
+/**
+ * True when moving between these two history entries cannot create a Document:
+ * the URLs differ, but only after the `#`. Identical URLs stay out — a repeated
+ * entry can still be a real reload — so they keep the lifecycle wait.
+ */
+export function isSameDocumentHistoryHop(from?: string, to?: string): boolean {
+  if (!from || !to || from === to) return false;
+  return fragmentlessUrl(from) === fragmentlessUrl(to);
 }
 
 function currentLoaderId(guard: LifecycleWaitGuard | undefined): string {
@@ -330,6 +354,14 @@ function startLifecycleWait(
         (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
           if (settled) return;
           if (source.tabId !== expectedTabId) return;
+
+          if (guard?.acceptSameDocument && method === "Page.navigatedWithinDocument") {
+            const p = params as { frameId?: string };
+            if (!lifecycleEventMatchesFrame(p.frameId)) return;
+            noteRelevantLifecycle(SAME_DOCUMENT_LIFECYCLE);
+            finish({ reached: "match", lastLifecycle: SAME_DOCUMENT_LIFECYCLE });
+            return;
+          }
 
           if (targetName === "commit" && method === "Page.frameNavigated") {
             const p = params as { frame?: { id?: string; parentId?: string; loaderId?: string } };
@@ -728,6 +760,10 @@ async function handleHistory(
     const beforeFrame = await readMainFrameInfo(deps.cdp, target.tabId);
     const expected = cdpLifecycleName(waitUntil);
     const beforeReadyState = await probeMainFrameReadyState(deps.cdp, target.tabId);
+    // A fragment-only hop reuses the Document, so no loader is created and the
+    // lifecycle event never arrives. Accepting the same-document event as well
+    // keeps the lifecycle path available for an entry that does load after all.
+    const acceptSameDocument = isSameDocumentHistoryHop(previousUrl, targetEntry?.url);
     const waitAbort = linkedAbortSignal(deps.signal);
     const wait = startLifecycleWait(
       deps.cdp,
@@ -736,7 +772,10 @@ async function handleHistory(
       expected,
       timeoutMs,
       waitAbort.signal,
-      { beforeLoaderId: beforeFrame.loaderId },
+      {
+        beforeLoaderId: beforeFrame.loaderId,
+        ...(acceptSameDocument ? { acceptSameDocument: true } : {}),
+      },
     );
     const waitPromise = wait.promise;
     try {
@@ -759,7 +798,9 @@ async function handleHistory(
         tab_id: target.tabId,
         previous_url: previousUrl,
         final_url: finalUrl,
-        reached: waitUntil,
+        // Report what actually happened: a fragment hop never reaches `load`.
+        reached:
+          outcome.lastLifecycle === SAME_DOCUMENT_LIFECYCLE ? SAME_DOCUMENT_LIFECYCLE : waitUntil,
       });
     }
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
