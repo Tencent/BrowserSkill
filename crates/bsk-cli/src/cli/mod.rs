@@ -31,6 +31,7 @@ pub mod render_error;
 pub mod screenshot;
 pub mod scroll;
 pub mod session;
+pub mod site;
 pub mod snapshot;
 pub mod status;
 pub mod tab;
@@ -60,6 +61,7 @@ use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::scroll::ScrollToArgs;
 use crate::cli::session::SessionCmd;
+use crate::cli::site::SiteCmd;
 use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
@@ -225,6 +227,9 @@ pub enum Command {
 
     /// Record user actions into a semantic `trace.json` textbook for LLMs.
     Record(RecordCmd),
+
+    /// Read and write local per-host site memory (SITE.md, workflows, candidates).
+    Site(SiteCmd),
 }
 
 #[derive(Debug, Clone, Args, Default)]

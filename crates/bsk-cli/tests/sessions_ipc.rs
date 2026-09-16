@@ -1505,3 +1505,48 @@ async fn borrow_reports_unknown_outcome_when_cancel_cleanup_never_finishes() {
     drop(ws);
     handle.shutdown().await;
 }
+
+#[test]
+fn armed_recording_keeps_the_idle_reaper_away_until_cleared() {
+    use bsk::daemon::{
+        browsers::BrowserId,
+        sessions::{Session, SessionId, SessionRegistry},
+    };
+    use std::time::Instant;
+    let registry = SessionRegistry::new();
+    let owner = BrowserId("owner".into());
+    let recording = SessionId("recd".into());
+    let plain = SessionId("plan".into());
+    for id in [&recording, &plain] {
+        registry.insert(Session {
+            id: id.clone(),
+            browser_id: owner.clone(),
+            agent_window_id: Some(1),
+            created_at_ms: 0,
+            interaction: None,
+        });
+    }
+    assert!(registry.set_recording(&recording, true));
+    assert!(!registry.set_recording(&SessionId("nope".into()), true));
+    assert!(registry.is_recording(&recording));
+
+    let later = Instant::now() + Duration::from_secs(600);
+    let idle = registry.idle_ids_at(Duration::from_secs(300), later);
+    assert_eq!(
+        idle,
+        vec![plain.clone()],
+        "recording session must not be reaped"
+    );
+
+    assert!(registry.set_recording(&recording, false));
+    let mut idle = registry.idle_ids_at(Duration::from_secs(300), later);
+    idle.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(idle, vec![plain.clone(), recording.clone()]);
+
+    registry.set_recording(&recording, true);
+    registry.remove(&recording);
+    assert!(
+        !registry.is_recording(&recording),
+        "removal clears the flag"
+    );
+}

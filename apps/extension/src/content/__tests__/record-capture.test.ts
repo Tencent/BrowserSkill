@@ -1517,4 +1517,59 @@ describe("record-capture semantic", () => {
 
     expect(steps.map((s) => s.op)).toEqual(["click"]);
   });
+  it("records a click on a control whose page happens to contain a search box", () => {
+    // MediaWiki Vector ships `<body class="…skin-vector-search-vue…">`, which
+    // `closest('[class*="search"]')` used to match for every click on the page.
+    document.body.className = "skin-vector skin-vector-search-vue";
+    document.body.innerHTML = `
+      <form id="searchform"><input type="search" name="search" /></form>
+      <nav><button type="button" aria-label="\u9690\u85cf\u76ee\u5f55"><span>x</span></button></nav>
+    `;
+    const capture = startRecordCapture("rec-search-body", (step) => steps.push(step));
+    click(document.querySelector("span")!);
+    capture.dispose();
+    document.body.className = "";
+
+    expect(steps).toEqual([
+      expect.objectContaining({
+        op: "click",
+        target: expect.objectContaining({ name: "\u9690\u85cf\u76ee\u5f55" }),
+      }),
+    ]);
+  });
+
+  it("records a link click inside a form that also holds a search box", () => {
+    document.body.innerHTML = `
+      <form>
+        <input type="search" name="q" />
+        <a href="/help">Help</a>
+      </form>
+    `;
+    const capture = startRecordCapture("rec-search-form", (step) => steps.push(step));
+    click(document.querySelector("a")!);
+    capture.dispose();
+
+    expect(steps).toEqual([
+      expect.objectContaining({ op: "click", target: expect.objectContaining({ name: "Help" }) }),
+    ]);
+  });
+
+  it("still redirects a click on bare search chrome into a fill session", () => {
+    document.body.innerHTML = `
+      <div class="search-box">
+        <span class="icon"></span>
+        <input type="search" name="q" />
+      </div>
+    `;
+    const capture = startRecordCapture("rec-search-chrome", (step) => steps.push(step));
+    const icon = document.querySelector(".icon")!;
+    click(icon);
+    const input = document.querySelector("input")!;
+    input.value = "hello";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    capture.dispose();
+
+    expect(steps.map((s) => s.op)).toEqual(["fill"]);
+  });
 });

@@ -102,12 +102,56 @@ function fillableFromTarget(target: EventTarget | null): FillableElement | null 
   return null;
 }
 
+const SEARCH_CHROME_SELECTOR =
+  '[id*="chat-input"], [id*="search"], [class*="search"], form, [role="search"]';
+
+/**
+ * A control the user can name is its own step, so it must never be rewritten
+ * into "focus the search box next to it".
+ */
+const SEARCH_CHROME_CONTROL_SELECTOR = [
+  "a[href]",
+  "button",
+  "select",
+  "textarea",
+  "input",
+  "summary",
+  '[role="button"]',
+  '[role="link"]',
+  '[role="tab"]',
+  '[role="menuitem"]',
+  '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]',
+  '[role="checkbox"]',
+  '[role="radio"]',
+  '[role="switch"]',
+  '[role="option"]',
+].join(", ");
+
+/**
+ * Search chrome is a small wrapper drawn around the input, so only a handful of
+ * ancestors may claim a click. Without the bound, `closest` happily returns a
+ * page-level node — MediaWiki Vector renders `<body class="…search-vue…">`, and
+ * a site-wide `<form>` is just as common — and every click on the page would be
+ * swallowed into a fill session on whatever search box the page happens to have.
+ */
+const SEARCH_CHROME_MAX_DEPTH = 4;
+
+function isSearchChromeWrapper(container: Element, target: Element): boolean {
+  if (container === document.body || container === document.documentElement) return false;
+  let node: Element | null = target;
+  for (let depth = 0; node && depth <= SEARCH_CHROME_MAX_DEPTH; depth += 1) {
+    if (node === container) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
 /** Clicks on search chrome that only focus the nearby input should not become steps. */
 function nearbyFillableFromSearchChrome(target: Element): FillableElement | null {
-  const container = target.closest(
-    '[id*="chat-input"], [id*="search"], [class*="search"], form, [role="search"]',
-  );
-  if (!container) return null;
+  if (target.closest(SEARCH_CHROME_CONTROL_SELECTOR)) return null;
+  const container = target.closest(SEARCH_CHROME_SELECTOR);
+  if (!container || !isSearchChromeWrapper(container, target)) return null;
   const fillable = container.querySelector(
     'textarea, input[type="search"], input[name="q"], #chat-textarea',
   );

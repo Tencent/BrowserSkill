@@ -173,6 +173,11 @@ function makeFakeCdp(opts?: {
       const payload = { name, frameId, loaderId };
       for (const listener of [...events]) listener({ tabId: 4 }, "Page.lifecycleEvent", payload);
     },
+    fireNavigatedWithinDocument(frameId = opts?.navigateFrameId ?? "frame-1", url = "#anchor") {
+      for (const listener of [...events]) {
+        listener({ tabId: 4 }, "Page.navigatedWithinDocument", { frameId, url });
+      }
+    },
     fireFrameNavigated(
       frameId = opts?.navigateFrameId ?? "frame-1",
       loaderId = opts?.navigateLoaderId ?? "loader-after",
@@ -520,6 +525,54 @@ describe("handleNavigateBack / Forward", () => {
     const navigateCall = fake.sent.find((c) => c.method === "Page.navigateToHistoryEntry");
     expect(navigateCall?.params).toEqual({ entryId: 11 });
     expect(res.previous_url).toBe("https://b.example/");
+  });
+
+  it("finishes a fragment-only back hop on the same-document event", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex: 1,
+      historyEntries: [
+        { id: 11, url: "https://a.example/page" },
+        { id: 12, url: "https://a.example/page#section" },
+      ],
+    });
+    const navP = handleNavigateBack(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 1_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    // No new Document, so no lifecycle event will ever arrive for this hop.
+    fake.fireNavigatedWithinDocument();
+    const res = await navP;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("same_document");
+    expect(res.error_text).toBeUndefined();
+  });
+
+  it("keeps waiting for load when the history hop changes more than the fragment", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({
+      historyIndex: 1,
+      historyEntries: [
+        { id: 11, url: "https://a.example/" },
+        { id: 12, url: "https://b.example/#x" },
+      ],
+    });
+    const navP = handleNavigateBack(
+      sm,
+      { session_id: "aa11", wait_until: "load", timeout_ms: 1_000 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    fake.fireNavigatedWithinDocument();
+    await new Promise((r) => setTimeout(r, 5));
+    fake.fireLifecycle("load");
+    const res = await navP;
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.reached).toBe("load");
   });
 
   it("returns invalid_params when there is no previous history", async () => {

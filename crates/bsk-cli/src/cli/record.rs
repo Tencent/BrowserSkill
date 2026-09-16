@@ -13,14 +13,14 @@ use clap::{Args, Subcommand};
 
 use crate::cli::TOOL_IPC_TIMEOUT;
 
-mod export;
+pub(crate) mod export;
 
 use crate::cli::business_rpc;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::record_recovery;
 use crate::cli::record_state;
-use crate::cli::session::{SessionStartOptions, start_session, stop_session};
+use crate::cli::session::{SessionStartOptions, StopReply, start_session, stop_session};
 use export::{
     ExportMeta, export_with_recovery, states_dir_for_output, trace_json_path,
     validate_record_output,
@@ -78,6 +78,14 @@ pub struct RecordStartArgs {
     /// Writes `<dir>/trace.json` and `<dir>/states/*.txt`.
     #[arg(long, default_value = "trace")]
     pub output: PathBuf,
+
+    /// Return as soon as recording is armed instead of blocking until the
+    /// user clicks 结束. Prints the session id so the *agent* can drive the
+    /// recorded flow itself (`bsk observe/fill/click --session <id>`); the
+    /// per-session busy gate stays free because nothing holds `record_await`.
+    /// Finish with `bsk record stop --output <dir>`.
+    #[arg(long)]
+    pub detach: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -138,6 +146,19 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
         return Err(CliError::Local(err));
     }
 
+    if args.detach {
+        // Detached: no `record_await`, so the session's serial busy lock stays
+        // free and the agent's own observe/act calls are accepted. The session
+        // and the record state outlive this process; `record stop` closes both.
+        render_detached(
+            &session.session_id,
+            start_result.tab_id,
+            &args.output,
+            format,
+        )?;
+        return Ok(());
+    }
+
     if format == Format::Human {
         println!(
             "recording on tab={} — click 结束 in the browser when done",
@@ -170,7 +191,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     record_state::clear();
 
     run_result?;
-    session_stop_result?;
+    tolerate_concurrent_session_stop(session_stop_result)?;
     Ok(())
 }
 
@@ -184,25 +205,45 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         let params = RecordStopParams {
             session_id: session_id.clone(),
         };
-        let result = business_rpc::call::<RecordStopParams, RecordStopResult>(
+        let stop = business_rpc::call::<RecordStopParams, RecordStopResult>(
             info.sock_path.clone(),
             "record-stop",
             Method::ToolRecordStop,
             Some(params),
             TOOL_IPC_TIMEOUT,
-        )?;
+        );
 
-        let run_result: Result<(), CliError> = (|| {
-            let exported = export_with_recovery(&args.output, &result.trace)?;
-            render_stop(&result, &args.output, &exported, format)
-        })();
+        match stop {
+            Ok(result) => {
+                let run_result: Result<(), CliError> = (|| {
+                    let exported = export_with_recovery(&args.output, &result.trace)?;
+                    render_stop(&result, &args.output, &exported, format)
+                })();
 
-        let session_stop_result = stop_session(info.sock_path, &session_id);
-        record_state::clear();
+                let session_stop_result = stop_session(info.sock_path, &session_id);
+                record_state::clear();
 
-        run_result?;
-        session_stop_result?;
-        return Ok(());
+                run_result?;
+                tolerate_concurrent_session_stop(session_stop_result)?;
+                return Ok(());
+            }
+            // The recording session is gone: the process that armed it died, or
+            // the daemon reaped it as idle. `--detach` makes that reachable, so
+            // clear the state file rather than wedging every later `record
+            // start` behind "a recording is already in progress", then fall
+            // through to whatever the recovery file still holds.
+            Err(err) if is_recording_session_gone(&err) => {
+                record_state::clear();
+                if !record_recovery::exists() {
+                    return Err(CliError::Local(anyhow::anyhow!(
+                        "recording session {session_id} is no longer active, so nothing could be \
+                         exported. The stale record state is cleared; `bsk record start` works \
+                         again."
+                    )));
+                }
+            }
+            Err(err) => return Err(err),
+        }
     }
 
     let Some(trace) = record_recovery::load().map_err(CliError::Local)? else {
@@ -270,6 +311,88 @@ fn prepare_record_start(output: &Path) -> Result<(), CliError> {
         )));
     }
     validate_record_output(output)
+}
+
+/// Message the daemon returns when another `session.stop` is already running
+/// for this session. See `StopSessionError::Stopping` in `daemon/sessions.rs`.
+const SESSION_STOP_IN_PROGRESS: &str = "session stop is already in progress";
+
+/// A losing race against a concurrent `session.stop` is not a recording failure.
+///
+/// `record stop` and a blocked `record start` both tear the session down when
+/// the recording ends. Whoever arrives second gets
+/// `StopSessionError::Stopping`, which used to bubble up through
+/// `session_stop_result?` and fail the command with exit 4 — *after* the trace
+/// was already written and the window was already closing. Downgrade exactly
+/// that message to a warning; every other stop failure still fails the command.
+fn tolerate_concurrent_session_stop(result: Result<StopReply, CliError>) -> Result<(), CliError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(err) if is_concurrent_session_stop(&err) => {
+            eprintln!(
+                "warning: {SESSION_STOP_IN_PROGRESS}; the trace is already written and the \
+                 window is closing"
+            );
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether `tool.record_stop` failed because the session itself is gone.
+fn is_recording_session_gone(err: &CliError) -> bool {
+    matches!(err.code(), Some(ErrorCode::NotFound))
+}
+
+fn is_concurrent_session_stop(err: &CliError) -> bool {
+    match err {
+        CliError::Rpc { code, message, .. } | CliError::Rendered { code, message } => {
+            *code == ErrorCode::Timeout && message.contains(SESSION_STOP_IN_PROGRESS)
+        }
+        _ => false,
+    }
+}
+
+/// The `--json` shape of a detached `record start`.
+fn detached_payload(session_id: &str, tab_id: i64, output: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "detached": true,
+        "session_id": session_id,
+        "tab_id": tab_id,
+        "output": output,
+        "trace_json": trace_json_path(output),
+    })
+}
+
+/// Print what a detached `record start` hands back to its caller.
+///
+/// The session id is the whole point: the agent passes it to `--session` on
+/// every following command, and to `record stop` implicitly via the record
+/// state file.
+fn render_detached(
+    session_id: &str,
+    tab_id: i64,
+    output: &Path,
+    format: Format,
+) -> Result<(), CliError> {
+    match format {
+        Format::Json => {
+            let payload = detached_payload(session_id, tab_id, output);
+            println!(
+                "{}",
+                serde_json::to_string(&payload).map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+            );
+        }
+        Format::Human => {
+            println!("recording detached on tab={tab_id}");
+            println!("session: {session_id}");
+            println!(
+                "run the task with `--session {session_id}`, then `bsk record stop --output {}`",
+                output.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn record_await_ipc_timeout(timeout_ms: u32) -> Duration {
@@ -426,6 +549,7 @@ mod tests {
             max_page_tokens: None,
             redact_values: false,
             output: PathBuf::from("trace"),
+            detach: false,
         };
         assert_eq!(args.output, PathBuf::from("trace"));
     }
@@ -434,6 +558,85 @@ mod tests {
     fn record_await_ipc_timeout_covers_long_wait() {
         let got = record_await_ipc_timeout(RECORD_AWAIT_TIMEOUT_MS);
         assert!(got >= Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn concurrent_session_stop_is_downgraded_to_a_warning() {
+        let err = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::Timeout,
+            message: SESSION_STOP_IN_PROGRESS.into(),
+            data: None,
+        });
+        assert!(is_concurrent_session_stop(&err));
+        tolerate_concurrent_session_stop(Err(err))
+            .expect("a losing stop race must not fail the export");
+    }
+
+    #[test]
+    fn other_session_stop_failures_still_fail() {
+        let err = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::Timeout,
+            message: "session stop timed out waiting for extension".into(),
+            data: None,
+        });
+        assert!(!is_concurrent_session_stop(&err));
+        assert!(tolerate_concurrent_session_stop(Err(err)).is_err());
+
+        let other_code = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::NotFound,
+            message: SESSION_STOP_IN_PROGRESS.into(),
+            data: None,
+        });
+        assert!(!is_concurrent_session_stop(&other_code));
+    }
+
+    #[test]
+    fn a_vanished_recording_session_is_recognised() {
+        // `--detach` outlives the process that armed it, so `record stop` can
+        // meet a session the daemon already reaped. That must clear the state
+        // file, not wedge every later `record start`.
+        let gone = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::NotFound,
+            message: "session is not registered".into(),
+            data: None,
+        });
+        assert!(is_recording_session_gone(&gone));
+
+        let other = CliError::from_rpc(bsk_protocol::RpcError {
+            code: ErrorCode::CdpFailed,
+            message: "extension rejected tool.record_stop".into(),
+            data: None,
+        });
+        assert!(!is_recording_session_gone(&other));
+    }
+
+    #[test]
+    fn detached_json_reports_session_and_tab() {
+        // The agent reads `session_id` out of this payload and passes it to
+        // every following command, so the field must stay in `--json`.
+        let payload = detached_payload("abcd", 7, Path::new("rec"));
+        assert_eq!(payload["detached"], true);
+        assert_eq!(payload["session_id"], "abcd");
+        assert_eq!(payload["tab_id"], 7);
+        assert_eq!(
+            payload["trace_json"],
+            serde_json::json!(trace_json_path(Path::new("rec")))
+        );
+    }
+
+    #[test]
+    fn detach_defaults_to_blocking() {
+        let args = RecordStartArgs {
+            browser: None,
+            tab_id: None,
+            url: None,
+            purpose: None,
+            max_page_tokens: None,
+            redact_values: false,
+            output: PathBuf::from("trace"),
+            detach: false,
+        };
+        assert!(!args.detach, "the blocking path stays the default");
     }
 
     #[test]

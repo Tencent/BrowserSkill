@@ -75,17 +75,59 @@ fn prepare_home(home: &Path) -> Result<()> {
 }
 
 fn ensure_run_dir(home: &Path) -> Result<()> {
-    let run = home.join("run");
-    if !run.exists() {
-        std::fs::create_dir_all(&run).with_context(|| format!("create {}", run.display()))?;
+    ensure_private_dir(&home.join("run"))
+}
+
+/// Create `dir` (and parents) if missing and tighten it to 0700 on Unix.
+///
+/// Shared by every BSK_HOME subtree that may hold user-derived data
+/// (`run/`, `sites/`) so they all carry the same permission promise as the
+/// home itself.
+///
+/// Every level this call brings into existence is created and chmodded
+/// individually rather than through `create_dir_all`, which would leave the
+/// intermediate levels at the process umask: `sites/.drafts/<task>/<host>`
+/// used to end up with a world-readable `.drafts/` and `.drafts/<task>/`,
+/// letting any other account on the machine enumerate task ids. Directories
+/// that already existed keep their own permissions except for `dir` itself.
+pub fn ensure_private_dir(dir: &Path) -> Result<()> {
+    if !dir.exists() {
+        let mut missing: Vec<&Path> = Vec::new();
+        let mut cursor = Some(dir);
+        while let Some(path) = cursor {
+            if path.as_os_str().is_empty() || path.exists() {
+                break;
+            }
+            missing.push(path);
+            cursor = path.parent();
+        }
+        for path in missing.into_iter().rev() {
+            match std::fs::create_dir(path) {
+                Ok(()) => {}
+                // A concurrent agent may have created the same level first.
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    return Err(
+                        anyhow::Error::from(err).context(format!("create {}", path.display()))
+                    );
+                }
+            }
+            set_private_mode(path)?;
+        }
     }
+    set_private_mode(dir)
+}
+
+fn set_private_mode(dir: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&run, perms)
-            .with_context(|| format!("chmod 0700 {}", run.display()))?;
+        std::fs::set_permissions(dir, perms)
+            .with_context(|| format!("chmod 0700 {}", dir.display()))?;
     }
+    #[cfg(not(unix))]
+    let _ = dir;
     Ok(())
 }
 
@@ -126,6 +168,36 @@ pub fn record_session_path() -> Result<PathBuf> {
 /// recording the extension already returned.
 pub fn record_recovery_path() -> Result<PathBuf> {
     Ok(bsk_home()?.join("record-recovery.json"))
+}
+
+/// Root of the local site-memory tree (`$BSK_HOME/sites`).
+///
+/// Holds the same kind of user-derived data as `audit/`, so it inherits the
+/// 0700 directory promise from [`ensure_private_dir`].
+pub fn sites_root() -> Result<PathBuf> {
+    Ok(bsk_home()?.join("sites"))
+}
+
+/// Ensure the site-memory root exists with restrictive permissions.
+pub fn ensure_sites_root() -> Result<PathBuf> {
+    let home = ensure_bsk_home()?;
+    let root = home.join("sites");
+    ensure_private_dir(&root)?;
+    Ok(root)
+}
+
+/// Active memory directory for one already-normalised host (design §5).
+///
+/// `host` must be a single safe path segment; callers go through
+/// `cli::site::store::normalize_host`, which guarantees that. The directory is
+/// not created here.
+pub fn site_dir(host: &str) -> Result<PathBuf> {
+    Ok(sites_root()?.join(host))
+}
+
+/// Draft root for one task (design §5). Not created here.
+pub fn drafts_dir(task: &str) -> Result<PathBuf> {
+    Ok(sites_root()?.join(".drafts").join(task))
 }
 
 /// Windows named-pipe name. Include the resolved `BSK_HOME` path in the
@@ -203,6 +275,21 @@ mod tests {
     }
 
     #[test]
+    fn ensure_sites_root_creates_private_directory() {
+        with_temp_home(|_| {
+            let root = ensure_sites_root().unwrap();
+            assert!(root.is_dir());
+            assert_eq!(root, sites_root().unwrap());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700);
+            }
+        });
+    }
+
+    #[test]
     fn computes_expected_paths() {
         with_temp_home(|_| {
             let home = ensure_bsk_home().unwrap();
@@ -218,6 +305,15 @@ mod tests {
             assert_eq!(
                 record_recovery_path().unwrap(),
                 home.join("record-recovery.json")
+            );
+            assert_eq!(sites_root().unwrap(), home.join("sites"));
+            assert_eq!(
+                site_dir("corp.example").unwrap(),
+                home.join("sites").join("corp.example")
+            );
+            assert_eq!(
+                drafts_dir("t1").unwrap(),
+                home.join("sites").join(".drafts").join("t1")
             );
         });
     }

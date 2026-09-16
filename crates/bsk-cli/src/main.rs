@@ -108,6 +108,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::WaitMs(args) => cli::waits::dispatch_wait_ms(args, format),
         Command::RequestHelp(args) => cli::human_loop::dispatch(args, format),
         Command::Record(cmd) => cli::record::dispatch(cmd, format),
+        Command::Site(cmd) => cli::site::dispatch(cmd, format),
     }
 }
 

@@ -3,7 +3,7 @@
 //! `bsk session stop`, `bsk session list` and the matching
 //! `tool.session_start` / `tool.session_stop` round-trips.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -73,6 +73,10 @@ pub struct SessionRegistry {
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
     last_activity: Mutex<HashMap<SessionId, Instant>>,
+    /// Sessions with an armed recording. A detached `record start` leaves
+    /// no inflight tool behind, so the idle reaper must skip these
+    /// explicitly or a long agent pause silently discards the recording.
+    recording: Mutex<HashSet<SessionId>>,
 }
 
 impl SessionRegistry {
@@ -198,6 +202,10 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .remove(session_id);
+        self.recording
+            .lock()
+            .expect("session recording registry poisoned")
+            .remove(session_id);
     }
 
     pub fn remove(&self, id: &SessionId) -> Option<Session> {
@@ -209,6 +217,10 @@ impl SessionRegistry {
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
+            .remove(id);
+        self.recording
+            .lock()
+            .expect("session recording registry poisoned")
             .remove(id);
         if removed.is_some()
             && let Some(audit) = &self.audit
@@ -256,20 +268,57 @@ impl SessionRegistry {
         true
     }
 
+    /// Mark or clear an armed recording on a live session. Returns false
+    /// when the session is unknown.
+    pub fn set_recording(&self, id: &SessionId, recording: bool) -> bool {
+        if !self
+            .inner
+            .lock()
+            .expect("session registry poisoned")
+            .contains_key(id)
+        {
+            return false;
+        }
+        let mut guard = self
+            .recording
+            .lock()
+            .expect("session recording registry poisoned");
+        if recording {
+            guard.insert(id.clone());
+        } else {
+            guard.remove(id);
+        }
+        true
+    }
+
+    pub fn is_recording(&self, id: &SessionId) -> bool {
+        self.recording
+            .lock()
+            .expect("session recording registry poisoned")
+            .contains(id)
+    }
+
     /// Return sessions whose last tool activity is at least `idle_for`
-    /// old. The caller supplies `now` to keep boundary tests deterministic.
+    /// old. Sessions with an armed recording are never reported: their
+    /// idleness is the user (or a paused agent) thinking, not abandonment.
+    /// The caller supplies `now` to keep boundary tests deterministic.
     pub fn idle_ids_at(&self, idle_for: Duration, now: Instant) -> Vec<SessionId> {
         let sessions = self.inner.lock().expect("session registry poisoned");
         let activity = self
             .last_activity
             .lock()
             .expect("session activity registry poisoned");
+        let recording = self
+            .recording
+            .lock()
+            .expect("session recording registry poisoned");
         sessions
             .values()
             .filter(|session| {
-                activity
-                    .get(&session.id)
-                    .is_some_and(|last| now.saturating_duration_since(*last) >= idle_for)
+                !recording.contains(&session.id)
+                    && activity
+                        .get(&session.id)
+                        .is_some_and(|last| now.saturating_duration_since(*last) >= idle_for)
             })
             .map(|session| session.id.clone())
             .collect()
@@ -290,9 +339,15 @@ impl SessionRegistry {
             .last_activity
             .lock()
             .expect("session activity registry poisoned");
+        let mut recording = self
+            .recording
+            .lock()
+            .expect("session recording registry poisoned");
         for session in &drained {
             activity.remove(&session.id);
+            recording.remove(&session.id);
         }
+        drop(recording);
         drop(activity);
         drop(guard);
         if let Some(audit) = &self.audit {

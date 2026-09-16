@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RecordFramePortMessage } from "@/lib/recording/frame-bridge";
 import { RECORD_FRAME_START } from "@/lib/recording/frame-bridge";
 import { RECORD_DOCUMENT_ATTRIBUTE } from "@/shared/recording-document-identity";
-import { RecordFrameAgent } from "../recording/frame-agent";
+import { attachRecordFrameAgent, RecordFrameAgent } from "../recording/frame-agent";
+
+/** happy-dom's PageTransitionEvent drops `persisted`, so set it directly. */
+function pageShowEvent(persisted: boolean): Event {
+  const event = new Event("pageshow");
+  Object.defineProperty(event, "persisted", { value: persisted });
+  return event;
+}
 
 class PortListeners<T extends (...args: never[]) => unknown> {
   readonly values = new Set<T>();
@@ -37,6 +44,7 @@ function portHarness() {
   return {
     port,
     outbound,
+    disconnectListeners: onDisconnect.values,
     receive(message: RecordFramePortMessage) {
       for (const listener of onMessage.values) listener(message);
     },
@@ -120,5 +128,55 @@ describe("RecordFrameAgent", () => {
     );
     expect(sendMessage).toHaveBeenCalledTimes(3);
     expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(false);
+  });
+  it("re-arms the restored Document after a back/forward-cache pageshow", async () => {
+    const harness = portHarness();
+    const connect = vi.fn(() => harness.port);
+    const sendMessage = vi.fn(async (message: { type?: string }) =>
+      message.type === "bsk-record-frame-query"
+        ? { active: true, requestId: "rec-bfcache", startedAtMs: 10 }
+        : undefined,
+    );
+    vi.stubGlobal("chrome", {
+      runtime: { connect, sendMessage, onMessage: new PortListeners() },
+    });
+
+    const dispose = attachRecordFrameAgent();
+    await vi.waitFor(() =>
+      expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(true),
+    );
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    // Entering the cache drops the port, which tears capture down here.
+    for (const listener of harness.disconnectListeners) listener();
+    expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(false);
+
+    window.dispatchEvent(pageShowEvent(true));
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(2));
+    expect(document.documentElement.hasAttribute(RECORD_DOCUMENT_ATTRIBUTE)).toBe(true);
+
+    dispose();
+  });
+
+  it("ignores a pageshow that is not a cache restore", async () => {
+    const harness = portHarness();
+    const connect = vi.fn(() => harness.port);
+    const sendMessage = vi.fn(async () => ({
+      active: true,
+      requestId: "rec-plain",
+      startedAtMs: 10,
+    }));
+    vi.stubGlobal("chrome", {
+      runtime: { connect, sendMessage, onMessage: new PortListeners() },
+    });
+
+    const dispose = attachRecordFrameAgent();
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(pageShowEvent(false));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(connect).toHaveBeenCalledTimes(1);
+
+    dispose();
   });
 });

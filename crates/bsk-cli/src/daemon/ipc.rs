@@ -472,6 +472,17 @@ async fn handle_tool_dispatch(
             .await
     };
     drop(inflight_guard);
+    // Keep the idle reaper away from a session whose recording is armed
+    // (detached `record start` has no inflight command to protect it).
+    match (&method, &outcome) {
+        (Method::ToolRecordStart, Ok(_)) => {
+            state.sessions.set_recording(&session_id, true);
+        }
+        (Method::ToolRecordStop | Method::ToolRecordAwait, _) => {
+            state.sessions.set_recording(&session_id, false);
+        }
+        _ => {}
+    }
     match outcome {
         Ok(v) if method == Method::ToolDownload => {
             let id = download_transfer_id.expect("download transfer allocated");
