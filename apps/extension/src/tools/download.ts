@@ -4,6 +4,7 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { DownloadParams, DownloadResult, RpcError } from "@/transport/types";
 import { captureBrowserDownload, chromeDownloadsApi, type DownloadsApi } from "./download-capture";
+import { resolveDownloadTriggerUrl } from "./download-trigger-intent";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
@@ -35,6 +36,7 @@ export async function handleDownload(
     const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
+    const expectedUrl = await resolveDownloadTriggerUrl(deps.cdp, address);
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
       target: address.cdpTarget,
@@ -44,6 +46,7 @@ export async function handleDownload(
       timeoutMs: params.timeout_ms ?? 120_000,
       signal: deps.signal,
       expectedFrameId: address.frameId,
+      expectedUrl,
       trigger: () => clickResolvedTarget(ctx, address, {}, deps),
     });
     if (isRpcError(capture)) return capture;

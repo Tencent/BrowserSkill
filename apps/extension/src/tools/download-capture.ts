@@ -54,6 +54,7 @@ export interface DownloadCaptureOptions {
   maxByteSize?: number;
   timeoutMs: number;
   signal?: AbortSignal;
+  expectedUrl?: string;
   trigger(): Promise<ClickResult | RpcError>;
 }
 
@@ -64,7 +65,8 @@ export interface DownloadCaptureResult {
 
 interface DownloadIntent {
   url: string;
-  suggestedFilename: string;
+  cdpUrl?: string;
+  suggestedFilename?: string;
   frameId?: string;
 }
 
@@ -85,8 +87,13 @@ function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpT
 }
 
 function matchesIntent(item: chrome.downloads.DownloadItem, intent: DownloadIntent): boolean {
-  const urlMatches = item.url === intent.url || item.finalUrl === intent.url;
-  return urlMatches && safeBasename(item.filename) === safeBasename(intent.suggestedFilename);
+  const urls = [intent.url, intent.cdpUrl].filter((url): url is string => Boolean(url));
+  const urlMatches = urls.some((url) => item.url === url || item.finalUrl === url);
+  return (
+    urlMatches &&
+    (!intent.suggestedFilename ||
+      safeBasename(item.filename) === safeBasename(intent.suggestedFilename))
+  );
 }
 
 function knownSize(item: chrome.downloads.DownloadItem): number | undefined {
@@ -137,7 +144,10 @@ export async function captureBrowserDownload(
   options: DownloadCaptureOptions,
 ): Promise<DownloadCaptureResult | RpcError> {
   let click: ClickResult | undefined;
-  let intent: DownloadIntent | undefined;
+  let intent: DownloadIntent | undefined = options.expectedUrl
+    ? { url: options.expectedUrl }
+    : undefined;
+  let cdpIntentSeen = false;
   let capturedId: number | undefined;
   let settled = false;
   let succeeded = false;
@@ -199,7 +209,9 @@ export async function captureBrowserDownload(
     clearTimeout(candidate.graceTimer);
     capturedId = candidate.item.id;
     candidate.suggest({
-      filename: `${options.browserRelativeDir}/${safeBasename(intent.suggestedFilename)}`,
+      filename: `${options.browserRelativeDir}/${safeBasename(
+        intent.suggestedFilename ?? candidate.item.filename,
+      )}`,
       conflictAction: "overwrite",
     });
     const size = knownSize(candidate.item);
@@ -278,12 +290,14 @@ export async function captureBrowserDownload(
       fail(new Error("download originated from a different frame"));
       return;
     }
-    if (intent) {
+    if (cdpIntentSeen) {
       fail(new Error("download trigger produced more than one browser download intent"));
       return;
     }
+    cdpIntentSeen = true;
     intent = {
-      url: event.url,
+      url: intent?.url ?? event.url,
+      ...(intent ? { cdpUrl: event.url } : {}),
       suggestedFilename: event.suggestedFilename,
       ...(typeof event.frameId === "string" ? { frameId: event.frameId } : {}),
     };
@@ -319,7 +333,7 @@ export async function captureBrowserDownload(
     if (isRpcError(triggered)) {
       void completion.catch(() => undefined);
       const effect: TransferEffectState =
-        capturedId !== undefined ? "committed" : intent ? "unknown" : "none";
+        capturedId !== undefined ? "committed" : cdpIntentSeen ? "unknown" : "none";
       failureResult = {
         ...triggered,
         data: { ...triggered.data, effect_state: effect, phase: "trigger" },
