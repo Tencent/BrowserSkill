@@ -1,9 +1,16 @@
 # Extension localization
 
-The extension ships English (`en-US`), Simplified Chinese (`zh-CN`) and Korean
-(`ko-KR`) in the `common` and `extension` namespaces. These resources cover the
-popup, page overlays and extension notifications; they do not translate CLI
-output or extension store metadata.
+The extension ships English (`en-US`), Simplified Chinese (`zh-CN`),
+Traditional Chinese (`zh-TW`), Korean (`ko-KR`), Japanese (`ja-JP`), French
+(`fr-FR`), Italian (`it-IT`), Spanish (`es-ES`), German (`de-DE`) and
+Brazilian Portuguese (`pt-BR`) in the `common` and `extension` namespaces.
+These resources cover the popup, page overlays and extension notifications;
+they do not translate CLI output or extension store metadata.
+
+Locale resources are registered automatically: dropping a
+`src/locales/<locale>/{common,extension}.json` pair in place is enough for
+`i18n.ts` to pick it up (see `i18n.ts`'s `import.meta.glob` scan) — no code
+change is required to ship a new language.
 
 ## Language selection
 
