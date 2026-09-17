@@ -4,6 +4,7 @@
 import type { SessionManager } from "@/session-manager/manager";
 import type { DownloadParams, DownloadResult, RpcError } from "@/transport/types";
 import { captureBrowserDownload, chromeDownloadsApi, type DownloadsApi } from "./download-capture";
+import { resolveDownloadTriggerUrl } from "./download-trigger-intent";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
@@ -35,6 +36,7 @@ export async function handleDownload(
     const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
+    const expectedUrl = await resolveDownloadTriggerUrl(deps.cdp, address);
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
       target: address.cdpTarget,
@@ -44,14 +46,15 @@ export async function handleDownload(
       timeoutMs: params.timeout_ms ?? 120_000,
       signal: deps.signal,
       expectedFrameId: address.frameId,
-      trigger: () => clickResolvedTarget(ctx, address, {}, deps),
+      expectedUrl,
+      trigger: (observer) => clickResolvedTarget(ctx, address, {}, deps, undefined, observer),
     });
     if (isRpcError(capture)) return capture;
-    const { click, item } = capture;
+    const { item } = capture;
     return {
       tab_id: target.tabId,
-      used_ref: click.used_ref,
-      used_selector: click.used_selector,
+      used_ref: address.usedRef,
+      used_selector: address.usedSelector,
       suggested_filename: item.filename.split(/[\\/]/).pop() ?? "download",
       byte_size: item.fileSize >= 0 ? item.fileSize : item.totalBytes,
       mime: item.mime || undefined,
