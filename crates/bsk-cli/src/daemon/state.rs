@@ -56,6 +56,11 @@ pub struct DaemonState {
     /// Operation-scoped local file staging. The extension only sees paths
     /// minted here; agent-facing RPCs use opaque transfer ids.
     pub transfers: Arc<TransferRegistry>,
+    /// Pins the local WS server to the extension origin that first connects,
+    /// so any other browser extension shaped like an extension origin (see
+    /// `ws::origin_allowed`) can't also drive the daemon. See
+    /// `extension_pin` module docs.
+    pub extension_pin: Arc<super::extension_pin::ExtensionPinStore>,
 }
 
 impl DaemonState {
@@ -76,6 +81,9 @@ impl DaemonState {
         let abort_registry = Arc::new(AbortRegistry::new());
         let session_interrupts = Arc::new(SessionInterruptRegistry::new());
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
+        let extension_pin = Arc::new(super::extension_pin::ExtensionPinStore::new(
+            super::paths::bsk_home().ok(),
+        ));
         Self {
             audit,
             config,
@@ -86,6 +94,7 @@ impl DaemonState {
             tool_inflight,
             session_interrupts,
             transfers,
+            extension_pin,
         }
     }
 }
