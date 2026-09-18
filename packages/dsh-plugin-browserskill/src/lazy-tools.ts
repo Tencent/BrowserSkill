@@ -133,8 +133,23 @@ export function armLazyTools(ctx: Context, registerSuite: () => () => void): () 
 
   // Live gesture/append feed: covers /browser-skill user gestures (no tool
   // call happens on that path) landing as skill-invocation messages.
-  const onSessionEvent = (_session: SessionLike, event: SessionEventLike): void => {
-    if (isSkillInvocationMessage(event?.data)) ensureSuite();
+  const onSessionEvent = (session: SessionLike, event: SessionEventLike): void => {
+    if (suiteDisposer !== undefined) return;
+    if (isSkillInvocationMessage(event?.data)) {
+      ensureSuite();
+      return;
+    }
+    // Reload recovery. The history scan below runs once, when the plugin is
+    // applied, and it covers neither of the reload cases: a session that
+    // already exists never emits `session/created`, and `ctx.get("sessions")`
+    // yields nothing when the sessions service is registered after this
+    // plugin. The suite then stays hidden until the model happens to invoke
+    // the skill again, which surfaces as `unknown tool "browser_session"`.
+    //
+    // The session is already in hand on every event, so let any later event
+    // re-derive the reveal from durable history. Guarded above, so this scans
+    // only while still hidden.
+    if (session !== undefined && session !== null) scanSession(session);
   };
   disposers.push(ctx.on("session/event" as never, onSessionEvent as never));
 

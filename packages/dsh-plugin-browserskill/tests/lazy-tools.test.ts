@@ -135,6 +135,65 @@ describe("armLazyTools", () => {
     expect(missRegister).not.toHaveBeenCalled();
   });
 
+  it("re-arms from history on a later event when the boot scan could not see the session", () => {
+    const hitEvents = [
+      {
+        type: "tool/call",
+        data: { callId: "c1", name: "skill", arguments: '{"name":"browser-skill"}' },
+      },
+      { type: "tool/result", data: { message: { callId: "c1", isError: false } } },
+    ];
+    // After a plugin reload the sessions service may not be registered yet, so
+    // ctx.get("sessions") yields nothing and the boot scan covers nothing; the
+    // session already exists, so session/created never fires for it either.
+    const { ctx, listeners } = fakeEventCtx();
+    const registerSuite = vi.fn(() => () => {});
+    armLazyTools(ctx, registerSuite);
+    expect(registerSuite).not.toHaveBeenCalled();
+
+    // An ordinary event carrying no invocation of its own still hands over the
+    // session, whose durable history proves the skill already ran.
+    callListeners(listeners, "session/event", { events: hitEvents }, { type: "message/append" });
+    expect(registerSuite).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reveal from an event whose session has no proof", () => {
+    const { ctx, listeners } = fakeEventCtx();
+    const registerSuite = vi.fn(() => () => {});
+    armLazyTools(ctx, registerSuite);
+    callListeners(
+      listeners,
+      "session/event",
+      { events: [{ type: "message/append", data: {} }] },
+      { type: "message/append" },
+    );
+    expect(registerSuite).not.toHaveBeenCalled();
+  });
+
+  it("stops scanning session history once the suite is revealed", () => {
+    const { ctx, listeners } = fakeEventCtx();
+    const registerSuite = vi.fn(() => () => {});
+    armLazyTools(ctx, registerSuite);
+    callListeners(
+      listeners,
+      "tools/result",
+      { name: "skill", arguments: { name: "browser-skill" } },
+      { isError: false },
+    );
+    expect(registerSuite).toHaveBeenCalledTimes(1);
+
+    // Events arrive constantly; re-deriving from history on each one after the
+    // reveal would be pure waste. A session that would throw if read proves
+    // the history is not touched again.
+    const exploding = {
+      get events(): never {
+        throw new Error("session history must not be read after the reveal");
+      },
+    };
+    callListeners(listeners, "session/event", exploding, { type: "message/append" });
+    expect(registerSuite).toHaveBeenCalledTimes(1);
+  });
+
   it("disposes listeners and the revealed suite", () => {
     const { ctx, listeners } = fakeEventCtx();
     const suiteDispose = vi.fn();
