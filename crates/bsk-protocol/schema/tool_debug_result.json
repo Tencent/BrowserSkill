@@ -15,6 +15,16 @@
         "$ref": "#/definitions/DebugConsole"
       }
     },
+    "evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "next_since": {
       "type": [
         "integer",
@@ -193,6 +203,24 @@
         "level": {
           "type": "string"
         },
+        "relation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "stack": {
           "type": [
             "string",
@@ -201,6 +229,124 @@
         },
         "text": {
           "type": "string"
+        }
+      }
+    },
+    "DebugEvidence": {
+      "type": "object",
+      "required": [
+        "changes",
+        "fields",
+        "gaps",
+        "links",
+        "observations",
+        "payloads"
+      ],
+      "properties": {
+        "changes": {
+          "$ref": "#/definitions/DebugTextChanges"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugFieldTrace"
+          }
+        },
+        "gaps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "links": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugRequestLink"
+          }
+        },
+        "observations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugPage"
+          }
+        },
+        "payloads": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugPayload"
+          }
+        }
+      }
+    },
+    "DebugField": {
+      "type": "object",
+      "required": [
+        "key",
+        "label",
+        "state"
+      ],
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "DebugFieldTrace": {
+      "type": "object",
+      "required": [
+        "before",
+        "input",
+        "key",
+        "label",
+        "later",
+        "response",
+        "submitted"
+      ],
+      "properties": {
+        "before": {
+          "$ref": "#/definitions/DebugValue"
+        },
+        "input": {
+          "$ref": "#/definitions/DebugValue"
+        },
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "later": {
+          "$ref": "#/definitions/DebugValue"
+        },
+        "response": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugValue"
+          }
+        },
+        "submitted": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugValue"
+          }
         }
       }
     },
@@ -263,6 +409,28 @@
         "method": {
           "type": "string"
         },
+        "observation_end": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "observation_limited": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "observations": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/DebugPage"
+          }
+        },
         "request_ids": {
           "type": "array",
           "items": {
@@ -276,6 +444,12 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "started_at": {
           "type": "number",
@@ -313,6 +487,27 @@
           "type": "number",
           "format": "double"
         },
+        "fields": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/DebugField"
+          }
+        },
+        "fields_partial": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "navigation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "state": {
           "type": "string"
         },
@@ -339,6 +534,35 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "DebugPayload": {
+      "type": "object",
+      "required": [
+        "part",
+        "path",
+        "request_id",
+        "value"
+      ],
+      "properties": {
+        "part": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "value": {
+          "type": "string"
         }
       }
     },
@@ -556,6 +780,21 @@
         }
       }
     },
+    "DebugRequestLink": {
+      "type": "object",
+      "required": [
+        "relation",
+        "request_id"
+      ],
+      "properties": {
+        "relation": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      }
+    },
     "DebugRun": {
       "type": "object",
       "required": [
@@ -596,6 +835,15 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        },
+        "environment": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "errors": {
           "type": "integer",
@@ -665,6 +913,61 @@
         },
         "url": {
           "type": "string"
+        }
+      }
+    },
+    "DebugTextChanges": {
+      "type": "object",
+      "required": [
+        "added",
+        "removed",
+        "truncated"
+      ],
+      "properties": {
+        "added": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "removed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DebugValue": {
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

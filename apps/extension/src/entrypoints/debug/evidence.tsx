@@ -9,6 +9,7 @@ import {
 } from "@remixicon/react";
 import { useEffect, useState } from "react";
 import { recordingRequest } from "@/debug/client";
+import { requestKind } from "@/debug/evidence-model";
 import type {
   DebugBody,
   DebugConsole,
@@ -47,15 +48,23 @@ export function Quiet({ children }: { children: React.ReactNode }) {
 export function RequestList({
   requests,
   onSelect,
+  delayedIds = [],
 }: {
   requests: DebugRequest[];
   onSelect: (request: DebugRequest) => void;
+  delayedIds?: string[];
 }) {
   const { t } = useTranslation("extension");
+  const [showNoise, setShowNoise] = useState(false);
+  const primary = requests.filter((request) => requestKind(request) === "business");
+  const noise = requests.length - primary.length;
   if (!requests.length) return <Quiet>{t("debug.noRequests")}</Quiet>;
   return (
     <div className="divide-y divide-border/60">
-      {requests.map((request) => (
+      {!primary.length && !showNoise && (
+        <p className="px-5 py-4 text-xs text-muted-foreground">{t("debug.noPrimaryRequests")}</p>
+      )}
+      {(showNoise ? requests : primary).map((request) => (
         <button
           key={request.id}
           type="button"
@@ -77,6 +86,11 @@ export function RequestList({
             <span className="mt-1 block truncate text-[10px] text-muted-foreground">
               {request.error || request.resource_type || request.mime_type} ·{" "}
               {request.id.split(":").at(-1)}
+              {requestKind(request) === "extension" && <> · {t("debug.source_extension")}</>}
+              {delayedIds.includes(request.id) && <> · {t("debug.delayedAssociation")}</>}
+              {!["available", "empty"].includes(request.response_body.state) && (
+                <> · {t(`debug.gap_body_${request.response_body.state}` as "debug.partial")}</>
+              )}
             </span>
           </span>
           <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
@@ -88,24 +102,46 @@ export function RequestList({
           />
         </button>
       ))}
+      {noise > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowNoise((value) => !value)}
+          className="w-full px-5 py-3 text-left text-[11px] text-muted-foreground"
+        >
+          {t(showNoise ? "debug.hideNoise" : "debug.showNoise", { count: noise })}
+        </button>
+      )}
     </div>
   );
 }
 export function ConsoleList({ entries }: { entries: DebugConsole[] }) {
   const { t } = useTranslation("extension");
+  const [showOther, setShowOther] = useState(false);
+  const other = entries.filter((entry) =>
+    ["extension", "browser"].includes(entry.source ?? "unknown"),
+  );
   if (!entries.length) return <Quiet>{t("debug.noConsole")}</Quiet>;
   return (
     <div className="divide-y divide-border/60">
-      {entries.map((entry) => (
+      {(showOther ? entries : entries.filter((entry) => !other.includes(entry))).map((entry) => (
         <div key={entry.id} className="px-5 py-3">
           <div className="mb-2 flex gap-2 text-[10px] text-muted-foreground">
             <time>{clock(entry.at)}</time>
             <span className={entry.level === "error" ? "text-destructive" : ""}>{entry.level}</span>
             {entry.count > 1 && <span>×{entry.count}</span>}
+            {entry.relation === "delayed" && <span>{t("debug.delayedAssociation")}</span>}
+            <span className="ml-auto">
+              {t(`debug.source_${entry.source ?? "unknown"}` as "debug.source_unknown")}
+            </span>
           </div>
           <pre className="whitespace-pre-wrap break-all font-mono text-xs leading-relaxed">
             {entry.text}
           </pre>
+          {entry.source_url && (
+            <p className="mt-2 break-all font-mono text-[10px] text-muted-foreground">
+              {entry.source_url}
+            </p>
+          )}
           {entry.stack && (
             <details className="mt-2 text-xs text-muted-foreground">
               <summary className="cursor-pointer">Stack</summary>
@@ -114,6 +150,15 @@ export function ConsoleList({ entries }: { entries: DebugConsole[] }) {
           )}
         </div>
       ))}
+      {other.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setShowOther((value) => !value)}
+          className="w-full px-5 py-3 text-left text-[11px] text-muted-foreground"
+        >
+          {t(showOther ? "debug.hideNoise" : "debug.otherSources", { count: other.length })}
+        </button>
+      )}
     </div>
   );
 }
@@ -130,6 +175,25 @@ export function PageState({ page }: { page?: DebugPage }) {
       </pre>
       {page?.truncated && (
         <p className="mt-2 text-xs text-muted-foreground">{t("debug.partial")}</p>
+      )}
+      {!!page?.fields?.length && (
+        <details className="mt-4 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">{t("debug.capturedFields")}</summary>
+          <dl className="mt-3 space-y-2">
+            {page.fields.map((field, index) => (
+              <div key={`${field.key}-${index}`} className="grid grid-cols-2 gap-3">
+                <dt className="break-all">{field.name || field.label}</dt>
+                <dd className="break-all font-mono">
+                  {field.state === "available"
+                    ? field.value === ""
+                      ? t("debug.emptyValue")
+                      : field.value
+                    : t(`debug.value_${field.state}` as "debug.value_redacted")}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </details>
       )}
     </div>
   );
@@ -231,14 +295,16 @@ export function RequestDetail({
   request,
   pulse,
   onClose,
+  initialPart = "response",
 }: {
   session: string;
   request: DebugRequest;
   pulse: number;
   onClose: () => void;
+  initialPart?: NonNullable<DebugParams["part"]>;
 }) {
   const { t } = useTranslation("extension");
-  const [part, setPart] = useState<NonNullable<DebugParams["part"]>>("response");
+  const [part, setPart] = useState<NonNullable<DebugParams["part"]>>(initialPart);
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<DebugRequest>();
   const [error, setError] = useState("");

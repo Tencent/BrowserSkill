@@ -10,7 +10,7 @@ import {
   RiShieldCheckLine,
   RiStopCircleLine,
 } from "@remixicon/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { debugHistory, debugRequest, deleteRecording, recordingRequest } from "@/debug/client";
 import type {
   DebugConsole,
@@ -31,6 +31,7 @@ import {
   RequestDetail,
   RequestList,
 } from "./evidence";
+import { OperationEvidence } from "./operation-evidence";
 
 export function DebugApp() {
   const { t } = useTranslation("extension");
@@ -55,6 +56,8 @@ export function DebugApp() {
   const [mode, setMode] = useState<"requests" | "console" | "pages">("requests");
   const [detail, setDetail] = useState<DebugResult>();
   const [selectedRequest, setSelectedRequest] = useState<DebugRequest>();
+  const [requestPart, setRequestPart] = useState<"request" | "response">("response");
+  const initialOperation = useRef("");
   const run = selection.run
     ? runs.find((item) => item.id === selection.run)
     : selection.session
@@ -67,6 +70,13 @@ export function DebugApp() {
   );
   const isHistory = !selection.session && !selection.run;
   const pulse = run?.next_since ?? 0;
+  const errorCounts = messages
+    .filter((entry) => entry.level === "error")
+    .reduce<Record<string, number>>((counts, entry) => {
+      const source = entry.source ?? "unknown";
+      counts[source] = (counts[source] ?? 0) + entry.count;
+      return counts;
+    }, {});
 
   function select(session = "", id = "") {
     setSelection({ session, run: id });
@@ -76,6 +86,10 @@ export function DebugApp() {
     if (session) query.set("session", session);
     if (id) query.set("run", id);
     history.replaceState(null, "", `${location.pathname}${query.size ? `?${query}` : ""}`);
+  }
+  function openRequest(request: DebugRequest, part: "request" | "response" = "response") {
+    setRequestPart(part);
+    setSelectedRequest(request);
   }
 
   useEffect(() => {
@@ -116,6 +130,7 @@ export function DebugApp() {
   }, [revision]);
 
   useEffect(() => {
+    initialOperation.current = "";
     setOperations([]);
     setRequests([]);
     setMessages([]);
@@ -147,6 +162,10 @@ export function DebugApp() {
       }
       if (cancelled) return;
       setOperations((actions.operations ?? []).sort((a, b) => a.started_at - b.started_at));
+      if (initialOperation.current !== runId && actions.operations?.length) {
+        initialOperation.current = runId;
+        setOperationId(actions.operations.at(-1)!.id);
+      }
       setRequests(
         [...new Map(entries.map((item) => [item.id, item])).values()].sort(
           (a, b) => a.started_at - b.started_at,
@@ -438,6 +457,13 @@ export function DebugApp() {
                     {item.storage_error && (
                       <p className="mt-3 text-xs text-destructive">{t("debug.storageFailed")}</p>
                     )}
+                    {(item.dropped_requests + item.dropped_operations + item.dropped_console > 0 ||
+                      item.coverage.includes("interrupted_checkpoint") ||
+                      item.coverage.includes("manual_capture_unavailable")) && (
+                      <p className="mt-3 text-[10px] text-[var(--debug-accent)]">
+                        {t("debug.partial")}
+                      </p>
+                    )}
                   </button>
                 ))}
               </div>
@@ -476,6 +502,9 @@ export function DebugApp() {
               </span>
               <time>{new Date(run.started_at).toLocaleString()}</time>
               <span className="font-mono">{run.id}</span>
+              {run.environment?.extension_version && (
+                <span>BrowserSkill {run.environment.extension_version}</span>
+              )}
               {run.saved_at && <span>{t("debug.savedAt", { time: clock(run.saved_at) })}</span>}
               {run.stop_reason && (
                 <span>
@@ -491,7 +520,7 @@ export function DebugApp() {
                 [
                   [run.requests, "requests"],
                   [run.operations, "operations"],
-                  [run.errors, "exceptions"],
+                  [errorCounts.website ?? 0, "websiteErrors"],
                 ] as const
               ).map(([value, key]) => (
                 <div key={key} className="border-r border-border/70 px-5 py-5 last:border-r-0">
@@ -504,6 +533,13 @@ export function DebugApp() {
                 </div>
               ))}
             </div>
+            <p className="mb-5 flex flex-wrap gap-4 text-[10px] text-muted-foreground">
+              {(["website", "extension", "browser", "unknown"] as const).map((source) => (
+                <span key={source}>
+                  {t(`debug.source_${source}`)} · {errorCounts[source] ?? 0}
+                </span>
+              ))}
+            </p>
             {(run.dropped_requests + run.dropped_operations + run.dropped_console > 0 ||
               run.coverage.includes("page_context_limit") ||
               run.coverage.includes("interrupted_checkpoint")) && (
@@ -536,7 +572,7 @@ export function DebugApp() {
                     </span>
                   </button>
                 ))}
-                <div className="max-h-[620px] overflow-y-auto">
+                <div className="max-h-[180px] overflow-y-auto sm:max-h-[300px] lg:max-h-[620px]">
                   {operations.length ? (
                     operations.map((item, index) => (
                       <button
@@ -560,6 +596,11 @@ export function DebugApp() {
                           <span className="mt-2 flex gap-2 text-[10px] text-muted-foreground">
                             <time>{clock(item.started_at)}</time>
                             <span>{t(`debug.state_${item.state}`)}</span>
+                            <span>
+                              {t(
+                                item.source === "human" ? "debug.humanAction" : "debug.agentAction",
+                              )}
+                            </span>
                           </span>
                         </span>
                       </button>
@@ -576,6 +617,7 @@ export function DebugApp() {
                     session={sessionId}
                     request={selectedRequest}
                     pulse={pulse}
+                    initialPart={requestPart}
                     onClose={() => setSelectedRequest(undefined)}
                   />
                 ) : operationId ? (
@@ -594,18 +636,27 @@ export function DebugApp() {
                           </p>
                         )}
                       </div>
-                      <Panel title={t("debug.duringRequests")}>
-                        <RequestList
-                          requests={detail.requests ?? []}
-                          onSelect={setSelectedRequest}
-                        />
-                      </Panel>
+                      <OperationEvidence
+                        key={detail.operation.id}
+                        evidence={detail.evidence}
+                        operation={detail.operation}
+                        requests={detail.requests ?? []}
+                        onRequest={openRequest}
+                      />
+                      {!detail.evidence && (
+                        <Panel title={t("debug.duringRequests")}>
+                          <RequestList requests={detail.requests ?? []} onSelect={openRequest} />
+                        </Panel>
+                      )}
                       <Panel title={t("debug.console")}>
                         <ConsoleList entries={detail.console ?? []} />
                       </Panel>
-                      <Panel title={t("debug.pageChanges")}>
+                      <details className="rounded-2xl border border-border/80 bg-card">
+                        <summary className="cursor-pointer px-5 py-4 text-xs font-medium">
+                          {t("debug.rawPageEvidence")}
+                        </summary>
                         <PageChanges operation={detail.operation} />
-                      </Panel>
+                      </details>
                       <p className="text-[10px] text-muted-foreground">{t("debug.correlation")}</p>
                     </>
                   ) : (
@@ -613,7 +664,7 @@ export function DebugApp() {
                   )
                 ) : mode === "requests" ? (
                   <Panel title={t("debug.requests")}>
-                    <RequestList requests={requests} onSelect={setSelectedRequest} />
+                    <RequestList requests={requests} onSelect={openRequest} />
                   </Panel>
                 ) : mode === "console" ? (
                   <Panel title={t("debug.console")}>

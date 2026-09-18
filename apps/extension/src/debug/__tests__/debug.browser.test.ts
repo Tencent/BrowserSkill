@@ -1,5 +1,7 @@
 // @vitest-environment node
 // Opt in with BSK_CLICK_CHROME. Owns its browser, profile and local fixture server.
+
+import { writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
@@ -20,6 +22,11 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
     let fixed = false;
     const server = createServer((request, response) => {
       const route = request.url?.split("?")[0];
+      if (route === "/slow") {
+        response.setHeader("Content-Type", "application/json");
+        setTimeout(() => response.end('{"name":"Bob","success":true}'), 2000);
+        return;
+      }
       if (route === "/api/save") {
         response.setHeader("Content-Type", "application/json");
         response.setHeader("Set-Cookie", "session_id=private; Path=/");
@@ -58,8 +65,14 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
         return;
       }
       response.setHeader("Content-Type", "text/html");
-      response.end(`<!doctype html><title>Debug fixture</title><button id="save">Save</button><p role="status" id="result">Ready</p><iframe src="http://localhost:${(server.address() as { port: number }).port}/frame"></iframe><script>
+      response.end(`<!doctype html><title>Debug fixture</title><label for="name">Nickname</label><input id="name" name="name" value="Alice"><input id="password" type="password" value="manual-private"><button id="save">Save</button><p role="status" id="result">Ready</p><iframe src="http://localhost:${(server.address() as { port: number }).port}/frame"></iframe><script>
+        if(performance.getEntriesByType('navigation')[0]?.type==='reload') { document.querySelector('#name').value=''; setTimeout(()=>{document.querySelector('#name').value='Alice'},800); }
         document.querySelector('#save').onclick=async()=>{
+          if(document.querySelector('#name').value==='Bob') {
+            await new Promise(resolve=>setTimeout(resolve,2000));
+            await fetch('/slow',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Bob'})}).then(r=>r.json());
+            document.querySelector('#result').textContent='Delayed saved'; return;
+          }
           const data=await fetch('/api/save?token=private-query',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer private-header'},body:JSON.stringify({name:'Alice',password:'private-input'})}).then(r=>r.json());
           document.querySelector('#result').textContent=data.ok?'Saved':'Save failed';
           if(!data.ok) console.error('Save failed:',data.code);
@@ -301,7 +314,109 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
                 ).toBe(true),
               { timeout: 5000 },
             );
+            // Native input without DebugManager.before models a person reproducing a bug.
+            const beforeManual = (
+              await debug.read({ action: "operations", session_id: "website-debug" })
+            ).operations!;
+            expect(beforeManual.every((item) => item.source === "agent")).toBe(true);
+            await evaluate(
+              "document.querySelector('#name').focus();document.querySelector('#name').select();true",
+            );
+            await send("Input.insertText", { text: "Bob" }, sessionId);
+            await handleClick(
+              sessions,
+              { session_id: "website-debug", tab_id: 7, selector: "#save" },
+              { cdp, tabsApi: tabs },
+            );
+            let manualId = "";
+            await vi.waitFor(
+              async () => {
+                const operations = (
+                  await debug.read({ action: "operations", session_id: "website-debug" })
+                ).operations!;
+                expect(
+                  operations.some((item) => item.source === "human" && item.method === "tool.fill"),
+                ).toBe(true);
+                manualId = operations.findLast(
+                  (item) => item.source === "human" && item.method === "tool.click",
+                )!.id;
+                const detail = await debug.read({
+                  action: "operation",
+                  session_id: "website-debug",
+                  id: manualId,
+                });
+                expect(
+                  detail.evidence?.fields.find((field) => field.label === "Nickname"),
+                ).toMatchObject({
+                  before: { value: "Alice" },
+                  input: { value: "Bob" },
+                  submitted: [{ value: "Bob" }],
+                  response: [{ value: "Bob" }],
+                });
+                expect(detail.evidence?.links.some((link) => link.relation === "delayed")).toBe(
+                  true,
+                );
+                expect(detail.operation?.after?.text).toContain("Delayed saved");
+              },
+              { timeout: 9000 },
+            );
+            await send("Page.reload", {}, sessionId);
+            await vi.waitFor(
+              async () => {
+                const detail = await debug.read({
+                  action: "operation",
+                  session_id: "website-debug",
+                  id: manualId,
+                });
+                expect(
+                  detail.evidence?.fields.find((field) => field.label === "Nickname")?.later,
+                  JSON.stringify(
+                    (await debug.read({ action: "export", session_id: "website-debug" })).recording
+                      ?.pages,
+                  ),
+                ).toMatchObject({ value: "Alice", source: "page:reload" });
+              },
+              { timeout: 5000 },
+            );
+            const exported = await debug.read({ action: "export", session_id: "website-debug" });
+            expect(JSON.stringify(exported)).not.toContain("manual-private");
+            expect(
+              exported.recording?.operations.some(
+                (item) => item.source === "human" && item.method === "tool.reload",
+              ),
+            ).toBe(true);
+            await evaluate(
+              "document.querySelector('#name').focus();document.querySelector('#name').select();true",
+            );
+            await send("Input.insertText", { text: "Pending edit" }, sessionId);
             await debug.read({ action: "stop", session_id: "website-debug" });
+            const finalRecord = (
+              await debug.read({ action: "export", session_id: "website-debug" })
+            ).recording!;
+            expect(finalRecord.operations.at(-1)).toMatchObject({
+              source: "human",
+              method: "tool.fill",
+              state: "completed",
+            });
+            expect(
+              finalRecord.operations.at(-1)?.after?.fields?.find((field) => field.name === "name")
+                ?.value,
+            ).toBe("Pending edit");
+            if (process.env.BSK_DEBUG_RECORD_PATH) {
+              const details = await Promise.all(
+                finalRecord.operations.map((operation) =>
+                  debug.read({
+                    action: "operation",
+                    session_id: "website-debug",
+                    id: operation.id,
+                  }),
+                ),
+              );
+              await writeFile(
+                process.env.BSK_DEBUG_RECORD_PATH,
+                JSON.stringify({ recording: finalRecord, details, selectedOperation: manualId }),
+              );
+            }
             const stopped = (await debug.read({ action: "status", session_id: "website-debug" }))
               .runs![0];
             await evaluate("fetch('/frame-api?after-stop').then(r=>r.text())");

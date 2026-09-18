@@ -116,6 +116,22 @@ pub struct DebugConsole {
     pub last_at: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugField {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    pub state: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugPage {
@@ -129,6 +145,12 @@ pub struct DebugPage {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<DebugField>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields_partial: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub navigation: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugOperation {
@@ -138,6 +160,8 @@ pub struct DebugOperation {
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub started_at: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<f64>,
@@ -150,6 +174,12 @@ pub struct DebugOperation {
     pub before: Option<DebugPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<DebugPage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observations: Option<Vec<DebugPage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_end: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation_limited: Option<bool>,
     pub request_ids: Vec<String>,
     pub console_ids: Vec<String>,
     pub truncated: bool,
@@ -179,6 +209,8 @@ pub struct DebugRun {
     pub saved_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<BTreeMap<String, String>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugRecording {
@@ -189,6 +221,55 @@ pub struct DebugRecording {
     pub operations: Vec<DebugOperation>,
     pub console: Vec<DebugConsole>,
     pub pages: Vec<DebugPage>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugValue {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<f64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugFieldTrace {
+    pub key: String,
+    pub label: String,
+    pub before: DebugValue,
+    pub input: DebugValue,
+    pub submitted: Vec<DebugValue>,
+    pub response: Vec<DebugValue>,
+    pub later: DebugValue,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugPayload {
+    pub request_id: String,
+    pub part: String,
+    pub path: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<bool>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugRequestLink {
+    pub request_id: String,
+    pub relation: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugTextChanges {
+    pub added: Vec<String>,
+    pub removed: Vec<String>,
+    pub truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugEvidence {
+    pub fields: Vec<DebugFieldTrace>,
+    pub payloads: Vec<DebugPayload>,
+    pub links: Vec<DebugRequestLink>,
+    pub gaps: Vec<String>,
+    pub changes: DebugTextChanges,
+    pub observations: Vec<DebugPage>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugResult {
@@ -211,6 +292,8 @@ pub struct DebugResult {
     pub pages: Option<Vec<DebugPage>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recording: Option<DebugRecording>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<DebugEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

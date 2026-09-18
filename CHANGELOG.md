@@ -13,6 +13,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   capture, operation-linked console and page context, browser-local history and JSON export,
   CLI and DSH entry points, and an extension evidence workspace. Existing popup
   controls are preserved, with an additive current-task card.
+- Debug operation cards now include manual inputs, field-change chains, delayed
+  evidence, source-aware noise filtering and explicit capture gaps.
 
 ## [0.3.0] - 2026-09-16
 

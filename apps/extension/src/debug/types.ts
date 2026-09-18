@@ -75,6 +75,17 @@ export interface DebugConsole {
   count: number;
   last_at: number;
   stack?: string;
+  source?: "website" | "extension" | "browser" | "unknown";
+  source_url?: string;
+  relation?: "window" | "delayed";
+}
+
+export interface DebugField {
+  key: string;
+  name?: string;
+  label: string;
+  value?: string;
+  state: "available" | "redacted" | "truncated";
 }
 
 export interface DebugPage {
@@ -84,6 +95,9 @@ export interface DebugPage {
   text?: string;
   state: "available" | "unavailable";
   truncated?: boolean;
+  fields?: DebugField[];
+  fields_partial?: boolean;
+  navigation?: string;
 }
 
 export interface DebugOperation {
@@ -92,6 +106,7 @@ export interface DebugOperation {
   sequence: number;
   method: string;
   target?: string;
+  source?: "human" | "agent";
   started_at: number;
   finished_at?: number;
   /** Time-window correlation, never a causal assertion. */
@@ -100,6 +115,9 @@ export interface DebugOperation {
   error?: string;
   before?: DebugPage;
   after?: DebugPage;
+  observations?: DebugPage[];
+  observation_end?: number;
+  observation_limited?: boolean;
   request_ids: string[];
   console_ids: string[];
   truncated: boolean;
@@ -125,6 +143,37 @@ export interface DebugRun {
   next_since: number;
   saved_at?: number;
   storage_error?: string;
+  environment?: { extension_version?: string; user_agent?: string };
+}
+
+export interface DebugValue {
+  state: string;
+  value?: string;
+  source?: string;
+  at?: number;
+}
+export interface DebugFieldTrace {
+  key: string;
+  label: string;
+  before: DebugValue;
+  input: DebugValue;
+  submitted: DebugValue[];
+  response: DebugValue[];
+  later: DebugValue;
+}
+export interface DebugEvidence {
+  fields: DebugFieldTrace[];
+  payloads: {
+    request_id: string;
+    part: string;
+    path: string;
+    value: string;
+    truncated?: boolean;
+  }[];
+  links: { request_id: string; relation: "window" | "delayed" }[];
+  gaps: string[];
+  changes: { added: string[]; removed: string[]; truncated: boolean };
+  observations: DebugPage[];
 }
 
 /** Portable, already-redacted snapshot. Also used by browser-local history. */
@@ -149,6 +198,7 @@ export interface DebugResult {
   console?: DebugConsole[];
   pages?: DebugPage[];
   recording?: DebugRecording;
+  evidence?: DebugEvidence;
   next_since?: number;
   truncated?: boolean;
 }

@@ -1,3 +1,4 @@
+import { operationEvidence, operationWindow } from "./evidence-model";
 import { requestProjection } from "./network-store";
 import type { DebugParams, DebugRecording, DebugResult } from "./types";
 
@@ -40,7 +41,9 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
           operations: recording.operations
             .filter((item) => page.includes(item))
             .sort((a, b) => a.sequence - b.sequence)
-            .map(({ before: _before, after: _after, ...item }) => item),
+            .map(
+              ({ before: _before, after: _after, observations: _observations, ...item }) => item,
+            ),
         };
     return {
       ...result,
@@ -54,13 +57,26 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
   if (params.action === "operation") {
     const operation = recording.operations.find((entry) => entry.id === params.id);
     if (!operation) throw new Error("operation not found or evicted");
+    const evidence = operationEvidence(recording, operation);
+    const window = operationWindow(recording, operation);
     return {
       ...result,
       operation,
+      evidence,
       requests: recording.requests
-        .filter((entry) => operation.request_ids.includes(entry.id))
+        .filter((entry) => evidence.links.some((link) => link.request_id === entry.id))
         .map((entry) => requestProjection(entry)),
-      console: recording.console.filter((entry) => operation.console_ids.includes(entry.id)),
+      console: recording.console
+        .filter(
+          (entry) =>
+            entry.at >= operation.started_at &&
+            entry.at <= window.end &&
+            entry.at < window.next_start,
+        )
+        .map((entry) => ({
+          ...entry,
+          relation: entry.at <= window.immediate ? "window" : "delayed",
+        })),
     };
   }
   throw new Error("unsupported history action");

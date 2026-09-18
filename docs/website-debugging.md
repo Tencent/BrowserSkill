@@ -5,8 +5,8 @@ same owned browser task. It records browser evidence for people and agents to in
 
 - **Request details:** stable request IDs, URL/method/status, headers, POST body,
   response body, initiator, timing, failure, redirect and cache metadata.
-- **Operation evidence:** agent inputs linked by time window to network activity,
-  console messages/exceptions and main-page text before/after.
+- **Operation evidence:** agent and manual inputs grouped with immediate and delayed
+  requests, source-labelled console messages, field values and visible page changes.
 - **History:** browser-local recordings with page-load context, all retained console
   entries, and portable JSON export, independent of the original task lifecycle.
 
@@ -80,24 +80,49 @@ The redirect chain uses `redirect_from`. Cache/service-worker flags are reported
 when Chrome provides them. A completed request can have an error HTTP status or
 an HTTP 200 body describing a business failure. Neither proves a fix.
 
-Operations record supported navigation, click, fill, select, press, hover,
-wheel, scroll-to, focus, blur and evaluation calls. An operation's evidence
-window starts just before input and ends 1.5 seconds after completion or when
-another operation starts. Request association uses request start time, not
-completion time. Slow responses can finish later; asynchronous requests starting
-outside that window remain in `requests`. A temporal association is not causality.
+Operations record supported agent navigation, click, fill, select, press, hover,
+wheel, scroll-to, focus, blur and evaluation calls. Opt-in capture also installs a
+main-frame observer in a named CDP isolated world, recording trusted manual input,
+click, submission and navigation/reload events. Agent inputs suppress duplicate
+manual events. Continuous typing is grouped with a 350 ms debounce; the operation
+is marked running until the final input snapshot. Explicit stop flushes pending
+input; interrupted tasks do not claim unfinished input completed. The observer,
+new-document script, binding and timers are removed on stop or task release.
 
-Page observations use main-frame accessibility text (headings, static text,
-alerts and status), bounded to 6000 characters/100 lines. Input values are not
-captured. The before-read has a 600 ms deadline; the after-read is asynchronous.
-A next action can provide the previous action's post-state within that window.
-This is a text observation, not a screenshot or complete DOM diff. Unavailable
-observations stay explicit. Console repeats coalesce only within the same action.
+The immediate evidence window ends 1.5 seconds after the operation completes or
+when the next operation starts. Later requests and console entries can appear for
+up to 15 seconds as **possibly related**, capped by the next operation and stop.
+A request already retained keeps its eventual response regardless of response
+latency. This association is based on start time, not proof of causation.
+All retained traffic remains accessible outside the operation view.
 
-Page-load context is also recorded at capture start and main-page load events, up
-to 20 observations. `console` includes retained messages outside agent action
-windows. Human actions do not become individual agent-operation records, although
-their network activity, console output and resulting page loads are collected.
+Page observations include bounded visible main-page text and up to 16 conventional
+form fields with stable name/id and form identity. Field values are capped at 256
+characters; credential, payment and file fields are omitted/redacted. Unidentified,
+duplicate, overly long or custom field identities are not guessed. The observer
+scans at most 80 candidate controls. Shadow DOM and iframe manual actions/fields
+are not covered. Captured page text is bounded to 6000 characters; the accessibility
+fallback also limits 100 lines. Observer values are redacted again before retention.
+
+Follow-up page observations are coalesced at 700 ms, with bounded checkpoints to
+catch silent field-property updates. Up to four changing observations are retained
+per operation, with an explicit eviction flag. Page-load context is retained for
+20 loads. The first later load of the same identified field can supply a later or
+reload value; intervening operations are flagged, and this is not a causal claim.
+
+The field-chain view shows recorded original, operation-time, submitted, response
+and later page values. It joins only exact, unambiguous field names in complete
+JSON/form bodies; different names, arrays, duplicate nested names, missing and
+truncated bodies remain unlinked. Body field summaries are bounded to 12 requests,
+96 scalar fields and 256 characters per value. Full retained bodies remain available
+through request details. Text differences require both recorded page states.
+
+Cards display pending/interrupted work, truncated/unavailable bodies, missing
+fields, late capture and capacity limits next to the evidence. A normal HTTP status
+is not interpreted as business success. Console entries retain their source URL;
+website, extension, browser and unknown sources are separated. Static resources
+and extension traffic are folded by default, without deleting them from history
+or export. There is no automatic root-cause verdict or completeness score.
 
 ## History and export
 
@@ -118,7 +143,9 @@ retained evidence, not an unlimited archive of all traffic. Export important rec
 before automatic expiration. Lists read only metadata; bodies are fetched on demand.
 
 The JSON document contains `version: 1`, `saved_at`, `run`, `requests` (including
-retained headers and bodies), `operations`, `console` and `pages`. Stable IDs link
+retained headers and bodies), `operations`, `console` and `pages`. Optional fields preserve manual/agent source,
+field snapshots, later observations, extension version and browser user agent.
+Older history remains readable and does not gain invented fields. Stable IDs link
 operations to requests and console entries. Capacity counters, omissions and stop
 reasons are preserved. Exporting an active capture produces a point-in-time snapshot.
 
@@ -136,6 +163,8 @@ access to older tasks' data. There is no built-in comparison or repair action.
 | Live in-memory captures | 4 across the extension; saved stopped captures evicted first |
 | Local history | 30 days / 50 records / 50 MiB total |
 | Page-load observations | 20 per capture |
+| Fields / value length | 16 / 256 characters per page observation |
+| Follow-up observations | 4 retained changes per operation, within 15 seconds |
 | Requests / operations / console entries | 200 / 64 / 100 per capture |
 | Retained request + response text | 512 Ki UTF-16 code units per capture |
 | Individual body | 64 Ki code units, with explicit truncation/omission |
@@ -160,6 +189,7 @@ and service-worker internal requests, WebSocket frames, SSE chunks, screenshots,
 request interception/replay and CPU profiling are outside this version's scope.
 Iframe setup can miss its earliest requests; coverage flags report setup failure
 or target limits. Ordinary browsing adds no debug subscription or page reads.
-Stopping cancels observation timers and pending browser body reads, then saves the
+Stopping cancels observation timers and pending browser body reads, removes the
+manual observer, then saves the
 final retained record. It does not disable CDP domains shared by existing tools;
 browser buffers end with task detachment.

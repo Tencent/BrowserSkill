@@ -80,6 +80,26 @@ export function redactBody(
       // A malformed payload cannot be parsed safely; scrub common assignments.
       result = redactText(text, BODY_CHARS);
     }
+  } else if (/html/i.test(mime)) {
+    // A password can also occur in a server-rendered input's value attribute.
+    // Remove that input from retained HTML rather than exposing its initial value.
+    result = redactText(
+      text.replace(/<input\b(?:[^>"']|"[^"]*"|'[^']*')*>/gi, (tag) => {
+        const attributes = tag.matchAll(
+          /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
+        );
+        for (const match of attributes) {
+          const value = match[2] ?? match[3] ?? match[4];
+          if (
+            SECRET.test(value) ||
+            /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(value)
+          )
+            return '<input data-bsk-redacted="true">';
+        }
+        return tag;
+      }),
+      BODY_CHARS,
+    );
   } else if (/x-www-form-urlencoded/i.test(mime)) {
     const fields = new URLSearchParams(text);
     for (const key of [...fields.keys()]) if (SECRET.test(key)) fields.set(key, MASK);

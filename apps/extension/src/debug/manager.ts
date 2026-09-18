@@ -8,7 +8,9 @@ import { isAgentControlledTab, type SessionManager } from "@/session-manager/man
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
 import type { DebugArchive } from "./archive";
+import { consoleSource } from "./evidence-model";
 import { DebugNetworkStore, requestProjection } from "./network-store";
+import { DebugObserver, sanitizeFields } from "./observer";
 import { readRecording } from "./recording";
 import { redactText, redactUrl } from "./redact";
 import type {
@@ -26,6 +28,7 @@ const MAX_RUNS = 4;
 const MAX_OPERATIONS = 64;
 const MAX_CONSOLE = 100;
 const WINDOW_MS = 1500;
+const OBSERVE_MS = 15000;
 const ACTIONS = new Set([
   "tool.navigate",
   "tool.navigate_back",
@@ -68,6 +71,10 @@ interface RunState {
   archiveTimer?: ReturnType<typeof setTimeout>;
   dirty?: boolean;
   saving?: Promise<void>;
+  observer?: DebugObserver;
+  observing?: boolean;
+  agentBusy?: boolean;
+  checkpoints?: ReturnType<typeof setTimeout>[];
 }
 export interface DebugTicket {
   run: RunState;
@@ -166,7 +173,16 @@ export class DebugManager {
         "time_window_not_causality",
         "page_main_frame",
         "worker_targets_not_captured",
+        "manual_main_frame_only",
       ],
+      environment: {
+        ...(typeof __BSK_EXT_VERSION__ === "string"
+          ? { extension_version: __BSK_EXT_VERSION__ }
+          : {}),
+        ...(typeof navigator !== "undefined"
+          ? { user_agent: redactText(navigator.userAgent, 300) }
+          : {}),
+      },
     };
     const network = new DebugNetworkStore(
       id,
@@ -239,6 +255,12 @@ export class DebugManager {
       run.url = redactUrl((await this.tabs.get(tabId)).url ?? "");
       if (!this.owned(sessionId, tabId) || !this.runs.has(id))
         throw new Error("task ended during debug start");
+      if (/^https?:/.test(run.url)) this.coverage(state, "initial_load_not_recorded");
+      state.observer = new DebugObserver(this.cdp, tabId, id);
+      await deadline(state.observer.start(), 2500).catch(() => {
+        this.coverage(state, "manual_capture_unavailable");
+        void state.observer?.dispose();
+      });
       await this.capturePage(state);
       await this.persist(state);
       return this.summary(state);
@@ -302,6 +324,25 @@ export class DebugManager {
         this.stopState(state, "tab_released");
         continue;
       }
+      if (!source.sessionId) {
+        state.observer?.contextEvent(method, params);
+        if (
+          method === "Page.frameStartedLoading" &&
+          state.observer?.isRoot((params as { frameId?: string }).frameId) &&
+          !state.agentBusy
+        )
+          this.manualEvent(state, JSON.stringify({ kind: "navigate", at: this.now() }));
+        if (method === "Runtime.bindingCalled") {
+          const event = params as { name?: string; executionContextId?: number; payload?: string };
+          if (
+            state.observer?.accepts(event) &&
+            typeof event.payload === "string" &&
+            event.payload.length < 65536
+          )
+            this.manualEvent(state, event.payload);
+          continue;
+        }
+      }
       if (method === "Target.attachedToTarget") {
         const child = params as { sessionId?: string; targetInfo?: { type?: string } };
         if (child.sessionId && child.targetInfo?.type === "iframe")
@@ -316,8 +357,9 @@ export class DebugManager {
           state.network.detachTarget(child.sessionId);
         }
       }
-      if (!source.sessionId && method === "Page.loadEventFired") void this.capturePage(state);
+      if (!source.sessionId && method === "Page.loadEventFired") void this.capturePage(state, true);
       state.network.onEvent({ ...source, tabId: source.tabId }, method, params);
+      if (method === "Network.loadingFinished") this.scheduleObservation(state);
       const parsed =
         method === "Runtime.consoleAPICalled"
           ? parseConsoleApiCalled(params)
@@ -330,6 +372,11 @@ export class DebugManager {
         continue;
       const at = this.now();
       const text = redactText(parsed.text, 2048);
+      const sourceUrl = parsed.url || parsed.stack_trace?.find((frame) => frame.url)?.url;
+      const origin = consoleSource(
+        sourceUrl,
+        (params as { entry?: { source?: string } })?.entry?.source,
+      );
       const stack = parsed.stack_trace
         ?.map(
           (frame) =>
@@ -344,6 +391,8 @@ export class DebugManager {
         last.text === text &&
         last.stack === stack &&
         last.level === parsed.level &&
+        last.source === origin &&
+        last.source_url === sourceUrl &&
         at - last.last_at < 1000 &&
         (!state.current || last.at >= state.current.started_at)
       ) {
@@ -357,6 +406,8 @@ export class DebugManager {
           level: parsed.level,
           text,
           count: 1,
+          source: origin,
+          ...(sourceUrl ? { source_url: redactUrl(sourceUrl) } : {}),
           ...(stack ? { stack } : {}),
         });
         if (state.console.length > MAX_CONSOLE) {
@@ -385,10 +436,19 @@ export class DebugManager {
     if (tabId === undefined || !this.owned(params.session_id, tabId)) return;
     const state = this.active(params.session_id, tabId);
     if (!state) return;
+    await state.observer
+      ?.call("agent", true)
+      .catch(() => this.coverage(state, "manual_capture_unavailable"));
+    state.agentBusy = true;
     clearTimeout(state.timer);
+    state.timer = undefined;
+    state.checkpoints?.forEach(clearTimeout);
     const now = this.now();
     const previous = state.current;
-    if (previous) previous.window_end = Math.min(previous.window_end ?? now, now);
+    if (previous) {
+      previous.window_end = Math.min(previous.window_end ?? now, now);
+      previous.observation_end = Math.min(previous.observation_end ?? now, now);
+    }
     const ref = params.ref ? context.refStore.resolveEntry(params.ref) : undefined;
     const target = ref?.kind === "dom" ? ref.name : params.selector;
     const operation: DebugOperation = {
@@ -396,6 +456,7 @@ export class DebugManager {
       run_id: state.run.id,
       sequence: this.change(state),
       method: req.method,
+      source: "agent",
       ...(target ? { target: redactText(target, 160) } : {}),
       started_at: now,
       state: "running",
@@ -428,21 +489,169 @@ export class DebugManager {
     if (!ticket) return;
     const { run: state, operation } = ticket;
     if (state.run.state !== "capturing") return;
+    state.agentBusy = false;
+    void state.observer?.call("agent", false).catch(() => {});
     operation.finished_at = this.now();
     operation.window_end = operation.finished_at + WINDOW_MS;
+    operation.observation_end = operation.finished_at + OBSERVE_MS;
     operation.state = error ? "error" : "completed";
     if (error) operation.error = redactText(error, 1024);
     operation.sequence = this.change(state);
+    this.startObservation(state);
+  }
+
+  private manualEvent(state: RunState, payload: string): void {
+    let event: { kind?: string; at?: number; target?: string; before?: unknown; after?: unknown };
+    try {
+      event = JSON.parse(payload);
+    } catch {
+      return;
+    }
+    if (event.kind === "changed") {
+      this.scheduleObservation(state);
+      return;
+    }
+    if (
+      state.agentBusy ||
+      !["input_start", "input", "click", "submit", "navigate"].includes(event.kind ?? "")
+    )
+      return;
+    const now = this.now();
+    const at =
+      typeof event.at === "number" && Number.isFinite(event.at)
+        ? Math.min(now, Math.max(state.run.started_at, event.at))
+        : now;
+    const previous = state.current;
+    if (
+      event.kind === "input" &&
+      previous?.source === "human" &&
+      previous.method === "tool.fill" &&
+      previous.started_at === at &&
+      previous.state === "running"
+    ) {
+      previous.after = { ...previous.before!, at: now, ...sanitizeFields(event.after) };
+      previous.state = "completed";
+      previous.finished_at = now;
+      previous.window_end = now + WINDOW_MS;
+      previous.observation_end = now + OBSERVE_MS;
+      previous.sequence = this.change(state);
+      this.startObservation(state);
+      return;
+    }
+    if (
+      event.kind === "navigate" &&
+      previous?.source === "human" &&
+      at - previous.started_at < 1000
+    ) {
+      if (previous.method === "tool.navigate") {
+        if (event.before) {
+          previous.before = {
+            at,
+            state: "available",
+            url: state.run.url,
+            ...sanitizeFields(event.before),
+          };
+          previous.sequence = this.change(state);
+        }
+        return;
+      }
+      if (previous.method === "tool.click" && at - previous.started_at < 250) return;
+    }
+    // A submit caused by the same click is one user operation, not two steps.
+    if (
+      event.kind === "submit" &&
+      previous?.source === "human" &&
+      previous.method === "tool.click" &&
+      at - previous.started_at < 250
+    )
+      return;
+    if (previous) {
+      previous.window_end = Math.min(previous.window_end ?? at, at);
+      previous.observation_end = Math.min(previous.observation_end ?? at, at);
+    }
+    const baseline = previous?.after ?? state.pages.at(-1);
+    const before: DebugPage = {
+      at,
+      state: event.before ? "available" : "unavailable",
+      url: baseline?.url ?? state.run.url,
+      title: baseline?.title,
+      text: baseline?.text,
+      ...sanitizeFields(event.before),
+    };
+    const operation: DebugOperation = {
+      id: `${state.run.id}:a${++state.nextOperation}`,
+      run_id: state.run.id,
+      sequence: this.change(state),
+      method: `tool.${event.kind?.startsWith("input") ? "fill" : event.kind === "submit" ? "press" : event.kind}`,
+      source: "human",
+      target: redactText(typeof event.target === "string" ? event.target : "", 120),
+      started_at: at,
+      finished_at: now,
+      window_end: now + WINDOW_MS,
+      observation_end: now + OBSERVE_MS,
+      state: event.kind === "input_start" ? "running" : "completed",
+      before,
+      ...(event.after ? { after: { ...before, at: now, ...sanitizeFields(event.after) } } : {}),
+      request_ids: [],
+      console_ids: [],
+      truncated: false,
+    };
+    state.operations.push(operation);
+    state.current = operation;
+    if (state.operations.length > MAX_OPERATIONS) {
+      state.operations.shift();
+      state.run.dropped_operations += 1;
+    }
+    clearTimeout(state.timer);
+    state.timer = undefined;
+    this.startObservation(state);
+  }
+
+  private startObservation(state: RunState): void {
+    state.checkpoints?.forEach(clearTimeout);
+    this.scheduleObservation(state);
+    state.checkpoints = [2500, 7500, 14000].map((delay) =>
+      setTimeout(() => this.scheduleObservation(state), delay),
+    );
+  }
+
+  private scheduleObservation(state: RunState): void {
+    const operation = state.current;
+    if (
+      !operation ||
+      state.timer ||
+      state.observing ||
+      state.run.state !== "capturing" ||
+      operation.state === "running" ||
+      this.now() > (operation.observation_end ?? 0)
+    )
+      return;
     state.timer = setTimeout(() => {
       state.timer = undefined;
       if (state.current !== operation || state.run.state !== "capturing") return;
-      void this.page(state).then((page) => {
-        if (state.current === operation && state.run.state === "capturing") {
+      state.observing = true;
+      void this.page(state)
+        .then((page) => {
+          if (state.current !== operation || state.run.state !== "capturing") return;
+          const previous = operation.observations?.at(-1);
+          if (
+            previous?.text === page.text &&
+            JSON.stringify(previous?.fields) === JSON.stringify(page.fields)
+          )
+            return;
           operation.after = page;
+          operation.observations ??= [];
+          if (operation.observations.length === 4) {
+            operation.observations.shift();
+            operation.observation_limited = true;
+          }
+          operation.observations.push(page);
           operation.sequence = this.change(state);
-        }
-      });
-    }, WINDOW_MS);
+        })
+        .finally(() => {
+          state.observing = false;
+        });
+    }, 700);
   }
 
   private async page(state: RunState): Promise<DebugPage> {
@@ -450,12 +659,13 @@ export class DebugManager {
     if (!this.owned(state.run.session_id, state.run.tab_id) || state.run.state !== "capturing")
       return { at, state: "unavailable" };
     try {
-      const [tree, tab] = await deadline(
+      const [tree, tab, fieldValues] = await deadline(
         Promise.all([
           this.cdp.sendAttached<{
             nodes: { ignored?: boolean; role?: { value?: string }; name?: { value?: string } }[];
           }>({ tabId: state.run.tab_id }, "Accessibility.getFullAXTree"),
           this.tabs.get(state.run.tab_id),
+          state.observer?.call("snapshot").catch(() => undefined),
         ]),
         600,
       );
@@ -488,6 +698,7 @@ export class DebugManager {
         title: redactText(tab.title ?? "", 200),
         text: lines.join("\n"),
         truncated,
+        ...sanitizeFields(fieldValues),
       };
     } catch {
       return { at, state: "unavailable" };
@@ -513,6 +724,8 @@ export class DebugManager {
     state.run.stopped_at = this.now();
     state.run.stop_reason = reason;
     clearTimeout(state.timer);
+    void state.observer?.dispose();
+    state.checkpoints?.forEach(clearTimeout);
     if (state.current) {
       state.current.window_end = Math.min(state.current.window_end ?? this.now(), this.now());
       if (state.current.state === "running") state.current.state = "interrupted";
@@ -590,29 +803,42 @@ export class DebugManager {
 
   private operation(state: RunState, operation: DebugOperation, details = true): DebugOperation {
     const end = Math.min(operation.window_end ?? this.now(), this.now());
+    const nextStart =
+      state.operations[state.operations.indexOf(operation) + 1]?.started_at ?? Infinity;
     const requests = state.network
       .list()
-      .filter((entry) => entry.started_at >= operation.started_at && entry.started_at <= end);
+      .filter(
+        (entry) =>
+          entry.started_at >= operation.started_at &&
+          entry.started_at <= end &&
+          entry.started_at < nextStart,
+      );
     const messages = state.console.filter(
-      (entry) => entry.at >= operation.started_at && entry.at <= end,
+      (entry) => entry.at >= operation.started_at && entry.at <= end && entry.at < nextStart,
     );
-    const { before, after, ...rest } = operation;
+    const { before, after, observations, ...rest } = operation;
     return {
       ...rest,
-      ...(details ? { before, after } : {}),
+      ...(details ? { before, after, observations } : {}),
       request_ids: requests.map((entry) => entry.id),
       console_ids: messages.map((entry) => entry.id),
       truncated: state.network.dropped > 0 || state.run.dropped_console > 0,
     };
   }
 
-  private async capturePage(state: RunState): Promise<void> {
+  private async capturePage(state: RunState, loaded = false): Promise<void> {
     if (state.pagePending || state.run.state !== "capturing") return;
     state.pagePending = true;
     try {
       const page = await this.page(state);
       if (state.run.state !== "capturing" || state.released) return;
+      if (!loaded) delete page.navigation;
       state.pages.push(page);
+      if (loaded && state.current?.source === "human" && state.current.method === "tool.navigate") {
+        if (page.navigation === "reload") state.current.method = "tool.reload";
+        state.current.after = page;
+        state.current.sequence = this.change(state);
+      }
       if (page.url) state.run.url = page.url;
       if (state.pages.length > 20) {
         state.pages.shift();
@@ -736,6 +962,7 @@ export class DebugManager {
     if (!state)
       throw new Error("debug capture not found; start capture before reproducing the issue");
     if (params.action === "stop") {
+      await deadline(state.observer?.call("flush") ?? Promise.resolve(), 600).catch(() => {});
       this.stopState(state, "requested");
       await this.persist(state);
       return { ...result, run: this.summary(state) };
@@ -796,12 +1023,6 @@ export class DebugManager {
       operation.after = await this.page(state);
       operation.sequence = this.change(state);
     }
-    const projected = this.operation(state, operation);
-    return {
-      ...result,
-      operation: projected,
-      requests: projected.request_ids.map((id) => requestProjection(state.network.get(id)!)),
-      console: state.console.filter((entry) => projected.console_ids.includes(entry.id)),
-    };
+    return readRecording(this.recording(state), params);
   }
 }

@@ -171,7 +171,11 @@ describe("task-scoped debug lifecycle", () => {
       session_id: "s1",
       id: list.operations![0].id,
     });
-    expect(result.requests?.map((request) => request.url)).toEqual(["https://site.test/save"]);
+    expect(result.requests?.map((request) => request.url)).toEqual([
+      "https://site.test/save",
+      "https://site.test/background-after",
+    ]);
+    expect(result.evidence?.links.map((link) => link.relation)).toEqual(["window", "delayed"]);
     expect(result.console).toHaveLength(1);
     expect(result.operation?.before?.text).toBe("Save failed");
     expect(result.operation?.after?.state).toBe("available");

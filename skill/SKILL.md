@@ -279,7 +279,14 @@ opt-in and not retroactive. Keep the tab/session open while investigating.
 
 1. Reproduce once using observed controls. Read `bsk debug operations --session <id>`
    and `bsk debug operation <operation-id> --session <id>` for the action's requests,
-   console and page before/after. `bsk debug requests --session <id>` also includes
+   console and page before/after. Capture also records the user's manual main-page
+   input/click/reload actions, so they can reproduce while the agent inspects.
+   Operation details include an `evidence` projection: exact-name field chains,
+   original body fields, visible text changes, tentative delayed associations and
+   explicit gaps. Treat unmatched/truncated fields as unknown; never join different
+   names by equal values. Attribute Console errors using their recorded source,
+   and do not infer a root cause from temporal proximity or a page success message.
+   `bsk debug requests --session <id>` also includes
    requests outside action windows. Evidence in the same time window is not proof
    of causation; background traffic and delayed effects can be unrelated.
 2. Drill into a returned request ID: `bsk debug request <request-id> --session <id>
