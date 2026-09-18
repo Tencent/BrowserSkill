@@ -35,13 +35,14 @@ use super::state::{
 
 /// Result of the optional Origin allow-list check.
 ///
-/// TODO(M10/M12): pair v0.1 GA with an actual extension-id allow-list
-/// (`DaemonConfig::allowed_extension_ids: HashSet<String>`) populated
-/// from a config file / pairing flow, rather than accepting any
-/// extension-shaped origin. Review M4/M5 I8 — acceptable defense-in-
-/// depth gap for now because pairing happens through the popup, but
-/// a side-loaded extension on the same machine currently passes the
-/// gate.
+/// This only validates that `origin` is *shaped* like a Chrome extension
+/// origin (`chrome-extension://<32 a-p chars>`) — any extension installed in
+/// the same browser passes it identically, not just the BrowserSkill
+/// extension. `handle_connection` closes that gap afterward by pinning the
+/// daemon to the first extension origin that completes a WS upgrade
+/// (`state.extension_pin`) and rejecting any other one from then on, so a
+/// side-loaded or otherwise-installed extension can no longer piggyback on
+/// this shape check alone to drive the daemon.
 pub(super) fn origin_allowed(origin: &str, allow_any: bool) -> bool {
     if allow_any {
         return true;
@@ -152,7 +153,7 @@ async fn handle_connection(
         Ok(resp)
     };
 
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
+    let mut ws = match tokio_tungstenite::accept_hdr_async(stream, callback).await {
         Ok(ws) => ws,
         Err(err) => {
             debug!(?peer, %err, "ws handshake rejected");
@@ -162,6 +163,41 @@ async fn handle_connection(
 
     let origin = captured_origin.lock().unwrap().clone().unwrap_or_default();
     debug!(?peer, %origin, "ws connection upgraded");
+
+    // `origin_allowed` above only checks that `origin` is *shaped* like a
+    // Chrome extension origin, not that it's the BrowserSkill extension —
+    // any other extension in the same browser passes that check equally.
+    // Pin the daemon to the first extension that connects and reject any
+    // other one from then on, closing that gap without requiring the full
+    // pairing-UI allow-list this was originally deferred to (see the
+    // `origin_allowed` doc comment).
+    if !allow_any {
+        match state.extension_pin.get() {
+            Ok(Some(pinned)) if pinned != origin => {
+                warn!(
+                    ?origin,
+                    pinned = %pinned,
+                    "rejecting ws connection from an extension origin other than the pinned one"
+                );
+                let _ = ws
+                    .send(Message::Close(Some(CloseFrame {
+                        code: tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode::Policy,
+                        reason: "extension origin does not match the pinned extension".into(),
+                    })))
+                    .await;
+                return Ok(());
+            }
+            Ok(_) => {
+                if let Err(err) = state.extension_pin.pin_if_empty(&origin) {
+                    warn!(%err, "failed to persist extension pin; continuing unpinned for this connection");
+                }
+            }
+            Err(err) => {
+                warn!(%err, "failed to read extension pin store; continuing unpinned for this connection");
+            }
+        }
+    }
+
     drive_connection(state, ws, None).await
 }
 

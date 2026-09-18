@@ -4,6 +4,7 @@ pub mod abort;
 pub mod audit;
 pub mod browsers;
 mod cancel_forward;
+pub mod extension_pin;
 pub mod file_transfer;
 pub mod inflight;
 pub mod info;
