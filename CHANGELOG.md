@@ -5,6 +5,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Added
+
+- [Task-scoped website debugging](docs/website-debugging.md): bounded request/body
+  capture, operation-linked console and page evidence, before/after comparison,
+  CLI and DSH entry points, and an extension evidence workspace. Existing popup
+  controls are preserved, with an additive current-task card.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added

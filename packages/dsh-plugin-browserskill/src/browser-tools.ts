@@ -6,6 +6,7 @@
  */
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
+import { DEBUG_PARAMETERS } from "./debug-tool";
 import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM, WAIT_UNTIL_PARAM } from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
 
@@ -142,7 +143,8 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     description:
       "Read page state without arbitrary script execution. Actions: observe, snapshot, html, " +
       "screenshot, console, network. Prefer observe, then snapshot, then bounded html; use screenshot " +
-      "for visual evidence. console/network support cursor fields since/limit/maxTextChars.",
+      "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
+      "debug with debugAction starts/stops task-scoped capture, reads request details and operation evidence, or compares two operations. Start before reproduction.",
     actions: {
       observe: "inspect.observe",
       snapshot: "inspect.snapshot",
@@ -150,10 +152,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       screenshot: "inspect.screenshot",
       console: "inspect.console",
       network: "inspect.network",
+      debug: "inspect.debug",
     },
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
+      ...DEBUG_PARAMETERS,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
       cursor: {

@@ -349,6 +349,11 @@ through the [plugin](#deepseek-harness-plugin): the agent calls injected
 
 ## For Developers
 
+[Website debugging](docs/website-debugging.md) connects request details, console
+and page changes to agent actions, with bounded evidence and before/after comparison.
+Start capture before reproducing; the extension home keeps its existing controls
+and adds a current-task card linking to the evidence workspace.
+
 The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol
 and plugin entry points, visible bounds and interruption behavior.
 

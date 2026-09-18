@@ -112,3 +112,19 @@ No default token cap. With `maxTokens`, follow `nextCursor` using observe's `cur
 for remaining content. Each page replaces refs: use them before continuing, never
 reuse old ones. Continuation reads the same capture without refresh/depth changes;
 new observe/snapshot or changed page identity invalidates it.
+
+
+## Debugging your website
+
+Use `browser_inspect` with `action: "debug"`, `debugAction: "start"` and `session`
+**before** reproducing on an owned tab.
+Read `debugAction: "operations"`, then `"operation"` with `id` for
+requests, console and page changes; `"requests"` includes all captured traffic.
+For `"request"`, pass its `id` and `part: "response"` (or `"request"`, `"headers"`,
+`"timing"`). `pointer` selects complete JSON fields; `offset`/`maxChars` page bodies.
+Merge `since` updates by ID. Missing/truncated/evicted data is incomplete.
+HTTP 200 is not business success; temporal association is not causation.
+After fixing, repeat identical inputs. Use `"compare"` with `before`/`after`
+operation IDs; verify response fields and visible outcome.
+`"stop"` retains bounded evidence for the live task; session end/tab return clears it.
+Never expose secrets or infer extra authorization.

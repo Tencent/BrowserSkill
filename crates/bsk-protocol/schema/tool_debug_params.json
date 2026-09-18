@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DebugParams",
+  "type": "object",
+  "required": [
+    "action",
+    "session_id"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/DebugAction"
+    },
+    "after": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "before": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_chars": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "offset": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "part": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "pointer": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "run_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "since": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    }
+  },
+  "definitions": {
+    "DebugAction": {
+      "type": "string",
+      "enum": [
+        "start",
+        "stop",
+        "status",
+        "requests",
+        "request",
+        "operations",
+        "operation",
+        "compare"
+      ]
+    }
+  }
+}

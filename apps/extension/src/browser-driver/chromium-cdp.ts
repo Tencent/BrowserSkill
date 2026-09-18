@@ -497,6 +497,16 @@ export class ChromiumCdp {
     if (!this.tabOwners.has(tabId)) await this.detach(tabId);
   }
 
+  /** Debug body reads must never resurrect a detached / returned tab. */
+  async sendAttached<T = unknown>(
+    target: CdpDebuggee & { tabId: number },
+    method: string,
+    params?: object,
+  ): Promise<T> {
+    if (!this.attachedTabs.has(target.tabId)) throw new Error("debugger detached");
+    return this.api.sendCommand(target, method, params) as Promise<T>;
+  }
+
   /** Subscribe to all CDP events. Returned disposable removes the listener. */
   onEvent(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
     dispose(): void;
@@ -980,7 +990,7 @@ function truncateDialogField(value: string): string {
   return `${value.slice(0, MAX_DIALOG_FIELD_LENGTH)}... [truncated]`;
 }
 
-function parseConsoleApiCalled(params: unknown): ParsedConsoleEntry | null {
+export function parseConsoleApiCalled(params: unknown): ParsedConsoleEntry | null {
   const raw = (params ?? {}) as Record<string, unknown>;
   const args = Array.isArray(raw.args) ? raw.args : [];
   const text = args.map(remoteObjectToText).filter(Boolean).join(" ");
@@ -998,7 +1008,7 @@ function parseConsoleApiCalled(params: unknown): ParsedConsoleEntry | null {
   });
 }
 
-function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null {
+export function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null {
   const raw = (params ?? {}) as Record<string, unknown>;
   const details = (raw.exceptionDetails ?? {}) as Record<string, unknown>;
   const exception = (details.exception ?? {}) as Record<string, unknown>;
@@ -1018,7 +1028,7 @@ function parseExceptionThrown(params: unknown): ParsedConsoleEntry | null {
   });
 }
 
-function parseLogEntry(params: unknown): ParsedConsoleEntry | null {
+export function parseLogEntry(params: unknown): ParsedConsoleEntry | null {
   const raw = (params ?? {}) as Record<string, unknown>;
   const entry = (raw.entry ?? {}) as Record<string, unknown>;
   return makeConsoleEntry({

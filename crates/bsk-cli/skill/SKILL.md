@@ -269,3 +269,33 @@ sequence cursors. `emulate --device iphone-14` affects one tab; `--off` restores
 CLI exit code 0. Never evaluate secrets. `record start` captures user actions;
 read its help first and never record banking, SSO or password-manager pages.
 Use `bsk --help` to find navigation/history, tab, wait and window commands.
+
+
+## Debugging your website
+
+For a requested investigation, start `bsk debug start --session <id> --name "<issue>"`
+on a task-created or borrowed tab **before** navigating/reproducing. Capture is
+opt-in and not retroactive. Keep the tab/session open while investigating.
+
+1. Reproduce once using observed controls. Read `bsk debug operations --session <id>`
+   and `bsk debug operation <operation-id> --session <id>` for the action's requests,
+   console and page before/after. `bsk debug requests --session <id>` also includes
+   requests outside action windows. Evidence in the same time window is not proof
+   of causation; background traffic and delayed effects can be unrelated.
+2. Drill into a returned request ID: `bsk debug request <request-id> --session <id>
+   --part response` (or `request`, `headers`, `timing`). Lists omit body text. Use
+   `--pointer /path/to/field` for a complete JSON body, or returned `next_offset`
+   with `--offset`; incremental lists use `next_since`/`--since`, merging by ID.
+   Explicit pending/unavailable/omitted/truncated/evicted states mean missing
+   evidence, not an empty response. Never infer business success from HTTP 200.
+3. Fix the cause in the user's project, then repeat the same inputs and action.
+   `bsk debug compare --session <id> --before <operation-id> --after <operation-id>`
+   compares observations; inspect relevant response fields and visible behavior
+   before claiming the fix. Report evidence IDs and any remaining uncertainty.
+4. `bsk debug stop --session <id>` stops capture while retaining bounded in-memory
+   evidence for this live task. Session stop, tab return, disconnect or extension
+   restart clears it. Stop the session according to the normal lifecycle rules.
+
+Debugging does not authorize extra site actions, network replay, interception or
+sending evidence elsewhere. Common credential fields are redacted; free-form
+application data can still be sensitive. Do not print or request secrets.

@@ -109,6 +109,8 @@ pub enum Method {
     ToolScreenshotRelease,
     #[serde(rename = "tool.console")]
     ToolConsole,
+    #[serde(rename = "tool.debug")]
+    ToolDebug,
     #[serde(rename = "tool.network")]
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
@@ -229,7 +231,8 @@ impl Method {
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
             // System / control — not gated.
-            Method::AuditRequest
+            Method::ToolDebug
+            | Method::AuditRequest
             | Method::SystemHandshake
             | Method::SystemPing
             | Method::SystemStatus

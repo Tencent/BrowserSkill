@@ -100,6 +100,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.screenshot": ["browser_inspect", "screenshot"],
   "inspect.console": ["browser_inspect", "console"],
   "inspect.network": ["browser_inspect", "network"],
+  "inspect.debug": ["browser_inspect", "debug"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
   "interact.wheel": ["browser_interact", "wheel"],
@@ -203,7 +204,7 @@ const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chr
 const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
-  browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network"],
+  browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network", "debug"],
   browser_interact: [
     "click",
     "hover",
@@ -1536,4 +1537,62 @@ it("forwards screenshot-bound Canvas coordinates to click", async () => {
     "shift",
     "e1",
   ]);
+});
+
+describe("website debug", () => {
+  it("routes task-owned bounded body reads through the existing runtime", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "debug request": {
+        session_id: "s1",
+        request: { id: "d1:n1", response_body: { state: "available", text: "false" } },
+      },
+    });
+    await startSession(tools);
+    const result = await tools.get("browser_inspect")!.execute(
+      {
+        action: "debug",
+        debugAction: "request",
+        id: "d1:n1",
+        part: "response",
+        pointer: "/ok",
+        maxChars: 100,
+      },
+      makeExec(),
+    );
+    expect(result).toMatchObject({ request: { response_body: { text: "false" } } });
+    expect(calls.at(-1)?.args).toEqual(
+      expect.arrayContaining([
+        "debug",
+        "request",
+        "d1:n1",
+        "--session",
+        "s1",
+        "--part",
+        "response",
+        "--pointer",
+        "/ok",
+        "--max-chars",
+        "100",
+      ]),
+    );
+    await expect(
+      tools
+        .get("browser_inspect")!
+        .execute({ action: "debug", debugAction: "status", session: "foreign" }, makeExec()),
+    ).rejects.toThrow();
+  });
+  it("validates debug arguments before spawning a CLI command", async () => {
+    const { tools, calls } = setup({});
+    for (const args of [
+      {},
+      { debugAction: "request" },
+      { debugAction: "compare", before: "a" },
+      { debugAction: "requests", limit: 101 },
+    ])
+      await expect(
+        tools.get("browser_inspect")!.execute({ action: "debug", ...args }, makeExec()),
+      ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
 });
