@@ -1,11 +1,23 @@
 import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { debugRequest, debugTasks } from "@/debug/client";
+import {
+  debugHistory,
+  debugRequest,
+  debugTasks,
+  deleteRecording,
+  recordingRequest,
+} from "@/debug/client";
 import type { DebugOperation, DebugRequest, DebugRun } from "@/debug/types";
 import { DebugApp } from "./App";
 
-vi.mock("@/debug/client", () => ({ debugRequest: vi.fn(), debugTasks: vi.fn() }));
+vi.mock("@/debug/client", () => ({
+  debugHistory: vi.fn(),
+  debugRequest: vi.fn(),
+  debugTasks: vi.fn(),
+  deleteRecording: vi.fn(),
+  recordingRequest: vi.fn(),
+}));
 const run: DebugRun = {
   id: "d1",
   session_id: "s1",
@@ -67,7 +79,13 @@ beforeEach(async () => {
   vi.mocked(debugTasks).mockResolvedValue({
     tasks: [{ session_id: "s1", created_at: 1000, tab_id: 7, title: "App", run }],
   });
-  vi.mocked(debugRequest).mockImplementation(async (params) => {
+  history.replaceState(null, "", "/debug.html?session=s1&run=d1");
+  vi.mocked(debugHistory).mockResolvedValue({ runs: [run] });
+  vi.mocked(debugRequest).mockResolvedValue({
+    session_id: "s1",
+    run: { ...run, state: "stopped" },
+  });
+  vi.mocked(recordingRequest).mockImplementation(async (params) => {
     const base = { session_id: "s1" };
     if (params.action === "status") return { ...base, runs: [run] };
     if (params.action === "requests") return { ...base, requests: [request], next_since: 2 };
@@ -94,17 +112,29 @@ beforeEach(async () => {
           response_headers: { "content-type": "application/json" },
         },
       };
-    if (params.action === "compare")
+    if (params.action === "console")
       return {
         ...base,
-        comparison: {
-          before: operation,
-          after: second,
-          before_requests: [request],
-          after_requests: [request],
-          before_console: [],
-          after_console: [],
-          same_target: true,
+        console: [
+          { id: "c1", at: 1000, last_at: 1000, count: 1, level: "error", text: "Startup failure" },
+        ],
+      };
+    if (params.action === "pages")
+      return {
+        ...base,
+        pages: [{ at: 1000, state: "available", title: "Page on load", text: "Loaded context" }],
+      };
+    if (params.action === "export")
+      return {
+        ...base,
+        recording: {
+          version: 1,
+          saved_at: 3000,
+          run,
+          requests: [request],
+          operations: [operation, second],
+          console: [],
+          pages: [],
         },
       };
     return { ...base, run: { ...run, state: "stopped" } };
@@ -123,7 +153,7 @@ describe("website evidence workspace", () => {
     expect(await screen.findByText('{"ok":false}')).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "下一段" }));
     await waitFor(() =>
-      expect(debugRequest).toHaveBeenCalledWith(
+      expect(recordingRequest).toHaveBeenCalledWith(
         expect.objectContaining({ action: "request", id: "d1:n1", part: "response", offset: 4096 }),
       ),
     );
@@ -134,30 +164,59 @@ describe("website evidence workspace", () => {
     expect(await screen.findByText("Save failed")).toBeTruthy();
     expect(screen.getByText("Ready")).toBeTruthy();
   });
-  it("compares two operations without an automatic fix verdict and stops only capture", async () => {
+  it("keeps history readable after the task ends, including global console and page context", async () => {
+    vi.mocked(debugTasks).mockResolvedValue({ tasks: [] });
+    vi.mocked(debugHistory).mockResolvedValue({
+      runs: [{ ...run, state: "stopped", stopped_at: 3000 }],
+    });
     render(<DebugApp />);
-    await screen.findByText("/api/save");
-    fireEvent.click(screen.getByRole("button", { name: "修复对比" }));
+    fireEvent.click(await screen.findByText("/api/save"));
+    expect(await screen.findByText('{"ok":false}')).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "返回操作" }));
+    fireEvent.click(screen.getByRole("button", { name: /Console/ }));
+    expect(await screen.findByText("Startup failure")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /页面上下文/ }));
+    expect(await screen.findByText("Loaded context")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /对比/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "开启调试" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "删除记录" }));
+    fireEvent.click(screen.getByRole("alertdialog").querySelectorAll("button")[1]);
+    await waitFor(() => expect(deleteRecording).toHaveBeenCalledWith("d1"));
+  });
+
+  it("exports a historical record after the task ends", async () => {
+    vi.mocked(debugTasks).mockResolvedValue({ tasks: [] });
+    const create = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:recording");
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    render(<DebugApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "导出 JSON" }));
     await waitFor(() =>
-      expect(screen.getByLabelText("修复前操作").querySelectorAll("option")).toHaveLength(3),
+      expect(recordingRequest).toHaveBeenCalledWith({
+        action: "export",
+        session_id: "s1",
+        run_id: "d1",
+      }),
     );
-    fireEvent.change(screen.getByLabelText("修复前操作"), { target: { value: "d1:a1" } });
-    fireEvent.change(screen.getByLabelText("修复后操作"), { target: { value: "d1:a2" } });
-    fireEvent.click(screen.getByRole("button", { name: "比较证据" }));
-    expect(await screen.findByText("Saved")).toBeTruthy();
-    expect(screen.getByText("Save failed")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "停止采集" }));
+    expect(create.mock.calls[0][0]).toBeInstanceOf(Blob);
+    expect(click).toHaveBeenCalledOnce();
+    create.mockRestore();
+    click.mockRestore();
+  });
+
+  it("stops capture without stopping the task", async () => {
+    render(<DebugApp />);
+    fireEvent.click(await screen.findByRole("button", { name: "停止采集" }));
     await waitFor(() =>
       expect(debugRequest).toHaveBeenCalledWith({ action: "stop", session_id: "s1", run_id: "d1" }),
     );
-    expect(debugRequest).not.toHaveBeenCalledWith(
-      expect.objectContaining({ action: "session_stop" }),
-    );
   });
+
   it("renders the empty task state without issuing capture calls", async () => {
     vi.mocked(debugTasks).mockResolvedValue({ tasks: [] });
+    vi.mocked(debugHistory).mockResolvedValue({ runs: [] });
+    history.replaceState(null, "", "/debug.html");
     render(<DebugApp />);
-    expect(await screen.findByText("从一个调试任务开始")).toBeTruthy();
+    expect(await screen.findByText("还没有调试记录")).toBeTruthy();
     expect(debugRequest).not.toHaveBeenCalled();
   });
 });

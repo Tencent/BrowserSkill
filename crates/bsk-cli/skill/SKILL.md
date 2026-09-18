@@ -288,13 +288,22 @@ opt-in and not retroactive. Keep the tab/session open while investigating.
    with `--offset`; incremental lists use `next_since`/`--since`, merging by ID.
    Explicit pending/unavailable/omitted/truncated/evicted states mean missing
    evidence, not an empty response. Never infer business success from HTTP 200.
-3. Fix the cause in the user's project, then repeat the same inputs and action.
-   `bsk debug compare --session <id> --before <operation-id> --after <operation-id>`
-   compares observations; inspect relevant response fields and visible behavior
-   before claiming the fix. Report evidence IDs and any remaining uncertainty.
-4. `bsk debug stop --session <id>` stops capture while retaining bounded in-memory
-   evidence for this live task. Session stop, tab return, disconnect or extension
-   restart clears it. Stop the session according to the normal lifecycle rules.
+3. Read `bsk debug console --session <id>` for all retained console entries and
+   `bsk debug pages --session <id>` for page-load context, including evidence outside
+   action windows. Report concrete evidence IDs, omissions and uncertainty.
+4. Stop capture with `bsk debug stop --session <id>`. To hand off results, export
+   before ending the task: `bsk debug export --session <id> > website-debug.json`.
+   Choose a new filename to avoid overwriting an existing file. The exported JSON
+   includes retained bodies, headers, operations, console and page context.
+5. Follow the normal session cleanup rules. Stopping/ending a task preserves saved
+   history in the browser; users can view and export it from Website debugging →
+   History. Records are bounded to 30 days / 50 records / 50 MiB. Browser restarts
+   recover the last checkpoint as interrupted; recent changes may be missing.
+
+This feature records evidence. Do not assume a debugging request authorizes code
+changes or that a website URL identifies a local repository. Users or agents can
+analyze/compare exported recordings independently. A new task cannot read another
+ended task's history; use a user-provided export when investigating older records.
 
 Debugging does not authorize extra site actions, network replay, interception or
 sending evidence elsewhere. Common credential fields are redacted; free-form

@@ -13,7 +13,9 @@ pub enum DebugAction {
     Request,
     Operations,
     Operation,
-    Compare,
+    Console,
+    Pages,
+    Export,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -26,10 +28,6 @@ pub struct DebugParams {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub before: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub after: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -177,17 +175,20 @@ pub struct DebugRun {
     pub dropped_console: u64,
     pub coverage: Vec<String>,
     pub next_since: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_at: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_error: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DebugComparison {
-    pub before: DebugOperation,
-    pub after: DebugOperation,
-    pub before_requests: Vec<DebugRequest>,
-    pub after_requests: Vec<DebugRequest>,
-    pub before_console: Vec<DebugConsole>,
-    pub after_console: Vec<DebugConsole>,
-    /// Matching targets are evidence only, never an automatic success verdict.
-    pub same_target: bool,
+pub struct DebugRecording {
+    pub version: u32,
+    pub saved_at: f64,
+    pub run: DebugRun,
+    pub requests: Vec<DebugRequest>,
+    pub operations: Vec<DebugOperation>,
+    pub console: Vec<DebugConsole>,
+    pub pages: Vec<DebugPage>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugResult {
@@ -207,7 +208,9 @@ pub struct DebugResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub console: Option<Vec<DebugConsole>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub comparison: Option<DebugComparison>,
+    pub pages: Option<Vec<DebugPage>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recording: Option<DebugRecording>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

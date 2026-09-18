@@ -8,10 +8,9 @@ import {
   RiCodeSSlashLine,
 } from "@remixicon/react";
 import { useEffect, useState } from "react";
-import { debugRequest } from "@/debug/client";
+import { recordingRequest } from "@/debug/client";
 import type {
   DebugBody,
-  DebugComparison,
   DebugConsole,
   DebugOperation,
   DebugPage,
@@ -118,7 +117,7 @@ export function ConsoleList({ entries }: { entries: DebugConsole[] }) {
     </div>
   );
 }
-function PageState({ page }: { page?: DebugPage }) {
+export function PageState({ page }: { page?: DebugPage }) {
   const { t } = useTranslation("extension");
   return (
     <div className="min-w-0">
@@ -245,7 +244,7 @@ export function RequestDetail({
   const [error, setError] = useState("");
   useEffect(() => {
     let cancelled = false;
-    void debugRequest({
+    void recordingRequest({
       action: "request",
       session_id: session,
       run_id: request.run_id,
@@ -363,57 +362,5 @@ export function RequestDetail({
         </div>
       )}
     </section>
-  );
-}
-export function Comparison({
-  comparison,
-  onSelect,
-}: {
-  comparison: DebugComparison;
-  onSelect: (request: DebugRequest) => void;
-}) {
-  const { t } = useTranslation("extension");
-  return (
-    <div className="space-y-4">
-      <p className="text-xs leading-relaxed text-muted-foreground">{t("debug.compareHelp")}</p>
-      {!comparison.same_target && (
-        <p className="rounded-xl bg-[var(--debug-tint)] p-3 text-xs text-[var(--debug-accent)]">
-          {t("debug.targetMismatch")}
-        </p>
-      )}
-      <div className="grid gap-4 xl:grid-cols-2">
-        {(["before", "after"] as const).map((side) => (
-          <section
-            key={side}
-            className="min-w-0 overflow-hidden rounded-2xl border border-border bg-card"
-          >
-            <div className="border-b border-border p-5">
-              <span className="mb-3 block text-[10px] uppercase tracking-widest text-muted-foreground">
-                {t(side === "before" ? "debug.firstRun" : "debug.secondRun")} ·{" "}
-                {clock(comparison[side].started_at)}
-              </span>
-              <h3 className="break-words text-sm font-medium">
-                <OperationName operation={comparison[side]} />
-              </h3>
-            </div>
-            <h4 className="px-5 pt-5 text-xs font-medium">
-              {t("debug.requests")} · {comparison[`${side}_requests`].length}
-            </h4>
-            <RequestList requests={comparison[`${side}_requests`]} onSelect={onSelect} />
-            <h4 className="border-t border-border px-5 pt-5 text-xs font-medium">
-              {t("debug.console")}
-            </h4>
-            <ConsoleList entries={comparison[`${side}_console`]} />
-            <div className="border-t border-border p-5">
-              <h4 className="mb-4 flex items-center gap-2 text-xs font-medium">
-                <RiCodeSSlashLine className="size-4" aria-hidden />
-                {t("debug.pageChanges")}
-              </h4>
-              <PageState page={comparison[side].after} />
-            </div>
-          </section>
-        ))}
-      </div>
-    </div>
   );
 }

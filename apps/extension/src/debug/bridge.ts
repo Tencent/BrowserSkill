@@ -1,5 +1,5 @@
 import type { SessionManager } from "@/session-manager/manager";
-import { handleDebug } from "@/tools/debug";
+import { handleDebug, validateDebugParams } from "@/tools/debug";
 import { isRpcError } from "@/tools/shared";
 import type { DebugManager } from "./manager";
 import type { DebugParams } from "./types";
@@ -33,13 +33,30 @@ export function attachDebugBridge(sessions: SessionManager, debug: DebugManager)
     const action = message.action;
     const execute = async () => {
       if (action === "tasks") return { tasks: await debug.tasks() };
+      if (action === "history") return debug.history();
+      if (action === "delete") {
+        if (typeof message.run_id !== "string" || !/^d[a-zA-Z0-9]+$/.test(message.run_id))
+          throw new Error("invalid recording ID");
+        await debug.deleteHistory(message.run_id);
+        return {};
+      }
       const params = message.params as DebugParams;
+      if (action === "record") {
+        const invalid = validateDebugParams(params);
+        if (invalid) throw new Error(invalid);
+        return debug.readHistory(params);
+      }
+      if (action !== "debug") throw new Error("unsupported debug message");
       const result = await handleDebug(sessions, params, debug);
       if (isRpcError(result)) throw new Error(result.message);
       return result;
     };
     const request = writes.then(execute);
-    if (message.params?.action === "start" || message.params?.action === "stop")
+    if (
+      action === "delete" ||
+      message.params?.action === "start" ||
+      message.params?.action === "stop"
+    )
       writes = request.then(
         () => {},
         () => {},

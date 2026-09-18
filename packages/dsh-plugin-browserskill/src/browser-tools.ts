@@ -144,7 +144,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       "Read page state without arbitrary script execution. Actions: observe, snapshot, html, " +
       "screenshot, console, network. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
-      "debug with debugAction starts/stops task-scoped capture, reads request details and operation evidence, or compares two operations. Start before reproduction.",
+      "debug with debugAction starts/stops task-scoped capture, reads request details and operation evidence, or exports a recording for later analysis. Start before visiting the page.",
     actions: {
       observe: "inspect.observe",
       snapshot: "inspect.snapshot",

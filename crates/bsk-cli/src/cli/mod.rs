@@ -157,7 +157,7 @@ pub enum Command {
     /// Read buffered network responses / failures.
     Network(NetworkArgs),
 
-    /// Opt-in website debugging: requests, operation evidence, and comparisons.
+    /// Opt-in website debugging: requests, page context, and recording export.
     Debug(debug::DebugArgs),
 
     /// Dump raw HTML for a tab or a snapshot ref.

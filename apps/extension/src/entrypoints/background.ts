@@ -1,5 +1,6 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { LocalDebugArchive } from "@/debug/archive";
 import { attachDebugBridge } from "@/debug/bridge";
 import { DebugManager } from "@/debug/manager";
 import { getAuditEnabled } from "@/lib/audit";
@@ -81,7 +82,7 @@ export default defineBackground(() => {
       return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
     },
   });
-  const debug = new DebugManager(sessions, cdp, chrome.tabs);
+  const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
   attachDebugBridge(sessions, debug);
   chrome.debugger.onDetach.addListener((source) => {
     if (source.tabId !== undefined) debug.stopTab(source.tabId, "debugger_detached");

@@ -6,16 +6,6 @@
     "session_id"
   ],
   "properties": {
-    "comparison": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/DebugComparison"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
     "console": {
       "type": [
         "array",
@@ -51,6 +41,25 @@
       "items": {
         "$ref": "#/definitions/DebugOperation"
       }
+    },
+    "pages": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/DebugPage"
+      }
+    },
+    "recording": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugRecording"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "request": {
       "anyOf": [
@@ -151,54 +160,6 @@
             "string",
             "null"
           ]
-        }
-      }
-    },
-    "DebugComparison": {
-      "type": "object",
-      "required": [
-        "after",
-        "after_console",
-        "after_requests",
-        "before",
-        "before_console",
-        "before_requests",
-        "same_target"
-      ],
-      "properties": {
-        "after": {
-          "$ref": "#/definitions/DebugOperation"
-        },
-        "after_console": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/DebugConsole"
-          }
-        },
-        "after_requests": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/DebugRequest"
-          }
-        },
-        "before": {
-          "$ref": "#/definitions/DebugOperation"
-        },
-        "before_console": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/DebugConsole"
-          }
-        },
-        "before_requests": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/DebugRequest"
-          }
-        },
-        "same_target": {
-          "description": "Matching targets are evidence only, never an automatic success verdict.",
-          "type": "boolean"
         }
       }
     },
@@ -378,6 +339,56 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "DebugRecording": {
+      "type": "object",
+      "required": [
+        "console",
+        "operations",
+        "pages",
+        "requests",
+        "run",
+        "saved_at",
+        "version"
+      ],
+      "properties": {
+        "console": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugConsole"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugOperation"
+          }
+        },
+        "pages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugPage"
+          }
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugRequest"
+          }
+        },
+        "run": {
+          "$ref": "#/definitions/DebugRun"
+        },
+        "saved_at": {
+          "type": "number",
+          "format": "double"
+        },
+        "version": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },
@@ -612,6 +623,13 @@
           "format": "uint64",
           "minimum": 0.0
         },
+        "saved_at": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "session_id": {
           "type": "string"
         },
@@ -634,6 +652,12 @@
             "null"
           ],
           "format": "double"
+        },
+        "storage_error": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tab_id": {
           "type": "integer",

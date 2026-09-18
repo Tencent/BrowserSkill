@@ -1,65 +1,82 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Button } from "@browser-skill/ui";
 import {
-  RiArrowRightLine,
+  RiArrowLeftLine,
+  RiArrowRightUpLine,
   RiBugLine,
-  RiCodeSSlashLine,
-  RiGitMergeLine,
-  RiPulseLine,
+  RiDeleteBinLine,
+  RiDownloadLine,
+  RiHistoryLine,
   RiShieldCheckLine,
   RiStopCircleLine,
 } from "@remixicon/react";
 import { useEffect, useState } from "react";
-import { debugRequest } from "@/debug/client";
+import { debugHistory, debugRequest, deleteRecording, recordingRequest } from "@/debug/client";
 import type {
-  DebugComparison,
+  DebugConsole,
   DebugOperation,
+  DebugPage,
   DebugRequest,
   DebugResult,
   DebugRun,
 } from "@/debug/types";
 import { useDebugTasks } from "@/debug/use-tasks";
 import {
-  Comparison,
   ConsoleList,
   clock,
   OperationName,
   PageChanges,
+  PageState,
   Quiet,
   RequestDetail,
   RequestList,
 } from "./evidence";
 
-const selectClass =
-  "min-w-0 max-w-full rounded-lg border border-input bg-background px-3 py-2 text-xs text-foreground outline-none focus:ring-2 focus:ring-ring";
-
 export function DebugApp() {
   const { t } = useTranslation("extension");
-  const { tasks, loaded, error: taskError, refresh } = useDebugTasks();
-  const [session, setSession] = useState(
-    () => new URLSearchParams(location.search).get("session") ?? "",
-  );
-  const task =
-    tasks.find((item) => item.session_id === session) ?? (!session ? tasks[0] : undefined);
-  const sessionId = task?.session_id ?? "";
-  const [runId, setRunId] = useState(() => new URLSearchParams(location.search).get("run") ?? "");
+  const { tasks, error: taskError, refresh } = useDebugTasks();
+  const [selection, setSelection] = useState(() => {
+    const query = new URLSearchParams(location.search);
+    return { session: query.get("session") ?? "", run: query.get("run") ?? "" };
+  });
   const [runs, setRuns] = useState<DebugRun[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState("");
+  const [historyError, setHistoryError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [revision, setRevision] = useState(0);
   const [operations, setOperations] = useState<DebugOperation[]>([]);
   const [requests, setRequests] = useState<DebugRequest[]>([]);
+  const [messages, setMessages] = useState<DebugConsole[]>([]);
+  const [pages, setPages] = useState<DebugPage[]>([]);
   const [operationId, setOperationId] = useState("");
+  const [mode, setMode] = useState<"requests" | "console" | "pages">("requests");
   const [detail, setDetail] = useState<DebugResult>();
   const [selectedRequest, setSelectedRequest] = useState<DebugRequest>();
-  const [mode, setMode] = useState<"evidence" | "compare">("evidence");
-  const [compareOptions, setCompareOptions] = useState<DebugOperation[]>([]);
-  const [beforeId, setBeforeId] = useState("");
-  const [afterId, setAfterId] = useState("");
-  const [comparison, setComparison] = useState<DebugComparison>();
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [pulse, setPulse] = useState(0);
-  const [revision, setRevision] = useState(0);
-  const run = runs.find((item) => item.id === runId) ?? (!runId ? runs.at(-1) : undefined);
-  const activeRunId = run?.id;
+  const run = selection.run
+    ? runs.find((item) => item.id === selection.run)
+    : selection.session
+      ? runs.find((item) => item.session_id === selection.session)
+      : undefined;
+  const runId = run?.id;
+  const sessionId = run?.session_id ?? selection.session;
+  const task = tasks.find(
+    (item) => item.session_id === sessionId && (!run || run.started_at >= item.created_at),
+  );
+  const isHistory = !selection.session && !selection.run;
+  const pulse = run?.next_since ?? 0;
+
+  function select(session = "", id = "") {
+    setSelection({ session, run: id });
+    setError("");
+    setConfirmDelete(false);
+    const query = new URLSearchParams();
+    if (session) query.set("session", session);
+    if (id) query.set("run", id);
+    history.replaceState(null, "", `${location.pathname}${query.size ? `?${query}` : ""}`);
+  }
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -70,155 +87,107 @@ export function DebugApp() {
   }, []);
 
   useEffect(() => {
-    if (!sessionId) {
-      setRuns([]);
-      return;
-    }
     let cancelled = false;
     let pending = false;
     const poll = async () => {
       if (cancelled || document.hidden || pending) return;
       pending = true;
       try {
-        const result = await debugRequest({ action: "status", session_id: sessionId });
+        const result = await debugHistory();
         if (!cancelled) {
-          setRuns(result.runs ?? []);
-          setRunId((value) =>
-            value && !result.runs?.some((item) => item.id === value) ? "" : value,
-          );
-          setError("");
-          setPulse((value) => value + 1);
+          setRuns(result.runs);
+          setHistoryError(result.error ?? "");
         }
-      } catch (err) {
-        if (!cancelled) setError(String(err instanceof Error ? err.message : err));
+      } catch (reason) {
+        if (!cancelled) setHistoryError(reason instanceof Error ? reason.message : String(reason));
       } finally {
         pending = false;
+        if (!cancelled) setLoaded(true);
       }
     };
     void poll();
-    const timer = setInterval(() => void poll(), 2000);
+    const timer = setInterval(() => void poll(), 3000);
     document.addEventListener("visibilitychange", poll);
     return () => {
       cancelled = true;
       clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
     };
-  }, [sessionId, revision]);
+  }, [revision]);
 
   useEffect(() => {
     setOperations([]);
     setRequests([]);
+    setMessages([]);
+    setPages([]);
     setOperationId("");
-    setSelectedRequest(undefined);
     setDetail(undefined);
-    if (!sessionId || !activeRunId) return;
-    let cancelled = false;
-    let pending = false;
-    let since = 0;
-    const retained = new Map<string, DebugRequest>();
-    const poll = async () => {
-      if (cancelled || document.hidden || pending) return;
-      pending = true;
-      try {
-        const result = await debugRequest({
-          action: "operations",
-          session_id: sessionId,
-          run_id: activeRunId,
-          limit: 100,
-        });
-        if (cancelled) return;
-        for (let page = 0; page < 3; page++) {
-          if (cancelled || document.hidden) return;
-          const batch = await debugRequest({
-            action: "requests",
-            session_id: sessionId,
-            run_id: activeRunId,
-            since,
-            limit: 100,
-          });
-          if (cancelled) return;
-          for (const entry of batch.requests ?? []) retained.set(entry.id, entry);
-          since = batch.next_since ?? since;
-          if ((batch.requests?.length ?? 0) < 100) break;
-        }
-        const entries = [...retained.values()]
-          .sort((a, b) => a.started_at - b.started_at)
-          .slice(-200);
-        retained.clear();
-        for (const entry of entries) retained.set(entry.id, entry);
-        if (!cancelled) {
-          setOperations((result.operations ?? []).sort((a, b) => a.started_at - b.started_at));
-          setRequests(entries);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
-      } finally {
-        pending = false;
-      }
-    };
-    void poll();
-    const timer = setInterval(() => void poll(), 2000);
-    document.addEventListener("visibilitychange", poll);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      document.removeEventListener("visibilitychange", poll);
-    };
-  }, [sessionId, activeRunId, revision]);
+    setSelectedRequest(undefined);
+    setMode("requests");
+  }, [runId]);
 
   useEffect(() => {
-    if (!sessionId || !operationId || !activeRunId) {
+    if (!runId) return;
+    let cancelled = false;
+    const base = { session_id: sessionId, run_id: runId };
+    void (async () => {
+      const [actions, consoleResult, pageResult] = await Promise.all([
+        recordingRequest({ ...base, action: "operations", limit: 100 }),
+        recordingRequest({ ...base, action: "console" }),
+        recordingRequest({ ...base, action: "pages" }),
+      ]);
+      const entries: DebugRequest[] = [];
+      let since = 0;
+      for (let page = 0; page < 2; page++) {
+        if (cancelled) return;
+        const batch = await recordingRequest({ ...base, action: "requests", since, limit: 100 });
+        entries.push(...(batch.requests ?? []));
+        since = batch.next_since ?? since;
+        if ((batch.requests?.length ?? 0) < 100) break;
+      }
+      if (cancelled) return;
+      setOperations((actions.operations ?? []).sort((a, b) => a.started_at - b.started_at));
+      setRequests(
+        [...new Map(entries.map((item) => [item.id, item])).values()].sort(
+          (a, b) => a.started_at - b.started_at,
+        ),
+      );
+      setMessages(consoleResult.console ?? []);
+      setPages(pageResult.pages ?? []);
+    })().catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, sessionId, pulse]);
+
+  useEffect(() => {
+    if (!runId || !operationId) {
       setDetail(undefined);
       return;
     }
     let cancelled = false;
-    void debugRequest({
+    void recordingRequest({
       action: "operation",
       session_id: sessionId,
-      run_id: activeRunId,
+      run_id: runId,
       id: operationId,
     }).then(
       (result) => {
-        if (!cancelled) {
-          setDetail(result);
-        }
+        if (!cancelled) setDetail(result);
       },
-      (err: Error) => {
+      (reason: Error) => {
         if (!cancelled) {
           setDetail(undefined);
-          setError(err.message);
+          setError(reason.message);
         }
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [sessionId, activeRunId, operationId, pulse]);
-
-  useEffect(() => {
-    if (mode !== "compare" || !sessionId) return;
-    let cancelled = false;
-    void Promise.all(
-      runs.map((item) =>
-        debugRequest({ action: "operations", session_id: sessionId, run_id: item.id, limit: 100 }),
-      ),
-    ).then(
-      (results) => {
-        if (!cancelled)
-          setCompareOptions(
-            results
-              .flatMap((item) => item.operations ?? [])
-              .sort((a, b) => a.started_at - b.started_at),
-          );
-      },
-      (err: Error) => {
-        if (!cancelled) setError(err.message);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [mode, sessionId, runs]);
+  }, [runId, sessionId, operationId, pulse]);
 
   async function capture() {
     if (!task) return;
@@ -226,50 +195,79 @@ export function DebugApp() {
     setError("");
     try {
       const result = await debugRequest({
+        session_id: task.session_id,
         action: run?.state === "capturing" ? "stop" : "start",
-        session_id: sessionId,
         ...(run?.state === "capturing"
           ? { run_id: run.id }
           : { tab_id: task.tab_id, name: task.title }),
       });
-      if (result.run) setRunId(result.run.id);
+      if (result.run) {
+        setRuns((current) => [
+          result.run!,
+          ...current.filter((item) => item.id !== result.run!.id),
+        ]);
+        select(task.session_id, result.run.id);
+      }
       setRevision((value) => value + 1);
       refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
   }
-  async function compare() {
+
+  async function exportRecord() {
+    if (!run) return;
     setBusy(true);
     setError("");
     try {
-      setComparison(
-        (
-          await debugRequest({
-            action: "compare",
-            session_id: sessionId,
-            before: beforeId,
-            after: afterId,
-          })
-        ).comparison,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const result = await recordingRequest({
+        action: "export",
+        session_id: run.session_id,
+        run_id: run.id,
+      });
+      if (!result.recording) throw new Error(t("debug.recordMissing"));
+      const blob = new Blob([JSON.stringify(result.recording, null, 2)], {
+        type: "application/json",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `browser-debug-${run.id}.json`;
+      document.body.append(link);
+      try {
+        link.click();
+      } finally {
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
     }
   }
-  function switchSession(value: string) {
-    setSession(value);
-    setRunId("");
-    setRuns([]);
-    setComparison(undefined);
-    setBeforeId("");
-    setAfterId("");
-    setCompareOptions([]);
+
+  async function removeRecord() {
+    if (!run || run.state === "capturing") return;
+    setBusy(true);
+    setError("");
+    try {
+      await deleteRecording(run.id);
+      setRuns((current) => current.filter((item) => item.id !== run.id));
+      select();
+      setRevision((value) => value + 1);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setBusy(false);
+    }
   }
+
+  const visible = runs.filter((item) =>
+    `${item.name} ${item.url} ${item.id}`.toLocaleLowerCase().includes(filter.toLocaleLowerCase()),
+  );
   return (
     <div className="debug-workspace min-h-screen bg-background text-foreground">
       <header className="border-b border-border/70 bg-card/70">
@@ -278,202 +276,300 @@ export function DebugApp() {
           <span className="text-sm font-semibold tracking-tight">BrowserSkill</span>
           <span className="text-border">/</span>
           <span className="text-xs text-muted-foreground">{t("debug.title")}</span>
-          <div className="ml-auto flex items-center gap-3">
-            {tasks.length > 0 && (
-              <select
-                aria-label={t("debug.currentTasks")}
-                className={selectClass}
-                value={sessionId}
-                onChange={(event) => switchSession(event.target.value)}
-              >
-                {!task && <option value="">{t("debug.currentTasks")}</option>}
-                {tasks.map((item) => (
-                  <option key={item.session_id} value={item.session_id}>
-                    {item.run?.name || item.title || item.session_id}
-                  </option>
-                ))}
-              </select>
-            )}
-            <span className="hidden font-mono text-[10px] text-muted-foreground sm:block">
-              {sessionId}
-            </span>
-          </div>
+          {!isHistory && (
+            <Button size="sm" variant="ghost" className="ml-auto" onClick={() => select()}>
+              <RiHistoryLine className="size-4" aria-hidden />
+              {t("debug.history")}
+            </Button>
+          )}
         </div>
       </header>
       <main className="mx-auto max-w-[1480px] px-6 py-8 lg:px-10">
-        <div className="mb-8 flex flex-wrap items-start gap-5">
+        <div className="mb-7 flex flex-wrap items-start gap-5">
           <div className="min-w-0 flex-1">
             <p className="mb-3 flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--debug-accent)]">
               <RiBugLine className="size-3.5" aria-hidden />
-              {t("debug.evidence")}
+              {t(isHistory ? "debug.localHistory" : "debug.evidence")}
             </p>
             <h1 className="break-words text-2xl font-medium tracking-tight">
-              {run?.name || task?.title || t("debug.title")}
+              {isHistory ? t("debug.history") : run?.name || task?.title || t("debug.title")}
             </h1>
-            <p className="mt-3 break-all font-mono text-xs text-muted-foreground">
-              {run?.url || task?.url || t("debug.emptyHelp")}
+            <p className="mt-3 break-all text-xs leading-relaxed text-muted-foreground">
+              {isHistory ? t("debug.historyHelp") : run?.url || task?.url || t("debug.emptyHelp")}
             </p>
           </div>
-          {task && (
-            <div className="flex items-center gap-3">
-              <span className="flex items-center gap-2 rounded-full border border-border px-3 py-2 text-[11px] text-muted-foreground">
-                <span
-                  className={`size-1.5 rounded-full ${run?.state === "capturing" ? "bg-[var(--debug-accent)]" : "bg-muted-foreground/50"}`}
-                />
-                {t(
-                  run?.state === "capturing"
-                    ? "debug.capturing"
-                    : run
-                      ? "debug.stopped"
-                      : "debug.notCapturing",
-                )}
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={busy || (run?.state !== "capturing" && task.tab_id === undefined)}
-                onClick={() => void capture()}
-              >
-                <RiStopCircleLine className="size-4" aria-hidden />
-                {t(
-                  busy
-                    ? "debug.working"
-                    : run?.state === "capturing"
-                      ? "debug.stop"
-                      : "debug.start",
-                )}
-              </Button>
+          {!isHistory && (
+            <div className="flex flex-wrap items-center gap-2">
+              {run && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => void exportRecord()}
+                >
+                  <RiDownloadLine className="size-4" aria-hidden />
+                  {t("debug.export")}
+                </Button>
+              )}
+              {task && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || (run?.state !== "capturing" && task.tab_id === undefined)}
+                  onClick={() => void capture()}
+                >
+                  <RiStopCircleLine className="size-4" aria-hidden />
+                  {t(run?.state === "capturing" ? "debug.stop" : "debug.start")}
+                </Button>
+              )}
+              {run && run.state !== "capturing" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={busy}
+                  aria-label={t("debug.delete")}
+                  onClick={() => setConfirmDelete(true)}
+                >
+                  <RiDeleteBinLine className="size-4" aria-hidden />
+                </Button>
+              )}
             </div>
           )}
         </div>
-        {(error || taskError) && (
+        {(error || historyError || taskError || run?.storage_error) && (
           <p
             role="alert"
             className="mb-5 rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-xs text-destructive"
           >
-            {error || taskError}
+            {run?.storage_error
+              ? `${t("debug.storageFailed")} ${run.storage_error}`
+              : historyError
+                ? `${t("debug.storageFailed")} ${historyError}`
+                : error || taskError}
           </p>
+        )}
+        {confirmDelete && (
+          <div
+            role="alertdialog"
+            aria-label={t("debug.delete")}
+            className="mb-5 flex flex-wrap items-center gap-4 rounded-xl border border-border bg-card p-4"
+          >
+            <p className="flex-1 text-xs">{t("debug.deleteConfirm")}</p>
+            <Button size="sm" variant="outline" onClick={() => setConfirmDelete(false)}>
+              {t("debug.cancel")}
+            </Button>
+            <Button size="sm" disabled={busy} onClick={() => void removeRecord()}>
+              {t("debug.delete")}
+            </Button>
+          </div>
         )}
         {!loaded ? (
           <Quiet>{t("debug.loading")}</Quiet>
-        ) : !task ? (
-          <div className="rounded-2xl border border-dashed border-border py-16 text-center">
-            <RiBugLine className="mx-auto mb-4 size-8 text-muted-foreground" />
+        ) : isHistory ? (
+          <>
+            {tasks.length > 0 && (
+              <section className="mb-7 rounded-2xl border border-border bg-card p-5">
+                <h2 className="mb-3 text-xs text-muted-foreground">{t("debug.currentTasks")}</h2>
+                <div className="flex flex-wrap gap-3">
+                  {tasks.map((item) => (
+                    <button
+                      type="button"
+                      key={item.session_id}
+                      onClick={() => select(item.session_id, item.run?.id)}
+                      className="flex min-w-0 items-center gap-3 rounded-xl border border-border px-4 py-3 text-left text-xs hover:bg-muted"
+                    >
+                      <span className="max-w-72 truncate">
+                        {item.run?.name || item.title || item.session_id}
+                      </span>
+                      <RiArrowRightUpLine className="size-3.5 shrink-0" aria-hidden />
+                    </button>
+                  ))}
+                </div>
+              </section>
+            )}
+            {runs.length > 0 && (
+              <div className="mb-4 flex items-center gap-4">
+                <input
+                  type="search"
+                  aria-label={t("debug.searchHistory")}
+                  placeholder={t("debug.searchHistory")}
+                  value={filter}
+                  onChange={(event) => setFilter(event.target.value)}
+                  className="w-full max-w-sm rounded-lg border border-input bg-card px-3 py-2.5 text-xs outline-none focus:ring-2 focus:ring-ring"
+                />
+                <span className="text-xs text-muted-foreground">
+                  {visible.length} / {runs.length}
+                </span>
+              </div>
+            )}
+            {visible.length ? (
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {visible.map((item) => (
+                  <button
+                    type="button"
+                    key={item.id}
+                    onClick={() => select(item.session_id, item.id)}
+                    className="group min-w-0 rounded-2xl border border-border/80 bg-card p-5 text-left transition-colors hover:border-[var(--debug-accent)]/50"
+                  >
+                    <div className="mb-4 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+                      <time>{new Date(item.started_at).toLocaleString()}</time>
+                      <span
+                        className={item.state === "capturing" ? "text-[var(--debug-accent)]" : ""}
+                      >
+                        {t(item.state === "capturing" ? "debug.capturing" : "debug.savedRecord")}
+                      </span>
+                    </div>
+                    <h2 className="truncate text-sm font-medium">{item.name || t("debug.run")}</h2>
+                    <p className="mt-2 truncate font-mono text-[11px] text-muted-foreground">
+                      {item.url || "about:blank"}
+                    </p>
+                    <div className="mt-5 flex flex-wrap gap-x-4 gap-y-2 border-t border-border/60 pt-4 text-[11px] text-muted-foreground">
+                      <span>
+                        {item.requests} {t("debug.requests")}
+                      </span>
+                      <span>
+                        {item.operations} {t("debug.operations")}
+                      </span>
+                      <span>
+                        {item.errors} {t("debug.exceptions")}
+                      </span>
+                      <RiArrowRightUpLine className="ml-auto size-3.5" aria-hidden />
+                    </div>
+                    {item.storage_error && (
+                      <p className="mt-3 text-xs text-destructive">{t("debug.storageFailed")}</p>
+                    )}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-2xl border border-dashed border-border py-14 text-center">
+                <RiHistoryLine className="mx-auto mb-4 size-8 text-muted-foreground" aria-hidden />
+                <h2 className="text-sm font-medium">
+                  {t(runs.length ? "debug.noMatches" : "debug.noHistory")}
+                </h2>
+                <Quiet>{t("debug.emptyHelp")}</Quiet>
+              </div>
+            )}
+          </>
+        ) : !run ? (
+          <div className="rounded-2xl border border-dashed border-border py-14 text-center">
             <h2 className="text-sm font-medium">
-              {t(session ? "debug.noSession" : "debug.emptyTitle")}
+              {t(
+                selection.run
+                  ? "debug.recordMissing"
+                  : task
+                    ? "debug.notCapturing"
+                    : "debug.noSession",
+              )}
             </h2>
             <Quiet>{t("debug.emptyHelp")}</Quiet>
-          </div>
-        ) : !run ? (
-          <div className="rounded-2xl border border-border bg-card p-10 text-center">
-            <RiPulseLine className="mx-auto mb-5 size-8 text-[var(--debug-accent)]" />
-            <h2 className="text-lg font-medium">{t("debug.notCapturing")}</h2>
-            <p className="mx-auto my-4 max-w-md text-sm leading-relaxed text-muted-foreground">
-              {t("debug.captureNetwork")} · {t("debug.captureConsole")} · {t("debug.capturePage")}
-            </p>
-            <p className="text-xs text-muted-foreground">{t("debug.retention")}</p>
+            <Button variant="outline" size="sm" onClick={() => select()}>
+              <RiArrowLeftLine className="size-4" aria-hidden />
+              {t("debug.history")}
+            </Button>
           </div>
         ) : (
           <>
-            <div className="mb-7 grid grid-cols-3 overflow-hidden rounded-2xl border border-border/80 bg-card">
-              {[
-                [run.operations, "operations"],
-                [run.requests, "requests"],
-                [run.errors, "exceptions"],
-              ].map(([value, key]) => (
+            <div className="mb-5 flex flex-wrap gap-x-5 gap-y-2 text-[11px] text-muted-foreground">
+              <span className={run.state === "capturing" ? "text-[var(--debug-accent)]" : ""}>
+                {t(run.state === "capturing" ? "debug.capturing" : "debug.stopped")}
+              </span>
+              <time>{new Date(run.started_at).toLocaleString()}</time>
+              <span className="font-mono">{run.id}</span>
+              {run.saved_at && <span>{t("debug.savedAt", { time: clock(run.saved_at) })}</span>}
+              {run.stop_reason && (
+                <span>
+                  {t("debug.stopReason")}:{" "}
+                  {t(`debug.reason_${run.stop_reason}` as "debug.reason_requested", {
+                    defaultValue: run.stop_reason,
+                  })}
+                </span>
+              )}
+            </div>
+            <div className="mb-6 grid grid-cols-3 overflow-hidden rounded-2xl border border-border/80 bg-card">
+              {(
+                [
+                  [run.requests, "requests"],
+                  [run.operations, "operations"],
+                  [run.errors, "exceptions"],
+                ] as const
+              ).map(([value, key]) => (
                 <div key={key} className="border-r border-border/70 px-5 py-5 last:border-r-0">
                   <span className="block text-[11px] text-muted-foreground">
-                    {t(`debug.${key}` as "debug.operations")}
+                    {t(`debug.${key}`)}
                   </span>
-                  <span
-                    className={`mt-2 block text-3xl font-light tracking-tight tabular-nums ${key === "exceptions" && Number(value) > 0 ? "text-[var(--debug-accent)]" : ""}`}
-                  >
+                  <span className="mt-2 block text-3xl font-light tracking-tight tabular-nums">
                     {value}
                   </span>
                 </div>
               ))}
             </div>
-            <div className="mb-5 flex flex-wrap items-center gap-3">
-              <nav className="flex rounded-xl bg-muted/60 p-1" aria-label={t("debug.evidence")}>
-                {(["evidence", "compare"] as const).map((value) => (
-                  <button
-                    key={value}
-                    type="button"
-                    aria-pressed={mode === value}
-                    onClick={() => {
-                      setMode(value);
-                      setSelectedRequest(undefined);
-                    }}
-                    className={`flex items-center gap-2 rounded-lg px-4 py-2 text-xs transition-colors ${mode === value ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"}`}
-                  >
-                    {value === "evidence" ? (
-                      <RiPulseLine className="size-3.5" aria-hidden />
-                    ) : (
-                      <RiGitMergeLine className="size-3.5" aria-hidden />
-                    )}
-                    {t(`debug.${value}`)}
-                  </button>
-                ))}
-              </nav>
-              <select
-                aria-label={t("debug.selectRun")}
-                value={run.id}
-                onChange={(event) => setRunId(event.target.value)}
-                className={`${selectClass} ml-auto`}
-              >
-                {runs.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name || t("debug.run")} · {clock(item.started_at)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {run.dropped_requests + run.dropped_operations + run.dropped_console > 0 && (
+            {(run.dropped_requests + run.dropped_operations + run.dropped_console > 0 ||
+              run.coverage.includes("page_context_limit") ||
+              run.coverage.includes("interrupted_checkpoint")) && (
               <p className="mb-4 text-xs text-[var(--debug-accent)]">{t("debug.partial")}</p>
             )}
-            {mode === "compare" ? (
-              <div className="space-y-5">
-                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-border bg-card p-4">
-                  {(
-                    [
-                      [beforeId, setBeforeId, "firstRun"],
-                      [afterId, setAfterId, "secondRun"],
-                    ] as const
-                  ).map(([value, setValue, key], index) => (
-                    <div key={key} className="flex min-w-0 flex-1 items-center gap-3">
-                      {index === 1 && (
-                        <RiArrowRightLine
-                          className="size-4 shrink-0 text-muted-foreground"
-                          aria-hidden
-                        />
-                      )}
-                      <select
-                        aria-label={t(`debug.${key}`)}
-                        value={value}
-                        onChange={(event) => {
-                          setValue(event.target.value);
-                          setComparison(undefined);
-                        }}
-                        className={`${selectClass} w-full`}
-                      >
-                        <option value="">{t(`debug.${key}`)}</option>
-                        {compareOptions.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {clock(item.started_at)} · {item.method.replace("tool.", "")}{" "}
-                            {item.target} · {item.id.split(":").at(-1)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  ))}
-                  <Button
-                    size="sm"
-                    disabled={busy || !beforeId || !afterId || beforeId === afterId}
-                    onClick={() => void compare()}
+            <div className="grid items-start gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
+              <aside className="overflow-hidden rounded-2xl border border-border/80 bg-card">
+                <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">
+                  {t("debug.timeline")}
+                </h2>
+                {(["requests", "console", "pages"] as const).map((value) => (
+                  <button
+                    type="button"
+                    key={value}
+                    onClick={() => {
+                      setMode(value);
+                      setOperationId("");
+                      setSelectedRequest(undefined);
+                    }}
+                    aria-pressed={!operationId && mode === value}
+                    className={`flex w-full items-center justify-between border-b border-border/60 px-5 py-3 text-left text-xs ${!operationId && mode === value ? "bg-[var(--debug-tint)] text-[var(--debug-accent)]" : "text-muted-foreground"}`}
                   >
-                    {t("debug.compareAction")}
-                  </Button>
+                    {t(`debug.${value}`)}
+                    <span className="font-mono text-[10px]">
+                      {value === "requests"
+                        ? run.requests
+                        : value === "console"
+                          ? messages.length
+                          : pages.length}
+                    </span>
+                  </button>
+                ))}
+                <div className="max-h-[620px] overflow-y-auto">
+                  {operations.length ? (
+                    operations.map((item, index) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        aria-pressed={operationId === item.id}
+                        onClick={() => {
+                          setOperationId(item.id);
+                          setDetail(undefined);
+                          setSelectedRequest(undefined);
+                        }}
+                        className={`flex w-full gap-3 border-b border-border/50 px-4 py-4 text-left last:border-b-0 ${operationId === item.id ? "bg-[var(--debug-tint)]" : "hover:bg-muted/50"}`}
+                      >
+                        <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block break-words text-xs font-medium leading-relaxed">
+                            <OperationName operation={item} />
+                          </span>
+                          <span className="mt-2 flex gap-2 text-[10px] text-muted-foreground">
+                            <time>{clock(item.started_at)}</time>
+                            <span>{t(`debug.state_${item.state}`)}</span>
+                          </span>
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <Quiet>{t("debug.noOperations")}</Quiet>
+                  )}
                 </div>
+              </aside>
+              <div className="min-w-0 space-y-5">
                 {selectedRequest ? (
                   <RequestDetail
                     key={selectedRequest.id}
@@ -482,138 +578,74 @@ export function DebugApp() {
                     pulse={pulse}
                     onClose={() => setSelectedRequest(undefined)}
                   />
-                ) : comparison ? (
-                  <Comparison comparison={comparison} onSelect={setSelectedRequest} />
+                ) : operationId ? (
+                  detail?.operation ? (
+                    <>
+                      <div className="px-1">
+                        <h2 className="text-sm font-medium">
+                          <OperationName operation={detail.operation} />
+                        </h2>
+                        <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+                          {detail.operation.id}
+                        </p>
+                        {detail.operation.error && (
+                          <p className="mt-3 break-words text-xs text-destructive">
+                            {detail.operation.error}
+                          </p>
+                        )}
+                      </div>
+                      <Panel title={t("debug.duringRequests")}>
+                        <RequestList
+                          requests={detail.requests ?? []}
+                          onSelect={setSelectedRequest}
+                        />
+                      </Panel>
+                      <Panel title={t("debug.console")}>
+                        <ConsoleList entries={detail.console ?? []} />
+                      </Panel>
+                      <Panel title={t("debug.pageChanges")}>
+                        <PageChanges operation={detail.operation} />
+                      </Panel>
+                      <p className="text-[10px] text-muted-foreground">{t("debug.correlation")}</p>
+                    </>
+                  ) : (
+                    <Quiet>{t("debug.loading")}</Quiet>
+                  )
+                ) : mode === "requests" ? (
+                  <Panel title={t("debug.requests")}>
+                    <RequestList requests={requests} onSelect={setSelectedRequest} />
+                  </Panel>
+                ) : mode === "console" ? (
+                  <Panel title={t("debug.console")}>
+                    <ConsoleList entries={messages} />
+                  </Panel>
                 ) : (
-                  <Quiet>{t("debug.noCompare")}</Quiet>
-                )}
-              </div>
-            ) : (
-              <div className="grid items-start gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
-                <aside className="overflow-hidden rounded-2xl border border-border/80 bg-card">
-                  <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">
-                    {t("debug.timeline")}
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setOperationId("");
-                      setSelectedRequest(undefined);
-                    }}
-                    aria-pressed={!operationId}
-                    className={`w-full border-b border-border/60 px-5 py-3 text-left text-xs ${!operationId ? "bg-[var(--debug-tint)] text-[var(--debug-accent)]" : "text-muted-foreground"}`}
-                  >
-                    {t("debug.requests")}{" "}
-                    <span className="float-right font-mono text-[10px]">{run.requests}</span>
-                  </button>
-                  <div className="max-h-[620px] overflow-y-auto">
-                    {operations.length ? (
-                      operations.map((item, index) => (
-                        <button
-                          key={item.id}
-                          type="button"
-                          aria-pressed={operationId === item.id}
-                          onClick={() => {
-                            setOperationId(item.id);
-                            setDetail(undefined);
-                            setSelectedRequest(undefined);
-                          }}
-                          className={`flex w-full gap-3 border-b border-border/50 px-4 py-4 text-left last:border-b-0 ${operationId === item.id ? "bg-[var(--debug-tint)]" : "hover:bg-muted/50"}`}
+                  <Panel title={t("debug.pages")}>
+                    {pages.length ? (
+                      pages.map((page, index) => (
+                        <details
+                          key={`${page.at}-${index}`}
+                          open={index === pages.length - 1}
+                          className="border-b border-border/60 p-5 last:border-b-0"
                         >
-                          <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full border border-border text-[9px] text-muted-foreground">
-                            {String(index + 1).padStart(2, "0")}
-                          </span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block break-words text-xs font-medium leading-relaxed">
-                              <OperationName operation={item} />
-                            </span>
-                            <span className="mt-2 flex items-center gap-2 text-[10px] text-muted-foreground">
-                              <time>{clock(item.started_at)}</time>
-                              <span className={item.state === "error" ? "text-destructive" : ""}>
-                                {t(`debug.state_${item.state}`)}
-                              </span>
-                            </span>
-                            <span className="mt-1 block text-[10px] text-muted-foreground">
-                              {t("debug.requestCount", { count: item.request_ids.length })}
-                            </span>
-                          </span>
-                        </button>
+                          <summary className="mb-4 cursor-pointer break-all text-xs text-muted-foreground">
+                            {clock(page.at)} · {page.title || page.url || t("debug.unavailable")}
+                          </summary>
+                          <PageState page={page} />
+                        </details>
                       ))
                     ) : (
-                      <Quiet>{t("debug.noOperations")}</Quiet>
+                      <Quiet>{t("debug.noData")}</Quiet>
                     )}
-                  </div>
-                </aside>
-                <div className="min-w-0 space-y-4">
-                  {selectedRequest ? (
-                    <RequestDetail
-                      key={selectedRequest.id}
-                      session={sessionId}
-                      request={selectedRequest}
-                      pulse={pulse}
-                      onClose={() => setSelectedRequest(undefined)}
-                    />
-                  ) : operationId ? (
-                    detail?.operation ? (
-                      <>
-                        <div className="px-1 py-2">
-                          <p className="mb-2 font-mono text-[10px] text-muted-foreground">
-                            {detail.operation.id}
-                          </p>
-                          <h2 className="break-words text-lg font-medium">
-                            <OperationName operation={detail.operation} />
-                          </h2>
-                          <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                            {t("debug.correlation")}
-                          </p>
-                          {detail.operation.error && (
-                            <p className="mt-3 break-words text-xs text-destructive">
-                              {detail.operation.error}
-                            </p>
-                          )}
-                        </div>
-                        <section className="overflow-hidden rounded-2xl border border-border/80 bg-card">
-                          <h3 className="border-b border-border/60 px-5 py-4 text-xs font-medium">
-                            {t("debug.duringRequests")} · {detail.requests?.length ?? 0}
-                          </h3>
-                          <RequestList
-                            requests={detail.requests ?? []}
-                            onSelect={setSelectedRequest}
-                          />
-                        </section>
-                        <section className="overflow-hidden rounded-2xl border border-border/80 bg-card">
-                          <h3 className="border-b border-border/60 px-5 py-4 text-xs font-medium">
-                            {t("debug.console")}
-                          </h3>
-                          <ConsoleList entries={detail.console ?? []} />
-                        </section>
-                        <section className="overflow-hidden rounded-2xl border border-border/80 bg-card">
-                          <h3 className="flex items-center gap-2 border-b border-border/60 px-5 py-4 text-xs font-medium">
-                            <RiCodeSSlashLine className="size-4" aria-hidden />
-                            {t("debug.pageChanges")}
-                          </h3>
-                          <PageChanges operation={detail.operation} />
-                        </section>
-                      </>
-                    ) : (
-                      <Quiet>{t("debug.loading")}</Quiet>
-                    )
-                  ) : (
-                    <section className="overflow-hidden rounded-2xl border border-border/80 bg-card">
-                      <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">
-                        {t("debug.requests")}
-                      </h2>
-                      <RequestList requests={requests} onSelect={setSelectedRequest} />
-                    </section>
-                  )}
-                </div>
+                  </Panel>
+                )}
               </div>
-            )}
+            </div>
           </>
         )}
-        <footer className="mt-8 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/60 pt-5 text-[10px] leading-relaxed text-muted-foreground">
-          <span className="flex items-center gap-1.5">
-            <RiShieldCheckLine className="size-3.5" aria-hidden />
+        <footer className="mt-8 flex flex-wrap items-start gap-x-5 gap-y-3 border-t border-border/60 pt-5 text-[10px] leading-relaxed text-muted-foreground">
+          <span className="flex max-w-3xl items-start gap-1.5">
+            <RiShieldCheckLine className="mt-0.5 size-3.5 shrink-0" aria-hidden />
             {t("debug.retention")}
           </span>
           <details className="ml-auto max-w-lg">
@@ -626,5 +658,14 @@ export function DebugApp() {
         </footer>
       </main>
     </div>
+  );
+}
+
+function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="overflow-hidden rounded-2xl border border-border/80 bg-card">
+      <h3 className="border-b border-border/60 px-5 py-4 text-xs font-medium">{title}</h3>
+      {children}
+    </section>
   );
 }

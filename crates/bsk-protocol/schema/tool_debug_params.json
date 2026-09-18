@@ -10,18 +10,6 @@
     "action": {
       "$ref": "#/definitions/DebugAction"
     },
-    "after": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "before": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "id": {
       "type": [
         "string",
@@ -106,7 +94,9 @@
         "request",
         "operations",
         "operation",
-        "compare"
+        "console",
+        "pages",
+        "export"
       ]
     }
   }

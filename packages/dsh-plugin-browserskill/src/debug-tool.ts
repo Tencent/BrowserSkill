@@ -6,15 +6,24 @@ import type { ToolDeps } from "./tools";
 export const DEBUG_PARAMETERS = {
   debugAction: {
     type: "string",
-    enum: ["start", "stop", "status", "requests", "request", "operations", "operation", "compare"],
+    enum: [
+      "start",
+      "stop",
+      "status",
+      "requests",
+      "request",
+      "operations",
+      "operation",
+      "console",
+      "pages",
+      "export",
+    ],
     description:
-      "Start capture before reproduction; inspect summaries, drill into IDs, compare two operations, then stop.",
+      "Start capture before visiting the page; inspect requests, console, page context and operations, or export the recording.",
   },
   runId: { type: "string", description: "Capture ID; defaults to the latest capture." },
   id: { type: "string", description: "Request/operation ID; required for request or operation." },
   name: { type: "string", description: "Short capture name for start." },
-  before: { type: "string", description: "Before operation ID for compare." },
-  after: { type: "string", description: "After operation ID for compare." },
   part: {
     type: "string",
     enum: ["metadata", "request", "response", "headers", "timing"],
@@ -37,7 +46,7 @@ export function registerDebugTool(
     defineTool({
       name: "inspect.debug",
       description:
-        "Opt-in, task-scoped website debugging. Correlate requests, console and page changes with agent operations; correlation is not causation. Compare identical inputs before claiming a fix.",
+        "Opt-in, task-scoped website debugging. Correlate requests, console and page changes with agent operations; correlation is not causation. Export recordings for later analysis.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -52,10 +61,10 @@ export function registerDebugTool(
       },
       // Keep observation/capture ordering in the existing per-session queue.
       async execute(args, exec) {
+        if (!DEBUG_PARAMETERS.debugAction.enum.includes(args.debugAction))
+          throw new Error("invalid debug action");
         if (["request", "operation"].includes(args.debugAction) && !args.id?.trim())
           throw new Error("id is required");
-        if (args.debugAction === "compare" && (!args.before || !args.after))
-          throw new Error("before and after operation IDs are required");
         if (args.pointer !== undefined && !["request", "response"].includes(args.part ?? ""))
           throw new Error("pointer requires request or response part");
         for (const [key, min, max] of [
@@ -76,8 +85,6 @@ export function registerDebugTool(
         for (const [key, flag] of [
           ["runId", "run-id"],
           ["name", "name"],
-          ["before", "before"],
-          ["after", "after"],
           ["part", "part"],
           ["offset", "offset"],
           ["maxChars", "max-chars"],

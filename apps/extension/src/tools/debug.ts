@@ -19,7 +19,9 @@ const ACTIONS = new Set([
   "request",
   "operations",
   "operation",
-  "compare",
+  "console",
+  "pages",
+  "export",
 ]);
 const PARTS = new Set(["metadata", "request", "response", "headers", "timing"]);
 
@@ -37,7 +39,7 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max))
       return `${key} must be an integer between ${min} and ${max}`;
   }
-  for (const key of ["id", "run_id", "before", "after", "name", "pointer"] as const) {
+  for (const key of ["id", "run_id", "name", "pointer"] as const) {
     const value = params[key];
     if (
       value !== undefined &&
@@ -48,8 +50,6 @@ export function validateDebugParams(params: DebugParams): string | undefined {
   if (params.part !== undefined && !PARTS.has(params.part)) return "invalid request detail part";
   if ((params.action === "request" || params.action === "operation") && !params.id)
     return "id is required";
-  if (params.action === "compare" && (!params.before || !params.after))
-    return "before and after operation IDs are required";
   if (params.pointer !== undefined && !["request", "response"].includes(params.part ?? ""))
     return "pointer requires request or response part";
   return undefined;

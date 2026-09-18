@@ -249,18 +249,20 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
                 ).toContain("Saved"),
               { timeout: 5000 },
             );
-            const comparison = (
-              await debug.read({
-                action: "compare",
-                session_id: "website-debug",
-                before: first.operation.id,
-                after: second.operation.id,
-              })
-            ).comparison!;
-            expect(comparison.same_target).toBe(true);
-            expect(comparison.before.after?.text).toContain("Save failed");
-            expect(comparison.after.after?.text).toContain("Saved");
-            expect(comparison.after_console).toHaveLength(0);
+            const recording = (await debug.read({ action: "export", session_id: "website-debug" }))
+              .recording!;
+            expect(recording.version).toBe(1);
+            expect(
+              recording.operations.find((item) => item.id === first.operation.id)?.after?.text,
+            ).toContain("Save failed");
+            expect(
+              recording.operations.find((item) => item.id === second.operation.id)?.after?.text,
+            ).toContain("Saved");
+            expect(
+              recording.requests.some((item) =>
+                item.response_body.text?.includes("VALIDATION_FAILED"),
+              ),
+            ).toBe(true);
             await evaluate("Promise.all([fetch('/redirect'),fetch('/large')]).then(()=>true)");
             await vi.waitFor(
               async () => {

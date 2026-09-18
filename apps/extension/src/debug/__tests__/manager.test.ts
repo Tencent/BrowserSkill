@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDebug, validateDebugParams } from "@/tools/debug";
+import type { DebugArchive } from "../archive";
 import { DebugManager } from "../manager";
-import type { DebugParams } from "../types";
+import type { DebugParams, DebugRecording } from "../types";
 
-async function fixture() {
+async function fixture(archive?: DebugArchive) {
   let window = 100;
   const sessions = new SessionManager({
     agentWindow: {
@@ -55,7 +56,7 @@ async function fixture() {
     ),
     query: vi.fn(async () => [{ id: 7, windowId: 100, active: true }] as chrome.tabs.Tab[]),
   };
-  const manager = new DebugManager(sessions, cdp, tabs, () => now);
+  const manager = new DebugManager(sessions, cdp, tabs, () => now, archive);
   const event = (method: string, data: object, tabId = 7) => listener?.({ tabId }, method, data);
   const request = (id: string) =>
     event("Network.requestWillBeSent", {
@@ -198,17 +199,19 @@ describe("task-scoped debug lifecycle", () => {
     f.manager.after(second);
     f.advance(1);
     f.request("second");
-    const result = await f.manager.read({
-      action: "compare",
+    const before = await f.manager.read({
+      action: "operation",
       session_id: "s1",
-      before: first!.operation.id,
-      after: second!.operation.id,
+      id: first!.operation.id,
     });
-    expect(result.comparison?.before_requests).toHaveLength(0);
-    expect(result.comparison?.after_requests).toHaveLength(1);
-    expect(result.comparison?.before.after?.state).toBe("available");
-    expect(result.comparison?.same_target).toBe(true);
-    expect(result.comparison).not.toHaveProperty("fixed");
+    const after = await f.manager.read({
+      action: "operation",
+      session_id: "s1",
+      id: second!.operation.id,
+    });
+    expect(before.requests).toHaveLength(0);
+    expect(after.requests).toHaveLength(1);
+    expect(before.operation?.after?.state).toBe("available");
   });
   it("retains stopped evidence, releases listeners, and removes data when tabs are returned", async () => {
     const f = await fixture();
@@ -276,11 +279,155 @@ describe("task-scoped debug lifecycle", () => {
   it("rejects invalid limits and selectors before touching browser state", () => {
     for (const params of [
       { action: "request" },
-      { action: "compare", before: "a" },
+      { action: "compare" },
       { action: "requests", limit: 101 },
       { action: "requests", since: -1 },
       { action: "request", id: "n1", part: "headers", pointer: "/x" },
     ])
       expect(validateDebugParams({ session_id: "s1", ...params } as DebugParams)).toBeTruthy();
+  });
+});
+
+class MemoryArchive implements DebugArchive {
+  records = new Map<string, DebugRecording>();
+  put = vi.fn(async (record: DebugRecording) => {
+    this.records.set(record.run.id, structuredClone(record));
+  });
+  async list() {
+    return [...this.records.values()].map((record) => structuredClone(record.run));
+  }
+  async get(id: string) {
+    const record = this.records.get(id);
+    return record && structuredClone(record);
+  }
+  async delete(id: string) {
+    this.records.delete(id);
+  }
+}
+
+describe("persistent debugging records", () => {
+  it("retains redacted evidence after task release and reads it without attaching to the tab", async () => {
+    const archive = new MemoryArchive();
+    const f = await fixture(archive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.event("Network.requestWillBeSent", {
+      requestId: "post",
+      request: {
+        url: "https://site.test/save?token=private",
+        method: "POST",
+        hasPostData: true,
+        headers: { "Content-Type": "application/json", Authorization: "Bearer private" },
+        postData: '{"name":"Alice","password":"private"}',
+      },
+    });
+    f.event("Runtime.consoleAPICalled", {
+      type: "error",
+      args: [{ type: "string", value: "Save failed" }],
+      timestamp: 10000,
+    });
+    f.manager.releaseSession("s1");
+    await vi.waitFor(() => expect(archive.records.get(run.id)?.run.state).toBe("stopped"));
+    expect((await f.manager.read({ action: "status", session_id: "s1" })).runs).toEqual([]);
+    const restored = new DebugManager(f.sessions, f.cdp, f.tabs, () => 11000, archive);
+    active.push(restored);
+    const calls = f.sendAttached.mock.calls.length;
+    const result = await restored.readHistory({ action: "export", run_id: run.id, session_id: "" });
+    expect(result.recording?.run.stop_reason).toBe("session_ended");
+    expect(result.recording?.requests[0].state).toBe("interrupted");
+    expect(result.recording?.console[0].text).toBe("Save failed");
+    expect(result.recording?.pages[0].title).toBe("App");
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(f.sendAttached).toHaveBeenCalledTimes(calls);
+    const request = await restored.readHistory({
+      action: "request",
+      run_id: run.id,
+      session_id: "",
+      id: result.recording!.requests[0].id,
+      part: "request",
+      pointer: "/name",
+    });
+    expect(request.request?.request_body.text).toBe('"Alice"');
+    await restored.deleteHistory(run.id);
+    expect((await restored.history()).runs).toEqual([]);
+  });
+
+  it("coalesces active checkpoints and flushes the final record before stop returns", async () => {
+    vi.useFakeTimers();
+    const archive = new MemoryArchive();
+    const f = await fixture(archive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    expect(archive.put).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 100; i++) f.request(`request-${i}`);
+    expect(archive.put).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(archive.put).toHaveBeenCalledTimes(2);
+    await expect(f.manager.deleteHistory(run.id)).rejects.toThrow("stop capture");
+    await f.manager.read({ action: "stop", session_id: "s1" });
+    expect(archive.records.get(run.id)?.run.state).toBe("stopped");
+    expect(archive.records.get(run.id)?.requests).toHaveLength(100);
+    await f.manager.deleteHistory(run.id);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(archive.records.has(run.id)).toBe(false);
+  });
+
+  it("shows storage failures without losing access to live export, and retries on stop", async () => {
+    const archive = new MemoryArchive();
+    archive.put.mockRejectedValueOnce(new Error("quota exceeded"));
+    const f = await fixture(archive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    expect(run.storage_error).toBe("quota exceeded");
+    f.request("save");
+    expect(
+      (await f.manager.read({ action: "export", session_id: "s1" })).recording?.requests,
+    ).toHaveLength(1);
+    const result = await f.manager.read({ action: "stop", session_id: "s1" });
+    expect(result.run?.storage_error).toBeUndefined();
+    expect(archive.records.get(run.id)?.requests).toHaveLength(1);
+  });
+
+  it("flushes release after an in-flight checkpoint and never resurrects a deleted record", async () => {
+    vi.useFakeTimers();
+    const archive = new MemoryArchive();
+    const f = await fixture(archive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    let finish!: () => void;
+    archive.put.mockImplementationOnce(
+      (record) =>
+        new Promise<void>((resolve) => {
+          finish = () => {
+            archive.records.set(record.run.id, structuredClone(record));
+            resolve();
+          };
+        }),
+    );
+    f.request("first");
+    await vi.advanceTimersByTimeAsync(2000);
+    f.request("last");
+    f.manager.releaseSession("s1");
+    finish();
+    await vi.waitFor(() => {
+      const saved = archive.records.get(run.id);
+      expect(saved?.run.state).toBe("stopped");
+      expect(saved?.requests).toHaveLength(2);
+    });
+    await f.manager.deleteHistory(run.id);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect((await f.manager.history()).runs).toEqual([]);
+    expect(archive.records.has(run.id)).toBe(false);
+  });
+
+  it("does not expose a released capture when a short session ID is reused", async () => {
+    const f = await fixture(new MemoryArchive());
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.manager.releaseSession("s1");
+    await expect(
+      f.manager.read({ action: "export", session_id: "s1", run_id: run.id }),
+    ).rejects.toThrow("not found");
+    expect((await f.manager.history()).runs.some((item) => item.id === run.id)).toBe(true);
   });
 });

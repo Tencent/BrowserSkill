@@ -11,8 +11,8 @@ use clap::Args;
 
 #[derive(Debug, Clone, Args)]
 pub struct DebugArgs {
-    /// Start/stop capture, inspect evidence, or compare two recorded operations.
-    #[arg(value_parser = ["start", "stop", "status", "requests", "request", "operations", "operation", "compare"])]
+    /// Start/stop capture, inspect context, or export a portable recording.
+    #[arg(value_parser = ["start", "stop", "status", "requests", "request", "operations", "operation", "console", "pages", "export"])]
     pub action: String,
     /// Request or operation ID returned by an earlier debug read.
     pub id: Option<String>,
@@ -25,10 +25,6 @@ pub struct DebugArgs {
     /// A short task name shown in the extension.
     #[arg(long)]
     pub name: Option<String>,
-    #[arg(long)]
-    pub before: Option<String>,
-    #[arg(long)]
-    pub after: Option<String>,
     /// Incremental cursor; records may reappear when their evidence changes.
     #[arg(long)]
     pub since: Option<u64>,
@@ -52,11 +48,6 @@ impl DebugArgs {
         if matches!(action, DebugAction::Request | DebugAction::Operation) && self.id.is_none() {
             return Err(anyhow::anyhow!("request/operation requires an ID").into());
         }
-        if action == DebugAction::Compare && (self.before.is_none() || self.after.is_none()) {
-            return Err(
-                anyhow::anyhow!("compare requires --before and --after operation IDs").into(),
-            );
-        }
         if self.pointer.is_some() && !matches!(self.part.as_deref(), Some("request" | "response")) {
             return Err(anyhow::anyhow!("--pointer requires --part request or response").into());
         }
@@ -67,8 +58,6 @@ impl DebugArgs {
             run_id: self.run_id,
             id: self.id,
             name: self.name,
-            before: self.before,
-            after: self.after,
             since: self.since,
             limit: self.limit,
             part: self.part,
@@ -81,6 +70,7 @@ impl DebugArgs {
 
 pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
     let params = args.params()?;
+    let export = params.action == DebugAction::Export;
     let info = ensure_daemon().context("ensure daemon is running")?;
     let result: DebugResult = super::business_rpc::call(
         info.sock_path,
@@ -89,11 +79,21 @@ pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
         Some(params),
         TOOL_IPC_TIMEOUT,
     )?;
-    // Nested evidence keeps the same navigable representation in both modes.
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&result).context("render debug evidence")?
-    );
+    // Export the portable document directly so stdout redirection produces a usable JSON file.
+    if export {
+        let recording = result
+            .recording
+            .context("extension returned no debug recording")?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&recording).context("render debug recording")?
+        );
+    } else {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&result).context("render debug evidence")?
+        );
+    }
     Ok(())
 }
 

@@ -36,11 +36,18 @@ export function DebugPanel({ connected }: { connected: boolean }) {
       setBusy(false);
     }
   };
-  if (!connected)
-    return <p className="py-4 text-xs text-muted-foreground">{t("debug.disconnected")}</p>;
   return (
     <section className="space-y-3" data-slot="popup-debug-panel">
-      {!loaded && <p className="text-xs text-muted-foreground">{t("debug.loading")}</p>}
+      <Button size="sm" variant="outline" className="w-full" onClick={() => openDebugPage()}>
+        <RiArrowRightUpLine className="size-4" aria-hidden />
+        {t("debug.history")}
+      </Button>
+      {!connected && (
+        <p className="py-4 text-xs text-muted-foreground">{t("debug.disconnected")}</p>
+      )}
+      {connected && !loaded && (
+        <p className="text-xs text-muted-foreground">{t("debug.loading")}</p>
+      )}
       {(failure || error) && (
         <p
           role="alert"
@@ -49,7 +56,7 @@ export function DebugPanel({ connected }: { connected: boolean }) {
           {failure || error}
         </p>
       )}
-      {loaded && !task && (
+      {connected && loaded && !task && (
         <div className="space-y-3 py-3 text-center">
           <RiBugLine className="mx-auto size-7 text-muted-foreground" aria-hidden />
           <h2 className="text-sm font-medium">{t("debug.emptyTitle")}</h2>
@@ -68,7 +75,7 @@ export function DebugPanel({ connected }: { connected: boolean }) {
           </Button>
         </div>
       )}
-      {task && (
+      {connected && task && (
         <>
           {tasks.length > 1 && (
             <label className="block text-xs text-muted-foreground">

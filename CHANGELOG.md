@@ -10,7 +10,7 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 ### Added
 
 - [Task-scoped website debugging](docs/website-debugging.md): bounded request/body
-  capture, operation-linked console and page evidence, before/after comparison,
+  capture, operation-linked console and page context, browser-local history and JSON export,
   CLI and DSH entry points, and an extension evidence workspace. Existing popup
   controls are preserved, with an additive current-task card.
 

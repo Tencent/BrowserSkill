@@ -7,7 +7,9 @@ export type DebugAction =
   | "request"
   | "operations"
   | "operation"
-  | "compare";
+  | "console"
+  | "pages"
+  | "export";
 
 export interface DebugParams {
   session_id: string;
@@ -15,8 +17,6 @@ export interface DebugParams {
   tab_id?: number;
   run_id?: string;
   id?: string;
-  before?: string;
-  after?: string;
   name?: string;
   since?: number;
   limit?: number;
@@ -123,17 +123,19 @@ export interface DebugRun {
   dropped_console: number;
   coverage: string[];
   next_since: number;
+  saved_at?: number;
+  storage_error?: string;
 }
 
-export interface DebugComparison {
-  before: DebugOperation;
-  after: DebugOperation;
-  before_requests: DebugRequest[];
-  after_requests: DebugRequest[];
-  before_console: DebugConsole[];
-  after_console: DebugConsole[];
-  /** A diff is evidence, not a declaration that the bug is fixed. */
-  same_target: boolean;
+/** Portable, already-redacted snapshot. Also used by browser-local history. */
+export interface DebugRecording {
+  version: 1;
+  saved_at: number;
+  run: DebugRun;
+  requests: DebugRequest[];
+  operations: DebugOperation[];
+  console: DebugConsole[];
+  pages: DebugPage[];
 }
 
 export interface DebugResult {
@@ -145,7 +147,8 @@ export interface DebugResult {
   operations?: DebugOperation[];
   operation?: DebugOperation;
   console?: DebugConsole[];
-  comparison?: DebugComparison;
+  pages?: DebugPage[];
+  recording?: DebugRecording;
   next_since?: number;
   truncated?: boolean;
 }

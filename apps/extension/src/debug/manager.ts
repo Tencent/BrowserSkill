@@ -7,14 +7,16 @@ import {
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
+import type { DebugArchive } from "./archive";
 import { DebugNetworkStore, requestProjection } from "./network-store";
+import { readRecording } from "./recording";
 import { redactText, redactUrl } from "./redact";
 import type {
-  DebugComparison,
   DebugConsole,
   DebugOperation,
   DebugPage,
   DebugParams,
+  DebugRecording,
   DebugResult,
   DebugRun,
   DebugTask,
@@ -60,6 +62,12 @@ interface RunState {
   nextOperation: number;
   nextConsole: number;
   targets: Set<string>;
+  pages: DebugPage[];
+  pagePending?: boolean;
+  released?: boolean;
+  archiveTimer?: ReturnType<typeof setTimeout>;
+  dirty?: boolean;
+  saving?: Promise<void>;
 }
 export interface DebugTicket {
   run: RunState;
@@ -80,7 +88,7 @@ async function deadline<T>(promise: Promise<T>, ms: number): Promise<T> {
   }
 }
 
-/** In-memory, bounded evidence independent from persistent operation audit. */
+/** Bounded live capture with browser-local checkpoints, independent of audit. */
 export class DebugManager {
   private readonly runs = new Map<string, RunState>();
   private subscription?: { dispose(): void };
@@ -91,6 +99,7 @@ export class DebugManager {
     private readonly cdp: DebugCdp,
     private readonly tabs: ChromeTabsApi,
     private readonly now: () => number = Date.now,
+    private readonly archive?: DebugArchive,
   ) {}
 
   private owned(sessionId: string, tabId: number): boolean {
@@ -109,6 +118,7 @@ export class DebugManager {
     const sequence = ++state.run.next_since;
     if (state.current && this.now() <= (state.current.window_end ?? this.now()))
       state.current.sequence = sequence;
+    this.scheduleSave(state);
     return sequence;
   }
 
@@ -125,6 +135,11 @@ export class DebugManager {
     while (this.runs.size >= MAX_RUNS) {
       const stopped = [...this.runs.values()].find(({ run }) => run.state === "stopped");
       if (!stopped) throw new Error("debug capture limit reached; stop another capture first");
+      await this.persist(stopped);
+      if (stopped.run.storage_error)
+        throw new Error(
+          "debug history save failed; export the stopped capture before starting another",
+        );
       this.runs.delete(stopped.run.id);
     }
     this.starting.add(key);
@@ -182,6 +197,7 @@ export class DebugManager {
       nextOperation: 0,
       nextConsole: 0,
       targets: new Set(),
+      pages: [],
     };
     this.runs.set(id, state);
     this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
@@ -223,9 +239,12 @@ export class DebugManager {
       run.url = redactUrl((await this.tabs.get(tabId)).url ?? "");
       if (!this.owned(sessionId, tabId) || !this.runs.has(id))
         throw new Error("task ended during debug start");
+      await this.capturePage(state);
+      await this.persist(state);
       return this.summary(state);
     } catch (error) {
       this.stopState(state, "start_failed");
+      clearTimeout(state.archiveTimer);
       this.runs.delete(id);
       this.pruneListener();
       throw error;
@@ -269,7 +288,10 @@ export class DebugManager {
   }
 
   private coverage(state: RunState, reason: string): void {
-    if (!state.run.coverage.includes(reason)) state.run.coverage.push(reason);
+    if (!state.run.coverage.includes(reason)) {
+      state.run.coverage.push(reason);
+      this.change(state);
+    }
   }
 
   private onEvent(source: CdpDebuggee, method: string, params: unknown): void {
@@ -294,6 +316,7 @@ export class DebugManager {
           state.network.detachTarget(child.sessionId);
         }
       }
+      if (!source.sessionId && method === "Page.loadEventFired") void this.capturePage(state);
       state.network.onEvent({ ...source, tabId: source.tabId }, method, params);
       const parsed =
         method === "Runtime.consoleAPICalled"
@@ -496,6 +519,8 @@ export class DebugManager {
     }
     if (state.current) state.current.sequence = this.change(state);
     state.network.stop(reason);
+    this.change(state);
+    void this.persist(state);
     this.pruneListener();
   }
   private pruneListener(): void {
@@ -508,34 +533,34 @@ export class DebugManager {
     for (const state of this.runs.values())
       if (state.run.tab_id === tabId) this.stopState(state, reason);
   }
+  private release(state: RunState, reason: string): void {
+    this.stopState(state, reason);
+    state.released = true;
+    void this.persist(state).then(() => {
+      if (this.archive && !state.run.storage_error && !state.dirty && !state.saving)
+        this.runs.delete(state.run.id);
+    });
+  }
   releaseTab(tabId: number): void {
-    for (const [id, state] of this.runs)
-      if (state.run.tab_id === tabId) {
-        this.stopState(state, "tab_released");
-        this.runs.delete(id);
-      }
+    for (const state of this.runs.values())
+      if (state.run.tab_id === tabId) this.release(state, "tab_released");
   }
   releaseSession(sessionId: string): void {
-    for (const [id, state] of this.runs)
-      if (state.run.session_id === sessionId) {
-        this.stopState(state, "session_ended");
-        this.runs.delete(id);
-      }
+    for (const state of this.runs.values())
+      if (state.run.session_id === sessionId) this.release(state, "session_ended");
   }
   sync(): void {
-    for (const [id, state] of this.runs) {
+    for (const state of this.runs.values()) {
+      if (state.released) continue;
       if (!this.sessions.has(state.run.session_id)) {
-        this.stopState(state, "session_ended");
-        this.runs.delete(id);
+        this.release(state, "session_ended");
       } else if (!this.owned(state.run.session_id, state.run.tab_id)) {
-        this.stopState(state, "tab_released");
-        this.runs.delete(id);
+        this.release(state, "tab_released");
       }
     }
   }
   dispose(): void {
-    for (const state of this.runs.values()) this.stopState(state, "disconnected");
-    this.runs.clear();
+    for (const state of this.runs.values()) this.release(state, "disconnected");
     this.pruneListener();
   }
 
@@ -545,7 +570,7 @@ export class DebugManager {
       this.sessions.list().map(async (context) => {
         const tab = (await this.tabs.query({ windowId: context.agentWindowId, active: true }))[0];
         const latest = [...this.runs.values()]
-          .filter(({ run }) => run.session_id === context.sessionId)
+          .filter(({ run, released }) => !released && run.session_id === context.sessionId)
           .at(-1);
         return {
           session_id: context.sessionId,
@@ -581,16 +606,110 @@ export class DebugManager {
     };
   }
 
-  private findOperation(
-    sessionId: string,
-    id: string,
-  ): { state: RunState; operation: DebugOperation } {
-    for (const state of this.runs.values()) {
-      if (state.run.session_id !== sessionId) continue;
-      const operation = state.operations.find((entry) => entry.id === id);
-      if (operation) return { state, operation: this.operation(state, operation) };
+  private async capturePage(state: RunState): Promise<void> {
+    if (state.pagePending || state.run.state !== "capturing") return;
+    state.pagePending = true;
+    try {
+      const page = await this.page(state);
+      if (state.run.state !== "capturing" || state.released) return;
+      state.pages.push(page);
+      if (page.url) state.run.url = page.url;
+      if (state.pages.length > 20) {
+        state.pages.shift();
+        this.coverage(state, "page_context_limit");
+      }
+      this.change(state);
+    } finally {
+      state.pagePending = false;
     }
-    throw new Error("operation not found or evicted");
+  }
+
+  private recording(state: RunState): DebugRecording {
+    return {
+      version: 1,
+      saved_at: this.now(),
+      run: this.summary(state),
+      requests: state.network.list(),
+      operations: state.operations.map((operation) => this.operation(state, operation)),
+      console: state.console,
+      pages: state.pages,
+    };
+  }
+
+  private scheduleSave(state: RunState): void {
+    if (!this.archive) return;
+    state.dirty = true;
+    if (state.archiveTimer || state.saving) return;
+    state.archiveTimer = setTimeout(() => {
+      state.archiveTimer = undefined;
+      void this.persist(state);
+    }, 2000);
+  }
+
+  private async persist(state: RunState): Promise<void> {
+    if (!this.archive) return;
+    clearTimeout(state.archiveTimer);
+    state.archiveTimer = undefined;
+    while (state.saving) await state.saving;
+    if (!state.dirty && state.run.saved_at !== undefined && !state.run.storage_error) return;
+    const recording = structuredClone(this.recording(state));
+    recording.run.saved_at = recording.saved_at;
+    delete recording.run.storage_error;
+    state.dirty = false;
+    const save = this.archive.put(recording).then(
+      () => {
+        state.run.saved_at = recording.saved_at;
+        delete state.run.storage_error;
+      },
+      (error: unknown) => {
+        state.run.storage_error =
+          error instanceof Error ? error.message : "debug history unavailable";
+      },
+    );
+    state.saving = save;
+    await save;
+    if (state.saving === save) state.saving = undefined;
+    // Changes that arrived during an IndexedDB transaction need another checkpoint.
+    if (state.dirty && !state.archiveTimer) this.scheduleSave(state);
+  }
+
+  async history(): Promise<{ runs: DebugRun[]; error?: string }> {
+    this.sync();
+    let history: DebugRun[] = [];
+    let error: string | undefined;
+    try {
+      history = (await this.archive?.list()) ?? [];
+    } catch (reason) {
+      error = reason instanceof Error ? reason.message : "debug history unavailable";
+    }
+    const combined = new Map(history.map((run) => [run.id, run]));
+    for (const state of this.runs.values()) combined.set(state.run.id, this.summary(state));
+    return {
+      runs: [...combined.values()].sort((a, b) => b.started_at - a.started_at),
+      ...(error ? { error } : {}),
+    };
+  }
+
+  /** Extension UI only. Task RPCs cannot use this browser-wide history reader. */
+  async readHistory(params: DebugParams): Promise<DebugResult> {
+    this.sync();
+    if (!params.run_id) throw new Error("recording ID is required");
+    const live = this.runs.get(params.run_id);
+    const recording = live ? this.recording(live) : await this.archive?.get(params.run_id);
+    if (!recording) throw new Error("debug recording not found or expired");
+    return readRecording(recording, params);
+  }
+
+  async deleteHistory(id: string): Promise<void> {
+    const state = this.runs.get(id);
+    if (state?.run.state === "capturing")
+      throw new Error("stop capture before deleting its record");
+    if (state) {
+      await this.persist(state);
+      clearTimeout(state.archiveTimer);
+    }
+    await this.archive?.delete(id);
+    this.runs.delete(id);
   }
 
   async read(params: DebugParams): Promise<DebugResult> {
@@ -598,37 +717,13 @@ export class DebugManager {
     if (!this.sessions.has(params.session_id)) throw new Error("session not found");
     const result: DebugResult = { session_id: params.session_id };
     const states = [...this.runs.values()].filter(
-      ({ run }) =>
+      ({ run, released }) =>
+        !released &&
         run.session_id === params.session_id &&
         (params.tab_id === undefined || run.tab_id === params.tab_id),
     );
     if (params.action === "status")
       return { ...result, runs: states.map((state) => this.summary(state)) };
-    if (params.action === "compare") {
-      const before = this.findOperation(params.session_id, params.before ?? "");
-      const after = this.findOperation(params.session_id, params.after ?? "");
-      const comparison: DebugComparison = {
-        before: before.operation,
-        after: after.operation,
-        before_requests: before.operation.request_ids.map((id) =>
-          requestProjection(before.state.network.get(id)!),
-        ),
-        after_requests: after.operation.request_ids.map((id) =>
-          requestProjection(after.state.network.get(id)!),
-        ),
-        before_console: before.state.console.filter((entry) =>
-          before.operation.console_ids.includes(entry.id),
-        ),
-        after_console: after.state.console.filter((entry) =>
-          after.operation.console_ids.includes(entry.id),
-        ),
-        same_target:
-          Boolean(before.operation.target) &&
-          before.operation.method === after.operation.method &&
-          before.operation.target === after.operation.target,
-      };
-      return { ...result, comparison };
-    }
     const state = params.run_id
       ? states.find(({ run }) => run.id === params.run_id)
       : params.id
@@ -642,8 +737,11 @@ export class DebugManager {
       throw new Error("debug capture not found; start capture before reproducing the issue");
     if (params.action === "stop") {
       this.stopState(state, "requested");
+      await this.persist(state);
       return { ...result, run: this.summary(state) };
     }
+    if (["export", "console", "pages"].includes(params.action))
+      return readRecording(this.recording(state), params);
     result.run = this.summary(state);
     const limit = params.limit ?? 30;
     const since = params.since ?? 0;
