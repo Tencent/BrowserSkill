@@ -646,6 +646,25 @@ fn cached_update_hint(
     Ok(update_hint_for_cache(&cache, current_version, auto_update))
 }
 
+/// The newer version the cache names, if any. Same read-only, offline
+/// contract as `print_update_hint_from_cache`: the daemon owns refreshing
+/// `~/.bsk/update-check.json`, and a missing or stale cache means "say
+/// nothing" rather than "up to date".
+///
+/// `doctor` needs the version itself rather than the CLI hint wording, to
+/// explain that the bundled agent skill is only as current as the build it
+/// shipped with.
+pub(crate) fn cached_newer_version(current_version: &str) -> Option<String> {
+    let cache_path = crate::daemon::paths::update_check_path().ok()?;
+    let cache = read_update_cache(&cache_path).ok()??;
+    if !cache.is_fresh(now_epoch_secs(), UPDATE_CHECK_INTERVAL) {
+        return None;
+    }
+    let current = Version::parse(current_version.trim_start_matches('v')).ok()?;
+    let latest = Version::parse(cache.latest_version.trim_start_matches('v')).ok()?;
+    (latest > current).then(|| latest.to_string())
+}
+
 fn confirm_update(candidate: &UpdateCandidate) -> Result<bool> {
     dialoguer::Confirm::new()
         .with_prompt(format!(

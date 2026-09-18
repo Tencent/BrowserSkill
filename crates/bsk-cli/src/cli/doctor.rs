@@ -230,11 +230,17 @@ fn check_skill_up_to_date() -> CheckResult {
         }
     };
     let report = crate::skill_install::sync::sync_installed_skills(&home);
+    let newer_bsk = crate::cli::update::cached_newer_version(env!("CARGO_PKG_VERSION"));
 
-    skill_check_from_report(&report)
+    skill_check_from_report(&report, newer_bsk.as_deref())
 }
 
-fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> CheckResult {
+/// `newer_bsk` is the version the update cache names, if it names a newer one.
+/// Passed in rather than read here so the tests stay off the filesystem.
+fn skill_check_from_report(
+    report: &crate::skill_install::sync::SyncReport,
+    newer_bsk: Option<&str>,
+) -> CheckResult {
     let name = "agent skill up to date";
     let mut details = Vec::new();
     for (label, harnesses) in [
@@ -280,7 +286,25 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
     } else if !report.paused.is_empty() {
         CheckResult::warn(name, detail, hints.join("; "))
     } else if !report.updated.is_empty() || !report.up_to_date.is_empty() {
-        CheckResult::ok(name, detail)
+        // "up to date" is measured against the skill bundled in *this* build,
+        // not against upstream. An old bsk therefore reports a stale skill as
+        // current, and agents act on that: a 0.2.1 install kept a SKILL.md
+        // documenting a --full-page flag its own CLI did not have.
+        //
+        // A warning, not a failure: the skill really is synced for the build
+        // that is installed, and the cache is only consulted when it is fresh,
+        // so an unknown state stays quiet rather than crying stale.
+        match newer_bsk {
+            Some(latest) => CheckResult::warn(
+                name,
+                format!(
+                    "{detail}; matches the skill bundled with bsk {current}, but bsk {latest} is available",
+                    current = env!("CARGO_PKG_VERSION"),
+                ),
+                format!("run `bsk update` to install the {latest} skill, then re-run `bsk doctor`"),
+            ),
+            None => CheckResult::ok(name, detail),
+        }
     } else if !details.is_empty() {
         CheckResult::na(name, detail)
     } else {
@@ -547,7 +571,7 @@ mod m2_tests {
             } else {
                 report.up_to_date.push(HarnessId::ClaudeCode);
             }
-            let check = skill_check_from_report(&report);
+            let check = skill_check_from_report(&report, None);
             assert_eq!(check.status, CheckStatus::Ok);
             assert!(check.detail.contains("claude-code"));
             assert!(
@@ -567,16 +591,79 @@ mod m2_tests {
     }
 
     #[test]
+    fn skill_check_warns_when_the_bundled_skill_comes_from_an_older_bsk() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        // A synced skill is only as current as the build that bundled it.
+        // Both outcomes that previously reported plain "ok" must warn here.
+        for report in [
+            SyncReport {
+                up_to_date: vec![HarnessId::ClaudeCode],
+                ..Default::default()
+            },
+            SyncReport {
+                updated: vec![HarnessId::ClaudeCode],
+                ..Default::default()
+            },
+        ] {
+            let check = skill_check_from_report(&report, Some("9.9.9"));
+            assert_eq!(check.status, CheckStatus::Warning, "{}", check.detail);
+            // still not a failure: the skill is correct for what is installed
+            assert!(check.ok);
+            assert!(check.detail.contains("9.9.9"), "{}", check.detail);
+            assert!(
+                check.detail.contains(env!("CARGO_PKG_VERSION")),
+                "{}",
+                check.detail
+            );
+            assert!(check.hint.unwrap().contains("bsk update"));
+        }
+    }
+
+    #[test]
+    fn skill_check_stays_ok_when_no_newer_bsk_is_known() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        // A missing or stale update cache reads as None. Staying quiet is the
+        // point: doctor must not cry stale just because it cannot tell.
+        let check = skill_check_from_report(
+            &SyncReport {
+                up_to_date: vec![HarnessId::ClaudeCode],
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.hint.is_none());
+    }
+
+    #[test]
+    fn a_newer_bsk_does_not_downgrade_a_sync_failure() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        let check = skill_check_from_report(
+            &SyncReport {
+                up_to_date: vec![HarnessId::ClaudeCode],
+                errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
+                ..Default::default()
+            },
+            Some("9.9.9"),
+        );
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(!check.ok);
+    }
+
+    #[test]
     fn skill_check_keeps_all_outcomes_when_another_harness_fails() {
         use crate::skill_install::{HarnessId, sync::SyncReport};
-        let check = skill_check_from_report(&SyncReport {
-            updated: vec![HarnessId::ClaudeCode],
-            up_to_date: vec![HarnessId::PiAgent],
-            protected: vec![HarnessId::Cursor],
-            busy: vec![HarnessId::Hermes],
-            errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
-            paused: Vec::new(),
-        });
+        let check = skill_check_from_report(
+            &SyncReport {
+                updated: vec![HarnessId::ClaudeCode],
+                up_to_date: vec![HarnessId::PiAgent],
+                protected: vec![HarnessId::Cursor],
+                busy: vec![HarnessId::Hermes],
+                errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
+                paused: Vec::new(),
+            },
+            None,
+        );
         assert_eq!(check.status, CheckStatus::Fail);
         for text in [
             "synced: claude-code",
@@ -610,7 +697,7 @@ mod m2_tests {
                 if updated {
                     report.updated.push(HarnessId::ClaudeCode);
                 }
-                let check = skill_check_from_report(&report);
+                let check = skill_check_from_report(&report, None);
                 assert_eq!(check.status, CheckStatus::Warning);
                 assert!(check.detail.contains("automatic updates paused for cursor"));
                 assert!(check.detail.contains(reason.description()));
@@ -629,7 +716,7 @@ mod m2_tests {
                 report
                     .errors
                     .push((HarnessId::PiAgent, "permission denied".into()));
-                let failed = skill_check_from_report(&report);
+                let failed = skill_check_from_report(&report, None);
                 assert_eq!(failed.status, CheckStatus::Fail);
                 assert!(
                     failed
@@ -655,13 +742,13 @@ mod m2_tests {
                 ..Default::default()
             },
         ] {
-            let check = skill_check_from_report(&report);
+            let check = skill_check_from_report(&report, None);
             assert_eq!(check.status, CheckStatus::NotApplicable);
             assert!(check.detail.contains("cursor"));
             assert!(!has_failures(std::slice::from_ref(&check)));
             assert_eq!(serde_json::to_value(&check).unwrap()["status"], "na");
         }
-        let empty = skill_check_from_report(&SyncReport::default());
+        let empty = skill_check_from_report(&SyncReport::default(), None);
         assert_eq!(empty.status, CheckStatus::NotApplicable);
         assert_eq!(empty.detail, "no agent skill installed");
     }
