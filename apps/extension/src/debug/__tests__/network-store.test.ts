@@ -59,6 +59,30 @@ const settle = async () => {
 };
 
 describe("debug network evidence", () => {
+  it("preserves truncation and redaction when control annotations precede network events", () => {
+    const f = fixture();
+    const body = JSON.stringify({ password: "private-value", values: Array(14000).fill(1) });
+    expect(body.length).toBeLessThan(BODY_CHARS);
+    f.store.annotate({ tabId: 7 }, "raw", {
+      intervention: { rule_id: "r1", type: "mock", state: "applied" },
+      effective: {
+        url: "https://site.test/api",
+        method: "POST",
+        headers: { "content-type": "application/json", "x-large": "x".repeat(3000) },
+        postData: body,
+      },
+      mock: { status: 200, headers: { "content-type": "application/json" }, body },
+    });
+    f.request();
+    const entry = f.store.list()[0];
+    for (const retained of [entry.request_body, entry.response_body]) {
+      expect(retained.state).toBe("truncated");
+      expect(retained.redacted).toBe(true);
+      expect(retained.text).not.toContain("private-value");
+    }
+    expect(entry.truncated).toBe(true);
+  });
+
   it("bounds long redirect chains and does not misassign late extra headers after eviction", () => {
     const f = fixture();
     f.request();

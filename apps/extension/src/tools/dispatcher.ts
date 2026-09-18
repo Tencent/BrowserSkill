@@ -926,6 +926,12 @@ function recordingRuntimeUnavailable(): RpcError {
 }
 
 function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
+  if (req.method === "tool.debug") {
+    const params = req.params as DebugParams | undefined;
+    return params && ["rule_add", "rule_enable", "replay"].includes(params.action)
+      ? params.session_id
+      : null;
+  }
   switch (req.method) {
     case "tool.tab_create":
     case "tool.tab_close":

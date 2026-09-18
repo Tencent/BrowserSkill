@@ -9,6 +9,7 @@ import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
 import type { DebugArchive } from "./archive";
 import { consoleSource } from "./evidence-model";
+import { DebugNetworkControl } from "./network-control";
 import { DebugNetworkStore, requestProjection } from "./network-store";
 import { DebugObserver, sanitizeFields } from "./observer";
 import { readRecording } from "./recording";
@@ -58,6 +59,8 @@ export interface DebugCdp extends CdpRunner {
 interface RunState {
   run: DebugRun;
   network: DebugNetworkStore;
+  controls?: DebugNetworkControl;
+  controlCleanup?: Promise<void>;
   operations: DebugOperation[];
   console: DebugConsole[];
   timer?: ReturnType<typeof setTimeout>;
@@ -142,6 +145,7 @@ export class DebugManager {
     while (this.runs.size >= MAX_RUNS) {
       const stopped = [...this.runs.values()].find(({ run }) => run.state === "stopped");
       if (!stopped) throw new Error("debug capture limit reached; stop another capture first");
+      await stopped.controlCleanup;
       await this.persist(stopped);
       if (stopped.run.storage_error)
         throw new Error(
@@ -150,6 +154,11 @@ export class DebugManager {
       this.runs.delete(stopped.run.id);
     }
     this.starting.add(key);
+    await Promise.all(
+      [...this.runs.values()]
+        .filter((item) => item.run.tab_id === tabId)
+        .map((item) => item.controlCleanup),
+    );
     const id = `d${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     const run: DebugRun = {
       id,
@@ -215,6 +224,17 @@ export class DebugManager {
       targets: new Set(),
       pages: [],
     };
+    state.controls = new DebugNetworkControl(
+      id,
+      tabId,
+      this.cdp,
+      network,
+      () => {
+        this.change(state);
+      },
+      () => state.run.state === "capturing" && this.owned(sessionId, tabId),
+      this.now,
+    );
     this.runs.set(id, state);
     this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
       this.onEvent(source, method, params),
@@ -303,6 +323,7 @@ export class DebugManager {
         this.owned(state.run.session_id, target.tabId)
       )
         await this.cdp.sendAttached(target, "Runtime.enable");
+      await state.controls?.target(target);
     } catch (error) {
       state.targets.delete(key);
       throw error;
@@ -319,7 +340,12 @@ export class DebugManager {
   private onEvent(source: CdpDebuggee, method: string, params: unknown): void {
     if (typeof source.tabId !== "number") return;
     for (const state of this.runs.values()) {
-      if (state.run.tab_id !== source.tabId || state.run.state !== "capturing") continue;
+      if (state.run.tab_id !== source.tabId) continue;
+      if (state.run.state !== "capturing") {
+        if (state.controlCleanup)
+          state.controls?.onEvent({ ...source, tabId: source.tabId }, method, params);
+        continue;
+      }
       if (!this.owned(state.run.session_id, source.tabId)) {
         this.stopState(state, "tab_released");
         continue;
@@ -355,10 +381,12 @@ export class DebugManager {
         if (child.sessionId) {
           state.targets.delete(child.sessionId);
           state.network.detachTarget(child.sessionId);
+          state.controls?.detach(child.sessionId);
         }
       }
       if (!source.sessionId && method === "Page.loadEventFired") void this.capturePage(state, true);
       state.network.onEvent({ ...source, tabId: source.tabId }, method, params);
+      state.controls?.onEvent({ ...source, tabId: source.tabId }, method, params);
       if (method === "Network.loadingFinished") this.scheduleObservation(state);
       const parsed =
         method === "Runtime.consoleAPICalled"
@@ -708,6 +736,7 @@ export class DebugManager {
   private summary(state: RunState): DebugRun {
     return {
       ...state.run,
+      active_rules: state.controls?.activeCount ?? 0,
       requests: state.network.entries.size,
       operations: state.operations.length,
       errors: state.console
@@ -731,13 +760,29 @@ export class DebugManager {
       if (state.current.state === "running") state.current.state = "interrupted";
     }
     if (state.current) state.current.sequence = this.change(state);
+    state.controlCleanup = state.controls?.hasWork
+      ? state.controls
+          .stop()
+          .catch(() => {
+            this.coverage(state, "control_cleanup_failed");
+          })
+          .finally(() => {
+            state.controlCleanup = undefined;
+            this.pruneListener();
+            void this.persist(state);
+          })
+      : undefined;
     state.network.stop(reason);
     this.change(state);
     void this.persist(state);
     this.pruneListener();
   }
   private pruneListener(): void {
-    if (![...this.runs.values()].some(({ run }) => run.state === "capturing")) {
+    if (
+      ![...this.runs.values()].some(
+        ({ run, controlCleanup }) => run.state === "capturing" || controlCleanup,
+      )
+    ) {
       this.subscription?.dispose();
       this.subscription = undefined;
     }
@@ -750,7 +795,13 @@ export class DebugManager {
     this.stopState(state, reason);
     state.released = true;
     void this.persist(state).then(() => {
-      if (this.archive && !state.run.storage_error && !state.dirty && !state.saving)
+      if (
+        this.archive &&
+        !state.controlCleanup &&
+        !state.run.storage_error &&
+        !state.dirty &&
+        !state.saving
+      )
         this.runs.delete(state.run.id);
     });
   }
@@ -859,6 +910,8 @@ export class DebugManager {
       operations: state.operations.map((operation) => this.operation(state, operation)),
       console: state.console,
       pages: state.pages,
+      rules: state.controls?.list(),
+      replays: state.controls?.replays(),
     };
   }
 
@@ -931,6 +984,7 @@ export class DebugManager {
     if (state?.run.state === "capturing")
       throw new Error("stop capture before deleting its record");
     if (state) {
+      await state.controlCleanup;
       await this.persist(state);
       clearTimeout(state.archiveTimer);
     }
@@ -938,7 +992,7 @@ export class DebugManager {
     this.runs.delete(id);
   }
 
-  async read(params: DebugParams): Promise<DebugResult> {
+  async read(params: DebugParams, signal?: AbortSignal): Promise<DebugResult> {
     this.sync();
     if (!this.sessions.has(params.session_id)) throw new Error("session not found");
     const result: DebugResult = { session_id: params.session_id };
@@ -956,6 +1010,7 @@ export class DebugManager {
         ? states.find(
             (entry) =>
               entry.network.get(params.id!) ||
+              entry.controls?.has(params.id!) ||
               entry.operations.some((operation) => operation.id === params.id),
           )
         : states.at(-1);
@@ -964,10 +1019,37 @@ export class DebugManager {
     if (params.action === "stop") {
       await deadline(state.observer?.call("flush") ?? Promise.resolve(), 600).catch(() => {});
       this.stopState(state, "requested");
+      await state.controlCleanup;
       await this.persist(state);
       return { ...result, run: this.summary(state) };
     }
-    if (["export", "console", "pages"].includes(params.action))
+    if (params.action.startsWith("rule_") || params.action === "replay") {
+      if (this.starting.has(`${state.run.session_id}:${state.run.tab_id}`))
+        throw new Error("capture is still starting; wait until it is ready");
+      if (state.run.state !== "capturing" || !state.controls)
+        throw new Error("network controls require an active capture");
+      const tab = await this.tabs.get(state.run.tab_id);
+      if (
+        !this.owned(params.session_id, state.run.tab_id) ||
+        tab.windowId !== this.sessions.get(params.session_id)?.agentWindowId
+      )
+        throw new Error("debug tab must remain in its Agent Window");
+      if (signal?.aborted) throw new Error("debug action cancelled");
+      if (params.action === "rule_add") await state.controls.add(params.rule!, signal);
+      else if (params.action === "replay") {
+        const source = state.network.get(params.id!);
+        if (!source) throw new Error("request not found or evicted");
+        const replay = await state.controls.replay(source, params.replay!, tab.url ?? "", signal);
+        return { ...result, run: this.summary(state), replay };
+      } else
+        await state.controls.update(
+          params.id!,
+          params.action as "rule_enable" | "rule_disable" | "rule_remove",
+          signal,
+        );
+      return { ...result, run: this.summary(state), rules: state.controls.list() };
+    }
+    if (["export", "console", "pages", "rules"].includes(params.action))
       return readRecording(this.recording(state), params);
     result.run = this.summary(state);
     const limit = params.limit ?? 30;

@@ -2,7 +2,7 @@ import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
 import type { CdpRunner } from "@/tools/shared";
 import { sendToCdpTarget } from "@/tools/shared";
 import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "./redact";
-import type { DebugBody, DebugRequest } from "./types";
+import type { DebugBody, DebugIntervention, DebugRequest } from "./types";
 
 export const MAX_REQUESTS = 200;
 const MAX_BODY_CHARS = 512 * 1024;
@@ -59,10 +59,41 @@ interface Chain {
   partial?: boolean;
 }
 
+interface ControlAnnotation {
+  intervention?: DebugIntervention;
+  replay_from?: string;
+  replay_id?: string;
+  effective?: {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    postData?: string;
+  };
+  mock?: { status: number; headers?: Record<string, string>; body: string };
+}
+
+function headersLimited(headers?: Record<string, string>): boolean {
+  const values = Object.entries(headers ?? {});
+  return (
+    values.length > 80 ||
+    values.some(([key, value]) => key.length > 128 || value.length > 2048) ||
+    values.reduce((total, [key, value]) => total + key.length + value.length, 0) > 4096
+  );
+}
+
 export class DebugNetworkStore {
   readonly entries = new Map<string, RequestRecord>();
   private readonly chains = new Map<string, Chain>();
   private readonly queue: RequestRecord[] = [];
+  private readonly annotations = new Map<
+    string,
+    {
+      value: ControlAnnotation;
+      requestBody?: ReturnType<typeof redactBody>;
+      responseBody?: ReturnType<typeof redactBody>;
+      headersTruncated: boolean;
+    }
+  >();
   private jobs = 0;
   private serial = 0;
   private retainedChars = 0;
@@ -133,7 +164,7 @@ export class DebugNetworkStore {
         resource_type: event.type,
         frame_id: event.frameId,
         state: "pending",
-        truncated: chain.partial === true,
+        truncated: chain.partial === true || headersLimited(event.request.headers),
         request_headers: headers,
         request_body: {
           state: event.request.hasPostData ? "unavailable" : "empty",
@@ -166,6 +197,7 @@ export class DebugNetworkStore {
         );
       }
       this.applyExtra(chain);
+      this.applyAnnotation(key, record);
       while (this.entries.size > MAX_REQUESTS) {
         const oldest = this.entries.values().next().value as RequestRecord;
         this.evict(oldest);
@@ -183,6 +215,10 @@ export class DebugNetworkStore {
           ? chain.requestHeaders
           : chain.responseHeaders;
       if (queue.length < 8 && this.pendingHeaders < 64) {
+        if (headersLimited(event.headers)) {
+          const latest = chain.hops.at(-1);
+          if (latest) latest.entry.truncated = true;
+        }
         queue.push(redactHeaders(event.headers));
         this.pendingHeaders += 1;
       } else {
@@ -211,7 +247,9 @@ export class DebugNetworkStore {
         this.finish(record, event, "complete");
         if (entry.method === "HEAD" || entry.status === 204 || entry.status === 304)
           entry.response_body = { state: "empty", chars: 0 };
-        else if (
+        else if (entry.intervention?.type === "mock" && entry.response_body.state !== "pending") {
+          /* Mock body was retained directly. */
+        } else if (
           !/^(?:text\/|application\/(?:[\w.+-]*json|javascript|xml|x-www-form-urlencoded))/i.test(
             entry.mime_type ?? "",
           )
@@ -338,12 +376,13 @@ export class DebugNetworkStore {
     key: "request_body" | "response_body",
     text: string,
     mime: string,
+    retained?: ReturnType<typeof redactBody>,
   ): void {
     if (/multipart\/form-data/i.test(mime)) {
       record.entry[key] = { state: "omitted", reason: "multipart" };
       return;
     }
-    const body = redactBody(text, mime);
+    const body = retained ?? redactBody(text, mime);
     this.retainedChars -= record.entry[key].text?.length ?? 0;
     record.entry[key] = {
       state: body.truncated ? "truncated" : body.text.length ? "available" : "empty",
@@ -375,6 +414,7 @@ export class DebugNetworkStore {
     record.entry.request_headers = undefined;
     record.entry.response_headers = undefined;
     this.entries.delete(record.entry.id);
+    this.annotations.delete(this.key(record.target, record.rawId));
     // A redirect chain must not keep evicted request records alive. If its
     // pending ExtraInfo can no longer be matched, retain ordinary headers and
     // report partial evidence instead of assigning them to the wrong hop.
@@ -401,6 +441,81 @@ export class DebugNetworkStore {
     }
   }
 
+  /** Called on the CDP event path; annotations can precede requestWillBeSent. */
+  annotate(source: CdpDebuggee, rawId: string, annotation: ControlAnnotation): void {
+    const key = this.key(source, rawId);
+    let requestBody: ReturnType<typeof redactBody> | undefined;
+    let responseBody: ReturnType<typeof redactBody> | undefined;
+    const headersTruncated = headersLimited(annotation.effective?.headers);
+    // Pending annotations must obey the same redaction boundary as live records.
+    // Preserve the original completeness flags when formatting expands a JSON body.
+    if (annotation.effective) {
+      const value = annotation.effective;
+      if (value.postData !== undefined)
+        requestBody = redactBody(value.postData, value.headers["content-type"] ?? "");
+      annotation = {
+        ...annotation,
+        effective: {
+          ...value,
+          url: redactUrl(value.url),
+          headers: redactHeaders(value.headers),
+          ...(value.postData === undefined ? {} : { postData: requestBody!.text }),
+        },
+      };
+    }
+    if (annotation.mock) {
+      const value = annotation.mock;
+      responseBody = redactBody(value.body, value.headers?.["content-type"] ?? "");
+      annotation = {
+        ...annotation,
+        mock: {
+          ...value,
+          headers: redactHeaders(value.headers),
+          body: responseBody.text,
+        },
+      };
+    }
+    this.annotations.set(key, { value: annotation, requestBody, responseBody, headersTruncated });
+    while (this.annotations.size > 64)
+      this.annotations.delete(this.annotations.keys().next().value!);
+    const record = this.chains.get(key)?.hops.at(-1);
+    if (record) this.applyAnnotation(key, record);
+  }
+  private applyAnnotation(key: string, record: RequestRecord): void {
+    const retained = this.annotations.get(key);
+    if (!retained) return;
+    this.annotations.delete(key);
+    const { effective, mock, ...metadata } = retained.value;
+    Object.assign(record.entry, metadata);
+    if (effective) {
+      if (retained.headersTruncated) record.entry.truncated = true;
+      record.entry.url = redactUrl(effective.url);
+      record.entry.method = effective.method;
+      record.entry.request_headers = redactHeaders(effective.headers);
+      if (effective.postData !== undefined)
+        this.saveBody(
+          record,
+          "request_body",
+          effective.postData,
+          effective.headers["content-type"] ?? "",
+          retained.requestBody,
+        );
+    }
+    if (mock) {
+      record.entry.status = mock.status;
+      record.entry.response_headers = redactHeaders(mock.headers);
+      record.entry.mime_type = mock.headers?.["content-type"] ?? "text/plain";
+      this.saveBody(
+        record,
+        "response_body",
+        mock.body,
+        record.entry.mime_type,
+        retained.responseBody,
+      );
+    }
+    record.entry.sequence = this.changed();
+  }
+
   list(): DebugRequest[] {
     return Array.from(this.entries.values(), (record) => record.entry);
   }
@@ -424,6 +539,7 @@ export class DebugNetworkStore {
     this.alive = false;
     this.queue.length = 0;
     this.chains.clear();
+    this.annotations.clear();
     this.pendingHeaders = 0;
     for (const { entry } of this.entries.values()) {
       if (entry.state === "pending") {

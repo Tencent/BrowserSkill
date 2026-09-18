@@ -113,18 +113,17 @@ for remaining content. Each page replaces refs: use them before continuing, neve
 reuse old ones. Continuation reads the same capture without refresh/depth changes;
 new observe/snapshot or changed page identity invalidates it.
 
+## Website debugging
 
-## Debugging your website
+On an owned tab, use `browser_inspect` with `action: "debug"`, `session` and
+`debugAction: "start"` before reproducing. Read `operations` then `operation` with
+`id` for linked evidence, or `requests` then `request` with `id` and
+`part: "response"`. Missing/truncated data is incomplete; HTTP 200 is not business success. `stop` saves history; `export` retrieves it.
 
-Use `browser_inspect` with `action: "debug"`, `debugAction: "start"` and `session`
-**before** reproducing on an owned tab.
-Read `debugAction: "operations"`, then `"operation"` with `id` for
-requests, console and page changes; `"requests"` includes all captured traffic.
-For `"request"`, pass its `id` and `part: "response"` (or `"request"`, `"headers"`,
-`"timing"`). `pointer` selects complete JSON fields; `offset`/`maxChars` page bodies.
-Merge `since` updates by ID. Missing/truncated/evicted data is incomplete.
-HTTP 200 is not business success; temporal association is not causation.
-After fixing, repeat identical inputs. Use `"compare"` with `before`/`after`
-operation IDs; verify response fields and visible outcome.
-`"stop"` retains bounded evidence for the live task; session end/tab return clears it.
-Never expose secrets or infer extra authorization.
+For authorized experiments, `rule_add` takes JSON-string `rule` (see schema).
+Default: one Fetch/XHR match; first match wins. `rules` lists state;
+`rule_enable`, `rule_disable`, `rule_remove` take `id`. Rules end with capture.
+`replay` takes source `id` and JSON-string `replay`: `{"key":"attempt-1"}`.
+It sends again using current browser cookies and may write server data. Reuse the
+same key on uncertain retries. Only current-page same-origin requests; replace
+missing/redacted values explicitly. Replay does not update the UI. History preserves provenance; controls require an active capture.

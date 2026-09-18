@@ -8,6 +8,8 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
   const since = params.since ?? 0;
   const limit = params.limit ?? 30;
   if (params.action === "export") return { ...result, recording };
+  if (params.action === "rules")
+    return { ...result, rules: recording.rules ?? [], replays: recording.replays ?? [] };
   if (params.action === "pages") return { ...result, pages: recording.pages };
   if (params.action === "console") return { ...result, console: recording.console };
   if (params.action === "request") {

@@ -1540,6 +1540,29 @@ it("forwards screenshot-bound Canvas coordinates to click", async () => {
 });
 
 describe("website debug", () => {
+  it("routes explicit rule and replay JSON without shell interpolation", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "debug rule_add": { session_id: "s1", rules: [] },
+      "debug replay": { session_id: "s1", replay: { id: "r1" } },
+    });
+    await startSession(tools);
+    const rule = JSON.stringify({
+      match: { url: "http://localhost/api" },
+      effect: { type: "mock", status: 200, body: '{"value":"$(literal)"}' },
+    });
+    await tools
+      .get("browser_inspect")!
+      .execute({ action: "debug", debugAction: "rule_add", rule }, makeExec());
+    expect(calls.at(-1)?.args).toEqual(expect.arrayContaining(["rule_add", "--rule", rule]));
+    const replay = JSON.stringify({ key: "attempt-one", body: '{"name":"Bob"}' });
+    await tools
+      .get("browser_inspect")!
+      .execute({ action: "debug", debugAction: "replay", id: "d1:n1", replay }, makeExec());
+    expect(calls.at(-1)?.args).toEqual(
+      expect.arrayContaining(["replay", "d1:n1", "--replay", replay]),
+    );
+  });
   it("routes task-owned bounded body reads through the existing runtime", async () => {
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),
@@ -1589,6 +1612,9 @@ describe("website debug", () => {
       { debugAction: "request" },
       { debugAction: "compare", before: "a" },
       { debugAction: "requests", limit: 101 },
+      { debugAction: "rule_add" },
+      { debugAction: "replay", id: "d1:n1" },
+      { debugAction: "rule_disable" },
     ])
       await expect(
         tools.get("browser_inspect")!.execute({ action: "debug", ...args }, makeExec()),

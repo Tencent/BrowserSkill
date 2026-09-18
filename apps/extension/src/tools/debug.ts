@@ -1,3 +1,4 @@
+import { validateReplay, validateRule } from "@/debug/control-model";
 import type { DebugManager } from "@/debug/manager";
 import type { DebugParams, DebugResult } from "@/debug/types";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
@@ -22,6 +23,12 @@ const ACTIONS = new Set([
   "console",
   "pages",
   "export",
+  "rules",
+  "rule_add",
+  "rule_enable",
+  "rule_disable",
+  "rule_remove",
+  "replay",
 ]);
 const PARTS = new Set(["metadata", "request", "response", "headers", "timing"]);
 
@@ -52,6 +59,19 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     return "id is required";
   if (params.pointer !== undefined && !["request", "response"].includes(params.part ?? ""))
     return "pointer requires request or response part";
+  if (
+    ["rule_enable", "rule_disable", "rule_remove", "replay"].includes(params.action) &&
+    !params.id
+  )
+    return "id is required";
+  try {
+    if (params.action === "rule_add") validateRule(params.rule);
+    else if (params.rule !== undefined) return "rule is only accepted by rule_add";
+    if (params.action === "replay") validateReplay(params.replay);
+    else if (params.replay !== undefined) return "replay options are only accepted by replay";
+  } catch (error) {
+    return error instanceof Error ? error.message : "invalid network control options";
+  }
   return undefined;
 }
 
@@ -87,7 +107,7 @@ export async function handleDebug(
       }
       return { session_id: context.sessionId, run };
     }
-    return await debug.read(params);
+    return await debug.read(params, signal);
   } catch (error) {
     return {
       code: "invalid_params",

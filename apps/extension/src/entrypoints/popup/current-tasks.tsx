@@ -32,6 +32,11 @@ export function CurrentTasks({ enabled }: { enabled: boolean }) {
                 : t("debug.notCapturing")}{" "}
               · {task.run ? t("debug.requestCount", { count: task.run.requests }) : task.session_id}
             </span>
+            {!!task.run?.active_rules && (
+              <span className="mt-1 block text-[10px] text-[var(--debug-accent)]">
+                {t("debug.activeRules", { count: task.run.active_rules })}
+              </span>
+            )}
           </span>
           <RiArrowRightUpLine className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         </button>

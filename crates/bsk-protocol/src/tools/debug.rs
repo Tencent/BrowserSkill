@@ -16,6 +16,12 @@ pub enum DebugAction {
     Console,
     Pages,
     Export,
+    Rules,
+    RuleAdd,
+    RuleEnable,
+    RuleDisable,
+    RuleRemove,
+    Replay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +48,10 @@ pub struct DebugParams {
     pub max_chars: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rule: Option<DebugRuleSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<DebugReplaySpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -105,6 +115,12 @@ pub struct DebugRequest {
     pub response_body: DebugBody,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intervention: Option<DebugIntervention>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugConsole {
@@ -206,6 +222,8 @@ pub struct DebugRun {
     pub coverage: Vec<String>,
     pub next_since: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_rules: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub saved_at: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<String>,
@@ -221,6 +239,10 @@ pub struct DebugRecording {
     pub operations: Vec<DebugOperation>,
     pub console: Vec<DebugConsole>,
     pub pages: Vec<DebugPage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<DebugRule>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replays: Option<Vec<DebugReplay>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugValue {
@@ -295,7 +317,115 @@ pub struct DebugResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<DebugEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<DebugRule>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replays: Option<Vec<DebugReplay>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay: Option<DebugReplay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DebugRuleMatch {
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DebugJsonEdit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub set: Option<BTreeMap<String, serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remove: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rename: Option<BTreeMap<String, String>>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DebugRuleEffect {
+    Block,
+    Modify {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        method: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        headers: Option<BTreeMap<String, Option<String>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        json: Option<DebugJsonEdit>,
+    },
+    Mock {
+        status: u16,
+        body: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        headers: Option<BTreeMap<String, String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delay_ms: Option<u32>,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugRuleSpec {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "match")]
+    pub matcher: DebugRuleMatch,
+    pub effect: DebugRuleEffect,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub times: Option<u32>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugRule {
+    #[serde(flatten)]
+    pub spec: DebugRuleSpec,
+    pub id: String,
+    pub state: String,
+    pub hits: u32,
+    pub failures: u32,
+    pub created_at: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DebugReplaySpec {
+    pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<BTreeMap<String, Option<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugReplay {
+    pub id: String,
+    pub key: String,
+    pub source_request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugIntervention {
+    pub rule_id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Vec<String>>,
 }

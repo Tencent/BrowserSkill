@@ -17,12 +17,31 @@ export const DEBUG_PARAMETERS = {
       "console",
       "pages",
       "export",
+      "rules",
+      "rule_add",
+      "rule_enable",
+      "rule_disable",
+      "rule_remove",
+      "replay",
     ],
     description:
       "Start capture before visiting the page; inspect requests, console, page context and operations, or export the recording.",
   },
+  rule: {
+    type: "string",
+    description:
+      "JSON for rule_add: {match:{url,method?,resource_type?},effect:{type,...},times?:1}. URL is absolute; * matches path/query. Default scope Fetch/XHR; optional Document. Effects: block; modify with same-origin url?,method?,headers? (null removes),body? or json?:{set?,remove?,rename?} for top-level JSON fields; mock with status,body,headers?,delay_ms? (0..10000). Text bodies only. times=0 lasts until disabled/capture ends. Rules run locally; first match wins.",
+  },
+  replay: {
+    type: "string",
+    description:
+      'JSON for replay: {key:"unique-attempt",url?,method?,headers?,body?}. Sends once; reuse key on retry. Same-origin only; missing/redacted data must be replaced. A replay may write server data.',
+  },
   runId: { type: "string", description: "Capture ID; defaults to the latest capture." },
-  id: { type: "string", description: "Request/operation ID; required for request or operation." },
+  id: {
+    type: "string",
+    description: "Request/operation/rule ID; required for detail, rule updates or replay.",
+  },
   name: { type: "string", description: "Short capture name for start." },
   part: {
     type: "string",
@@ -46,7 +65,7 @@ export function registerDebugTool(
     defineTool({
       name: "inspect.debug",
       description:
-        "Opt-in, task-scoped website debugging. Correlate requests, console and page changes with agent operations; correlation is not causation. Export recordings for later analysis.",
+        "Opt-in, task-scoped website debugging. Correlate requests, console and page changes with agent operations; correlation is not causation. Export recordings for later analysis. Explicitly add task-local block/modify/mock rules or replay a complete same-origin request. Paused requests are handled locally; never poll the agent for each request.",
       parameters: {
         session: SESSION_PARAM,
         tabId: TAB_ID_PARAM,
@@ -63,7 +82,12 @@ export function registerDebugTool(
       async execute(args, exec) {
         if (!DEBUG_PARAMETERS.debugAction.enum.includes(args.debugAction))
           throw new Error("invalid debug action");
-        if (["request", "operation"].includes(args.debugAction) && !args.id?.trim())
+        if (
+          ["request", "operation", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(
+            args.debugAction,
+          ) &&
+          !args.id?.trim()
+        )
           throw new Error("id is required");
         if (args.pointer !== undefined && !["request", "response"].includes(args.part ?? ""))
           throw new Error("pointer requires request or response part");
@@ -77,6 +101,15 @@ export function registerDebugTool(
           if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max))
             throw new Error(`${key} must be ${min}..${max}`);
         }
+        if ((args.debugAction === "rule_add") !== (args.rule !== undefined))
+          throw new Error("rule_add requires rule JSON");
+        if ((args.debugAction === "replay") !== (args.replay !== undefined))
+          throw new Error("replay requires replay JSON");
+        for (const value of [args.rule, args.replay])
+          if (value !== undefined) {
+            if (value.length > 81920) throw new Error("control options exceed 80 KiB");
+            JSON.parse(value);
+          }
         const session = deps.registry.resolve(args.session, "browser_inspect(action=debug)");
         const command = ["debug", args.debugAction];
         if (args.id !== undefined) command.push(args.id);
@@ -84,6 +117,8 @@ export function registerDebugTool(
         appendTabId(command, args.tabId);
         for (const [key, flag] of [
           ["runId", "run-id"],
+          ["rule", "rule"],
+          ["replay", "replay"],
           ["name", "name"],
           ["part", "part"],
           ["offset", "offset"],

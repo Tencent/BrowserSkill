@@ -363,7 +363,9 @@ async fn handle_tool_dispatch(
     // page state before asking the user, or from cleanly tearing down the
     // session. Classification lives on `Method::effect()` so adding a new
     // tool variant requires an explicit classification call.
-    if method.requires_interrupt_gate() && state.session_interrupts.try_consume(&session_id) {
+    if method.requires_interrupt_gate_with_params(&params)
+        && state.session_interrupts.try_consume(&session_id)
+    {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::UserAborted,
             message: "tool dispatch rejected: pending user interrupt. The user explicitly requested to stop. Ask the user how to proceed before issuing further actions.".into(),

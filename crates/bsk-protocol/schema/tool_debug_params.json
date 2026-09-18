@@ -58,6 +58,26 @@
         "null"
       ]
     },
+    "replay": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugReplaySpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rule": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugRuleSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "run_id": {
       "type": [
         "string",
@@ -96,8 +116,256 @@
         "operation",
         "console",
         "pages",
-        "export"
+        "export",
+        "rules",
+        "rule_add",
+        "rule_enable",
+        "rule_disable",
+        "rule_remove",
+        "replay"
       ]
+    },
+    "DebugJsonEdit": {
+      "type": "object",
+      "properties": {
+        "remove": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "rename": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugReplaySpec": {
+      "type": "object",
+      "required": [
+        "key"
+      ],
+      "properties": {
+        "body": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugRuleEffect": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": [
+                "block"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "headers": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "json": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/DebugJsonEdit"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "method": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "modify"
+              ]
+            },
+            "url": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "body",
+            "status",
+            "type"
+          ],
+          "properties": {
+            "body": {
+              "type": "string"
+            },
+            "delay_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "headers": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "status": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "mock"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "DebugRuleMatch": {
+      "type": "object",
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "DebugRuleSpec": {
+      "type": "object",
+      "required": [
+        "effect",
+        "match"
+      ],
+      "properties": {
+        "effect": {
+          "$ref": "#/definitions/DebugRuleEffect"
+        },
+        "match": {
+          "$ref": "#/definitions/DebugRuleMatch"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "times": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
     }
   }
 }

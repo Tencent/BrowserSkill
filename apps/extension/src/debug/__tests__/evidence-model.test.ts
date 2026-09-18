@@ -128,6 +128,31 @@ describe("operation evidence", () => {
       { request_id: "late", relation: "delayed" },
     ]);
   });
+  it("keeps replayed and unapplied controls out of the original operation's field chain", () => {
+    for (const control of [
+      { replay_from: "earlier" },
+      { intervention: { rule_id: "r1", type: "block", state: "applied" } },
+      { intervention: { rule_id: "r1", type: "modify", state: "failed" } },
+      { intervention: { rule_id: "r1", type: "mock", state: "pending" } },
+    ] as Partial<DebugRequest>[]) {
+      const record = fixture();
+      record.requests = [{ ...request, ...control }];
+      const evidence = operationEvidence(record, save);
+      expect(evidence.fields[0].submitted).toEqual([]);
+      expect(evidence.fields[0].response).toEqual([]);
+      expect(evidence.links).toHaveLength(1);
+      expect(evidence.gaps).toContain(
+        control.replay_from ? "request_replayed" : `control_${control.intervention?.type}`,
+      );
+    }
+    const record = fixture();
+    record.requests = [
+      { ...request, intervention: { rule_id: "r1", type: "mock", state: "applied" } },
+    ];
+    const evidence = operationEvidence(record, save);
+    expect(evidence.fields[0].submitted).toHaveLength(1);
+    expect(evidence.gaps).toContain("control_mock");
+  });
   it("uses the observed settled reload value rather than an empty loading form", () => {
     const record = fixture();
     record.pages = [{ ...page(10000, ""), navigation: "reload" }];

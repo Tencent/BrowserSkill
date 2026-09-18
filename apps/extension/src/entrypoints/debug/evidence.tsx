@@ -20,6 +20,9 @@ import type {
 } from "@/debug/types";
 
 export const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour12: false });
+
+import { RequestBadges } from "./network-controls";
+
 export function requestPath(url: string): string {
   try {
     const parsed = new URL(url);
@@ -82,6 +85,9 @@ export function RequestList({
               <span className="truncate font-mono text-xs" title={request.url}>
                 {requestPath(request.url)}
               </span>
+            </span>
+            <span className="mt-1 flex flex-wrap gap-1">
+              <RequestBadges request={request} />
             </span>
             <span className="mt-1 block truncate text-[10px] text-muted-foreground">
               {request.error || request.resource_type || request.mime_type} ·{" "}
@@ -296,12 +302,14 @@ export function RequestDetail({
   pulse,
   onClose,
   initialPart = "response",
+  onControl,
 }: {
   session: string;
   request: DebugRequest;
   pulse: number;
   onClose: () => void;
   initialPart?: NonNullable<DebugParams["part"]>;
+  onControl?: (action: "replay" | "block" | "modify" | "mock") => void;
 }) {
   const { t } = useTranslation("extension");
   const [part, setPart] = useState<NonNullable<DebugParams["part"]>>(initialPart);
@@ -357,7 +365,31 @@ export function RequestDetail({
           <span className="font-mono text-[11px] text-muted-foreground">{request.method}</span>
           <span className="ml-auto font-mono text-[10px] text-muted-foreground">{request.id}</span>
         </div>
-        <h3 className="break-all font-mono text-sm leading-relaxed">{request.url}</h3>
+        <h3 className="break-all font-mono text-sm leading-relaxed">{data?.url ?? request.url}</h3>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <RequestBadges request={data ?? request} />
+        </div>
+        {(data ?? request).intervention && (
+          <p className="mt-3 break-words text-[11px] text-muted-foreground">
+            {(data ?? request).intervention?.rule_id} ·{" "}
+            {(data ?? request).intervention?.error ||
+              (data ?? request).intervention?.changes?.join(", ")}
+          </p>
+        )}
+        {(data ?? request).replay_from && (
+          <p className="mt-2 break-all text-[11px] text-muted-foreground">
+            {t("debug.originalRequest")} · {(data ?? request).replay_from}
+          </p>
+        )}
+        {onControl && (
+          <div className="mt-5 flex flex-wrap gap-2 border-t border-border/60 pt-4">
+            {(["replay", "modify", "mock", "block"] as const).map((action) => (
+              <Button key={action} size="sm" variant="outline" onClick={() => onControl(action)}>
+                {t(`debug.${action}`)}
+              </Button>
+            ))}
+          </div>
+        )}
       </div>
       <nav
         className="flex overflow-x-auto border-b border-border/70 px-3"

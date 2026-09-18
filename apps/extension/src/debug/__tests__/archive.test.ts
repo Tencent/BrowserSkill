@@ -70,6 +70,19 @@ describe("debug history retention", () => {
       pages: [],
       console: [],
       operations: [],
+      rules: [
+        {
+          id: "d1:r1",
+          match: { url: "https://site.test/pending" },
+          effect: { type: "mock", status: 200, body: "mock" },
+          times: 0,
+          state: "enabled",
+          hits: 1,
+          failures: 0,
+          created_at: now - 1000,
+        },
+      ],
+      replays: [{ id: "replay-1", key: "attempt-1", source_request_id: "d1:n1", state: "running" }],
       requests: [
         {
           id: "d1:n1",
@@ -90,6 +103,7 @@ describe("debug history retention", () => {
           method: "GET",
           url: "https://site.test/pending",
           state: "pending",
+          intervention: { rule_id: "d1:r1", type: "mock", state: "pending" },
           request_body: { state: "empty" },
           response_body: { state: "pending" },
         },
@@ -98,6 +112,10 @@ describe("debug history retention", () => {
     const recovered = interrupted(record);
     expect(recovered.run.stopped_at).toBe(now);
     expect(recovered.run.coverage).toContain("interrupted_checkpoint");
+    expect(recovered.run.active_rules).toBe(0);
+    expect(recovered.rules?.[0].state).toBe("stopped");
+    expect(recovered.replays?.[0].state).toBe("interrupted");
+    expect(recovered.requests[1].intervention?.state).toBe("cancelled");
     expect(recovered.requests[0].response_body.text).toBe("saved");
     expect(recovered.requests[1].state).toBe("interrupted");
     expect(recovered.requests[1].response_body).toEqual({

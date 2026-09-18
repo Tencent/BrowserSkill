@@ -10,7 +10,7 @@ same owned browser task. It records browser evidence for people and agents to in
 - **History:** browser-local recordings with page-load context, all retained console
   entries, and portable JSON export, independent of the original task lifecycle.
 
-The extension records and displays evidence. Analysis and comparison belong to the
+The extension records evidence and can execute explicitly configured, task-local HTTP rules and replays. Analysis and comparison belong to the
 user or their agent; project discovery and source-code repair are outside this feature. This is independent of persistent operation audit.
 
 ## Entry points
@@ -186,10 +186,115 @@ reformatted; a truncated result is not suitable for a JSON-pointer query.
 
 Capture starts at enable time; earlier traffic cannot be reconstructed. Worker
 and service-worker internal requests, WebSocket frames, SSE chunks, screenshots,
-request interception/replay and CPU profiling are outside this version's scope.
+arbitrary response rewriting, cross-origin replay and CPU profiling are outside this version's scope.
 Iframe setup can miss its earliest requests; coverage flags report setup failure
 or target limits. Ordinary browsing adds no debug subscription or page reads.
 Stopping cancels observation timers and pending browser body reads, removes the
 manual observer, then saves the
 final retained record. It does not disable CDP domains shared by existing tools;
 browser buffers end with task detachment.
+
+
+## Request rules and replay
+
+The request detail view offers **Modify request**, **Mock response**, **Block request**
+and **Edit & replay**. The **Request rules** panel shows definitions, hit counts,
+failures and enable/disable/remove controls. The popup only adds an active-rule
+count to its existing task card. Stopped history shows definitions and outcomes,
+never execution controls. Rule/replay evidence is included in JSON export; importing
+or reopening history does not activate anything.
+
+Start capture first. Rules belong to that capture and its owned tab, including
+attached iframe targets. Defaults are **one match**, **Fetch/XHR only**, and **first
+matching rule wins** in creation order. URL matches require an absolute HTTP(S)
+origin; `*` is supported in path/query, while `?` is literal. Optional `method` and
+`resource_type` (`Fetch`, `XHR`, `Document`) narrow the match. `times: 0` lasts until
+disabled or capture ends; 1..100 sets a total match budget. Re-enabling does not
+reset the budget. Exhausted rules must be recreated. Cache/Service Worker handling
+is unchanged, so inspect actual rule hits instead of assuming every page request
+reached the interception layer. Early iframe traffic can precede target setup.
+
+The agent sends a declarative rule once; the extension executes it locally without
+an agent round trip per request. Interception is enabled only for the rule's URL
+patterns and resource types. Disabling/removing a rule cancels its pending delayed
+responses. Stop, release, disconnect and restart never restore active rules.
+Pending mocks are aborted rather than falling through to the real server.
+
+```sh
+# Rename the live outgoing JSON field once; other fields remain intact.
+bsk debug rule_add --session <id> --rule-file rename-rule.json
+bsk debug rules --session <id>
+bsk debug rule_disable <rule-id> --session <id>
+bsk debug rule_enable <rule-id> --session <id>
+bsk debug rule_remove <rule-id> --session <id>
+```
+
+`rename-rule.json`:
+
+```json
+{
+  "name": "Send the expected nickname field",
+  "match": {"url": "http://localhost:3000/api/profile", "method": "POST"},
+  "effect": {"type": "modify", "json": {"rename": {"displayName": "name"}}},
+  "times": 1
+}
+```
+
+Effects:
+
+- `{"type":"block"}`: fail the matching request with `BlockedByClient`.
+- `modify`: optional same-origin `url`, `method`, `headers` (string values replace,
+  `null` removes), and either a complete text `body` or `json` edits. JSON edits
+  support top-level `set`, `remove`, and `rename`; missing rename sources or
+  occupied destinations abort the request rather than guessing. Browser-managed
+  headers are not editable. Binary/multipart body edits are unsupported.
+- `mock`: required `status` and text `body`, optional response `headers` and
+  `delay_ms` (0..10000). Defaults to JSON content type. Status is 200..599 excluding
+  redirect statuses and 304; 204/205 require an empty body. HEAD responses omit
+  the body. Cookie setting and encoded response bodies are unsupported.
+
+Requests carry `intervention` with the rule ID, action, outcome and changed fields.
+For successful modification, retained request details describe the effective
+request. Rule failures/cancellation are explicitly labelled; a mock is never
+presented as an actual server response. Redacted rule definitions survive stop,
+but executable rule objects are discarded. Ordinary captures add no Fetch work.
+
+### Replay
+
+```sh
+bsk debug replay <request-id> --session <id> --replay-file replay.json
+```
+
+```json
+{"key":"nickname-attempt-1","body":"{\"name\":\"Bob\"}"}
+```
+
+`--rule` and `--replay` also accept inline JSON. DSH exposes these as JSON-string
+`rule` / `replay` parameters on `browser_inspect(action: "debug")`, with the same
+`debugAction` values. File input avoids putting large bodies in command arguments.
+
+Replay sends a **new** request and may change server data. It uses a dedicated
+isolated page context with the current page's cookies, never an extension-origin
+proxy. Source request, destination and current page must share an HTTP(S) origin.
+Cross-origin replay, redirects and binary/multipart bodies are rejected. Browser
+controlled headers (including Cookie, Origin and Content-Length) are supplied by
+the browser. Other captured headers are merged with explicit overrides; replace
+redacted values or remove them with `null`. Missing/truncated bodies require an
+explicit complete replacement. Redacted placeholders are never sent. Page
+navigation/context loss can interrupt the attempt.
+
+A caller-provided `key` is required. Reusing it within the same capture returns
+that attempt, including its failure, without sending again. Retry an uncertain
+call with the **same key**; create a new key only when deliberately sending a new
+request. The result includes a replay ID and linked request ID when Chrome supplies
+the initiator. Requests carry `replay_from` / `replay_id`; separate replays are not
+joined into a page action's field chain. This does not invoke the original page
+handler or guarantee a UI update. A completed replay means its network operation
+completed, not that the application succeeded.
+Active rules also apply to matching replay requests; both provenance markers are retained.
+
+Limits: 32 rule definitions and 20 replay attempts per capture; 32 concurrent
+rule handlers; 64 Ki characters per body; 80 KiB of input JSON. Replay has a
+15-second request deadline and a 256 KiB response-read limit. Read the linked
+request for HTTP status/body and omissions. Rules and replays require an active
+capture in the original owning task. Already-exported history remains read-only.

@@ -152,6 +152,11 @@ export function operationEvidence(
   if (!operation.after || operation.after.state !== "available") gaps.add("after_unavailable");
   if (operation.before?.truncated || operation.after?.truncated) gaps.add("page_truncated");
   for (const request of requests.filter((item) => requestKind(item) === "business")) {
+    if (request.intervention) gaps.add(`control_${request.intervention.type}`);
+    if (request.intervention?.state === "pending") gaps.add("control_pending");
+    if (request.intervention && ["failed", "cancelled"].includes(request.intervention.state))
+      gaps.add("control_failed");
+    if (request.replay_from) gaps.add("request_replayed");
     if (request.state === "pending") gaps.add("request_pending");
     if (request.state === "interrupted") gaps.add("request_interrupted");
     for (const body of [request.request_body, request.response_body]) {
@@ -216,7 +221,13 @@ export function operationEvidence(
     .slice(-9);
   const laterPage = loadedPage ?? observations.at(-1) ?? operation.after;
   const leaves = requests
-    .filter((item) => requestKind(item) === "business")
+    .filter(
+      (item) =>
+        requestKind(item) === "business" &&
+        !item.replay_from &&
+        (!item.intervention ||
+          (item.intervention.state === "applied" && item.intervention.type !== "block")),
+    )
     .slice(0, 12)
     .flatMap((request) =>
       (["request", "response"] as const).map((part) => ({

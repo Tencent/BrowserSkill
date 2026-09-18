@@ -31,6 +31,7 @@ import {
   RequestDetail,
   RequestList,
 } from "./evidence";
+import { ReplayEditor, RuleEditor, RulesPanel } from "./network-controls";
 import { OperationEvidence } from "./operation-evidence";
 
 export function DebugApp() {
@@ -53,10 +54,11 @@ export function DebugApp() {
   const [messages, setMessages] = useState<DebugConsole[]>([]);
   const [pages, setPages] = useState<DebugPage[]>([]);
   const [operationId, setOperationId] = useState("");
-  const [mode, setMode] = useState<"requests" | "console" | "pages">("requests");
+  const [mode, setMode] = useState<"requests" | "console" | "pages" | "rules">("requests");
   const [detail, setDetail] = useState<DebugResult>();
   const [selectedRequest, setSelectedRequest] = useState<DebugRequest>();
   const [requestPart, setRequestPart] = useState<"request" | "response">("response");
+  const [controlEditor, setControlEditor] = useState<"replay" | "block" | "modify" | "mock">();
   const initialOperation = useRef("");
   const run = selection.run
     ? runs.find((item) => item.id === selection.run)
@@ -88,6 +90,7 @@ export function DebugApp() {
     history.replaceState(null, "", `${location.pathname}${query.size ? `?${query}` : ""}`);
   }
   function openRequest(request: DebugRequest, part: "request" | "response" = "response") {
+    setControlEditor(undefined);
     setRequestPart(part);
     setSelectedRequest(request);
   }
@@ -138,6 +141,7 @@ export function DebugApp() {
     setOperationId("");
     setDetail(undefined);
     setSelectedRequest(undefined);
+    setControlEditor(undefined);
     setMode("requests");
   }, [runId]);
 
@@ -550,7 +554,7 @@ export function DebugApp() {
                 <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">
                   {t("debug.timeline")}
                 </h2>
-                {(["requests", "console", "pages"] as const).map((value) => (
+                {(["requests", "console", "pages", "rules"] as const).map((value) => (
                   <button
                     type="button"
                     key={value}
@@ -568,7 +572,9 @@ export function DebugApp() {
                         ? run.requests
                         : value === "console"
                           ? messages.length
-                          : pages.length}
+                          : value === "rules"
+                            ? (run.active_rules ?? 0)
+                            : pages.length}
                     </span>
                   </button>
                 ))}
@@ -612,14 +618,60 @@ export function DebugApp() {
               </aside>
               <div className="min-w-0 space-y-5">
                 {selectedRequest ? (
-                  <RequestDetail
-                    key={selectedRequest.id}
-                    session={sessionId}
-                    request={selectedRequest}
-                    pulse={pulse}
-                    initialPart={requestPart}
-                    onClose={() => setSelectedRequest(undefined)}
-                  />
+                  <div className="space-y-4">
+                    <RequestDetail
+                      key={selectedRequest.id}
+                      session={sessionId}
+                      request={selectedRequest}
+                      pulse={pulse}
+                      initialPart={requestPart}
+                      onClose={() => {
+                        setSelectedRequest(undefined);
+                        setControlEditor(undefined);
+                      }}
+                      onControl={task && run.state === "capturing" ? setControlEditor : undefined}
+                    />
+                    {task &&
+                      run.state === "capturing" &&
+                      controlEditor &&
+                      (controlEditor === "replay" ? (
+                        <ReplayEditor
+                          key={selectedRequest.id}
+                          session={sessionId}
+                          request={selectedRequest}
+                          onChange={() => setRevision((value) => value + 1)}
+                          onCancel={() => setControlEditor(undefined)}
+                          onRequest={(id) => {
+                            void recordingRequest({
+                              action: "request",
+                              session_id: sessionId,
+                              run_id: run.id,
+                              id,
+                            })
+                              .then((value) => {
+                                if (value.request) openRequest(value.request);
+                              })
+                              .catch((reason) => setError(String(reason)));
+                          }}
+                        />
+                      ) : (
+                        <RuleEditor
+                          key={`${selectedRequest.id}-${controlEditor}`}
+                          session={sessionId}
+                          run={run.id}
+                          request={selectedRequest}
+                          initial={controlEditor}
+                          onCancel={() => setControlEditor(undefined)}
+                          onDone={() => {
+                            setControlEditor(undefined);
+                            setSelectedRequest(undefined);
+                            setOperationId("");
+                            setMode("rules");
+                            setRevision((value) => value + 1);
+                          }}
+                        />
+                      ))}
+                  </div>
                 ) : operationId ? (
                   detail?.operation ? (
                     <>
@@ -662,6 +714,15 @@ export function DebugApp() {
                   ) : (
                     <Quiet>{t("debug.loading")}</Quiet>
                   )
+                ) : mode === "rules" ? (
+                  <RulesPanel
+                    key={run.id}
+                    session={sessionId}
+                    run={run.id}
+                    pulse={pulse}
+                    active={!!task && run.state === "capturing"}
+                    onChange={() => setRevision((value) => value + 1)}
+                  />
                 ) : mode === "requests" ? (
                   <Panel title={t("debug.requests")}>
                     <RequestList requests={requests} onSelect={openRequest} />

@@ -307,11 +307,50 @@ opt-in and not retroactive. Keep the tab/session open while investigating.
    History. Records are bounded to 30 days / 50 records / 50 MiB. Browser restarts
    recover the last checkpoint as interrupted; recent changes may be missing.
 
-This feature records evidence. Do not assume a debugging request authorizes code
+This feature records evidence and supports explicit HTTP experiments. Do not assume a debugging request authorizes code
 changes or that a website URL identifies a local repository. Users or agents can
 analyze/compare exported recordings independently. A new task cannot read another
 ended task's history; use a user-provided export when investigating older records.
 
-Debugging does not authorize extra site actions, network replay, interception or
-sending evidence elsewhere. Common credential fields are redacted; free-form
+A request to observe a problem does not by itself authorize extra submissions or
+changing network behavior. Follow the user’s requested experiment scope; never
+send evidence elsewhere without authorization. Common credential fields are redacted; free-form
 application data can still be sensitive. Do not print or request secrets.
+
+### Controlled HTTP experiments
+
+When the user's debugging task calls for changing network behavior, use task-local
+rules instead of page monkey patches. First inspect the actual request. Then use
+`bsk debug rule_add --session <id> --rule-file <path>` (or `--rule '<JSON>'`).
+Rules match an absolute HTTP(S) `match.url` (`*` allowed in path/query), optional
+`match.method`, and default to Fetch/XHR and `times: 1`. First matching rule wins.
+
+Examples of rule JSON (replace the URL with the observed endpoint):
+
+```json
+{"match":{"url":"http://localhost:3000/api/profile","method":"POST"},"effect":{"type":"modify","json":{"rename":{"displayName":"name"}}},"times":1}
+```
+
+- Block: `effect: {"type":"block"}`.
+- Modify: `effect: {"type":"modify","headers":{"x-test":"on"},"json":{"set":{"name":"Bob"}}}`.
+  Supports same-origin `url`, `method`, header changes (`null` removes), a complete
+  text `body`, or top-level JSON `set`/`remove`/`rename`. Never guess field mapping.
+- Mock: `effect: {"type":"mock","status":503,"body":"{\"error\":\"unavailable\"}","delay_ms":1000}`.
+  Optional response `headers`; default is JSON. Does not contact the real endpoint.
+
+Read `bsk debug rules --session <id>` for hit counts/state, then reproduce and inspect
+actual request IDs. `rule_disable`, `rule_enable`, `rule_remove` take a rule ID.
+`times: 0` lasts until disabled or capture ends. Rules run locally, without polling
+for paused requests. Stop cleans up rules and cancels delayed mocks. Mark mock,
+modified and blocked evidence in the analysis; a mock success does not prove a fix.
+
+Replay deliberately resends a request and may write server data:
+`bsk debug replay <request-id> --session <id> --replay-file <path>`.
+The file contains `{"key":"unique-attempt","body":"{\"name\":\"Bob\"}"}`;
+optional `url`, `method`, and `headers` override the source. Same-origin only;
+uses current browser cookies, rejects redirects and binary/multipart bodies.
+Replace missing/truncated/redacted inputs explicitly; never send placeholder values.
+Reuse the same key after an uncertain result to avoid duplicate sends; use a new
+key only for a deliberate new attempt. Inspect the returned linked request and
+its response. Replaying an API does not re-run the page handler. Rules/replays are
+available only while the original capture/task is active; history is read-only.

@@ -52,10 +52,19 @@ function complete(transaction: IDBTransaction): Promise<void> {
 export function interrupted(recording: DebugRecording): DebugRecording {
   if (recording.run.state !== "capturing") return recording;
   recording.run.state = "stopped";
+  recording.run.active_rules = 0;
+  for (const rule of recording.rules ?? [])
+    if (["enabled", "disabled"].includes(rule.state)) rule.state = "stopped";
+  for (const replay of recording.replays ?? [])
+    if (replay.state === "running") replay.state = "interrupted";
   recording.run.stopped_at = recording.saved_at;
   recording.run.stop_reason = "browser_restarted";
   recording.run.coverage = [...new Set([...recording.run.coverage, "interrupted_checkpoint"])];
   for (const request of recording.requests) {
+    if (request.intervention?.state === "pending") {
+      request.intervention.state = "cancelled";
+      request.intervention.error = "browser restarted before control completed";
+    }
     if (request.state === "pending") request.state = "interrupted";
     for (const body of [request.request_body, request.response_body]) {
       if (body.state === "pending") {

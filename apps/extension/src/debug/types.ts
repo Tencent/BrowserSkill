@@ -9,7 +9,66 @@ export type DebugAction =
   | "operation"
   | "console"
   | "pages"
-  | "export";
+  | "export"
+  | "rules"
+  | "rule_add"
+  | "rule_enable"
+  | "rule_disable"
+  | "rule_remove"
+  | "replay";
+
+export interface DebugRequestEdit {
+  url?: string;
+  method?: string;
+  headers?: Record<string, string | null>;
+  body?: string;
+  /** Top-level JSON object edits; applied to the live request, before redaction. */
+  json?: { set?: Record<string, unknown>; remove?: string[]; rename?: Record<string, string> };
+}
+export interface DebugRuleSpec {
+  name?: string;
+  match: { url: string; method?: string; resource_type?: "Fetch" | "XHR" | "Document" };
+  effect:
+    | { type: "block" }
+    | ({ type: "modify" } & DebugRequestEdit)
+    | {
+        type: "mock";
+        status: number;
+        headers?: Record<string, string>;
+        body: string;
+        delay_ms?: number;
+      };
+  /** Defaults to one match. Zero means until disabled or capture ends. */
+  times?: number;
+}
+export interface DebugRule extends DebugRuleSpec {
+  id: string;
+  state: "enabled" | "disabled" | "exhausted" | "removed" | "stopped";
+  hits: number;
+  failures: number;
+  created_at: number;
+  last_error?: string;
+}
+export interface DebugReplaySpec extends Omit<DebugRequestEdit, "json"> {
+  /** Reusing a key in the same capture never sends another request. */
+  key: string;
+}
+export interface DebugReplay {
+  id: string;
+  key: string;
+  source_request_id: string;
+  request_id?: string;
+  state: "running" | "complete" | "failed" | "interrupted";
+  error?: string;
+}
+export interface DebugIntervention {
+  rule_id: string;
+  type: "block" | "modify" | "mock";
+  state: "pending" | "applied" | "failed" | "cancelled";
+  error?: string;
+  /** Small redacted change summary; retained request body is the effective body. */
+  changes?: string[];
+}
 
 export interface DebugParams {
   session_id: string;
@@ -26,6 +85,8 @@ export interface DebugParams {
   max_chars?: number;
   /** RFC 6901 JSON pointer, applied to a complete redacted body. */
   pointer?: string;
+  rule?: DebugRuleSpec;
+  replay?: DebugReplaySpec;
 }
 
 export interface DebugBody {
@@ -65,6 +126,9 @@ export interface DebugRequest {
   request_body: DebugBody;
   response_body: DebugBody;
   truncated?: boolean;
+  intervention?: DebugIntervention;
+  replay_from?: string;
+  replay_id?: string;
 }
 
 export interface DebugConsole {
@@ -141,6 +205,7 @@ export interface DebugRun {
   dropped_console: number;
   coverage: string[];
   next_since: number;
+  active_rules?: number;
   saved_at?: number;
   storage_error?: string;
   environment?: { extension_version?: string; user_agent?: string };
@@ -185,6 +250,8 @@ export interface DebugRecording {
   operations: DebugOperation[];
   console: DebugConsole[];
   pages: DebugPage[];
+  rules?: DebugRule[];
+  replays?: DebugReplay[];
 }
 
 export interface DebugResult {
@@ -199,6 +266,9 @@ export interface DebugResult {
   pages?: DebugPage[];
   recording?: DebugRecording;
   evidence?: DebugEvidence;
+  rules?: DebugRule[];
+  replays?: DebugReplay[];
+  replay?: DebugReplay;
   next_since?: number;
   truncated?: boolean;
 }
