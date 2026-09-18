@@ -399,6 +399,52 @@ describe("handleRequestHelp", () => {
     }
   });
 
+  it("does not keep the RPC pending when cleanup hangs after content finishes", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const sendToTab = vi.fn(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "bsk-help-request") return { type: "bsk-help-ack", ok: true };
+      return new Promise<never>(() => {});
+    });
+    const deps = baseDeps({ autoAttachLifecycle: undefined, sendToTab });
+
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+        deps,
+      );
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-request" }),
+        ),
+      );
+
+      const request = sendToTab.mock.calls[0]?.[1] as { requestId: string };
+      chromeEvents.runtimeOnMessage.emit(
+        {
+          type: "bsk-help-finish",
+          requestId: request.requestId,
+          outcome: "continued",
+        },
+        { tab: { id: 5 } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        vi.fn(),
+      );
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-cancel" }),
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_100);
+      await expect(pending).resolves.toMatchObject({ outcome: "continued", tab_id: 5 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns completed when explicit completion criteria match", async () => {
     const deps = baseDeps({
       sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),

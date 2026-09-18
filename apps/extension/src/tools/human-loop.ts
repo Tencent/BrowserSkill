@@ -45,6 +45,7 @@ const HELP_SEND_RETRY_DELAY_MS = 350;
 const HELP_REARM_DEBOUNCE_MS = 150;
 const HELP_REARM_MAX_ATTEMPTS = 12;
 const HELP_REARM_RETRY_DELAY_MS = 400;
+const HELP_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_COMPLETION_STABLE_MS = 1_000;
 const COMPLETION_POLL_MS = 500;
 
@@ -299,6 +300,21 @@ async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
   );
 }
 
+/** Never let best-effort UI cleanup hold the daemon RPC open indefinitely. */
+async function awaitCleanupWithinBudget(cleanup: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, HELP_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function finishHelp(
   help: ActiveHelpRequest,
   value: RequestHelpResult | RpcError,
@@ -316,7 +332,7 @@ async function finishHelp(
   for (const tabId of help.overlayTabIds) clearRearmTimer(tabId);
   if (notifyContent) {
     const cleanup = cleanupHelp(help);
-    if (waitForCleanup) await cleanup;
+    if (waitForCleanup) await awaitCleanupWithinBudget(cleanup);
     else void cleanup;
   }
   help.resolve(value);
