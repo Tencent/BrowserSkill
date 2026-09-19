@@ -94,6 +94,14 @@ impl<'de> Deserialize<'de> for ResponseFrame {
         #[derive(Deserialize)]
         struct Flat {
             id: RpcId,
+            // `#[serde(default, deserialize_with)]` keeps a present-but-null
+            // `result` distinct from an absent field: serde's plain
+            // `Option<Value>` collapses JSON `"result": null` (a legal
+            // JSON-RPC null result — see the daemon's
+            // `serde_json::to_value(..).unwrap_or(Value::Null)` fallback in
+            // `bsk-cli/src/daemon/ipc.rs`) into `None`, which would then
+            // misclassify an explicit null result as an ambiguous frame.
+            #[serde(default, deserialize_with = "de_result_field")]
             result: Option<serde_json::Value>,
             error: Option<RpcError>,
         }
@@ -112,6 +120,22 @@ impl<'de> Deserialize<'de> for ResponseFrame {
             (Some(_), Some(_)) => Err(de::Error::custom(DecodeError::AmbiguousResponse)),
         }
     }
+}
+
+/// Deserialise the `result` field of a response frame.
+///
+/// A plain `Option<serde_json::Value>` collapses JSON `null` into `None`
+/// (serde's `Option` treats `null` as "none"), which would make an
+/// explicit `{"result": null}` reply indistinguishable from a missing
+/// field and reject it as ambiguous. The daemon can legitimately emit an
+/// explicit null result (its `serde_json::to_value(..).unwrap_or(Value::Null)`
+/// fallback), so we parse the raw `Value` here and let the caller's match
+/// decide — a present-but-null result becomes `Some(Value::Null)`.
+fn de_result_field<'de, D>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    serde_json::Value::deserialize(deserializer).map(Some)
 }
 
 impl Serialize for Frame {
@@ -152,7 +176,11 @@ impl<'de> Visitor<'de> for FrameVisitor {
         let mut id = None::<RpcId>;
         let mut method = None::<Method>;
         let mut params = None::<serde_json::Value>;
-        let mut result = None::<serde_json::Value>;
+        // Outer `Option` = field presence, inner = the value. `"result":
+        // null` parses to `Some(None)` so an explicit null result is
+        // distinguishable from a missing field (see `ResponseFrame`'s
+        // `Flat` helper for the rationale).
+        let mut result = None::<Option<serde_json::Value>>;
         let mut error = None::<RpcError>;
         let mut event = None::<EventKind>;
         let mut payload = None::<serde_json::Value>;
@@ -222,9 +250,13 @@ impl<'de> Visitor<'de> for FrameVisitor {
 
         let id = id.ok_or_else(|| de::Error::missing_field("id"))?;
         match (result, error) {
-            (Some(v), None) => Ok(Frame::Response(ResponseFrame {
+            (Some(Some(v)), None) => Ok(Frame::Response(ResponseFrame {
                 id,
                 body: ResponseBody::Ok(v),
+            })),
+            (Some(None), None) => Ok(Frame::Response(ResponseFrame {
+                id,
+                body: ResponseBody::Ok(serde_json::Value::Null),
             })),
             (None, Some(e)) => Ok(Frame::Response(ResponseFrame {
                 id,
@@ -279,5 +311,55 @@ mod tests {
             back.payload.get("session_id").and_then(|v| v.as_str()),
             Some("sess-1"),
         );
+    }
+
+    #[test]
+    fn explicit_null_result_decodes_as_ok_null() {
+        // The daemon may legitimately emit `"result": null` (its
+        // `serde_json::to_value(..).unwrap_or(Value::Null)` fallback in
+        // `bsk-cli/src/daemon/ipc.rs`). A plain `Option<Value>` would
+        // collapse the explicit null into "field absent" and reject the
+        // frame as ambiguous; the inner `Option` keeps the distinction.
+        let wire = serde_json::json!({ "id": "rpc-1", "result": null });
+        let frame: Frame = serde_json::from_value(wire).unwrap();
+        match frame {
+            Frame::Response(resp) => {
+                assert_eq!(resp.id, "rpc-1");
+                assert_eq!(resp.body, ResponseBody::Ok(serde_json::Value::Null));
+            }
+            other => panic!("expected response frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explicit_null_result_response_frame_decodes_as_ok_null() {
+        // The dedicated `ResponseFrame` deserializer must agree with the
+        // generic `Frame` visitor on the same wire shape.
+        let wire = serde_json::json!({ "id": "rpc-2", "result": null });
+        let resp: ResponseFrame = serde_json::from_value(wire).unwrap();
+        assert_eq!(resp.id, "rpc-2");
+        assert_eq!(resp.body, ResponseBody::Ok(serde_json::Value::Null));
+    }
+
+    #[test]
+    fn null_result_round_trips_through_serialise() {
+        // Serialising `Ok(Value::Null)` emits `"result": null`; decoding
+        // that wire shape must produce the same body (symmetric protocol).
+        let frame = Frame::Response(ResponseFrame {
+            id: "rpc-3".into(),
+            body: ResponseBody::Ok(serde_json::Value::Null),
+        });
+        let v = serde_json::to_value(&frame).unwrap();
+        let back: Frame = serde_json::from_value(v).unwrap();
+        assert_eq!(back, frame);
+    }
+
+    #[test]
+    fn missing_result_and_error_still_rejected() {
+        // A response with neither `result` nor `error` remains ambiguous —
+        // only an *explicit* null result is a legal success payload.
+        let wire = serde_json::json!({ "id": "rpc-4" });
+        assert!(serde_json::from_value::<Frame>(wire.clone()).is_err());
+        assert!(serde_json::from_value::<ResponseFrame>(wire).is_err());
     }
 }
