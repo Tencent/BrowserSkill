@@ -423,3 +423,262 @@ async fn handle(
     });
     Ok(upgrade_response.map(|_| Full::new(Bytes::new())))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon::remote::ServerConfig;
+    use crate::daemon::start::DaemonConfig;
+    use http_body_util::BodyExt;
+
+    const EXTENSION_ORIGIN: &str = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn server_config(authorize_rate_limit: u32) -> ServerConfig {
+        ServerConfig {
+            listen: "127.0.0.1".parse().unwrap(),
+            public_url: "wss://127.0.0.1/extension".into(),
+            tls_cert: None,
+            tls_key: None,
+            pairing_ttl: Duration::from_secs(300),
+            device_ttl: Duration::from_secs(90 * 86400),
+            renew_after: Duration::from_secs(30 * 86400),
+            max_connections: 64,
+            authorize_rate_limit,
+        }
+    }
+
+    fn daemon(server: ServerConfig) -> Arc<DaemonState> {
+        let mut config = DaemonConfig::new(0);
+        config.server = Some(server);
+        Arc::new(DaemonState::new(config))
+    }
+
+    async fn body_json(response: Response<Body>) -> serde_json::Value {
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn response_sets_json_no_store_headers_and_body() {
+        let response = response(StatusCode::OK, serde_json::json!({"ok": true}));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
+        assert_eq!(response.headers().get("connection").unwrap(), "close");
+        assert_eq!(body_json(response).await, serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn denied_returns_401_with_error_body() {
+        let response = denied();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(
+            body_json(response).await,
+            serde_json::json!({"error": "invalid_authorization"})
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_response_sets_retry_after() {
+        let response = retry_response(StatusCode::TOO_MANY_REQUESTS, "rate_limited", 60);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "60");
+        assert_eq!(
+            body_json(response).await,
+            serde_json::json!({"error": "rate_limited"})
+        );
+    }
+
+    #[test]
+    fn remote_gateway_rejects_unauthenticated_requests() {
+        crate::daemon::test_support::isolated(
+            "daemon::remote::server::tests::remote_gateway_rejects_unauthenticated_requests",
+            || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let state = daemon(server_config(2));
+                    let handle = bind(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+                    let base = format!("http://{}", handle.local_addr);
+                    let client = reqwest::Client::new();
+
+                    // Missing Origin on the browser path fails closed.
+                    let res = client
+                        .get(format!("{base}/extension"))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 401);
+
+                    // Query strings are rejected outright.
+                    let res = client
+                        .get(format!("{base}/extension?device=1"))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 401);
+
+                    // Unknown paths and non-browser methods are 404.
+                    let res = client.get(format!("{base}/other")).send().await.unwrap();
+                    assert_eq!(res.status().as_u16(), 404);
+                    let res = client
+                        .post(format!("{base}/extension"))
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 404);
+
+                    // Missing and malformed credentials are denied.
+                    let res = client
+                        .post(format!("{base}/extension/authorize"))
+                        .body("{}")
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 401);
+                    let res = client
+                        .post(format!("{base}/extension/authorize"))
+                        .header("authorization", "Bearer bad token with spaces")
+                        .body("{}")
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 401);
+
+                    // Non-JSON bodies are rejected with 400.
+                    let res = client
+                        .post(format!("{base}/extension/authorize"))
+                        .header("authorization", format!("Bearer {}", "a".repeat(43)))
+                        .body("this is not json")
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 400);
+
+                    // The authorize endpoint is rate limited per peer.
+                    let res = client
+                        .post(format!("{base}/extension/authorize"))
+                        .header("authorization", format!("Bearer {}", "a".repeat(43)))
+                        .body("{}")
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 429);
+                    assert_eq!(res.headers().get("retry-after").unwrap(), "60");
+
+                    handle.shutdown.notify_waiters();
+                    let _ = handle.task.await;
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn remote_gateway_pairs_device_over_http() {
+        crate::daemon::test_support::isolated(
+            "daemon::remote::server::tests::remote_gateway_pairs_device_over_http",
+            || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let state = daemon(server_config(60));
+                    let handle = bind(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+                    let base = format!("http://{}", handle.local_addr);
+                    let client = reqwest::Client::new();
+
+                    let store = AuthorizationStore::at_home(&paths::bsk_home().unwrap());
+                    let link = store.pair().unwrap().rsplit_once('#').unwrap().1.to_owned();
+                    let next = "b".repeat(43);
+                    let res = client
+                        .post(format!("{base}/extension/authorize"))
+                        .header("authorization", format!("Bearer {link}"))
+                        .header("content-type", "application/json")
+                        .body(
+                            serde_json::json!({
+                                "action": "pair",
+                                "next_token": next,
+                                "label": "Browser\nlabel"
+                            })
+                            .to_string(),
+                        )
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(res.status().as_u16(), 200);
+                    let grant: serde_json::Value =
+                        serde_json::from_str(&res.text().await.unwrap()).unwrap();
+                    assert_eq!(grant["action"], "pair");
+                    assert!(!grant["device_id"].as_str().unwrap().is_empty());
+                    assert_eq!(store.devices().unwrap().len(), 1);
+
+                    handle.shutdown.notify_waiters();
+                    let _ = handle.task.await;
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn remote_gateway_upgrades_authorized_device() {
+        crate::daemon::test_support::isolated(
+            "daemon::remote::server::tests::remote_gateway_upgrades_authorized_device",
+            || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    let state = daemon(server_config(60));
+                    let handle = bind(state, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+
+                    let store = AuthorizationStore::at_home(&paths::bsk_home().unwrap());
+                    let credential = "c".repeat(43);
+                    store
+                        .exchange(
+                            &store.pair().unwrap().rsplit_once('#').unwrap().1.to_owned(),
+                            AuthorizationRequest {
+                                action: "pair".into(),
+                                next_token: credential.clone(),
+                                label: "Browser\nlabel".into(),
+                            },
+                        )
+                        .unwrap();
+
+                    let request = Request::builder()
+                        .uri(format!("ws://{}/extension", handle.local_addr))
+                        .header("origin", EXTENSION_ORIGIN)
+                        .header("sec-websocket-protocol", format!("bsk-auth.{credential}"))
+                        .body(())
+                        .unwrap();
+                    let tcp = tokio::net::TcpStream::connect(handle.local_addr)
+                        .await
+                        .unwrap();
+                    let (ws, response) =
+                        tokio_tungstenite::client_async_with_config(request, tcp, None)
+                            .await
+                            .unwrap();
+                    assert_eq!(response.status().as_u16(), 101);
+                    assert_eq!(
+                        response.headers().get("sec-websocket-protocol").unwrap(),
+                        &format!("bsk-auth.{credential}")
+                    );
+                    drop(ws);
+
+                    handle.shutdown.notify_waiters();
+                    let _ = handle.task.await;
+                });
+            },
+        );
+    }
+}
