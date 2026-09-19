@@ -6,6 +6,7 @@
 //! not own any lockfile / port-conflict / idle-shutdown logic. It exists
 //! solely to give the M4/M5 extension code something concrete to talk to.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,27 +34,51 @@ use super::state::{
     DaemonState, LEGACY_MIN_COMPATIBLE_PEER, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME,
 };
 
+/// Extract the MV3 extension id from a `chrome-extension://` origin.
+///
+/// Chrome extension ids are exactly 32 characters drawn from `a`–`p` per
+/// the Chrome spec. Anything else — a different scheme, a trailing slash,
+/// a path suffix, or an id of the wrong shape or alphabet — is not an
+/// extension origin we recognise.
+pub(super) fn extension_id_from_origin(origin: &str) -> Option<&str> {
+    let id = origin.strip_prefix("chrome-extension://")?;
+    if id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
+        Some(id)
+    } else {
+        None
+    }
+}
+
 /// Result of the optional Origin allow-list check.
 ///
-/// TODO(M10/M12): pair v0.1 GA with an actual extension-id allow-list
-/// (`DaemonConfig::allowed_extension_ids: HashSet<String>`) populated
-/// from a config file / pairing flow, rather than accepting any
-/// extension-shaped origin. Review M4/M5 I8 — acceptable defense-in-
-/// depth gap for now because pairing happens through the popup, but
-/// a side-loaded extension on the same machine currently passes the
-/// gate.
-pub(super) fn origin_allowed(origin: &str, allow_any: bool) -> bool {
+/// `allowed_ids` is the optional pinned allow-list resolved from
+/// `--allowed-extension-id` / `BSK_ALLOWED_EXTENSION_IDS`.
+///
+/// * `None` — historic behaviour: any well-formed `chrome-extension://`
+///   origin is accepted. The extension id is not a secret and pairing
+///   happens through the popup, so an unpinned daemon still relies on the
+///   popup as its consent surface.
+/// * `Some(set)` — including an empty set — narrows the gate to exactly
+///   those ids. This is what closes the side-loaded-extension gap noted in
+///   review M4/M5 I8: without a pinned list, any extension on the same
+///   machine that can guess the loopback port passes the Origin gate,
+///   because "extension-shaped origin" is a shape check, not an identity
+///   check.
+pub(super) fn origin_allowed(
+    origin: &str,
+    allow_any: bool,
+    allowed_ids: Option<&HashSet<String>>,
+) -> bool {
     if allow_any {
         return true;
     }
-    // MV3 extension ids are 32 a–p characters per Chrome spec.
-    let prefix = "chrome-extension://";
-    if let Some(rest) = origin.strip_prefix(prefix) {
-        if rest.len() == 32 && rest.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-            return true;
-        }
+    let Some(id) = extension_id_from_origin(origin) else {
+        return false;
+    };
+    match allowed_ids {
+        None => true,
+        Some(allowed) => allowed.contains(id),
     }
-    false
 }
 
 pub struct WsServer {
@@ -124,6 +149,7 @@ async fn handle_connection(
     peer: SocketAddr,
 ) -> anyhow::Result<()> {
     let allow_any = state.config.allow_any_origin;
+    let allowed_extension_ids = state.config.allowed_extension_ids.clone();
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
@@ -135,7 +161,7 @@ async fn handle_connection(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if !origin_allowed(&origin, allow_any) {
+        if !origin_allowed(&origin, allow_any, allowed_extension_ids.as_ref()) {
             warn!(?origin, "rejecting WS upgrade with disallowed origin");
             let mut err = ErrorResponse::new(Some(
                 "Origin not in chrome-extension allow-list".to_string(),
@@ -716,33 +742,118 @@ fn handle_session_user_interrupt(
 mod tests {
     use super::*;
 
+    fn ids(list: &[&str]) -> HashSet<String> {
+        list.iter().map(|id| (*id).to_string()).collect()
+    }
+
     #[test]
     fn origin_allowlist_accepts_valid_extension_id() {
         let id = "a".repeat(32);
-        assert!(origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(origin_allowed(
+            &format!("chrome-extension://{id}"),
+            false,
+            None
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_uppercase() {
         let id = "A".repeat(32);
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            false,
+            None
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_unknown_scheme() {
         let id = "a".repeat(32);
-        assert!(!origin_allowed(&format!("http://{id}.example"), false));
+        assert!(!origin_allowed(
+            &format!("http://{id}.example"),
+            false,
+            None
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_chars_outside_ap() {
         let id = "z".repeat(32); // 'z' > 'p'
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            false,
+            None
+        ));
     }
 
     #[test]
     fn origin_allowlist_bypassed_when_allow_any() {
-        assert!(origin_allowed("http://localhost", true));
+        assert!(origin_allowed("http://localhost", true, None));
+    }
+
+    #[test]
+    fn origin_allowlist_bypassed_when_allow_any_even_with_pinned_ids() {
+        // `--insecure-origin` is an explicit escape hatch for tests and
+        // local debugging; a pinned list must not silently re-enable the
+        // gate and strand the operator.
+        let pinned = ids(&["a".repeat(32).as_str()]);
+        assert!(origin_allowed("http://localhost", true, Some(&pinned)));
+    }
+
+    #[test]
+    fn origin_allowlist_accepts_pinned_id() {
+        let allowed = "a".repeat(32);
+        let pinned = ids(&[allowed.as_str()]);
+        assert!(origin_allowed(
+            &format!("chrome-extension://{allowed}"),
+            false,
+            Some(&pinned)
+        ));
+    }
+
+    #[test]
+    fn origin_allowlist_rejects_well_formed_id_absent_from_pinned_list() {
+        // The regression this feature exists for: a side-loaded extension
+        // has a perfectly valid MV3 origin, so the shape check alone
+        // cannot tell it apart from the real one.
+        let pinned = ids(&["a".repeat(32).as_str()]);
+        let other = "b".repeat(32);
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{other}"),
+            false,
+            Some(&pinned)
+        ));
+    }
+
+    #[test]
+    fn origin_allowlist_empty_pinned_list_rejects_every_extension() {
+        let pinned = HashSet::new();
+        let id = "a".repeat(32);
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            false,
+            Some(&pinned)
+        ));
+    }
+
+    #[test]
+    fn extension_id_from_origin_extracts_id() {
+        let id = "a".repeat(32);
+        assert_eq!(
+            extension_id_from_origin(&format!("chrome-extension://{id}")),
+            Some(id.as_str())
+        );
+    }
+
+    #[test]
+    fn extension_id_from_origin_rejects_path_and_short_id() {
+        let id = "a".repeat(32);
+        assert_eq!(
+            extension_id_from_origin(&format!("chrome-extension://{id}/index.html")),
+            None
+        );
+        assert_eq!(extension_id_from_origin("chrome-extension://abcd"), None);
+        assert_eq!(extension_id_from_origin("chrome-extension://"), None);
     }
 }
 

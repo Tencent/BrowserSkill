@@ -301,6 +301,13 @@ Stop the daemon in its owning host or supervisor, update with `bsk update --yes 
 | Integrate with DeepSeek Harness | [DSH plugin](packages/dsh-plugin-browserskill/README.md) |
 | Understand the implementation | [Architecture](docs/architecture.md) · [Protocol](crates/bsk-protocol/README.md) |
 
+The daemon listens on loopback and only accepts WebSocket upgrades from
+`chrome-extension://` origins. That gate checks the *shape* of the origin, not
+which extension sent it, so on a shared machine you can additionally pin the
+endpoint to specific extension ids with `--allowed-extension-id` or
+`BSK_ALLOWED_EXTENSION_IDS`; see
+[pinning the extension allow-list](docs/extension-id-allowlist.md).
+
 ## For Developers
 
 The repository is a Rust + pnpm workspace. For a source build, use Rust stable, Node.js 22, and the pnpm version declared in `package.json`:

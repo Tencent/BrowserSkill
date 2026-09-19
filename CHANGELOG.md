@@ -7,6 +7,16 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Added
+
+- `--allowed-extension-id` (repeatable) and `BSK_ALLOWED_EXTENSION_IDS` pin the
+  local WebSocket endpoint to specific extension ids. The Origin gate is a
+  shape check, not an identity check, so an unpinned daemon admits any
+  well-formed `chrome-extension://` origin — including a side-loaded extension
+  that guesses the loopback port. Pinning closes that gap; the default is
+  unchanged, and `--insecure-origin` still overrides. See
+  [pinning the extension allow-list](docs/extension-id-allowlist.md).
+
 ### Fixed
 
 - CLI: argument parsing failures now honor `--json`, returning an
