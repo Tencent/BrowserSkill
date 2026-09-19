@@ -143,6 +143,16 @@ describe("armArchiveCleanup", () => {
     expect(h.stopSession).toHaveBeenCalledWith("bsk2");
   });
 
+  it("handles the host updating its registry before broadcasting the first archive", () => {
+    const options = { archived: [] as string[] };
+    const h = harness(options);
+    startOwned(h.registry, "bsk1", ["conv-a"]);
+    h.arm();
+    options.archived = ["conv-a"];
+    h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
+    expect(h.stopSession).toHaveBeenCalledWith("bsk1");
+  });
+
   it("treats a re-archived session as fresh again after unarchive", () => {
     const h = harness();
     startOwned(h.registry, "bsk1", ["conv-a"]);

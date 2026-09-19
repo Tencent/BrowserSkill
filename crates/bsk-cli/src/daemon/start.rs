@@ -536,6 +536,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 
         loop {
             ticker.tick().await;
+            super::session_requests::reap(&state);
             let idle_ids = state.sessions.idle_ids_at(session_idle, Instant::now());
             for session_id in idle_ids {
                 match stop_session(

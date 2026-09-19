@@ -341,6 +341,19 @@ export async function handleSessionStop(
         const leakedAgentTabs = liveWindowTabs.filter(
           (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (leakedAgentTabs.length > 0 && userTabs.length > 0) {
+          // Neither releasing ownership nor closing this mixed window is safe.
+          // Keep the binding so a later stop can retry only the agent tabs.
+          return rpcError(
+            "protocol_error",
+            "cleanup_failed",
+            "Agent tabs could not be closed; user tabs were preserved and cleanup can be retried",
+            {
+              resource_type: "agent_window",
+              resource_id: ctx.agentWindowId,
+            },
+          );
+        }
         if (leakedAgentTabs.length > 0) {
           console.warn(
             `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,

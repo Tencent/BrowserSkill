@@ -44,7 +44,7 @@ use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
-    start_session, stop_session,
+    stop_session,
 };
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
@@ -236,10 +236,16 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
-                Method::SessionStart => match handle_session_start(&state, rpc_id, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
+                Method::SessionStartTracked => {
+                    super::session_requests::start(&state, rpc_id, params).await
+                }
+                Method::SessionRequest => super::session_requests::operate(&state, params).await,
+                Method::SessionStart => {
+                    match handle_session_start(&state, rpc_id, params, false).await {
+                        Ok(v) => ResponseBody::Ok(v),
+                        Err(e) => ResponseBody::Err(e),
+                    }
+                }
                 Method::SessionStop => match handle_session_stop(&state, rpc_id, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -906,10 +912,11 @@ fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
     ))
 }
 
-async fn handle_session_start(
+pub(super) async fn handle_session_start(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
+    recoverable: bool,
 ) -> Result<Value, RpcError> {
     let task_name = params
         .get("task_name")
@@ -951,7 +958,7 @@ async fn handle_session_start(
             });
         }
     };
-    match start_session(
+    match super::sessions::start_session_recoverable(
         &state.browsers,
         &state.sessions,
         &state.tool_queues,
@@ -963,6 +970,7 @@ async fn handle_session_start(
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
         Some(cancel),
+        recoverable,
     )
     .await
     {
@@ -978,7 +986,12 @@ async fn handle_session_start(
             };
             Ok(serde_json::to_value(result).unwrap_or(Value::Null))
         }
-        Err(err) => Err(map_start_error(err)),
+        Err(err) => {
+            if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
+                state.tool_queues.spawn(session_id.clone());
+            }
+            Err(map_start_error(err))
+        }
     }
 }
 

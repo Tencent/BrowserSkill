@@ -142,6 +142,9 @@ function setup(opts: {
   queue?: KeyedExecutor;
 }) {
   const registry = opts.registry ?? new SessionRegistry(5);
+  // Ordinary observation fixtures represent an initialized, usable session.
+  // Lifecycle tests supply their own registry to exercise other states.
+  if (!opts.registry) own(registry, "s1");
   const runner = opts.runner ?? fakeRunner();
   const scheduler = opts.scheduler ?? fakeScheduler();
   const service = new ObservationService({
@@ -178,6 +181,35 @@ async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
 }
 
 describe("state machine", () => {
+  it("shows pending resources without capturing until activation, and stops captures during cleanup", async () => {
+    const registry = new SessionRegistry(5);
+    registry.trackStart({ sessionId: "pending", startedAtMs: 1 });
+    const { service, scheduler, runner } = setup({ registry });
+    service.addSession("pending");
+    expect(service.getState()[0].action).toBe("starting");
+    expect(scheduler.pending()).toEqual([]);
+    expect(runner.calls).toEqual([]);
+    registry.activate("pending");
+    service.endAction("pending");
+    expect(service.getState()[0].action).toBe("idle");
+    expect(scheduler.pending()).toEqual([0]);
+    scheduler.runNext();
+    await waitFor(
+      () =>
+        service.getState()[0].thumbnailAttachmentId !== undefined &&
+        scheduler.pending().length === 1,
+    );
+    registry.markForCleanup("pending");
+    service.endAction("pending");
+    expect(service.getState()[0].action).toBe("awaiting cleanup");
+    // Even a previously scheduled capture must recheck usability before running.
+    scheduler.runNext();
+    expect(runner.calls).toHaveLength(1);
+    expect(scheduler.pending()).toEqual([]);
+    expect(registry.isOwned("pending")).toBe(true);
+    service.dispose();
+  });
+
   it("tracks add/action/end/url/remove and emits upsert/remove/reset events", () => {
     const { service, events } = setup({});
     service.addSession("s1");

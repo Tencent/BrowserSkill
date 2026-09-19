@@ -447,7 +447,7 @@ describe("visual screenshot", () => {
     const f = fixture();
     const manager = new SessionManager({
       agentWindow: {
-        create: async () => 100,
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
         remove: async () => {},
         ensureActiveTab: async () => 4,
       },
@@ -471,7 +471,7 @@ async function pointFixture(child = false, oopif = false) {
   const f = fixture(child, oopif);
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },

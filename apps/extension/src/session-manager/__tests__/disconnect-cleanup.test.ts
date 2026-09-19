@@ -8,7 +8,7 @@ describe("disconnect session cleanup", () => {
     let nextWindowId = 100;
     const manager = new SessionManager({
       agentWindow: {
-        create: vi.fn(async () => nextWindowId++),
+        create: vi.fn(async () => ({ windowId: nextWindowId++, initialTabIds: [] })),
         ensureActiveTab: vi.fn(async () => 1),
         remove,
       },
@@ -40,7 +40,7 @@ describe("disconnect session cleanup", () => {
     });
     const manager = new SessionManager({
       agentWindow: {
-        create: vi.fn(async () => 100),
+        create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
         ensureActiveTab: vi.fn(async () => 1),
         remove: vi.fn(() => removeGate),
       },

@@ -81,7 +81,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           const foreground = await page(false);
           const manager = new SessionManager({
             agentWindow: {
-              create: async () => 100,
+              create: async () => ({ windowId: 100, initialTabIds: [] }),
               remove: async () => {},
               ensureActiveTab: async () => 4,
             },

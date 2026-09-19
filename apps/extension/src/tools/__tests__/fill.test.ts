@@ -13,7 +13,7 @@ async function setup(markup = '<input value="old">') {
   const element = document.body.firstElementChild as HTMLInputElement;
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },
