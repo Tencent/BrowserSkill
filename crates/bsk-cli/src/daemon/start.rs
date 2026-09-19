@@ -11,6 +11,7 @@
 //! startup, redirects stdio to `/dev/null`, calls `setsid` (Unix), and
 //! falls through to `run_foreground`.
 
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -41,6 +42,13 @@ pub(crate) const DAEMONIZED_ENV: &str = "BSK_DAEMONIZED";
 /// daemon lock, IPC socket, and WS port — before taking over.
 pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 
+/// Env-var contract for pinning the extension allow-list without CLI
+/// flags: a comma-separated list of MV3 extension ids. Blank entries are
+/// ignored; a value with no usable id is treated as "no pinned list"
+/// rather than "reject every extension", so a stray empty env var cannot
+/// lock an operator out of their own daemon.
+pub(crate) const ALLOWED_EXTENSION_IDS_ENV: &str = "BSK_ALLOWED_EXTENSION_IDS";
+
 /// Concrete daemon configuration resolved from CLI flags / defaults.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -50,6 +58,16 @@ pub struct DaemonConfig {
     pub daemon_idle: Duration,
     /// Skip the Origin allow-list (tests / `--insecure-origin`).
     pub allow_any_origin: bool,
+    /// Optional pinned allow-list of MV3 extension ids permitted to open
+    /// the local WebSocket endpoint.
+    ///
+    /// `None` keeps the historic behaviour — any well-formed
+    /// `chrome-extension://` origin passes — because the extension id is
+    /// not a secret and the popup is the consent surface. `Some(set)`
+    /// restricts the gate to exactly those ids, which is what stops a
+    /// side-loaded extension on the same machine from reaching the daemon
+    /// just by guessing the loopback port (review M4/M5 I8).
+    pub allowed_extension_ids: Option<HashSet<String>>,
     /// How long `session.start` polls for an extension handshake before
     /// returning `no_browser_connected`.
     pub extension_connect_wait: Duration,
@@ -72,6 +90,7 @@ impl DaemonConfig {
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
             allow_any_origin: false,
+            allowed_extension_ids: None,
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
@@ -80,6 +99,17 @@ impl DaemonConfig {
 
     pub fn with_extension_connect_wait(mut self, wait: Duration) -> Self {
         self.extension_connect_wait = wait;
+        self
+    }
+
+    /// Pin the local extension allow-list. Primarily for tests and embedders
+    /// that need the gate closed without going through CLI/env resolution.
+    pub fn with_allowed_extension_ids<I, S>(mut self, ids: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.allowed_extension_ids = Some(ids.into_iter().map(Into::into).collect());
         self
     }
 
@@ -107,11 +137,33 @@ impl From<&StartArgs> for DaemonConfig {
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
             allow_any_origin: false,
+            allowed_extension_ids: resolve_allowed_extension_ids(args),
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
         }
     }
+}
+
+/// Resolve the pinned extension allow-list.
+///
+/// CLI flags win over the environment so an explicit invocation is never
+/// silently widened by an inherited `BSK_ALLOWED_EXTENSION_IDS`. Ids are
+/// validated by the CLI value parser, but the env path is re-validated
+/// here so a typo in the env var fails closed (id simply never matches)
+/// instead of being normalised into something that does.
+fn resolve_allowed_extension_ids(args: &StartArgs) -> Option<HashSet<String>> {
+    if !args.allowed_extension_id.is_empty() {
+        return Some(args.allowed_extension_id.iter().cloned().collect());
+    }
+    let raw = std::env::var(ALLOWED_EXTENSION_IDS_ENV).ok()?;
+    let ids: HashSet<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| crate::cli::daemon::is_valid_extension_id(candidate))
+        .map(str::to_owned)
+        .collect();
+    (!ids.is_empty()).then_some(ids)
 }
 
 /// `bsk daemon start` entrypoint.

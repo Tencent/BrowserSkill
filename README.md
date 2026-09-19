@@ -347,6 +347,13 @@ extension runs it in an Agent Window. DeepSeek Harness takes the same path
 through the [plugin](#deepseek-harness-plugin): the agent calls injected
 `browser_*` tools, and the plugin invokes `bsk` on its behalf.
 
+The daemon listens on loopback and only accepts WebSocket upgrades from
+`chrome-extension://` origins. That gate checks the *shape* of the origin, not
+which extension sent it, so on a shared machine you can additionally pin the
+endpoint to specific extension ids with `--allowed-extension-id` or
+`BSK_ALLOWED_EXTENSION_IDS`; see
+[pinning the extension allow-list](docs/extension-id-allowlist.md).
+
 ## For Developers
 
 The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol

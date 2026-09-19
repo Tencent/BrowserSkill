@@ -81,6 +81,17 @@ pub struct StartArgs {
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
 
+    /// Pin the local WebSocket endpoint to specific extension ids
+    /// (repeatable). Without it, any well-formed `chrome-extension://`
+    /// origin is accepted. Also settable via `BSK_ALLOWED_EXTENSION_IDS`
+    /// (comma-separated); flags win over the environment.
+    #[arg(
+        long = "allowed-extension-id",
+        value_name = "ID",
+        value_parser = parse_extension_id
+    )]
+    pub allowed_extension_id: Vec<String>,
+
     /// Run in the foreground (do not double-fork). Useful for development.
     #[arg(long)]
     pub foreground: bool,
@@ -143,6 +154,30 @@ impl StartArgs {
 
     pub fn resolved_daemon_idle(&self) -> Duration {
         self.daemon_idle.unwrap_or(DEFAULT_DAEMON_IDLE)
+    }
+}
+
+/// A Chrome MV3 extension id is exactly 32 characters drawn from `a`–`p`.
+///
+/// Used both by the CLI value parser and by the `BSK_ALLOWED_EXTENSION_IDS`
+/// environment path, so both entry points agree on what a valid id is.
+pub fn is_valid_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
+}
+
+/// clap value parser for `--allowed-extension-id`.
+///
+/// Validating at parse time keeps a typo from producing a daemon that is
+/// happily running but that no real extension can ever reach — a failure
+/// that would otherwise surface much later as an unexplained handshake
+/// rejection.
+fn parse_extension_id(raw: &str) -> Result<String, String> {
+    if is_valid_extension_id(raw) {
+        Ok(raw.to_string())
+    } else {
+        Err(format!(
+            "`{raw}` is not a Chrome extension id (expected 32 characters in a-p)"
+        ))
     }
 }
 
@@ -302,5 +337,24 @@ mod tests {
     fn parse_duration_rejects_bad_unit() {
         assert!(parse_duration("10x").is_err());
         assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn extension_id_validator_accepts_a_chrome_id() {
+        assert!(is_valid_extension_id("abcdefghijklmnopabcdefghijklmnop"));
+        assert!(parse_extension_id("abcdefghijklmnopabcdefghijklmnop").is_ok());
+    }
+
+    #[test]
+    fn extension_id_validator_rejects_wrong_shape() {
+        // Uppercase, out-of-alphabet characters, and wrong lengths are all
+        // the same class of typo: a daemon that runs but that no extension
+        // can reach.
+        assert!(!is_valid_extension_id("ABCDEFGHIJKLMNOPABCDEFGHIJKLMNOP"));
+        assert!(!is_valid_extension_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+        assert!(!is_valid_extension_id("abcdefghijklmnopabcdefghijklmno"));
+        assert!(!is_valid_extension_id("abcdefghijklmnopabcdefghijklmnopq"));
+        assert!(!is_valid_extension_id(""));
+        assert!(parse_extension_id("not-an-id").is_err());
     }
 }

@@ -157,7 +157,11 @@ flowchart LR
 - Local mode binds WebSocket to **loopback**. Server mode permits remote access
   through authenticated WSS; plaintext listeners remain on loopback behind TLS
   termination or for development.
-- Extension origin allow-list at WS upgrade.
+- Extension origin allow-list at WS upgrade: the origin must be
+  `chrome-extension://` plus 32 `a`–`p` characters, and the endpoint can be
+  further pinned to specific ids with `--allowed-extension-id` /
+  `BSK_ALLOWED_EXTENSION_IDS`. See
+  [pinning the extension allow-list](extension-id-allowlist.md).
 - Website cookies stay in the user's browser profile. Remote device credentials
   are stored in extension-origin IndexedDB; the built-in server stores credential
   hashes in its private `BSK_HOME`. Pairing and device grants govern remote access.
