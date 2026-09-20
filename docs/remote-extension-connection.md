@@ -155,6 +155,19 @@ The extension uses the same protocol whether it connects to `bsk` or a compatibl
 5. Renewal uses the same POST endpoint and the current token, with `action: "renew"` and a new `next_token`. Keep the same `device_id`. Invalidate the old credential for new connections. An exact retry of the same old/new pair returns the original successful response; the old credential must not rotate to a different replacement. Revocation invalidates retries too. An already connected socket can remain open during renewal while its device grant is valid.
 6. After upgrade, support the existing native handshake and RPC frames. Bind all RPC routing, responses, events and session state to the authenticated device. Do not trust its self-reported browser ID as authorization to another device's tasks. Close active sockets on expiration or revocation and cancel their pending work.
 
+### Optional UI channel
+
+A gateway that renders its own view of a running task can send two extra request frames on the authenticated socket. The extension answers them outside the tool queue, so they still work while the session is navigating or waiting for `request_help`, and neither one ever starts a session:
+
+```json
+{"id":"ui-1","method":"ui.task_preview","params":{"session_id":"server-owned-session"}}
+```
+
+- `ui.task_preview` returns `image_base64`, `format: "jpeg"`, `tab_id`, `title` and `captured_at`. The encoded frame is at most 640 pixels wide. Captures are coalesced per task, at most one runs per tab, and a poll that arrives while Chrome still holds one is refused rather than queued behind it. Authorization, the document revision and the debugger identity are re-checked before a frame is returned. These frames keep the extension's control and help overlays visible, so a periodic preview does not make them flicker in the user's browser; tool screenshots continue to suppress them for unobstructed page content.
+- `ui.task_focus` activates the task's own tab and raises its window, returning `{ "focused": true }`.
+
+Both are restricted to a tab the task owns; window membership alone never qualifies, and an unowned tab inside the Agent Window is neither captured nor focused. Errors use the native envelope, `{ "id": "…", "error": { "code": "…", "message": "…" } }`. The channel exists only on remote sockets: an extension connected to a local daemon does not serve these methods. `session.stop` drains an in-flight preview before it detaches the debugger and closes the task's tabs.
+
 A gateway can bridge this protocol to a local `bsk` daemon on its server, keeping that daemon's loopback/IPC boundary private. A gateway that terminates device authentication owns that authentication lifecycle and routing isolation. Merely forwarding its credentials to the built-in server will not authorize them: the built-in server accepts its own issued grants.
 
 ## Browser permissions and task lifetime
@@ -167,7 +180,7 @@ This also applies to tabs or windows opened by a page through `target="_blank"`,
 
 Disconnecting cancels task work, returns borrowed tabs and closes task-created tabs. User-created tabs survive cleanup. Failed returns preserve the window and must be resolved before reconnecting. Reconnection starts new tasks; commands and sessions are never replayed. Failed remote authentication does not select a local connection automatically.
 
-Remote upload and download are unsupported in this version and return the `unsupported` error. Existing local file transfer behavior is unchanged. Screenshots and other existing RPC content results remain supported. There is no gateway preview or focus side protocol, background task tab group, or alternative window model.
+Remote upload and download are unsupported in this version and return the `unsupported` error. Existing local file transfer behavior is unchanged. Screenshots and other existing RPC content results remain supported. There is no background task tab group or alternative window model.
 
 Device credentials live in extension-origin IndexedDB; ordinary extension settings contain only the selected connection mode and a non-secret revision. Fresh local profiles and explicitly selected local mode do not read that credential database. If remote storage fails, the popup reports the error and the extension does not fall back automatically. Explicitly selecting the local connection can recover startup even when the credential database is unavailable. Legacy remote settings still migrate before ordinary settings access is restored. The standalone server persists hashed credentials with private file permissions and atomic writes. Treat the whole browser profile and `BSK_HOME` as trusted local data. Protect TLS private keys separately.
 

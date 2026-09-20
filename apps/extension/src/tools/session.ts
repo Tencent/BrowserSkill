@@ -1,3 +1,4 @@
+import { withTaskPreviewStop } from "@/lib/task-preview";
 import {
   DEFAULT_INTERACTION_PREFERENCES,
   type InteractionPreferenceStore,
@@ -196,6 +197,14 @@ export async function handleSessionStop(
   manager: SessionManager,
   params: SessionStopParams,
   deps: SessionStopDeps = {},
+): Promise<SessionStopResult | RpcError> {
+  return withTaskPreviewStop(manager, params?.session_id, () => stopSession(manager, params, deps));
+}
+
+async function stopSession(
+  manager: SessionManager,
+  params: SessionStopParams,
+  deps: SessionStopDeps,
 ): Promise<SessionStopResult | RpcError> {
   if (!params?.session_id) {
     return {
