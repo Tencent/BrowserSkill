@@ -9,6 +9,19 @@ const PENDING_COUNT = 256;
 export const jsonBytes = (value: unknown): number =>
   new TextEncoder().encode(JSON.stringify(value)).byteLength;
 
+/** Shared by persisted indexes and detail projections; no browser dependencies. */
+export function requestMetadata(entry: DebugRequest): DebugRequest {
+  const { text: _request, ...request_body } = entry.request_body;
+  const { text: _response, ...response_body } = entry.response_body;
+  const {
+    request_headers: _headers,
+    response_headers: _responseHeaders,
+    timing: _timing,
+    ...rest
+  } = entry;
+  return { ...rest, request_body, response_body };
+}
+
 /** Memory eviction must not erase evidence already captured or saved. */
 export function mergeRequest(
   previous: DebugRequest | undefined,
@@ -48,14 +61,12 @@ export class DebugJournal {
   private bytes = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private writing?: Promise<void>;
-  private stopped = false;
   constructor(
     private readonly archive: DebugArchive,
     private readonly run: () => DebugRun,
     private readonly failed: (reason: string) => void,
   ) {}
   retain = (value: DebugRequest): void => {
-    if (this.stopped) return;
     const entry = structuredClone(mergeRequest(this.pending.get(value.id)?.entry, value));
     const bytes = jsonBytes(entry);
     const previous = this.pending.get(entry.id);
@@ -94,9 +105,5 @@ export class DebugJournal {
     await writing;
     if (this.writing === writing) this.writing = undefined;
     if (this.pending.size) await this.flush();
-  }
-  async stop(): Promise<void> {
-    this.stopped = true;
-    await this.flush();
   }
 }

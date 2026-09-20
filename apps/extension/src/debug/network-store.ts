@@ -1,6 +1,7 @@
 import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
 import type { CdpRunner } from "@/tools/shared";
 import { sendToCdpTarget } from "@/tools/shared";
+import { requestMetadata } from "./journal";
 import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "./redact";
 import type { DebugBody, DebugIntervention, DebugRequest } from "./types";
 
@@ -670,23 +671,17 @@ export function requestProjection(
   maxChars = 4096,
   pointer?: string,
 ): DebugRequest {
-  const { request_headers, response_headers, timing, request_body, response_body, ...metadata } =
-    entry;
-  const summary = (body: DebugBody): DebugBody => {
-    const { text: _text, ...rest } = body;
-    return rest;
-  };
   return {
-    ...metadata,
-    request_body:
-      part === "request"
-        ? bodySlice(request_body, offset, maxChars, pointer)
-        : summary(request_body),
-    response_body:
-      part === "response"
-        ? bodySlice(response_body, offset, maxChars, pointer)
-        : summary(response_body),
-    ...(part === "headers" ? { request_headers, response_headers } : {}),
-    ...(part === "timing" ? { timing } : {}),
+    ...requestMetadata(entry),
+    ...(part === "request"
+      ? { request_body: bodySlice(entry.request_body, offset, maxChars, pointer) }
+      : {}),
+    ...(part === "response"
+      ? { response_body: bodySlice(entry.response_body, offset, maxChars, pointer) }
+      : {}),
+    ...(part === "headers"
+      ? { request_headers: entry.request_headers, response_headers: entry.response_headers }
+      : {}),
+    ...(part === "timing" ? { timing: entry.timing } : {}),
   };
 }

@@ -147,7 +147,10 @@ export class DebugManager {
   }
   private change(state: RunState): number {
     const sequence = ++state.run.next_since;
-    if (state.current && this.now() <= (state.current.window_end ?? this.now()))
+    if (
+      state.current &&
+      this.now() <= (state.current.observation_end ?? state.current.window_end ?? this.now())
+    )
       state.current.sequence = sequence;
     this.scheduleSave(state);
     return sequence;
@@ -950,31 +953,6 @@ export class DebugManager {
     );
   }
 
-  private operation(state: RunState, operation: DebugOperation, details = true): DebugOperation {
-    const end = Math.min(operation.window_end ?? this.now(), this.now());
-    const nextStart =
-      state.operations[state.operations.indexOf(operation) + 1]?.started_at ?? Infinity;
-    const requests = state.network
-      .list()
-      .filter(
-        (entry) =>
-          entry.started_at >= operation.started_at &&
-          entry.started_at <= end &&
-          entry.started_at < nextStart,
-      );
-    const messages = state.console.filter(
-      (entry) => entry.at >= operation.started_at && entry.at <= end && entry.at < nextStart,
-    );
-    const { before, after, observations, ...rest } = operation;
-    return {
-      ...rest,
-      ...(details ? { before, after, observations } : {}),
-      request_ids: requests.map((entry) => entry.id),
-      console_ids: messages.map((entry) => entry.id),
-      truncated: state.network.dropped > 0 || state.run.dropped_console > 0,
-    };
-  }
-
   private async capturePage(state: RunState, loaded = false): Promise<void> {
     if (state.pagePending || state.run.state !== "capturing") return;
     state.pagePending = true;
@@ -1040,7 +1018,7 @@ export class DebugManager {
       saved_at: this.now(),
       run: this.summary(state),
       requests: state.network.list(),
-      operations: state.operations.map((operation) => this.operation(state, operation)),
+      operations: state.operations,
       console: state.console,
       pages: state.pages,
       performance: state.performance,
@@ -1135,10 +1113,15 @@ export class DebugManager {
   async readHistory(params: DebugParams): Promise<DebugResult> {
     this.sync();
     if (!params.run_id) throw new Error("recording ID is required");
-    const live = this.runs.get(params.run_id);
+    return this.readEvidence(params, this.runs.get(params.run_id));
+  }
+
+  /** Internal reader; callers retain their own task or extension-page authorization. */
+  private async readEvidence(params: DebugParams, live?: RunState): Promise<DebugResult> {
+    const runId = params.run_id!;
     if (params.action === "requests" && (!live || live.journal)) {
       await live?.journal?.flush();
-      const indexed = await this.archive?.query?.(params.run_id, params).catch((error) => {
+      const indexed = await this.archive?.query?.(runId, params).catch((error) => {
         if (!live) throw error;
         this.coverage(live, "evidence_read_failed");
         return undefined;
@@ -1165,18 +1148,18 @@ export class DebugManager {
     const bodies = ["operation", "export", "duplicates"].includes(params.action);
     const recording = live
       ? await this.evidenceRecording(live, bodies)
-      : await this.archive?.get(params.run_id, bodies);
+      : await this.archive?.get(runId, bodies);
     if (recording && params.action === "request" && params.id) {
-      const stored = await this.archive?.request?.(params.run_id, params.id).catch((error) => {
+      const stored = await this.archive?.request?.(runId, params.id).catch((error) => {
         if (!live) throw error;
         this.coverage(live, "evidence_read_failed");
-        recording.run.coverage = [...live.run.coverage];
+        recording.run.coverage = [...new Set([...recording.run.coverage, ...live.run.coverage])];
         return undefined;
       });
-      if (stored) {
-        const current = recording.requests.find((entry) => entry.id === params.id);
-        recording.requests = [current ? mergeRequest(stored, current) : stored];
-      }
+      const current =
+        live?.network.get(params.id) ?? recording.requests.find((entry) => entry.id === params.id);
+      if (stored || current)
+        recording.requests = [current ? mergeRequest(stored, current) : stored!];
     }
     if (!recording) throw new Error("debug recording not found or expired");
     return readRecording(recording, params);
@@ -1258,19 +1241,23 @@ export class DebugManager {
         if (!this.archive?.pin) throw new Error("persistent evidence unavailable");
         await this.archive.pin(runId, params.id!, params.action === "pin");
       }
-      const saved = await this.readHistory({
-        ...params,
-        run_id: runId,
-        action:
-          params.action === "stop"
-            ? "rules"
-            : ["pin", "unpin"].includes(params.action)
-              ? "request"
-              : params.action,
-      });
+      const saved = await this.readEvidence(
+        {
+          ...params,
+          run_id: runId,
+          action:
+            params.action === "stop"
+              ? "rules"
+              : ["pin", "unpin"].includes(params.action)
+                ? "request"
+                : params.action,
+        },
+        this.runs.get(runId),
+      );
       if (
         this.sessions.get(params.session_id) !== context ||
-        !this.ownedRuns.get(context)?.has(runId)
+        !this.ownedRuns.get(context)?.has(runId) ||
+        !isAgentControlledTab(context, owned?.get(runId) ?? -1)
       )
         throw new Error("session not found");
       return params.action === "stop" ? { ...result, run: saved.run } : saved;
@@ -1323,56 +1310,27 @@ export class DebugManager {
         );
       return { ...result, run: this.summary(state), rules: state.controls.list() };
     }
-    if (params.action === "requests" && state.journal) {
-      await state.journal.flush();
-      const indexed = await this.archive?.query?.(state.run.id, params).catch(() => {
-        this.coverage(state, "evidence_read_failed");
-        return undefined;
-      });
-      if (indexed) {
-        state.run.storage = indexed.run?.storage;
-        return {
-          ...indexed,
-          run: {
-            ...this.summary(state),
-            requests: indexed.run!.requests,
-            dropped_requests: indexed.run!.dropped_requests,
-          },
-        };
+    if (params.action === "operation") {
+      const operation = state.operations.find((entry) => entry.id === params.id);
+      if (!operation) throw new Error("operation not found or evicted");
+      // During the observation window a caller may request an early post-state.
+      if (
+        state.current === operation &&
+        state.run.state === "capturing" &&
+        operation.state !== "running" &&
+        this.now() <= (operation.window_end ?? 0)
+      ) {
+        operation.after = await this.page(state);
+        operation.sequence = this.change(state);
       }
     }
-    if (params.action !== "operation") {
-      if (params.action === "performance") {
-        await this.refreshPerformance(state);
-        return readRecording(this.recording(state), params);
-      }
-      const recording = await this.evidenceRecording(
-        state,
-        ["export", "duplicates"].includes(params.action),
-      );
-      if (params.action === "request" && params.id) {
-        const saved = await this.archive?.request?.(state.run.id, params.id).catch(() => {
-          this.coverage(state, "evidence_read_failed");
-          return undefined;
-        });
-        const current = state.network.get(params.id);
-        if (saved || current)
-          recording.requests = [current ? mergeRequest(saved, current) : saved!];
-      }
-      return readRecording(recording, params);
-    }
-    const operation = state.operations.find((entry) => entry.id === params.id);
-    if (!operation) throw new Error("operation not found or evicted");
-    // During the observation window a caller may request an early post-state.
+    const evidence = await this.readEvidence({ ...params, run_id: state.run.id }, state);
     if (
-      state.current === operation &&
-      state.run.state === "capturing" &&
-      operation.state !== "running" &&
-      this.now() <= (operation.window_end ?? 0)
-    ) {
-      operation.after = await this.page(state);
-      operation.sequence = this.change(state);
-    }
-    return readRecording(await this.evidenceRecording(state), params);
+      this.sessions.get(params.session_id) !== context ||
+      state.released ||
+      !isAgentControlledTab(context, state.run.tab_id)
+    )
+      throw new Error("session not found");
+    return evidence;
   }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consoleSource, operationEvidence, requestKind } from "../evidence-model";
+import { consoleSource, operationContext, operationEvidence, requestKind } from "../evidence-model";
 import { sanitizeFields } from "../observer";
 import { redactBody } from "../redact";
 import type { DebugOperation, DebugPage, DebugRecording, DebugRequest } from "../types";
@@ -86,6 +86,34 @@ const fixture = (): DebugRecording => ({
 });
 
 describe("operation evidence", () => {
+  it("uses one window for request and console links, including running and delayed evidence", () => {
+    const record = fixture();
+    record.requests.push(
+      { ...request, id: "late", started_at: 2500 },
+      { ...request, id: "next", started_at: 3000 },
+    );
+    record.console = [320, 2500, 3000].map((at, index) => ({
+      id: `c${index}`,
+      at,
+      last_at: at,
+      level: "log",
+      text: "log",
+      count: 1,
+    }));
+    record.operations.push({ ...save, id: "d:a3", started_at: 3000 });
+    const context = operationContext(record, save);
+    expect(context.operation.request_ids).toEqual([request.id, "late"]);
+    expect(context.operation.console_ids).toEqual(["c0", "c1"]);
+    expect(context.console.map((entry) => entry.relation)).toEqual(["window", "delayed"]);
+    expect(context.operation.truncated).toBe(false);
+    record.run.dropped_requests = 1;
+    expect(operationContext(record, save).operation.truncated).toBe(true);
+    record.operations = [{ ...input, state: "running", finished_at: undefined }];
+    record.saved_at = 2000;
+    expect(operationContext(record, record.operations[0]).operation.request_ids).toEqual([
+      request.id,
+    ]);
+  });
   it("does not retain credentials embedded in server-rendered input values", () => {
     for (const html of [
       '<input type="password" value="private">',

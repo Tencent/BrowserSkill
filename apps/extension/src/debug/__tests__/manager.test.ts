@@ -145,6 +145,42 @@ describe("task-scoped debug lifecycle", () => {
     expect(expressions.some((expression) => expression.includes(".agent(false,"))).toBe(true);
   });
 
+  it("updates the operation cursor for delayed evidence only within its observation window", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    const ticket = await f.manager.before({
+      id: "click",
+      method: "tool.click",
+      params: { session_id: "s1", tab_id: 7 },
+    });
+    f.manager.after(ticket);
+    const before = await f.manager.read({ session_id: "s1", action: "operations" });
+    f.advance(2000);
+    f.request("delayed");
+    const updated = await f.manager.read({
+      session_id: "s1",
+      action: "operations",
+      since: before.next_since,
+    });
+    expect(updated.operations).toHaveLength(1);
+    expect(updated.operations![0].request_ids).toEqual([`${run.id}:n1`]);
+    const detail = await f.manager.read({
+      session_id: "s1",
+      action: "operation",
+      id: ticket!.operation.id,
+    });
+    expect(detail.evidence!.links).toEqual([{ request_id: `${run.id}:n1`, relation: "delayed" }]);
+    f.advance(14000);
+    f.request("outside");
+    const unchanged = await f.manager.read({
+      session_id: "s1",
+      action: "operations",
+      since: updated.next_since,
+    });
+    expect(unchanged.operations).toEqual([]);
+  });
+
   it("adds no CDP listeners, reads or page observations before explicit start", async () => {
     const f = await fixture();
     active.push(f.manager);
@@ -490,6 +526,12 @@ describe("persistent debugging records", () => {
     const f = await fixture(journalArchive);
     active.push(f.manager);
     const run = await f.manager.start("s1", 7);
+    const ticket = await f.manager.before({
+      id: "save",
+      method: "tool.click",
+      params: { session_id: "s1", tab_id: 7 },
+    });
+    expect(ticket).toBeDefined();
     for (let i = 0; i < 230; i++) {
       f.event("Network.requestWillBeSent", {
         requestId: `post-${i}`,
@@ -505,6 +547,7 @@ describe("persistent debugging records", () => {
       f.event("Network.loadingFailed", { requestId: `post-${i}`, errorText: "test failure" });
       if (i % 20 === 0) await Promise.resolve();
     }
+    f.manager.after(ticket);
     const first = `${run.id}:n1`;
     const body = await f.manager.read({
       session_id: "s1",
@@ -518,6 +561,27 @@ describe("persistent debugging records", () => {
     await f.manager.read({ session_id: "s1", action: "stop" });
     const saved = await f.manager.read({ session_id: "s1", action: "export" });
     expect(saved.recording!.requests).toHaveLength(230);
+    expect(saved.recording!.operations[0].request_ids).toContain(first);
+    expect(saved.recording!.operations[0].truncated).toBe(false);
+    for (const reader of ["read", "readHistory"] as const) {
+      const detail = await f.manager[reader]({
+        session_id: "s1",
+        run_id: run.id,
+        action: "operation",
+        id: ticket!.operation.id,
+      });
+      expect(detail.operation!.request_ids).toEqual(
+        detail.evidence!.links.map((link) => link.request_id),
+      );
+      expect(detail.operation!.truncated).toBe(false);
+      const operations = await f.manager[reader]({
+        session_id: "s1",
+        run_id: run.id,
+        action: "operations",
+      });
+      expect(operations.operations![0].request_ids).toContain(first);
+      expect(operations.operations![0].truncated).toBe(false);
+    }
     expect(saved.run!.coverage).not.toContain("evidence_write_backlog");
     await f.sessions.start("s2");
     await expect(
@@ -532,6 +596,66 @@ describe("persistent debugging records", () => {
       part: "request",
     });
     expect(restored.request!.request_body.text).toHaveLength(4096);
+  });
+
+  it.each([
+    "read",
+    "readHistory",
+  ] as const)("%s reports a failed detail read in the current response", async (reader) => {
+    const archive = new MemoryArchive();
+    const f = await fixture({
+      list: () => archive.list(),
+      put: (record) => archive.put(record),
+      delete: (id) => archive.delete(id),
+      get: (id) => archive.get(id),
+      retain: async () => {},
+      request: async () => {
+        throw new Error("read failed");
+      },
+    });
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.request("live");
+    const result = await f.manager[reader]({
+      action: "request",
+      session_id: "s1",
+      run_id: run.id,
+      id: `${run.id}:n1`,
+    });
+    expect(result.request!.url).toBe("https://site.test/live");
+    expect(result.run!.coverage).toContain("evidence_read_failed");
+  });
+
+  it("rechecks task ownership when a retained detail read finishes", async () => {
+    const archive = new MemoryArchive();
+    let finish: (entry: DebugRequest | undefined) => void = () => {};
+    const requested = vi.fn(
+      () =>
+        new Promise<DebugRequest | undefined>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const f = await fixture({
+      list: () => archive.list(),
+      put: (record) => archive.put(record),
+      delete: (id) => archive.delete(id),
+      get: (id) => archive.get(id),
+      request: requested,
+    });
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.request("owned");
+    const reading = f.manager.read({
+      session_id: "s1",
+      run_id: run.id,
+      action: "request",
+      id: `${run.id}:n1`,
+    });
+    const rejected = expect(reading).rejects.toThrow("session not found");
+    await vi.waitFor(() => expect(requested).toHaveBeenCalled());
+    f.context.agentCreatedTabs.delete(7);
+    finish(undefined);
+    await rejected;
   });
 
   it("reports failed persistent reads and still exposes live evidence", async () => {

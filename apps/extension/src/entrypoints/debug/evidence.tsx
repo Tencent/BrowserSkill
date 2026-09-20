@@ -5,7 +5,6 @@ import {
   RiArrowRightLine,
   RiArrowRightUpLine,
   RiCheckLine,
-  RiCodeSSlashLine,
 } from "@remixicon/react";
 import { useEffect, useState } from "react";
 import { debugRequest, recordingRequest } from "@/debug/client";

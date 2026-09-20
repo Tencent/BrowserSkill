@@ -31,7 +31,7 @@ describe("bounded evidence journal", () => {
       expect.objectContaining({ response_body: { state: "available", text: "saved" } }),
     ]);
     expect(failed).not.toHaveBeenCalled();
-    await journal.stop();
+    await journal.flush();
   });
   it("reports storage failures and bounds the queue while a transaction is stalled", async () => {
     let release: () => void = () => {};
@@ -50,7 +50,7 @@ describe("bounded evidence journal", () => {
       throw new Error("disk full");
     });
     release();
-    await journal.stop();
+    await journal.flush();
     expect(failed).toHaveBeenCalledWith("evidence_write_failed");
   });
   it("preserves pins and complete stored bodies when merging a metadata-only read", () => {

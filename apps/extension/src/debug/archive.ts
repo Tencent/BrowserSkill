@@ -4,6 +4,7 @@ import {
   JOURNAL_REQUESTS,
   jsonBytes,
   mergeRequest,
+  requestMetadata,
   retentionPriority,
 } from "./journal";
 import { interruptPerformance } from "./performance";
@@ -15,17 +16,6 @@ interface StoredRequest {
   entry: DebugRequest;
   bytes: number;
   priority: number;
-}
-function metadata(entry: DebugRequest): DebugRequest {
-  const { text: _request, ...request_body } = entry.request_body;
-  const { text: _response, ...response_body } = entry.response_body;
-  const {
-    request_headers: _headers,
-    response_headers: _responseHeaders,
-    timing: _timing,
-    ...rest
-  } = entry;
-  return { ...rest, request_body, response_body };
 }
 
 export const HISTORY_LIMIT = 50;
@@ -193,7 +183,7 @@ export class LocalDebugArchive implements DebugArchive {
                     requests: [saved.entry],
                   }).requests[0];
                   item.update({ ...saved, entry: recovered });
-                  tx.objectStore("request_index").put(metadata(recovered));
+                  tx.objectStore("request_index").put(requestMetadata(recovered));
                   item.continue();
                 };
               }
@@ -270,7 +260,7 @@ export class LocalDebugArchive implements DebugArchive {
       ),
     ]);
     const merged = new Map(
-      recording.requests.map((entry) => [entry.id, bodies ? entry : metadata(entry)]),
+      recording.requests.map((entry) => [entry.id, bodies ? entry : requestMetadata(entry)]),
     );
     for (const value of requests) {
       const entry = bodies ? (value as StoredRequest).entry : (value as DebugRequest);
@@ -470,7 +460,7 @@ export class LocalDebugArchive implements DebugArchive {
             bytes,
             priority: retentionPriority(entry),
           } satisfies StoredRequest);
-          index.put(metadata(entry));
+          index.put(requestMetadata(entry));
           if (--remaining === 0) finish();
         };
       }
@@ -519,7 +509,7 @@ export class LocalDebugArchive implements DebugArchive {
       saved.bytes = bytes;
       saved.priority = retentionPriority(saved.entry);
       tx.objectStore("requests").put(saved);
-      tx.objectStore("request_index").put(metadata(saved.entry));
+      tx.objectStore("request_index").put(requestMetadata(saved.entry));
       tx.objectStore("runs").put(run);
     };
     await done;

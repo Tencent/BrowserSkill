@@ -34,6 +34,7 @@ import {
 } from "./evidence";
 import { ReplayEditor, RuleEditor, RulesPanel } from "./network-controls";
 import { OperationEvidence } from "./operation-evidence";
+import { useRequests } from "./use-requests";
 
 export function DebugApp() {
   const { t } = useTranslation("extension");
@@ -51,7 +52,6 @@ export function DebugApp() {
   const [filter, setFilter] = useState("");
   const [revision, setRevision] = useState(0);
   const [operations, setOperations] = useState<DebugOperation[]>([]);
-  const [requests, setRequests] = useState<DebugRequest[]>([]);
   const [messages, setMessages] = useState<DebugConsole[]>([]);
   const [pages, setPages] = useState<DebugPage[]>([]);
   const [operationId, setOperationId] = useState("");
@@ -75,6 +75,10 @@ export function DebugApp() {
   );
   const isHistory = !selection.session && !selection.run;
   const pulse = run?.next_since ?? 0;
+  const { requests, error: requestError } = useRequests(
+    run,
+    mode === "requests" && !operationId && !selectedRequest,
+  );
   const errorCounts = messages
     .filter((entry) => entry.level === "error")
     .reduce<Record<string, number>>((counts, entry) => {
@@ -138,7 +142,6 @@ export function DebugApp() {
   useEffect(() => {
     initialOperation.current = "";
     setOperations([]);
-    setRequests([]);
     setMessages([]);
     setPages([]);
     setOperationId("");
@@ -158,26 +161,12 @@ export function DebugApp() {
         recordingRequest({ ...base, action: "console" }),
         recordingRequest({ ...base, action: "pages" }),
       ]);
-      const entries: DebugRequest[] = [];
-      let since = 0;
-      for (let page = 0; page < 20; page++) {
-        if (cancelled) return;
-        const batch = await recordingRequest({ ...base, action: "requests", since, limit: 100 });
-        entries.push(...(batch.requests ?? []));
-        since = batch.next_since ?? since;
-        if ((batch.requests?.length ?? 0) < 100) break;
-      }
       if (cancelled) return;
       setOperations((actions.operations ?? []).sort((a, b) => a.started_at - b.started_at));
       if (initialOperation.current !== runId && actions.operations?.length) {
         initialOperation.current = runId;
         setOperationId(actions.operations.at(-1)!.id);
       }
-      setRequests(
-        [...new Map(entries.map((item) => [item.id, item])).values()].sort(
-          (a, b) => a.started_at - b.started_at,
-        ),
-      );
       setMessages(consoleResult.console ?? []);
       setPages(pageResult.pages ?? []);
     })().catch((reason) => {
@@ -362,7 +351,7 @@ export function DebugApp() {
             </div>
           )}
         </div>
-        {(error || historyError || taskError || run?.storage_error) && (
+        {(error || requestError || historyError || taskError || run?.storage_error) && (
           <p
             role="alert"
             className="mb-5 rounded-xl border border-destructive/20 bg-destructive/5 p-4 text-xs text-destructive"
@@ -371,7 +360,7 @@ export function DebugApp() {
               ? `${t("debug.storageFailed")} ${run.storage_error}`
               : historyError
                 ? `${t("debug.storageFailed")} ${historyError}`
-                : error || taskError}
+                : error || requestError || taskError}
           </p>
         )}
         {confirmDelete && (

@@ -1,5 +1,5 @@
 import { i18n } from "@browser-skill/i18n";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   debugHistory,
@@ -10,6 +10,7 @@ import {
 } from "@/debug/client";
 import type { DebugOperation, DebugRequest, DebugRun } from "@/debug/types";
 import { DebugApp } from "./App";
+import { useRequests } from "./use-requests";
 
 vi.mock("@/debug/client", () => ({
   debugHistory: vi.fn(),
@@ -218,5 +219,182 @@ describe("website evidence workspace", () => {
     render(<DebugApp />);
     expect(await screen.findByText("还没有调试记录")).toBeTruthy();
     expect(debugRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("incremental request list", () => {
+  it("merges updates, resyncs on retention, and pauses when its panel is hidden", async () => {
+    let current = { ...run, next_since: 101 };
+    let retained = Array.from({ length: 101 }, (_, i) => ({
+      ...request,
+      id: `d1:n${i + 1}`,
+      sequence: i + 1,
+      started_at: 1000 + i,
+    }));
+    vi.mocked(recordingRequest).mockImplementation(async (params) => {
+      const page = retained
+        .filter((entry) => entry.sequence > (params.since ?? 0))
+        .sort((a, b) => a.sequence - b.sequence)
+        .slice(0, params.limit);
+      return {
+        session_id: "s1",
+        run: current,
+        requests: page,
+        next_since: page.at(-1)?.sequence ?? current.next_since,
+      };
+    });
+    const { result, rerender } = renderHook(({ run, enabled }) => useRequests(run, enabled), {
+      initialProps: { run: current, enabled: true },
+    });
+    await waitFor(() => expect(result.current.requests).toHaveLength(101));
+    expect(vi.mocked(recordingRequest).mock.calls.map(([p]) => p.since)).toEqual([0, 100]);
+    retained[0] = { ...retained[0], status: 500, sequence: 102 };
+    retained.push({ ...request, id: "d1:new", sequence: 103 });
+    current = { ...current, next_since: 103 };
+    rerender({ run: current, enabled: true });
+    await waitFor(() => expect(result.current.requests).toHaveLength(102));
+    expect(recordingRequest).toHaveBeenLastCalledWith(expect.objectContaining({ since: 101 }));
+    expect(result.current.requests.find((entry) => entry.id === "d1:n1")!.status).toBe(500);
+    retained = retained.filter((entry) => entry.id !== "d1:n2");
+    current = { ...current, next_since: 104, dropped_requests: 1 };
+    const before = vi.mocked(recordingRequest).mock.calls.length;
+    rerender({ run: current, enabled: true });
+    await waitFor(() => expect(result.current.requests).toHaveLength(101));
+    expect(vi.mocked(recordingRequest).mock.calls[before][0].since).toBe(0);
+    expect(result.current.requests.some((entry) => entry.id === "d1:n2")).toBe(false);
+    const calls = vi.mocked(recordingRequest).mock.calls.length;
+    current = { ...current, next_since: 105 };
+    rerender({ run: current, enabled: false });
+    expect(recordingRequest).toHaveBeenCalledTimes(calls);
+    rerender({ run: current, enabled: true });
+    await waitFor(() => expect(recordingRequest).toHaveBeenCalledTimes(calls + 1));
+    expect(recordingRequest).toHaveBeenLastCalledWith(expect.objectContaining({ since: 103 }));
+  });
+
+  it("serializes overlapping refreshes and keeps progress made by a superseded page", async () => {
+    let finish: (value: Awaited<ReturnType<typeof recordingRequest>>) => void = () => {};
+    vi.mocked(recordingRequest)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue({
+        session_id: "s1",
+        requests: [{ ...request, id: "d1:n2", sequence: 3 }],
+        next_since: 3,
+      });
+    const { result, rerender } = renderHook((value) => useRequests(value, true), {
+      initialProps: run,
+    });
+    await waitFor(() => expect(recordingRequest).toHaveBeenCalledTimes(1));
+    rerender({ ...run, next_since: 3 });
+    expect(recordingRequest).toHaveBeenCalledTimes(1);
+    finish({ session_id: "s1", requests: [request], next_since: 2 });
+    await waitFor(() => expect(result.current.requests).toHaveLength(2));
+    expect(recordingRequest).toHaveBeenLastCalledWith(expect.objectContaining({ since: 2 }));
+  });
+
+  it("restarts if retention changes during a read, without keeping removed rows", async () => {
+    vi.mocked(recordingRequest)
+      .mockResolvedValueOnce({ session_id: "s1", requests: [request], next_since: 2 })
+      .mockResolvedValueOnce({
+        session_id: "s1",
+        run: { ...run, dropped_requests: 1 },
+        requests: [],
+        next_since: 3,
+      })
+      .mockResolvedValueOnce({
+        session_id: "s1",
+        run: { ...run, dropped_requests: 1 },
+        requests: [{ ...request, id: "d1:n2", sequence: 3 }],
+        next_since: 3,
+      });
+    const { result, rerender } = renderHook((value) => useRequests(value, true), {
+      initialProps: run,
+    });
+    await waitFor(() => expect(result.current.requests[0]?.id).toBe(request.id));
+    rerender({ ...run, next_since: 3 });
+    await waitFor(() => expect(result.current.requests[0]?.id).toBe("d1:n2"));
+    expect(result.current.requests).toHaveLength(1);
+    expect(vi.mocked(recordingRequest).mock.calls.map(([p]) => p.since)).toEqual([0, 2, 0]);
+  });
+
+  it("rechecks older evidence after an incomplete storage fallback", async () => {
+    const fallbackRun = { ...run, coverage: ["evidence_read_failed"] };
+    vi.mocked(recordingRequest)
+      .mockResolvedValueOnce({
+        session_id: "s1",
+        run: fallbackRun,
+        requests: [{ ...request, id: "d1:new", sequence: 50 }],
+        next_since: 50,
+      })
+      .mockResolvedValueOnce({
+        session_id: "s1",
+        run: fallbackRun,
+        requests: [request, { ...request, id: "d1:new", sequence: 50 }],
+        next_since: 51,
+      });
+    const { result, rerender } = renderHook((value) => useRequests(value, true), {
+      initialProps: run,
+    });
+    await waitFor(() => expect(result.current.requests).toHaveLength(1));
+    rerender({ ...run, next_since: 51 });
+    await waitFor(() => expect(result.current.requests).toHaveLength(2));
+    expect(vi.mocked(recordingRequest).mock.calls.map(([p]) => p.since)).toEqual([0, 0]);
+  });
+
+  it("resumes after a failed page instead of discarding earlier progress", async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ({
+      ...request,
+      id: `d1:n${i + 1}`,
+      sequence: i + 1,
+    }));
+    vi.mocked(recordingRequest)
+      .mockResolvedValueOnce({ session_id: "s1", requests: page, next_since: 100 })
+      .mockRejectedValueOnce(new Error("storage unavailable"))
+      .mockResolvedValueOnce({
+        session_id: "s1",
+        requests: [{ ...request, id: "d1:last", sequence: 101 }],
+        next_since: 101,
+      });
+    const { result, rerender } = renderHook((value) => useRequests(value, true), {
+      initialProps: run,
+    });
+    await waitFor(() => expect(result.current.error).toBe("storage unavailable"));
+    expect(result.current.requests).toHaveLength(100);
+    rerender({ ...run, next_since: 101 });
+    await waitFor(() => expect(result.current.requests).toHaveLength(101));
+    expect(result.current.error).toBe("");
+    expect(vi.mocked(recordingRequest).mock.calls.map(([p]) => p.since)).toEqual([0, 100, 100]);
+  });
+
+  it("ignores a previous run's late response after the selection changes", async () => {
+    let finish: (value: Awaited<ReturnType<typeof recordingRequest>>) => void = () => {};
+    vi.mocked(recordingRequest)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      )
+      .mockResolvedValue({
+        session_id: "s2",
+        requests: [{ ...request, id: "d2:n1", run_id: "d2" }],
+        next_since: 2,
+      });
+    const { result, rerender } = renderHook((value) => useRequests(value, true), {
+      initialProps: run,
+    });
+    await waitFor(() => expect(recordingRequest).toHaveBeenCalledTimes(1));
+    rerender({ ...run, id: "d2", session_id: "s2" });
+    await waitFor(() => expect(result.current.requests[0]?.id).toBe("d2:n1"));
+    finish({ session_id: "s1", requests: [request], next_since: 2 });
+    await Promise.resolve();
+    expect(result.current.requests.map((entry) => entry.id)).toEqual(["d2:n1"]);
+    expect(recordingRequest).toHaveBeenLastCalledWith(
+      expect.objectContaining({ session_id: "s2", run_id: "d2", since: 0 }),
+    );
   });
 });

@@ -38,22 +38,29 @@ export function consoleSource(
   return "unknown";
 }
 
-export function relatedRequests(
-  recording: DebugRecording,
-  operation: DebugOperation,
-): DebugEvidence["links"] {
+/** Derive all associations from the same retained evidence, never the hot cache. */
+export function operationContext(recording: DebugRecording, operation: DebugOperation) {
   const { immediate, end, next_start } = operationWindow(recording, operation);
-  return recording.requests
-    .filter(
-      (request) =>
-        request.started_at >= operation.started_at &&
-        request.started_at <= end &&
-        request.started_at < next_start,
-    )
-    .map((request) => ({
+  const contains = (at: number) => at >= operation.started_at && at <= end && at < next_start;
+  const relation = (at: number): "window" | "delayed" => (at <= immediate ? "window" : "delayed");
+  const requests = recording.requests.filter((request) => contains(request.started_at));
+  const messages = recording.console
+    .filter((entry) => contains(entry.at))
+    .map((entry) => ({ ...entry, relation: relation(entry.at) }));
+  return {
+    requests,
+    console: messages,
+    links: requests.map((request) => ({
       request_id: request.id,
-      relation: request.started_at <= immediate ? "window" : "delayed",
-    }));
+      relation: relation(request.started_at),
+    })),
+    operation: {
+      ...operation,
+      request_ids: requests.map((request) => request.id),
+      console_ids: messages.map((entry) => entry.id),
+      truncated: recording.run.dropped_requests > 0 || recording.run.dropped_console > 0,
+    },
+  };
 }
 export function operationWindow(
   recording: DebugRecording,
@@ -61,7 +68,10 @@ export function operationWindow(
 ): { immediate: number; end: number; next_start: number } {
   const index = recording.operations.findIndex((item) => item.id === operation.id);
   const next = index >= 0 ? recording.operations[index + 1] : undefined;
-  const immediate = operation.window_end ?? operation.finished_at ?? operation.started_at;
+  const immediate =
+    operation.window_end ??
+    operation.finished_at ??
+    (operation.state === "running" ? recording.saved_at : operation.started_at);
   const end = Math.min(
     operation.observation_end ?? immediate,
     next?.started_at ?? Infinity,
@@ -131,11 +141,9 @@ function payload(request: DebugRequest, part: "request" | "response"): Leaf[] {
 export function operationEvidence(
   record: DebugRecording,
   operation: DebugOperation,
+  context = operationContext(record, operation),
 ): DebugEvidence {
-  const links = relatedRequests(record, operation);
-  const requests = record.requests.filter((request) =>
-    links.some((link) => link.request_id === request.id),
-  );
+  const { links, requests } = context;
   const gaps = new Set<string>(
     record.run.coverage.filter((value) => value.startsWith("evidence_")),
   );
