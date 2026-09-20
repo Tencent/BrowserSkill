@@ -1136,7 +1136,7 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
       "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "DIV", attributes: [] },
+        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
       }),
     });
     const res = await handleFill(

@@ -914,9 +914,34 @@ interface DescribedNode {
   attributes?: string[];
 }
 
+const NEVER_FILLABLE_TAGS = new Set([
+  "BUTTON",
+  "SELECT",
+  "OPTION",
+  "OPTGROUP",
+  "SCRIPT",
+  "STYLE",
+  "LINK",
+  "META",
+  "IMG",
+  "VIDEO",
+  "AUDIO",
+  "CANVAS",
+  "IFRAME",
+  "OBJECT",
+  "EMBED",
+  "SVG",
+  "BR",
+  "HR",
+]);
+
 /**
  * Decide whether a node can receive `tool.fill`: native `<input>` /
- * `<textarea>`, or any element flagged `contenteditable="true"`.
+ * `<textarea>`, an element with its own contenteditable attribute, or
+ * a descendant that may inherit contenteditable. `DOM.describeNode`
+ * only reports this node's attributes, so a `<p>` inside
+ * `[contenteditable]` must not be rejected here; the live
+ * `isContentEditable` check is the source of truth.
  * Exported via `__testing__` for unit coverage.
  */
 function isFillable(node: DescribedNode): boolean {
@@ -929,7 +954,7 @@ function isFillable(node: DescribedNode): boolean {
       return value === "" || value === "true" || value === "plaintext-only";
     }
   }
-  return false;
+  return !NEVER_FILLABLE_TAGS.has(tag);
 }
 
 type SelectMutationResult =
