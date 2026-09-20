@@ -106,6 +106,45 @@ describe("task-scoped debug lifecycle", () => {
     expect(f.dispose).toHaveBeenCalledTimes(1);
   });
 
+  it("bounds observer pre-reads and cancels without leaving agent suppression enabled", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    active.push(f.manager);
+    const normal = f.sendAttached.getMockImplementation()!;
+    const expressions: string[] = [];
+    f.sendAttached.mockImplementation((async (
+      target: CdpDebuggee,
+      method: string,
+      params?: { expression?: string },
+    ) => {
+      if (params?.expression) expressions.push(params.expression);
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate" && String(params?.expression).includes(".agent(true,"))
+        return new Promise(() => {});
+      return normal(target, method);
+    }) as never);
+    await f.manager.start("s1", 7);
+    const req = {
+      id: "navigate",
+      method: "tool.navigate",
+      params: { session_id: "s1", tab_id: 7 },
+    };
+    const before = f.manager.before(req);
+    await vi.advanceTimersByTimeAsync(601);
+    const ticket = await before;
+    expect(ticket?.operation.method).toBe("tool.navigate");
+    f.manager.after(ticket);
+    expect(
+      (await f.manager.read({ session_id: "s1", action: "status" })).runs![0].coverage,
+    ).toContain("manual_capture_unavailable");
+    const ac = new AbortController();
+    const cancelled = f.manager.before(req, ac.signal);
+    ac.abort();
+    expect(await cancelled).toBeUndefined();
+    expect(expressions.some((expression) => expression.includes(".agent(false,"))).toBe(true);
+  });
+
   it("adds no CDP listeners, reads or page observations before explicit start", async () => {
     const f = await fixture();
     active.push(f.manager);
@@ -311,6 +350,117 @@ class MemoryArchive implements DebugArchive {
 }
 
 describe("persistent debugging records", () => {
+  it("uses the archive's complete request reader after a metadata-only history read", async () => {
+    const archive = new MemoryArchive();
+    const f = await fixture(archive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.request("legacy");
+    f.event("Network.responseReceived", {
+      requestId: "legacy",
+      response: {
+        status: 200,
+        mimeType: "application/json",
+        headers: { "x-source": "legacy" },
+        timing: { receiveHeadersEnd: 42 },
+      },
+    });
+    f.event("Network.loadingFinished", { requestId: "legacy" });
+    for (let i = 0; i < 6; i++) await Promise.resolve();
+    await f.manager.read({ session_id: "s1", action: "stop" });
+    const source = await archive.get(run.id);
+    expect(source?.requests[0].response_body.text).toContain('"ok": false');
+    const reader = new DebugManager(f.sessions, f.cdp, f.tabs, Date.now, {
+      ...archive,
+      put: (record) => archive.put(record),
+      list: () => archive.list(),
+      delete: (id) => archive.delete(id),
+      get: async (id, bodies = true) => {
+        const record = await archive.get(id);
+        if (record && !bodies)
+          for (const request of record.requests) {
+            delete request.response_body.text;
+            delete request.request_headers;
+            delete request.response_headers;
+            delete request.timing;
+          }
+        return record;
+      },
+      request: async (id, requestId) =>
+        (await archive.get(id))?.requests.find((request) => request.id === requestId),
+    });
+    active.push(reader);
+    for (const part of ["response", "headers", "timing"] as const) {
+      const result = await reader.readHistory({
+        session_id: "",
+        run_id: run.id,
+        action: "request",
+        id: `${run.id}:n1`,
+        part,
+      });
+      if (part === "response") expect(result.request?.response_body.text).toContain('"ok": false');
+      if (part === "headers") expect(result.request?.response_headers?.["x-source"]).toBe("legacy");
+      if (part === "timing") expect(result.request?.timing?.receiveHeadersEnd).toBe(42);
+    }
+  });
+
+  it("reads saved captures beyond the live cache only for their original task instance", async () => {
+    const archive = new MemoryArchive();
+    const f = await fixture(archive);
+    active.push(f.manager);
+    let first = "";
+    for (let i = 0; i < 6; i++) {
+      const run = await f.manager.start("s1", 7);
+      first ||= run.id;
+      f.request(`request-${i}`);
+      await f.manager.read({ session_id: "s1", action: "stop" });
+      f.advance(1);
+    }
+    expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toHaveLength(6);
+    expect(
+      (await f.manager.read({ session_id: "s1", run_id: first, action: "export" })).recording?.run
+        .id,
+    ).toBe(first);
+    expect(
+      (await f.manager.read({ session_id: "s1", id: `${first}:n1`, action: "request" })).request
+        ?.id,
+    ).toBe(`${first}:n1`);
+    await expect(
+      f.manager.read({ session_id: "s1", run_id: first, tab_id: 8, action: "export" }),
+    ).rejects.toThrow("not found");
+    await f.sessions.start("s2");
+    await expect(
+      f.manager.read({ session_id: "s2", run_id: first, action: "export" }),
+    ).rejects.toThrow("not found");
+    await f.sessions.stop("s1");
+    const reused = await f.sessions.start("s1");
+    reused.agentCreatedTabs.add(7);
+    expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toEqual([]);
+    await expect(
+      f.manager.read({ session_id: "s1", run_id: first, action: "export" }),
+    ).rejects.toThrow("not found");
+    expect(
+      (await f.manager.readHistory({ session_id: "", run_id: first, action: "export" })).recording
+        ?.run.id,
+    ).toBe(first);
+  });
+
+  it("revokes saved capture access when its tab is released", async () => {
+    const f = await fixture(new MemoryArchive());
+    active.push(f.manager);
+    let first = "";
+    for (let i = 0; i < 5; i++) {
+      const run = await f.manager.start("s1", 7);
+      first ||= run.id;
+      await f.manager.read({ session_id: "s1", action: "stop" });
+    }
+    f.manager.releaseTab(7);
+    expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toEqual([]);
+    await expect(
+      f.manager.read({ session_id: "s1", run_id: first, action: "export" }),
+    ).rejects.toThrow("not found");
+  });
+
   it("journals early bodies before hot-cache eviction, survives stop and preserves task isolation", async () => {
     const archive = new MemoryArchive();
     const requests = new Map<string, DebugRequest>();

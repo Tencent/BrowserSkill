@@ -267,7 +267,7 @@ failures are displayed; live data remains exportable while retained in memory.
 History keeps recent stopped records for 30 days, up to 50 records / 50 MiB total,
 evicting the oldest stopped records first. Active captures are protected within
 these limits. Requests have a separate journal of up to 2,000 entries / 8 MiB of serialized
-request evidence per capture. This survives the smaller live-cache eviction.
+request evidence per capture. This survives the smaller live-cache eviction. The owning task can still query and export its saved captures after they leave the four-run live cache; task completion or tab release revokes this access.
 Failed requests, HTTP errors, controlled/replayed requests and Fetch/XHR/JSON traffic
 have retention priority over ordinary resources. Old unpinned entries of the
 lowest priority are removed first. Other context keeps its existing capture limits.
@@ -299,6 +299,7 @@ access to older tasks' data. There is no built-in comparison or repair action.
 | Fields / value length | 16 / 256 characters per page observation |
 | Follow-up observations | 4 retained changes per operation, within 15 seconds |
 | Live request cache / operations / console entries | 200 / 64 / 100 per capture |
+| Additional in-flight tracking | 200 requests or body reads displaced from the live cache; overflow is explicitly marked `interrupted` / `tracking_limit` |
 | Persistent request journal | 2,000 requests / 8 MiB per capture |
 | Pinned requests | 20 completed requests per capture, each at most 8 MiB / 20 |
 | Pending journal writes | 256 entries / 4 MiB, plus one batch in flight |

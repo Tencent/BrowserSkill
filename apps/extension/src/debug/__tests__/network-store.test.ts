@@ -247,8 +247,9 @@ describe("debug network evidence", () => {
         ),
     ).toBeLessThanOrEqual(512 * 1024);
     for (let i = 15; i < 230; i++) f.request({ requestId: String(i) });
-    expect(f.store.list()).toHaveLength(MAX_REQUESTS);
-    expect(f.store.dropped).toBe(30);
+    expect(f.store.entries.size).toBe(MAX_REQUESTS);
+    expect(f.store.list()).toHaveLength(215); // Pending requests keep their CDP identities.
+    expect(f.store.dropped).toBe(15);
     expect(f.store.get("d1:n1")).toBeUndefined();
   });
 

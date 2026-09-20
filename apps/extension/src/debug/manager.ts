@@ -4,16 +4,20 @@ import {
   parseExceptionThrown,
   parseLogEntry,
 } from "@/browser-driver/chromium-cdp";
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
-import type { DebugArchive } from "./archive";
+import { type DebugArchive, HISTORY_LIMIT } from "./archive";
 import { debugCapabilities } from "./capabilities";
 import { consoleSource } from "./evidence-model";
 import { DebugJournal, mergeRequest } from "./journal";
 import { DebugNetworkControl } from "./network-control";
 import { DebugNetworkStore, requestProjection } from "./network-store";
-import { DebugObserver, sanitizeFields } from "./observer";
+import { DebugObserver, OBSERVATION_TIMEOUT_MS, sanitizeFields } from "./observer";
 import { interruptPerformance, PERFORMANCE_LIMIT, performanceSnapshot } from "./performance";
 import { readRecording } from "./recording";
 import { redactText, redactUrl } from "./redact";
@@ -62,6 +66,7 @@ export interface DebugCdp extends CdpRunner {
 }
 interface RunState {
   run: DebugRun;
+  owner: SessionContext;
   network: DebugNetworkStore;
   controls?: DebugNetworkControl;
   journal?: DebugJournal;
@@ -91,23 +96,31 @@ export interface DebugTicket {
   operation: DebugOperation;
 }
 
-async function deadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+async function deadline<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abort: (() => void) | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("debug observation timeout")), ms);
+        abort = () => reject(new Error("debug observation cancelled"));
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
       }),
     ]);
   } finally {
     clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
   }
 }
 
 /** Bounded live capture with browser-local checkpoints, independent of audit. */
 export class DebugManager {
   private readonly runs = new Map<string, RunState>();
+  // Only lightweight ownership outlives the live cache. Object identity prevents
+  // a reused short session ID from inheriting another task's saved evidence.
+  private readonly ownedRuns = new WeakMap<SessionContext, Map<string, number>>();
   private subscription?: { dispose(): void };
   private readonly starting = new Set<string>();
 
@@ -125,8 +138,9 @@ export class DebugManager {
   }
   private active(sessionId: string, tabId?: number): RunState | undefined {
     return [...this.runs.values()].find(
-      ({ run }) =>
+      ({ run, owner }) =>
         run.session_id === sessionId &&
+        owner === this.sessions.get(sessionId) &&
         run.state === "capturing" &&
         (tabId === undefined || run.tab_id === tabId),
     );
@@ -142,6 +156,7 @@ export class DebugManager {
   async start(sessionId: string, tabId: number, name = ""): Promise<DebugRun> {
     this.sync();
     if (!this.owned(sessionId, tabId)) throw new Error("tab is not owned by this task");
+    const owner = this.sessions.get(sessionId)!;
     const key = `${sessionId}:${tabId}`;
     if (this.starting.has(key)) throw new Error("debug capture is already starting");
     const existing = this.active(sessionId, tabId);
@@ -224,6 +239,7 @@ export class DebugManager {
     );
     const state: RunState = {
       run,
+      owner,
       network,
       operations: [],
       console: [],
@@ -252,10 +268,16 @@ export class DebugManager {
       this.now,
     );
     this.runs.set(id, state);
+    let ownedRuns = this.ownedRuns.get(state.owner);
+    if (!ownedRuns) this.ownedRuns.set(state.owner, (ownedRuns = new Map()));
+    ownedRuns.set(id, tabId);
+    while (ownedRuns.size > HISTORY_LIMIT + MAX_RUNS)
+      ownedRuns.delete(ownedRuns.keys().next().value!);
     this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
       this.onEvent(source, method, params),
     );
     try {
+      if (this.sessions.get(sessionId) !== owner) throw new Error("task ended during debug start");
       const tab = await this.tabs.get(tabId);
       if (tab.windowId !== this.sessions.get(sessionId)?.agentWindowId)
         throw new Error("debug tab must remain in its Agent Window");
@@ -305,6 +327,7 @@ export class DebugManager {
       this.stopState(state, "start_failed");
       clearTimeout(state.archiveTimer);
       this.runs.delete(id);
+      ownedRuns.delete(id);
       this.pruneListener();
       throw error;
     } finally {
@@ -464,7 +487,8 @@ export class DebugManager {
     }
   }
 
-  async before(req: RequestFrame): Promise<DebugTicket | undefined> {
+  async before(req: RequestFrame, signal?: AbortSignal): Promise<DebugTicket | undefined> {
+    if (signal?.aborted) return;
     if (!ACTIONS.has(req.method)) return;
     const params = req.params as {
       session_id?: string;
@@ -477,13 +501,32 @@ export class DebugManager {
     if (!context) return;
     const tabId =
       params.tab_id ??
-      (await this.tabs.query({ windowId: context.agentWindowId, active: true }))[0]?.id;
+      (
+        await deadline(
+          this.tabs.query({ windowId: context.agentWindowId, active: true }),
+          OBSERVATION_TIMEOUT_MS,
+          signal,
+        )
+      )[0]?.id;
     if (tabId === undefined || !this.owned(params.session_id, tabId)) return;
     const state = this.active(params.session_id, tabId);
     if (!state) return;
-    await state.observer
-      ?.call("agent", true)
-      .catch(() => this.coverage(state, "manual_capture_unavailable"));
+    await deadline(
+      state.observer?.call("agent", true) ?? Promise.resolve(),
+      OBSERVATION_TIMEOUT_MS,
+      signal,
+    ).catch(() => {
+      this.coverage(state, "manual_capture_unavailable");
+      void state.observer?.call("agent", false).catch(() => {});
+    });
+    if (
+      signal?.aborted ||
+      state.run.state !== "capturing" ||
+      this.sessions.get(params.session_id) !== context
+    ) {
+      void state.observer?.call("agent", false).catch(() => {});
+      return;
+    }
     state.agentBusy = true;
     clearTimeout(state.timer);
     state.timer = undefined;
@@ -515,7 +558,15 @@ export class DebugManager {
       state.operations.shift();
       state.run.dropped_operations += 1;
     }
-    operation.before = await this.page(state);
+    try {
+      operation.before = await deadline(this.page(state), OBSERVATION_TIMEOUT_MS, signal);
+    } catch {
+      this.coverage(state, "page_snapshot_unavailable");
+    }
+    if (signal?.aborted) {
+      this.after({ run: state, operation }, "debug observation cancelled");
+      return;
+    }
     if (
       previous &&
       !previous.after &&
@@ -770,7 +821,7 @@ export class DebugManager {
     return {
       ...state.run,
       active_rules: state.controls?.activeCount ?? 0,
-      requests: Math.max(state.network.entries.size, state.run.storage?.requests ?? 0),
+      requests: Math.max(state.network.size, state.run.storage?.requests ?? 0),
       operations: state.operations.length,
       errors: state.console
         .filter((entry) => entry.level === "error")
@@ -834,6 +885,7 @@ export class DebugManager {
   private release(state: RunState, reason: string): void {
     this.stopState(state, reason);
     state.released = true;
+    this.ownedRuns.get(state.owner)?.delete(state.run.id);
     void this.persist(state).then(() => {
       if (
         this.archive &&
@@ -846,17 +898,22 @@ export class DebugManager {
     });
   }
   releaseTab(tabId: number): void {
+    for (const context of this.sessions.list())
+      for (const [id, tab] of this.ownedRuns.get(context) ?? [])
+        if (tab === tabId) this.ownedRuns.get(context)!.delete(id);
     for (const state of this.runs.values())
       if (state.run.tab_id === tabId) this.release(state, "tab_released");
   }
   releaseSession(sessionId: string): void {
+    const context = this.sessions.get(sessionId);
+    if (context) this.ownedRuns.delete(context);
     for (const state of this.runs.values())
       if (state.run.session_id === sessionId) this.release(state, "session_ended");
   }
   sync(): void {
     for (const state of this.runs.values()) {
       if (state.released) continue;
-      if (!this.sessions.has(state.run.session_id)) {
+      if (this.sessions.get(state.run.session_id) !== state.owner) {
         this.release(state, "session_ended");
       } else if (!this.owned(state.run.session_id, state.run.tab_id)) {
         this.release(state, "tab_released");
@@ -864,6 +921,7 @@ export class DebugManager {
     }
   }
   dispose(): void {
+    for (const context of this.sessions.list()) this.ownedRuns.delete(context);
     for (const state of this.runs.values()) this.release(state, "disconnected");
     this.pruneListener();
   }
@@ -1073,7 +1131,7 @@ export class DebugManager {
     }
   }
 
-  /** Extension UI only. Task RPCs cannot use this browser-wide history reader. */
+  /** Browser-wide reader. Task RPC fallbacks must authorize the run before calling. */
   async readHistory(params: DebugParams): Promise<DebugResult> {
     this.sync();
     if (!params.run_id) throw new Error("recording ID is required");
@@ -1139,18 +1197,37 @@ export class DebugManager {
 
   async read(params: DebugParams, signal?: AbortSignal): Promise<DebugResult> {
     this.sync();
-    if (!this.sessions.has(params.session_id)) throw new Error("session not found");
+    const context = this.sessions.get(params.session_id);
+    if (!context) throw new Error("session not found");
     const result: DebugResult = { session_id: params.session_id };
     if (params.action === "capabilities")
       return { ...result, capabilities: debugCapabilities(!!this.archive?.retain) };
     const states = [...this.runs.values()].filter(
-      ({ run, released }) =>
+      ({ run, owner, released }) =>
         !released &&
-        run.session_id === params.session_id &&
+        owner === context &&
         (params.tab_id === undefined || run.tab_id === params.tab_id),
     );
-    if (params.action === "status")
-      return { ...result, runs: states.map((state) => this.summary(state)) };
+    const owned = this.ownedRuns.get(context);
+    const savedRuns = async () => {
+      const runs = (await this.archive?.list()) ?? [];
+      if (this.sessions.get(params.session_id) !== context) throw new Error("session not found");
+      return runs
+        .filter(
+          (run) =>
+            this.ownedRuns.get(context)?.has(run.id) &&
+            isAgentControlledTab(context, run.tab_id) &&
+            (params.tab_id === undefined || run.tab_id === params.tab_id),
+        )
+        .sort((a, b) => b.started_at - a.started_at);
+    };
+    if (params.action === "status") {
+      const runs = new Map<string, DebugRun>();
+      if (owned && [...owned.keys()].some((id) => !this.runs.has(id)))
+        for (const run of await savedRuns()) runs.set(run.id, run);
+      for (const state of states) runs.set(state.run.id, this.summary(state));
+      return { ...result, runs: [...runs.values()].sort((a, b) => a.started_at - b.started_at) };
+    }
     const state = params.run_id
       ? states.find(({ run }) => run.id === params.run_id)
       : params.id
@@ -1162,8 +1239,42 @@ export class DebugManager {
               entry.operations.some((operation) => operation.id === params.id),
           )
         : states.at(-1);
-    if (!state)
-      throw new Error("debug capture not found; start capture before reproducing the issue");
+    if (!state) {
+      const id = params.run_id ?? (params.id ? params.id.split(":")[0] : undefined);
+      const runId =
+        id &&
+        owned?.has(id) &&
+        isAgentControlledTab(context, owned.get(id)!) &&
+        (params.tab_id === undefined || owned.get(id) === params.tab_id)
+          ? id
+          : !id
+            ? (await savedRuns()).at(0)?.id
+            : undefined;
+      if (!runId)
+        throw new Error("debug capture not found; start capture before reproducing the issue");
+      if (params.action.startsWith("rule_") || params.action === "replay")
+        throw new Error("network controls require an active capture");
+      if (["pin", "unpin"].includes(params.action)) {
+        if (!this.archive?.pin) throw new Error("persistent evidence unavailable");
+        await this.archive.pin(runId, params.id!, params.action === "pin");
+      }
+      const saved = await this.readHistory({
+        ...params,
+        run_id: runId,
+        action:
+          params.action === "stop"
+            ? "rules"
+            : ["pin", "unpin"].includes(params.action)
+              ? "request"
+              : params.action,
+      });
+      if (
+        this.sessions.get(params.session_id) !== context ||
+        !this.ownedRuns.get(context)?.has(runId)
+      )
+        throw new Error("session not found");
+      return params.action === "stop" ? { ...result, run: saved.run } : saved;
+    }
     if (params.action === "stop") {
       await deadline(state.observer?.call("flush") ?? Promise.resolve(), 600).catch(() => {});
       await this.refreshPerformance(state, true);

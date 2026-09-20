@@ -284,10 +284,11 @@ export class ToolDispatcher {
         /* The daemon still has the original operation metadata. */
       }
       try {
-        debugTicket = await this.debug?.before(req);
+        debugTicket = await this.debug?.before(req, ac.signal);
       } catch {
         /* Evidence must not block the operation. */
       }
+      throwIfDispatchAborted(ac.signal);
       const result = await this.invoke(req, ac.signal);
       this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
       debugTicket = undefined;

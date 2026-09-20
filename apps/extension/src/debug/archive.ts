@@ -351,7 +351,13 @@ export class LocalDebugArchive implements DebugArchive {
     const saved = await result<StoredRequest | undefined>(
       db.transaction("requests").objectStore("requests").get([runId, id]),
     );
-    return saved?.entry;
+    if (saved) return saved.entry;
+    // v1 stored requests inside the recording. Keep the indexed v2 fast path,
+    // but resolve old details here so every caller gets the same complete data.
+    const recording = await result<DebugRecording | undefined>(
+      db.transaction("recordings").objectStore("recordings").get(runId),
+    );
+    return recording?.requests.find((entry) => entry.id === id);
   }
 
   async put(recording: DebugRecording): Promise<void> {

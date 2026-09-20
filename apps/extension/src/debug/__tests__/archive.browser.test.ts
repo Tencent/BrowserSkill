@@ -66,12 +66,17 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
           const legacy = await new Promise((resolve,reject)=>{const r=indexedDB.open('bsk-debug-history',1);r.onupgradeneeded=()=>{r.result.createObjectStore('runs',{keyPath:'run.id'});r.result.createObjectStore('recordings',{keyPath:'run.id'});};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
           const record = (id, at = now, state = 'stopped') => ({ version: 1, saved_at: now,
             run: { id, session_id: 'old', tab_id: 7, name: 'Retained', url: 'https://site.test', started_at: at, stopped_at: at, state, requests: 1, operations: 1, errors: 0, dropped_requests: 0, dropped_operations: 0, dropped_console: 0, coverage: [], next_since: 1, saved_at: now },
-            requests: [{ id: id+':n1', run_id: id, state: 'pending', request_body: {state:'available',text:'{"name":"Alice"}'}, response_body:{state:'pending'} }],
+            requests: [{ id: id+':n1', run_id: id, state: 'pending', request_body: {state:'available',text:'{"name":"Alice"}'}, response_body:{state:'pending'}, request_headers:{'x-legacy':'retained'}, timing:{receiveHeadersEnd:42} }],
             operations: [{ id:id+':a1', state:'running' }], console:[], pages:[] });
           await new Promise((resolve,reject)=>{const tx=legacy.transaction(['runs','recordings'],'readwrite');const old=record('dlegacy');tx.objectStore('runs').put({run:old.run,bytes:100});tx.objectStore('recordings').put(old);tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error);});
           legacy.close();
           const archive = new LocalDebugArchive(undefined, () => now);
           if (!(await archive.get('dlegacy'))?.requests[0].request_body.text.includes('Alice')) throw Error('v1 history migration failed');
+          const legacyMetadata = await archive.get('dlegacy', false);
+          if (legacyMetadata.requests[0].request_body.text !== undefined) throw Error('metadata read loaded bodies');
+          const legacyDetail = await archive.request('dlegacy', 'dlegacy:n1');
+          if (!legacyDetail?.request_body.text.includes('Alice') || legacyDetail.request_headers['x-legacy'] !== 'retained' || legacyDetail.timing.receiveHeadersEnd !== 42) throw Error('v1 request detail failed');
+          if (await archive.request('dlegacy', 'other:n1')) throw Error('cross-record request lookup');
           const active = record('dactive', now, 'capturing');
           active.performance = [{id:'dactive:p1',sequence:1,document_key:'1000:0',time_origin:1000,started_at:1000,observed_at:now,url:'https://site.test',navigation:'navigate',state:'capturing',early:true,scope:'main_frame',metrics:{cls:{value:0.2,state:'provisional',reasons:[]}},visibility:[],visibility_truncated:false,long_tasks:[],long_tasks_truncated:false,coverage:[]}];
           await archive.put(active);

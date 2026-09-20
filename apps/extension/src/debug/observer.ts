@@ -3,6 +3,8 @@ import { installPerformance } from "./performance-observer";
 import { redactText } from "./redact";
 import type { DebugField } from "./types";
 
+export const OBSERVATION_TIMEOUT_MS = 600;
+
 // This function runs only in a named CDP isolated world of the captured main frame.
 // Keep it self-contained: its compiled source is also installed on future documents.
 function installObserver(
@@ -16,6 +18,7 @@ function installObserver(
   (host[slot] as { dispose?: () => void } | undefined)?.dispose?.();
   const abort = new AbortController();
   let agent = false;
+  let agentRevision = 0;
   let pending: { target: Element; before: ReturnType<typeof snapshot>; at: number } | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let changedTimer: ReturnType<typeof setTimeout> | undefined;
@@ -218,7 +221,11 @@ function installObserver(
     finishPerformance: () => performanceCapture?.finish(),
     snapshot,
     flush,
-    agent(value: boolean) {
+    agent(value: boolean, revision: number, expiresAt: number) {
+      // A queued pre-read may execute after its command finished or was cancelled.
+      if (revision <= agentRevision) return;
+      agentRevision = revision;
+      if (value && Date.now() >= expiresAt) return;
       if (value) flush();
       agent = value;
     },
@@ -290,6 +297,7 @@ export class DebugObserver {
   private rootFrame?: string;
   private script?: string;
   private stopped = false;
+  private agentRevision = 0;
   private readonly contexts = new Set<number>();
   constructor(
     private readonly cdp: DebugCdp,
@@ -370,8 +378,14 @@ export class DebugObserver {
     value?: boolean,
   ): Promise<T | undefined> {
     if (this.context === undefined || this.stopped) return undefined;
+    const args =
+      method === "agent"
+        ? `${value},${++this.agentRevision},${Date.now() + OBSERVATION_TIMEOUT_MS}`
+        : value === undefined
+          ? ""
+          : String(value);
     const result = await this.send<{ result?: { value?: T } }>("Runtime.evaluate", {
-      expression: `globalThis[${JSON.stringify(this.world)}]?.${method}(${value === undefined ? "" : String(value)})`,
+      expression: `globalThis[${JSON.stringify(this.world)}]?.${method}(${args})`,
       contextId: this.context,
       returnByValue: true,
     });

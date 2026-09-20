@@ -5,6 +5,7 @@ import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "./
 import type { DebugBody, DebugIntervention, DebugRequest } from "./types";
 
 export const MAX_REQUESTS = 200;
+export const MAX_INFLIGHT = 200;
 const MAX_BODY_CHARS = 512 * 1024;
 const MAX_BODY_JOBS = 4;
 const MAX_BODY_QUEUE = 32;
@@ -84,6 +85,8 @@ function headersLimited(headers?: Record<string, string>): boolean {
 
 export class DebugNetworkStore {
   readonly entries = new Map<string, RequestRecord>();
+  // Recent traffic must not erase the CDP identity of a slow request or body job.
+  private readonly inflight = new Map<string, RequestRecord>();
   private readonly chains = new Map<string, Chain>();
   private readonly queue: RequestRecord[] = [];
   private readonly annotations = new Map<
@@ -115,6 +118,20 @@ export class DebugNetworkStore {
     return `${source.sessionId ?? "root"}:${requestId}`;
   }
 
+  private tracked(id: string): boolean {
+    return this.entries.has(id) || this.inflight.has(id);
+  }
+  private unsettled(record: RequestRecord): boolean {
+    return record.entry.state === "pending" || record.entry.response_body.state === "pending";
+  }
+  private *records(): IterableIterator<RequestRecord> {
+    yield* this.inflight.values();
+    yield* this.entries.values();
+  }
+  get size(): number {
+    return this.entries.size + this.inflight.size;
+  }
+
   onEvent(source: CdpDebuggee & { tabId: number }, method: string, raw: unknown): void {
     if (!this.accepting || !method.startsWith("Network.")) return;
     const event = raw as Event;
@@ -139,8 +156,12 @@ export class DebugNetworkStore {
         responseIndex: 0,
       };
       this.chains.set(key, chain);
-      while (this.chains.size > MAX_REQUESTS) {
-        const oldestKey = this.chains.keys().next().value as string;
+      while (this.chains.size > MAX_REQUESTS * 2 + MAX_INFLIGHT) {
+        // At most MAX_REQUESTS + MAX_INFLIGHT records are tracked, leaving room
+        // for bounded unmatched ExtraInfo chains without dropping pending work.
+        const oldestKey = [...this.chains].find(
+          ([, value]) => !value.hops.some((hop) => this.unsettled(hop)),
+        )![0];
         const oldest = this.chains.get(oldestKey)!;
         this.pendingHeaders -= oldest.requestHeaders.length + oldest.responseHeaders.length;
         this.chains.delete(oldestKey);
@@ -203,10 +224,26 @@ export class DebugNetworkStore {
       this.applyExtra(chain);
       this.applyAnnotation(key, record);
       this.retain?.(entry);
+      if (previous) this.releaseFinished(previous);
       while (this.entries.size > MAX_REQUESTS) {
         const oldest = this.entries.values().next().value as RequestRecord;
-        this.evict(oldest);
-        this.dropped += 1;
+        if (this.unsettled(oldest)) {
+          this.entries.delete(oldest.entry.id);
+          this.inflight.set(oldest.entry.id, oldest);
+          if (this.inflight.size > MAX_INFLIGHT) {
+            const lost = this.inflight.values().next().value!;
+            if (lost.entry.state === "pending") {
+              lost.entry.state = "interrupted";
+              lost.entry.finished_at = this.now();
+              lost.entry.error = "tracking_limit";
+            }
+            lost.entry.truncated = true;
+            if (lost.entry.response_body.state === "pending")
+              lost.entry.response_body = { state: "unavailable", reason: "tracking_limit" };
+            lost.entry.sequence = this.changed();
+            this.evict(lost);
+          }
+        } else this.evict(oldest);
       }
       return;
     }
@@ -235,7 +272,7 @@ export class DebugNetworkStore {
       return;
     }
     const record = chain.hops.at(-1);
-    if (!record || !this.entries.has(record.entry.id)) return;
+    if (!record || !this.tracked(record.entry.id)) return;
     const entry = record.entry;
     switch (method) {
       case "Network.responseReceived":
@@ -282,6 +319,7 @@ export class DebugNetworkStore {
     }
     entry.sequence = this.changed();
     this.retain?.(entry);
+    this.releaseFinished(record);
   }
 
   private applyExtra(chain: Chain): void {
@@ -299,7 +337,7 @@ export class DebugNetworkStore {
         chain[indexKey] += 1;
         const headers = headersQueue.shift();
         this.pendingHeaders -= 1;
-        if (!this.entries.has(record.entry.id)) continue;
+        if (!this.tracked(record.entry.id)) continue;
         record.entry[side === "request" ? "request_headers" : "response_headers"] = headers;
         record.entry.sequence = this.changed();
         this.retain?.(record.entry);
@@ -339,7 +377,7 @@ export class DebugNetworkStore {
   private pump(): void {
     while (this.alive && this.jobs < MAX_BODY_JOBS && this.queue.length) {
       const record = this.queue.shift() as RequestRecord;
-      if (!this.entries.has(record.entry.id)) continue;
+      if (!this.tracked(record.entry.id)) continue;
       this.jobs += 1;
       // Never call send(), which can reattach a returned tab. The production
       // runner supplies a direct command guarded by current task ownership.
@@ -350,7 +388,7 @@ export class DebugNetworkStore {
         { requestId: record.rawId },
       )
         .then((result) => {
-          if (!this.alive || !this.entries.has(record.entry.id)) return;
+          if (!this.alive || !this.tracked(record.entry.id)) return;
           let body = result.body;
           if (result.base64Encoded) {
             if (body.length > BODY_CHARS * 6) {
@@ -364,7 +402,7 @@ export class DebugNetworkStore {
           this.saveBody(record, "response_body", body, record.entry.mime_type ?? "");
         })
         .catch(() => {
-          if (this.alive && this.entries.has(record.entry.id))
+          if (this.alive && this.tracked(record.entry.id))
             record.entry.response_body = {
               state: "unavailable",
               reason: "browser_buffer_unavailable",
@@ -372,9 +410,10 @@ export class DebugNetworkStore {
         })
         .finally(() => {
           this.jobs -= 1;
-          if (this.alive && this.entries.has(record.entry.id)) {
+          if (this.alive && this.tracked(record.entry.id)) {
             record.entry.sequence = this.changed();
             this.retain?.(record.entry);
+            this.releaseFinished(record);
           }
           this.pump();
         });
@@ -403,7 +442,7 @@ export class DebugNetworkStore {
     };
     this.retainedChars += body.text.length;
     this.retain?.(record.entry);
-    for (const item of this.entries.values()) {
+    for (const item of this.records()) {
       if (this.retainedChars <= MAX_BODY_CHARS) break;
       for (const part of ["request_body", "response_body"] as const) {
         const length = item.entry[part].text?.length ?? 0;
@@ -418,6 +457,7 @@ export class DebugNetworkStore {
 
   private evict(record: RequestRecord): void {
     this.retain?.(record.entry);
+    this.dropped += 1;
     this.retainedChars -=
       (record.entry.request_body.text?.length ?? 0) +
       (record.entry.response_body.text?.length ?? 0);
@@ -427,6 +467,7 @@ export class DebugNetworkStore {
     record.entry.request_headers = undefined;
     record.entry.response_headers = undefined;
     this.entries.delete(record.entry.id);
+    this.inflight.delete(record.entry.id);
     this.annotations.delete(this.key(record.target, record.rawId));
     // A redirect chain must not keep evicted request records alive. If its
     // pending ExtraInfo can no longer be matched, retain ordinary headers and
@@ -452,6 +493,10 @@ export class DebugNetworkStore {
         this.chains.delete(key);
       }
     }
+  }
+
+  private releaseFinished(record: RequestRecord): void {
+    if (this.inflight.has(record.entry.id) && !this.unsettled(record)) this.evict(record);
   }
 
   /** Called on the CDP event path; annotations can precede requestWillBeSent. */
@@ -531,18 +576,19 @@ export class DebugNetworkStore {
   }
 
   checkpoint(): void {
-    for (const { entry } of this.entries.values()) this.retain?.(entry);
+    for (const { entry } of this.records()) this.retain?.(entry);
   }
 
   list(): DebugRequest[] {
-    return Array.from(this.entries.values(), (record) => record.entry);
+    return Array.from(this.records(), (record) => record.entry);
   }
   get(id: string): DebugRequest | undefined {
-    return this.entries.get(id)?.entry;
+    return (this.entries.get(id) ?? this.inflight.get(id))?.entry;
   }
 
   detachTarget(sessionId: string): void {
-    for (const { entry, target } of this.entries.values()) {
+    for (const record of this.records()) {
+      const { entry, target } = record;
       if (target.sessionId !== sessionId || entry.state !== "pending") continue;
       entry.state = "interrupted";
       entry.error = "frame_detached";
@@ -550,6 +596,7 @@ export class DebugNetworkStore {
       entry.response_body = { state: "unavailable", reason: "frame_detached" };
       entry.sequence = this.changed();
       this.retain?.(entry);
+      this.releaseFinished(record);
     }
   }
 
@@ -560,7 +607,8 @@ export class DebugNetworkStore {
     this.chains.clear();
     this.annotations.clear();
     this.pendingHeaders = 0;
-    for (const { entry } of this.entries.values()) {
+    for (const record of this.records()) {
+      const { entry } = record;
       if (entry.state === "pending") {
         entry.state = "interrupted";
         entry.error = reason;
@@ -570,6 +618,7 @@ export class DebugNetworkStore {
         entry.response_body = { state: "unavailable", reason: "capture_stopped" };
       entry.sequence = this.changed();
       this.retain?.(entry);
+      this.releaseFinished(record);
     }
   }
 }
