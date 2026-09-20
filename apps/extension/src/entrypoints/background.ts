@@ -476,7 +476,9 @@ export default defineBackground(() => {
       const msg = raw as PopupOutbound;
       if (msg && typeof msg === "object" && "kind" in msg) {
         if (msg.kind === "set_label") {
-          void setLabel(msg.value).then(() => controller.refreshLabel());
+          void setLabel(msg.value)
+            .then(() => controller.refreshLabel())
+            .catch((err) => console.error("[browser-skill] label update failed", err));
         } else if (msg.kind === "set_connection_enabled") {
           void controller.setConnectionEnabled(msg.value);
           // Persist user intent in message order, independently of slow cleanup.

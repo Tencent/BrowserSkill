@@ -55,6 +55,13 @@
     "copy": "복사",
     "copied": "복사됨",
     "copyInstanceId": "인스턴스 ID 복사",
+    "browserLabel": {
+      "title": "브라우저 이름",
+      "placeholder": "예: 업무 프로필",
+      "save": "저장",
+      "hint": "에이전트에게 브라우저를 지정할 때 사용할 고유한 이름을 입력하세요. 저장하면 BrowserSkill이 다시 연결되고 진행 중인 작업이 종료됩니다.",
+      "instanceIdError": "8자리 16진수 인스턴스 ID 형식이 아닌 이름을 선택하세요."
+    },
     "record": {
       "sectionTitle": "작업 기록",
       "cardDesc": "에이전트가 참고할 수 있도록 작업 기록",

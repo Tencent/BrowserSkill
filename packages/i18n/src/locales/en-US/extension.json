@@ -55,6 +55,13 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyInstanceId": "Copy instance ID",
+    "browserLabel": {
+      "title": "Browser name",
+      "placeholder": "e.g. Work profile",
+      "save": "Save",
+      "hint": "Use a unique name when talking to your agent. Saving reconnects BrowserSkill and ends active tasks.",
+      "instanceIdError": "Choose a name other than an 8-character hexadecimal instance ID."
+    },
     "record": {
       "sectionTitle": "Action recording",
       "cardDesc": "Record your actions for Agent reference",

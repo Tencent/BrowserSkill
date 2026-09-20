@@ -6,6 +6,7 @@ import { AuditPanel } from "@/components/audit-panel";
 import { compareProtocol } from "@/lib/semver";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
+import { BrowserLabel } from "./browser-label";
 import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
 import { POPUP_FEATURES, type PopupView } from "./features";
@@ -40,7 +41,7 @@ function getLogoSrc() {
 
 export function App() {
   const { t } = useTranslation("extension");
-  const { snapshot, statusState, setConnectionEnabled } = useConnectionState();
+  const { snapshot, statusState, setLabel, setConnectionEnabled } = useConnectionState();
   const [controlHintsHidden, setControlHintsHidden] = useControlHintsHidden();
   const [view, setView] = useState<PopupView>("main");
   const [copiedInstanceId, setCopiedInstanceId] = useState(false);
@@ -233,6 +234,7 @@ export function App() {
               connectionEnabled={snapshot.connectionEnabled}
               disconnected={isDisconnected && !snapshot.lastError}
             />
+            <BrowserLabel label={snapshot.label} onSave={setLabel} />
             <ProfileInstructions instanceId={snapshot.instanceId} connected={connectionLive} />
           </section>
 
