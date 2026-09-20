@@ -6,6 +6,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugAction {
+    Performance,
+    Aggregate,
+    Duplicates,
     Capabilities,
     Activity,
     Wait,
@@ -64,6 +67,14 @@ pub struct DebugParams {
     #[schemars(range(min = 4096, max = 262144))]
     pub budget: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 60000))]
+    pub slow_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 100, max = 10000))]
+    pub window_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_controlled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
@@ -116,6 +127,8 @@ pub struct DebugRequest {
     pub resource_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loader_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +291,8 @@ pub struct DebugRecording {
     pub rules: Option<Vec<DebugRule>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replays: Option<Vec<DebugReplay>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance: Option<Vec<DebugPerformance>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugValue {
@@ -330,6 +345,12 @@ pub struct DebugEvidence {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregates: Option<Vec<DebugEndpoint>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicates: Option<Vec<DebugDuplicate>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<DebugAnalysis>,
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run: Option<DebugRun>,
@@ -355,6 +376,8 @@ pub struct DebugResult {
     pub rules: Option<Vec<DebugRule>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replays: Option<Vec<DebugReplay>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance: Option<Vec<DebugPerformance>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<DebugReplay>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -493,4 +516,104 @@ pub struct DebugActivity {
 
 pub fn debug_parameter_schema() -> serde_json::Value {
     serde_json::to_value(schemars::schema_for!(DebugParams)).expect("debug schema serializes")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugMetric {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    pub state: String,
+    pub reasons: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugVisibility {
+    pub at: f64,
+    pub state: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugLongTask {
+    pub at: f64,
+    pub duration_ms: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugPerformance {
+    pub id: String,
+    pub document_key: String,
+    pub sequence: u64,
+    pub time_origin: f64,
+    pub started_at: f64,
+    pub observed_at: f64,
+    pub url: String,
+    pub navigation: String,
+    pub state: String,
+    pub early: bool,
+    pub scope: String,
+    pub visibility: Vec<DebugVisibility>,
+    pub visibility_truncated: bool,
+    pub metrics: BTreeMap<String, DebugMetric>,
+    pub long_tasks: Vec<DebugLongTask>,
+    pub long_tasks_truncated: bool,
+    pub coverage: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugDurationStats {
+    pub min: f64,
+    pub mean: f64,
+    pub p50: f64,
+    pub p95: f64,
+    pub max: f64,
+    pub total: f64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugEndpoint {
+    pub id: String,
+    pub method: String,
+    pub endpoint: String,
+    pub count: u64,
+    pub failed: u64,
+    pub http_errors: u64,
+    pub pending: u64,
+    pub interrupted: u64,
+    pub statuses: BTreeMap<String, u64>,
+    pub slow: u64,
+    pub timing_samples: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<DebugDurationStats>,
+    pub transfer_bytes: f64,
+    pub transfer_samples: u64,
+    pub cached: u64,
+    pub service_worker: u64,
+    pub controlled: u64,
+    pub replayed: u64,
+    pub request_ids: Vec<String>,
+    pub refs_truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugDuplicate {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    pub count: u64,
+    pub extra_requests: u64,
+    pub started_at: f64,
+    pub ended_at: f64,
+    pub overlap_count: u64,
+    pub possible_retry: bool,
+    pub request_ids: Vec<String>,
+    pub operation_ids: Vec<String>,
+    pub refs_truncated: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugAnalysis {
+    pub retained: u64,
+    pub matched: u64,
+    pub included: u64,
+    pub excluded_controlled: u64,
+    pub uncomparable: u64,
+    pub groups: u64,
+    pub suspected_extra_requests: u64,
+    pub window_ms: u32,
+    pub slow_ms: u32,
+    pub coverage: Vec<String>,
+    pub semantics: String,
 }

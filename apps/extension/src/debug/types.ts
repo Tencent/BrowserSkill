@@ -1,5 +1,8 @@
 /** Opt-in, task-owned evidence. All timestamps are epoch milliseconds. */
 export type DebugAction =
+  | "performance"
+  | "aggregate"
+  | "duplicates"
   | "capabilities"
   | "activity"
   | "wait"
@@ -92,8 +95,11 @@ export interface DebugParams {
   pointer?: string;
   rule?: DebugRuleSpec;
   replay?: DebugReplaySpec;
-  /** UTF-8 bytes of JSON output (default 32768; export is exempt). */
+  /** UTF-8 bytes of JSON output (default 65536; export is exempt). */
   budget?: number;
+  slow_ms?: number;
+  window_ms?: number;
+  include_controlled?: boolean;
   url?: string;
   method?: string;
   resource_type?: string;
@@ -125,6 +131,7 @@ export interface DebugRequest {
   url: string;
   resource_type?: string;
   frame_id?: string;
+  loader_id?: string;
   state: "pending" | "complete" | "failed" | "redirected" | "interrupted";
   status?: number;
   error?: string;
@@ -270,6 +277,7 @@ export interface DebugRecording {
   pages: DebugPage[];
   rules?: DebugRule[];
   replays?: DebugReplay[];
+  performance?: DebugPerformance[];
 }
 
 export interface DebugResult {
@@ -286,7 +294,11 @@ export interface DebugResult {
   evidence?: DebugEvidence;
   rules?: DebugRule[];
   replays?: DebugReplay[];
+  performance?: DebugPerformance[];
   replay?: DebugReplay;
+  aggregates?: DebugEndpoint[];
+  duplicates?: DebugDuplicate[];
+  analysis?: DebugAnalysis;
   next_offset?: number;
   next_since?: number;
   truncated?: boolean;
@@ -310,4 +322,78 @@ export interface DebugTask {
   title?: string;
   url?: string;
   run?: DebugRun;
+}
+
+export interface DebugMetric {
+  value?: number;
+  state: "available" | "provisional" | "partial" | "unavailable" | "unsupported";
+  reasons: string[];
+}
+export interface DebugPerformance {
+  id: string;
+  document_key: string;
+  sequence: number;
+  time_origin: number;
+  started_at: number;
+  observed_at: number;
+  url: string;
+  navigation: string;
+  state: "capturing" | "completed" | "interrupted";
+  early: boolean;
+  scope: "main_frame";
+  visibility: { at: number; state: string }[];
+  visibility_truncated: boolean;
+  metrics: Record<string, DebugMetric>;
+  long_tasks: { at: number; duration_ms: number }[];
+  long_tasks_truncated: boolean;
+  coverage: string[];
+}
+export interface DebugEndpoint {
+  id: string;
+  method: string;
+  endpoint: string;
+  count: number;
+  failed: number;
+  http_errors: number;
+  pending: number;
+  interrupted: number;
+  statuses: Record<string, number>;
+  slow: number;
+  timing_samples: number;
+  duration_ms?: { min: number; mean: number; p50: number; p95: number; max: number; total: number };
+  transfer_bytes: number;
+  transfer_samples: number;
+  cached: number;
+  service_worker: number;
+  controlled: number;
+  replayed: number;
+  request_ids: string[];
+  refs_truncated: boolean;
+}
+export interface DebugDuplicate {
+  id: string;
+  method: string;
+  url: string;
+  count: number;
+  extra_requests: number;
+  started_at: number;
+  ended_at: number;
+  overlap_count: number;
+  possible_retry: boolean;
+  request_ids: string[];
+  operation_ids: string[];
+  refs_truncated: boolean;
+}
+export interface DebugAnalysis {
+  retained: number;
+  matched: number;
+  included: number;
+  excluded_controlled: number;
+  uncomparable: number;
+  groups: number;
+  suspected_extra_requests: number;
+  window_ms: number;
+  slow_ms: number;
+  coverage: string[];
+  semantics: string;
 }

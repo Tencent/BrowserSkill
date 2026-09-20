@@ -156,6 +156,26 @@ describe("agent debug query budget", () => {
     expect(() => bodySlice(body, 2, 2)).toThrow("Unicode");
     expect(() => bodySlice(body, 1, 1)).toThrow("Unicode");
   });
+  it("uses 64 KiB by default while preserving an explicit smaller budget", () => {
+    const original: DebugResult = {
+      session_id: "s",
+      console: Array.from({ length: 60 }, (_, i) => ({
+        id: `c${i}`,
+        at: i,
+        last_at: i,
+        text: "x".repeat(700),
+        level: "info",
+        count: 1,
+      })),
+    };
+    const wide = budgetResult(original, { session_id: "s", action: "console" });
+    expect(wide.console).toHaveLength(60);
+    expect(wide.output?.budget).toBe(65536);
+    expect(size(wide)).toBeGreaterThan(32768);
+    const narrow = budgetResult(original, { session_id: "s", action: "console", budget: 32768 });
+    expect(narrow.console!.length).toBeLessThan(60);
+    expect(narrow.next_offset).toBe(narrow.console!.length);
+  });
   it("applies filters before pagination and advances past unmatched records", () => {
     const recording = {
       run: { session_id: "s", next_since: 10, dropped_requests: 0 },
@@ -172,7 +192,7 @@ describe("agent debug query budget", () => {
       readRecording(recording, { session_id: "s", action: "requests", status: 404 }).next_since,
     ).toBe(10);
     expect(debugCapabilities().parameters).toMatchObject({
-      budget: { min: 4096, max: 262144, default: 32768 },
+      budget: { min: 4096, max: 262144, default: 65536 },
       limit: { max: 100 },
     });
   });

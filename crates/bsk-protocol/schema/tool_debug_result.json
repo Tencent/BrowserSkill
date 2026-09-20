@@ -16,6 +16,25 @@
         }
       ]
     },
+    "aggregates": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/DebugEndpoint"
+      }
+    },
+    "analysis": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugAnalysis"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "capabilities": true,
     "console": {
       "type": [
@@ -24,6 +43,15 @@
       ],
       "items": {
         "$ref": "#/definitions/DebugConsole"
+      }
+    },
+    "duplicates": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/DebugDuplicate"
       }
     },
     "evidence": {
@@ -79,6 +107,15 @@
       ],
       "items": {
         "$ref": "#/definitions/DebugPage"
+      }
+    },
+    "performance": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/DebugPerformance"
       }
     },
     "recording": {
@@ -220,6 +257,78 @@
         }
       }
     },
+    "DebugAnalysis": {
+      "type": "object",
+      "required": [
+        "coverage",
+        "excluded_controlled",
+        "groups",
+        "included",
+        "matched",
+        "retained",
+        "semantics",
+        "slow_ms",
+        "suspected_extra_requests",
+        "uncomparable",
+        "window_ms"
+      ],
+      "properties": {
+        "coverage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_controlled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "groups": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "included": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "matched": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "retained": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "semantics": {
+          "type": "string"
+        },
+        "slow_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "suspected_extra_requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "uncomparable": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "window_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
     "DebugBody": {
       "type": "object",
       "required": [
@@ -329,6 +438,238 @@
         },
         "text": {
           "type": "string"
+        }
+      }
+    },
+    "DebugDuplicate": {
+      "type": "object",
+      "required": [
+        "count",
+        "ended_at",
+        "extra_requests",
+        "id",
+        "method",
+        "operation_ids",
+        "overlap_count",
+        "possible_retry",
+        "refs_truncated",
+        "request_ids",
+        "started_at",
+        "url"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "ended_at": {
+          "type": "number",
+          "format": "double"
+        },
+        "extra_requests": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "operation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "overlap_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "possible_retry": {
+          "type": "boolean"
+        },
+        "refs_truncated": {
+          "type": "boolean"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "started_at": {
+          "type": "number",
+          "format": "double"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "DebugDurationStats": {
+      "type": "object",
+      "required": [
+        "max",
+        "mean",
+        "min",
+        "p50",
+        "p95",
+        "total"
+      ],
+      "properties": {
+        "max": {
+          "type": "number",
+          "format": "double"
+        },
+        "mean": {
+          "type": "number",
+          "format": "double"
+        },
+        "min": {
+          "type": "number",
+          "format": "double"
+        },
+        "p50": {
+          "type": "number",
+          "format": "double"
+        },
+        "p95": {
+          "type": "number",
+          "format": "double"
+        },
+        "total": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "DebugEndpoint": {
+      "type": "object",
+      "required": [
+        "cached",
+        "controlled",
+        "count",
+        "endpoint",
+        "failed",
+        "http_errors",
+        "id",
+        "interrupted",
+        "method",
+        "pending",
+        "refs_truncated",
+        "replayed",
+        "request_ids",
+        "service_worker",
+        "slow",
+        "statuses",
+        "timing_samples",
+        "transfer_bytes",
+        "transfer_samples"
+      ],
+      "properties": {
+        "cached": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "controlled": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "duration_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DebugDurationStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "failed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "http_errors": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "id": {
+          "type": "string"
+        },
+        "interrupted": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "method": {
+          "type": "string"
+        },
+        "pending": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "refs_truncated": {
+          "type": "boolean"
+        },
+        "replayed": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "service_worker": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "slow": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "statuses": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        },
+        "timing_samples": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "transfer_bytes": {
+          "type": "number",
+          "format": "double"
+        },
+        "transfer_samples": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
         }
       }
     },
@@ -514,6 +855,48 @@
         }
       },
       "additionalProperties": false
+    },
+    "DebugLongTask": {
+      "type": "object",
+      "required": [
+        "at",
+        "duration_ms"
+      ],
+      "properties": {
+        "at": {
+          "type": "number",
+          "format": "double"
+        },
+        "duration_ms": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "DebugMetric": {
+      "type": "object",
+      "required": [
+        "reasons",
+        "state"
+      ],
+      "properties": {
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "state": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        }
+      }
     },
     "DebugOperation": {
       "type": "object",
@@ -731,6 +1114,98 @@
         }
       }
     },
+    "DebugPerformance": {
+      "type": "object",
+      "required": [
+        "coverage",
+        "document_key",
+        "early",
+        "id",
+        "long_tasks",
+        "long_tasks_truncated",
+        "metrics",
+        "navigation",
+        "observed_at",
+        "scope",
+        "sequence",
+        "started_at",
+        "state",
+        "time_origin",
+        "url",
+        "visibility",
+        "visibility_truncated"
+      ],
+      "properties": {
+        "coverage": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "document_key": {
+          "type": "string"
+        },
+        "early": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "long_tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugLongTask"
+          }
+        },
+        "long_tasks_truncated": {
+          "type": "boolean"
+        },
+        "metrics": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/DebugMetric"
+          }
+        },
+        "navigation": {
+          "type": "string"
+        },
+        "observed_at": {
+          "type": "number",
+          "format": "double"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "started_at": {
+          "type": "number",
+          "format": "double"
+        },
+        "state": {
+          "type": "string"
+        },
+        "time_origin": {
+          "type": "number",
+          "format": "double"
+        },
+        "url": {
+          "type": "string"
+        },
+        "visibility": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/DebugVisibility"
+          }
+        },
+        "visibility_truncated": {
+          "type": "boolean"
+        }
+      }
+    },
     "DebugRecording": {
       "type": "object",
       "required": [
@@ -759,6 +1234,15 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/DebugPage"
+          }
+        },
+        "performance": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/definitions/DebugPerformance"
           }
         },
         "replays": {
@@ -910,6 +1394,12 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "loader_id": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "method": {
@@ -1423,6 +1913,22 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "DebugVisibility": {
+      "type": "object",
+      "required": [
+        "at",
+        "state"
+      ],
+      "properties": {
+        "at": {
+          "type": "number",
+          "format": "double"
+        },
+        "state": {
+          "type": "string"
         }
       }
     }

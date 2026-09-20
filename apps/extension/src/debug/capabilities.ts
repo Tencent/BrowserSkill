@@ -4,6 +4,9 @@ import { JOURNAL_BYTES, JOURNAL_PINS, JOURNAL_REQUESTS } from "./journal";
 declare const __BSK_EXT_BUILD__: string;
 declare const __BSK_EXT_VERSION__: string;
 export const DEBUG_ACTIONS = [
+  "performance",
+  "aggregate",
+  "duplicates",
   "start",
   "stop",
   "status",
@@ -27,6 +30,7 @@ export const DEBUG_ACTIONS = [
 export const DEBUG_FIELDS = [
   "resource_type",
   "frame_id",
+  "loader_id",
   "status",
   "error",
   "mime_type",
@@ -43,7 +47,7 @@ export const QUERY_LIMITS = {
   limit: { min: 1, max: 100, default: 30 },
   max_chars: { min: 1, max: 16384, default: 4096 },
   offset: { min: 0, max: 65536 },
-  budget: { min: 4096, max: 262144, default: 32768 },
+  budget: { min: 4096, max: 262144, default: 65536 },
 };
 export function debugCapabilities(persistent = true): Record<string, unknown> {
   return {
@@ -57,7 +61,7 @@ export function debugCapabilities(persistent = true): Record<string, unknown> {
       ...QUERY_LIMITS,
       since: { min: 0, semantics: "incremental sequence; merge updates by id" },
       filters: {
-        actions: ["requests"],
+        actions: ["requests", "aggregate", "duplicates"],
         url: "case-sensitive substring of retained URL",
         method: "exact HTTP method",
         resource_type: "exact CDP resource type",
@@ -104,6 +108,34 @@ export function debugCapabilities(persistent = true): Record<string, unknown> {
       scope: "owning task only; browser history is available through extension UI",
       overflow: "old low-priority unpinned requests evicted first; reported by run.storage.dropped",
     },
+    analysis: {
+      default_kind: "business",
+      default_include_controlled: false,
+      slow_ms: { default: 1000, min: 0, max: 60000 },
+      window_ms: { default: 1000, min: 100, max: 10000 },
+      reference_limit: 50,
+      scope: "retained requests only; suspected duplicates are not defects",
+      pagination: "offset/next_offset; restart pagination when recording changes",
+    },
+    performance: {
+      metrics: [
+        "ttfb_ms",
+        "dom_content_loaded_ms",
+        "load_ms",
+        "fcp_ms",
+        "lcp_ms",
+        "cls",
+        "long_task_count",
+        "long_task_total_ms",
+        "long_task_max_ms",
+      ],
+      scope: "main frame; per document/visit",
+      record_limit: 20,
+      long_task_limit: 50,
+      visibility_limit: 64,
+      validity:
+        "inspect metric.state and reasons; provisional/partial values are not final Core Web Vitals",
+    },
     network_controls: {
       capture_required: true,
       rule_limit: 32,
@@ -112,7 +144,10 @@ export function debugCapabilities(persistent = true): Record<string, unknown> {
       replay_requires_key: true,
     },
     unsupported: [
-      "performance_capture",
+      "cpu_profiling",
+      "inp",
+      "iframe_vitals",
+      "soft_navigation_vitals",
       "cross_origin_replay",
       "binary_request_editing",
       "response_rewriting",

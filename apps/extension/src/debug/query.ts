@@ -92,8 +92,12 @@ export function budgetResult(value: DebugResult, params: DebugParams): DebugResu
       result.truncated = true;
     }
   }
-  if (params.action === "pages" || params.action === "console") {
-    const entries = result[params.action] ?? [];
+  if (["pages", "console", "performance", "aggregate", "duplicates"].includes(params.action)) {
+    const key =
+      params.action === "aggregate"
+        ? "aggregates"
+        : (params.action as "pages" | "console" | "performance" | "duplicates");
+    const entries = result[key] ?? [];
     while (entries.length > 1 && size() > budget) {
       entries.pop();
       omit(params.action);

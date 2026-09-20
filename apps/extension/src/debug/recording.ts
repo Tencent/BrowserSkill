@@ -1,3 +1,4 @@
+import { analyzeRecording } from "./analysis";
 import { operationEvidence, operationWindow } from "./evidence-model";
 import { requestProjection } from "./network-store";
 import { matchesRequest, projectFields } from "./query";
@@ -8,6 +9,18 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
   const result: DebugResult = { session_id: recording.run.session_id, run: recording.run };
   const since = params.since ?? 0;
   const limit = params.limit ?? 30;
+  if (["aggregate", "duplicates"].includes(params.action))
+    return analyzeRecording(recording, params);
+  if (params.action === "performance") {
+    const all = recording.performance ?? [];
+    const offset = params.offset ?? 0,
+      end = Math.min(all.length, offset + (params.limit ?? 30));
+    return {
+      ...result,
+      performance: all.slice(offset, end),
+      ...(end < all.length ? { next_offset: end, truncated: true } : {}),
+    };
+  }
   if (params.action === "export") return { ...result, recording };
   if (params.action === "rules")
     return { ...result, rules: recording.rules ?? [], replays: recording.replays ?? [] };

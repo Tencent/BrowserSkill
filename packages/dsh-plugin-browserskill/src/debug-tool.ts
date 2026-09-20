@@ -7,6 +7,9 @@ export const DEBUG_PARAMETERS = {
   debugAction: {
     type: "string",
     enum: [
+      "performance",
+      "aggregate",
+      "duplicates",
       "capabilities",
       "activity",
       "wait",
@@ -42,27 +45,39 @@ export const DEBUG_PARAMETERS = {
     description:
       'JSON for replay: {key:"unique-attempt",url?,method?,headers?,body?}. Sends once; reuse key on retry. Same-origin only; missing/redacted data must be replaced. A replay may write server data.',
   },
+  slowMs: {
+    type: "integer",
+    description: "aggregate only: slow threshold 0..60000 ms, default 1000.",
+  },
+  windowMs: {
+    type: "integer",
+    description: "duplicates only: fixed burst window 100..10000 ms, default 1000.",
+  },
+  includeControlled: {
+    type: "boolean",
+    description: "Analysis only: include rule/replay experiments (excluded by default).",
+  },
   budget: {
     type: "integer",
     description:
-      "Total JSON output bytes: 4096..262144, default 32768; export exempt. Inspect output.omitted and follow next_since/next_offset.",
+      "Total JSON output bytes: 4096..262144, default 65536; export exempt. Inspect output.omitted and follow next_since/next_offset.",
   },
-  url: { type: "string", description: "requests only: case-sensitive URL substring." },
-  method: { type: "string", description: "requests only: exact HTTP method." },
+  url: { type: "string", description: "requests/analysis: case-sensitive URL substring." },
+  method: { type: "string", description: "requests/analysis: exact HTTP method." },
   resourceType: {
     type: "string",
-    description: "requests only: exact resource type, e.g. Fetch or XHR.",
+    description: "requests/analysis: exact resource type, e.g. Fetch or XHR.",
   },
-  status: { type: "integer", description: "requests only: exact HTTP status, 100..599." },
+  status: { type: "integer", description: "requests/analysis: exact HTTP status, 100..599." },
   state: {
     type: "string",
     enum: ["pending", "complete", "failed", "redirected", "interrupted"],
-    description: "requests only: capture state.",
+    description: "requests/analysis: capture state.",
   },
   kind: {
     type: "string",
     enum: ["all", "business", "resource", "extension"],
-    description: "requests only: traffic category.",
+    description: "requests/analysis: traffic category.",
   },
   fields: {
     type: "string",
@@ -96,7 +111,7 @@ export const DEBUG_PARAMETERS = {
   },
   offset: {
     type: "integer",
-    description: "Body character or pages/console entry offset, 0..65536.",
+    description: "Body character or pages/console/performance/analysis entry offset, 0..65536.",
   },
   maxChars: { type: "integer", description: "Body slice size, 1..16384; default 4096." },
   pointer: {
@@ -154,6 +169,8 @@ export function registerDebugTool(
           ["offset", 0, 65536],
           ["maxChars", 1, 16384],
           ["budget", 4096, 262144],
+          ["slowMs", 0, 60000],
+          ["windowMs", 100, 10000],
           ["status", 100, 599],
           ["waitMs", 0, 60000],
         ] as const) {
@@ -161,6 +178,17 @@ export function registerDebugTool(
           if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max))
             throw new Error(`${key} must be ${min}..${max}`);
         }
+        if (args.slowMs !== undefined && args.debugAction !== "aggregate")
+          throw new Error("slowMs requires aggregate");
+        if (args.windowMs !== undefined && args.debugAction !== "duplicates")
+          throw new Error("windowMs requires duplicates");
+        if (args.includeControlled && !["aggregate", "duplicates"].includes(args.debugAction))
+          throw new Error("includeControlled requires analysis");
+        if (
+          args.since !== undefined &&
+          ["performance", "aggregate", "duplicates"].includes(args.debugAction)
+        )
+          throw new Error("Use offset for performance/analysis pagination");
         if ((args.debugAction === "rule_add") !== (args.rule !== undefined))
           throw new Error("rule_add requires rule JSON");
         if ((args.debugAction === "replay") !== (args.replay !== undefined))
@@ -175,6 +203,7 @@ export function registerDebugTool(
         if (args.id !== undefined) command.push(args.id);
         command.push("--session", session);
         appendTabId(command, args.tabId);
+        if (args.includeControlled) command.push("--include-controlled");
         for (const [key, flag] of [
           ["runId", "run-id"],
           ["rule", "rule"],
@@ -187,6 +216,8 @@ export function registerDebugTool(
           ["since", "since"],
           ["limit", "limit"],
           ["budget", "budget"],
+          ["slowMs", "slow-ms"],
+          ["windowMs", "window-ms"],
           ["url", "url"],
           ["method", "method"],
           ["resourceType", "resource-type"],

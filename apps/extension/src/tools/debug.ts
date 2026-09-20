@@ -25,6 +25,8 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     ["offset", 64 * 1024, 0],
     ["limit", QUERY_LIMITS.limit.max, QUERY_LIMITS.limit.min],
     ["budget", QUERY_LIMITS.budget.max, QUERY_LIMITS.budget.min],
+    ["slow_ms", 60000, 0],
+    ["window_ms", 10000, 100],
     ["status", 599, 100],
     ["max_chars", 16 * 1024, 1],
     ["tab_id", Number.MAX_SAFE_INTEGER, 0],
@@ -64,9 +66,25 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     ["url", "method", "resource_type", "status", "state", "kind"].some(
       (key) => params[key as keyof DebugParams] !== undefined,
     ) &&
-    params.action !== "requests"
+    !["requests", "aggregate", "duplicates"].includes(params.action)
   )
-    return "filters require requests action";
+    return "filters require requests, aggregate or duplicates action";
+  if (
+    params.since !== undefined &&
+    ["aggregate", "duplicates", "performance"].includes(params.action)
+  )
+    return "analysis/performance pagination uses offset";
+  if (params.include_controlled !== undefined && typeof params.include_controlled !== "boolean")
+    return "include_controlled must be boolean";
+  if (params.slow_ms !== undefined && params.action !== "aggregate")
+    return "slow_ms requires aggregate";
+  if (params.window_ms !== undefined && params.action !== "duplicates")
+    return "window_ms requires duplicates";
+  if (
+    params.include_controlled !== undefined &&
+    !["aggregate", "duplicates"].includes(params.action)
+  )
+    return "include_controlled requires analysis";
   if (
     params.state !== undefined &&
     !["pending", "complete", "failed", "redirected", "interrupted"].includes(params.state)

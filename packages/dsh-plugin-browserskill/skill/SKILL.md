@@ -6,21 +6,13 @@ description: Browser automation through six injected domain tools.
 # browser-skill for DeepSeek Harness
 
 All browser work must use the injected tools directly, in an Agent Window with existing logins.
-Use loaded schemas; do not control the browser through another process.
-
-Remote setup: [pairing guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
+Use loaded schemas; never control through another process.
 
 ## Mandatory workflow
 
-1. Define success. Start a session and retain `sessionId`. For a new page:
+1. Define success. Start a session and retain `sessionId`. Navigate using `browser_page(action: "navigate", session, url)`, then `browser_inspect(action: "observe", session)`.
 
-   ```text
-   browser_session({ action: "start" })
-   browser_page({ action: "navigate", session: "<id>", url: "https://example.com" })
-   browser_inspect({ action: "observe", session: "<id>" })
-   ```
-
-2. Borrow existing user tabs. Use returned IDs/refs. Pass `session` when more than one exists; never use foreign IDs.
+2. Borrow existing user tabs. Use returned IDs/refs, never foreign IDs. Pass `session` if multiple exist.
 3. Observe after page changes; check ambiguous results once. Stop acting when success
    is visible. On success or failure, call
    `browser_session({ action: "stop", session: "<id>" })` unless keeping the session
@@ -29,14 +21,7 @@ Remote setup: [pairing guide](https://github.com/Tencent/BrowserSkill/blob/main/
 
 ## Read and interact
 
-Prefer `observe` for text/refs; use `snapshot` for static accessibility, `html` for
-exact markup, and `screenshot` for visuals. Console/network reads use sequence cursors. Wait only for expected navigation.
-
-To fill an observed field `@e3`:
-
-```text
-browser_interact({ action: "fill", session: "<id>", target: "@e3", value: "text" })
-```
+Use `observe` for text/refs, `snapshot` for static accessibility, `html` for markup, `screenshot` for visuals. Console/network reads use sequence cursors. Wait only for expected navigation.
 
 Refs invalidate after navigation; observe again after DOM changes.
 Prefer refs for frames/shadow roots; selectors search the main document. Observe before acting on HTML/screenshot findings.
@@ -60,7 +45,7 @@ Unowned Agent Window tabs need a user move to a user window before borrowing.
 
 With help enabled, use `browser_assist` action `request-help` for login, CAPTCHA,
 OTP, payment confirmation, consent, or after two attempts without progress. Supply
-a precise prompt, fresh targets and stable success criteria.
+precise prompts, fresh targets and stable success criteria.
 Resume only on `continued` / `completed`, then observe. Cancellation/timeout blocks
 the step; do not repeat the request. Navigation alone is not success.
 `browser_assist` also resizes windows or emulates a device for one tab.
@@ -85,7 +70,7 @@ unknown effects or switch backends to bypass limits. Borrow confirmation still a
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported.
 Do not invent tools or bypass these limits.
 
-## Canvas and continuation
+## Canvas
 
 `@eN canvas [visual:screenshot]` is text, not an image. Screenshot the ref when needed; never infer
 Canvas names/controls from nearby labels. If images cannot be understood, ask for
@@ -96,7 +81,7 @@ browser_inspect({ action: "screenshot", session: "<id>", ref: "@e3" })
 browser_interact({ action: "click", session: "<id>", target: "@e3", captureId: "<capture-id>", imageX: 100, imageY: 50 })
 ```
 
-Use captureId and a point seen in ORIGINAL PNG pixels, not resized coordinates. Captures expire after use, 2m, ref replacement or a newer ref screenshot. `captureUnavailable` means
+Use captureId with ORIGINAL PNG coordinates. Captures expire after use, 2m, ref replacement or a newer screenshot. `captureUnavailable` means
 view-only: observe and screenshot again before clicking. Counts 1/2 and buttons/
 modifiers work; Canvas fill/IME/drag/hover/HTML do not. Repainting is allowed; verify
 results and use DOM refs for revealed controls. Inspect `effect_state=unknown`
@@ -108,11 +93,10 @@ new observe/snapshot or changed page identity invalidates it.
 
 ## Website debugging
 
-Use `browser_inspect(action: "debug")` with owned `session` and `debugAction`.
-`capabilities` discovers builds/limits. `start` before reproduction. Read
-`operations`/`operation` by `id`, or `requests`/`request` by `id`, `part: "response"`.
-Missing data is unknown; HTTP 200 does not prove success.
-Output defaults to 32 KiB; `budget`: 4096..262144, `limit`: 1..100.
+Use `browser_inspect(action: "debug", session, debugAction)`. Discover `capabilities`;
+`start` before reproduction. Read `operations`/`requests`, then `operation`/`request`
+by `id` (`part: "response"` for bodies). Missing is unknown; HTTP 200 is not success.
+Output defaults to 64 KiB; `budget`: 4096..262144, `limit`: 1..100.
 Filters: `url`, `method`, `resourceType`, `status`, `state`, `kind`; `fields` selects metadata.
 Follow `next_since`/`next_offset`; check `output.omitted`, `run.storage`, `run.coverage`.
 `pin`/`unpin` protect completed requests against capacity eviction, not expiry.
@@ -120,8 +104,14 @@ Follow `next_since`/`next_offset`; check `output.omitted`, `run.storage`, `run.c
 `activity` gives command ID. `wait(commandId, waitMs: 0..60000)` observes completion,
 not success; it never resends or cancels the original command.
 
-For authorized experiments, `rule_add` takes JSON-string `rule` (see schema).
-Default one Fetch/XHR match, first rule wins. `rules` lists state;
+`performance` returns native navigation/paint/CLS/long-task metrics; check states, reasons and visibility.
+`aggregate` groups method/path with P95/errors/slow counts (`slowMs`, default 1000).
+`duplicates` finds suspected equal URL/body/document bursts (`windowMs`, default 1000); retries may be valid.
+Both default to business traffic, excluding rules/replays; `includeControlled` opts in.
+Inspect request IDs and gaps; paginate with `offset`/`next_offset` after capture stops.
+
+Authorized `rule_add` takes JSON-string `rule` (see schema).
+Default one Fetch/XHR match; first rule wins. `rules` lists state;
 `rule_enable`, `rule_disable`, `rule_remove` take `id`. Capture end clears rules.
 `replay` takes source `id` and JSON-string `replay`: `{"key":"attempt-1"}`.
 It may write server data. Reuse the key on uncertain retries. Same-origin only,

@@ -12,7 +12,7 @@ use clap::Args;
 #[derive(Debug, Clone, Args)]
 pub struct DebugArgs {
     /// Capture/inspect evidence, manage request rules, or replay a recorded request.
-    #[arg(value_parser = ["start", "stop", "status", "requests", "request", "operations", "operation", "console", "pages", "export", "rules", "rule_add", "rule_enable", "rule_disable", "rule_remove", "replay", "capabilities", "activity", "wait", "pin", "unpin"])]
+    #[arg(value_parser = ["performance", "aggregate", "duplicates", "start", "stop", "status", "requests", "request", "operations", "operation", "console", "pages", "export", "rules", "rule_add", "rule_enable", "rule_disable", "rule_remove", "replay", "capabilities", "activity", "wait", "pin", "unpin"])]
     pub action: String,
     /// Request, operation or rule ID returned by an earlier debug action.
     pub id: Option<String>,
@@ -28,12 +28,12 @@ pub struct DebugArgs {
     /// Incremental cursor; records may reappear when their evidence changes.
     #[arg(long)]
     pub since: Option<u64>,
-    /// List size: 1..100, default 30. Follow next_since to continue.
+    /// List size: 1..100, default 30. Follow next_since or next_offset.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=100))]
     pub limit: Option<u32>,
     #[arg(long, value_parser = ["metadata", "request", "response", "headers", "timing"])]
     pub part: Option<String>,
-    /// Body character or pages/console entry offset: 0..65536.
+    /// Body character or pages/console/performance/analysis entry offset: 0..65536.
     #[arg(long, value_parser = clap::value_parser!(u32).range(0..=65536))]
     pub offset: Option<u32>,
     /// Body slice: 1..16384 characters, default 4096.
@@ -52,10 +52,19 @@ pub struct DebugArgs {
     pub replay: Option<String>,
     #[arg(long)]
     pub replay_file: Option<std::path::PathBuf>,
-    /// Output budget: 4096..262144 UTF-8 JSON bytes, default 32768. Export is exempt.
+    /// Output budget: 4096..262144 UTF-8 JSON bytes, default 65536. Export is exempt.
     #[arg(long, value_parser = clap::value_parser!(u32).range(4096..=262144))]
     pub budget: Option<u32>,
-    /// Requests only: URL substring (case-sensitive).
+    /// Aggregate only: slow-request threshold in ms, 0..60000; default 1000.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..=60000))]
+    pub slow_ms: Option<u32>,
+    /// Duplicates only: fixed burst window in ms, 100..10000; default 1000.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(100..=10000))]
+    pub window_ms: Option<u32>,
+    /// Analysis only: include requests affected by rules or agent replay.
+    #[arg(long)]
+    pub include_controlled: bool,
+    /// Requests/analysis: URL substring (case-sensitive).
     #[arg(long)]
     pub url: Option<String>,
     #[arg(long)]
@@ -121,9 +130,33 @@ impl DebugArgs {
             || self.status.is_some()
             || self.state.is_some()
             || self.kind.is_some())
-            && action != DebugAction::Requests
+            && !matches!(
+                action,
+                DebugAction::Requests | DebugAction::Aggregate | DebugAction::Duplicates
+            )
         {
-            return Err(anyhow::anyhow!("filters require requests").into());
+            return Err(
+                anyhow::anyhow!("filters require requests, aggregate or duplicates").into(),
+            );
+        }
+        if self.slow_ms.is_some() && action != DebugAction::Aggregate {
+            return Err(anyhow::anyhow!("--slow-ms requires aggregate").into());
+        }
+        if self.window_ms.is_some() && action != DebugAction::Duplicates {
+            return Err(anyhow::anyhow!("--window-ms requires duplicates").into());
+        }
+        if self.include_controlled
+            && !matches!(action, DebugAction::Aggregate | DebugAction::Duplicates)
+        {
+            return Err(anyhow::anyhow!("--include-controlled requires analysis").into());
+        }
+        if self.since.is_some()
+            && matches!(
+                action,
+                DebugAction::Aggregate | DebugAction::Duplicates | DebugAction::Performance
+            )
+        {
+            return Err(anyhow::anyhow!("this action uses --offset, not --since").into());
         }
         let rule = read_options(self.rule, self.rule_file)?;
         let replay = read_options(self.replay, self.replay_file)?;
@@ -152,6 +185,9 @@ impl DebugArgs {
             rule,
             replay,
             budget: self.budget,
+            slow_ms: self.slow_ms,
+            window_ms: self.window_ms,
+            include_controlled: self.include_controlled.then_some(true),
             url: self.url,
             method: self.method,
             resource_type: self.resource_type,
@@ -212,7 +248,7 @@ pub fn dispatch(args: DebugArgs, _format: Format) -> Result<(), CliError> {
         TOOL_IPC_TIMEOUT
     };
     let export = params.action == DebugAction::Export;
-    let budget = params.budget.unwrap_or(32768) as usize;
+    let budget = params.budget.unwrap_or(65536) as usize;
     let info = ensure_daemon().context("ensure daemon is running")?;
     let mut result: DebugResult = super::business_rpc::call(
         info.sock_path,
@@ -411,6 +447,73 @@ mod tests {
                 "evidence.json"
             ])
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn parses_and_bounds_analysis_queries() {
+        let p = parse(&[
+            "bsk",
+            "debug",
+            "aggregate",
+            "--session",
+            "s",
+            "--slow-ms",
+            "500",
+            "--url",
+            "/api",
+            "--include-controlled",
+            "--budget",
+            "65536",
+        ])
+        .unwrap();
+        assert_eq!(p.action, DebugAction::Aggregate);
+        assert_eq!(p.slow_ms, Some(500));
+        assert_eq!(p.include_controlled, Some(true));
+        assert!(
+            parse(&[
+                "bsk",
+                "debug",
+                "performance",
+                "--session",
+                "s",
+                "--offset",
+                "1"
+            ])
+            .is_ok()
+        );
+        assert!(
+            parse(&[
+                "bsk",
+                "debug",
+                "duplicates",
+                "--session",
+                "s",
+                "--window-ms",
+                "10000"
+            ])
+            .is_ok()
+        );
+        for flags in [
+            vec!["--slow-ms", "60001"],
+            vec!["--window-ms", "1000"],
+            vec!["--since", "1"],
+        ] {
+            let mut args = vec!["bsk", "debug", "aggregate", "--session", "s"];
+            args.extend(flags);
+            assert!(parse(&args).is_err());
+        }
+        assert!(
+            parse(&[
+                "bsk",
+                "debug",
+                "duplicates",
+                "--session",
+                "s",
+                "--window-ms",
+                "99"
+            ])
+            .is_err()
         );
     }
 

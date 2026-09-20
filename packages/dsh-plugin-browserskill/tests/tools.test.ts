@@ -1654,6 +1654,38 @@ describe("website debug", () => {
     expect(calls.at(-1)!.options.tag).toBeUndefined();
     expect(calls.at(-1)!.options.timeoutMs).toBeGreaterThanOrEqual(75000);
   });
+  it("routes native performance and bounded analysis through the owned session", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "debug performance": { performance: [] },
+      "debug aggregate": { aggregates: [] },
+      "debug duplicates": { duplicates: [] },
+    });
+    await startSession(tools);
+    const inspect = tools.get("browser_inspect")!;
+    await inspect.execute({ action: "debug", debugAction: "performance" }, makeExec());
+    expect(calls.at(-1)!.args).toEqual(["debug", "performance", "--session", "s1"]);
+    await inspect.execute(
+      {
+        action: "debug",
+        debugAction: "aggregate",
+        slowMs: 500,
+        includeControlled: true,
+        url: "/api",
+      },
+      makeExec(),
+    );
+    expect(calls.at(-1)!.args).toEqual(
+      expect.arrayContaining(["--slow-ms", "500", "--include-controlled", "--url", "/api"]),
+    );
+    await inspect.execute(
+      { action: "debug", debugAction: "duplicates", windowMs: 2000, offset: 20 },
+      makeExec(),
+    );
+    expect(calls.at(-1)!.args).toEqual(
+      expect.arrayContaining(["--window-ms", "2000", "--offset", "20"]),
+    );
+  });
   it("validates debug arguments before spawning a CLI command", async () => {
     const { tools, calls } = setup({});
     for (const args of [
@@ -1664,6 +1696,11 @@ describe("website debug", () => {
       { debugAction: "rule_add" },
       { debugAction: "replay", id: "d1:n1" },
       { debugAction: "rule_disable" },
+      { debugAction: "performance", includeControlled: true },
+      { debugAction: "aggregate", windowMs: 1000 },
+      { debugAction: "duplicates", windowMs: 99 },
+      { debugAction: "duplicates", slowMs: 500 },
+      { debugAction: "aggregate", since: 1 },
     ])
       await expect(
         tools.get("browser_inspect")!.execute({ action: "debug", ...args }, makeExec()),

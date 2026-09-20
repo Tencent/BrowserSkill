@@ -31,6 +31,7 @@ interface Event {
   timestamp?: number;
   type?: string;
   frameId?: string;
+  loaderId?: string;
   errorText?: string;
   encodedDataLength?: number;
   dataLength?: number;
@@ -165,6 +166,7 @@ export class DebugNetworkStore {
         url: redactUrl(event.request.url),
         resource_type: event.type,
         frame_id: event.frameId,
+        loader_id: event.loaderId,
         state: "pending",
         truncated: chain.partial === true || headersLimited(event.request.headers),
         request_headers: headers,

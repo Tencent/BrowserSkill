@@ -10,7 +10,7 @@ same owned browser task. It records browser evidence for people and agents to in
 - **History:** browser-local recordings with page-load context, all retained console
   entries, and portable JSON export, independent of the original task lifecycle.
 
-The extension records evidence and can execute explicitly configured, task-local HTTP rules and replays. Analysis and comparison belong to the
+The extension records evidence and can execute explicitly configured, task-local HTTP rules and replays. The evidence page supplies bounded performance and request summaries; diagnosis and cross-record comparison belong to the
 user or their agent; project discovery and source-code repair are outside this feature. This is independent of persistent operation audit.
 
 ## Entry points
@@ -20,7 +20,7 @@ existing Quick Actions. A current-task card links to a separate evidence page.
 Quick Actions → Website debugging starts/stops capture for an existing task and
 opens its evidence. Without a task, it provides a prompt to give the agent.
 The evidence page opens both live and historical records, with a timeline, requests,
-body/header/timing details, Console, and page context. History is reachable through
+body/header/timing details, Console, page context, **Performance**, and **API analysis**. History is reachable through
 Quick Actions → Website debugging even without a connected daemon or active task.
 Users can search records, export JSON, and delete stopped records.
 
@@ -73,6 +73,72 @@ tools, existing session ownership, cancellation and queue remain unchanged.
 The wire endpoint is `tool.debug`; schemas are in `crates/bsk-protocol/schema`.
 Older extensions reject it without altering the existing `console`/`network` tools.
 
+## Performance and request analysis
+
+```sh
+# Capture starts before navigation; no evaluate script is needed.
+bsk debug performance --session <id>
+bsk debug aggregate --session <id> --url /api/ --slow-ms 1000
+bsk debug duplicates --session <id> --window-ms 1000
+# Explicitly include requests affected by rules or replay experiments.
+bsk debug aggregate --session <id> --include-controlled
+```
+
+Performance capture shares the existing isolated main-frame observer and lifecycle.
+It installs a new-document hook before subsequent navigation and records navigation
+TTFB, DOMContentLoaded/load timing, FCP, LCP candidates, CLS, and long-task counts,
+total/max duration and the 50 most expensive task intervals. Values ending in
+`_ms` use milliseconds; navigation/paint timings are relative to the document time
+origin. TTFB is `responseStart` from navigation start, including redirects and
+connection setup, not server-only processing time. CLS uses the largest session
+window (at most 5 seconds, gaps under 1 second) and excludes recent-input shifts.
+See the primary definitions for [LCP](https://web.dev/articles/lcp),
+[CLS](https://web.dev/articles/cls), [navigation timing](https://w3c.github.io/navigation-timing/),
+and [long tasks](https://w3c.github.io/longtasks/).
+
+Each metric has `state` and `reasons`. `provisional` values can still change;
+`partial` means capture was late, interrupted, stopped before finalization, or
+limited. `unavailable` and `unsupported` have no invented zero value. A page
+initially hidden cannot supply valid paint measurements; the observer records
+visibility changes and never activates a tab. Buffered data from late capture is
+marked partial because prior visibility is unknown. BFCache restores get a separate
+visit; navigation/paint metrics for BFCache and prerender are explicitly unsupported.
+These are observed main-frame metrics, not a complete Core Web Vitals report:
+INP, iframe vitals, SPA soft-navigation vitals and CPU profiling are not included.
+
+At most 20 document/visit snapshots and 64 visibility transitions per visit are
+retained, with explicit coverage/limit markers. Updates coalesce over 500 ms, with
+immediate lifecycle checkpoints and no idle polling in the page. Metrics persist
+with the recording and export; old recordings without them remain readable.
+
+`aggregate` groups by HTTP method + exact origin/path, combining query values;
+it does not guess dynamic route templates. It reports calls, transport failures,
+HTTP errors, pending/interrupted calls, known timing samples (mean, nearest-rank
+P50/P95, maximum), slow count, transfer samples, cache/service-worker counts and
+source request IDs. HTTP 200 still does not establish business success.
+
+`duplicates` reports **suspected** duplicate bursts within a fixed start-time
+window (default 1000 ms, range 100..10000). It requires equal method, retained URL,
+complete retained body, frame and document identity; headers are not compared.
+Requests lacking identity/body or containing redacted comparison data are counted
+as `uncomparable`. The result includes overlap, possible retry, request IDs and
+nearby operation references. Deliberate repeated calls, polling and retries can be
+valid; a group is not proof of a defect. Old records without document identity
+cannot safely participate in duplicate matching.
+
+Both analyses default to business traffic and exclude modified, blocked, mocked
+and replayed requests. Existing URL/method/type/status/state/kind filters apply
+before aggregation; use `--kind all` or `--include-controlled` explicitly as needed.
+`--slow-ms` accepts 0..60000 (default 1000). Analysis is computed only when requested,
+over retained evidence, without issuing any website requests. Storage and capture
+gaps remain visible. Each group retains up to 50 source request references.
+
+Performance and analysis lists use `--offset`, `--limit` and top-level `next_offset`.
+Restart pagination if the live recording changes; stop capture for a stable complete
+analysis. These reads use the same output budget and task/history isolation as
+other debug queries. DSH exposes `debugAction: "performance" | "aggregate" |
+"duplicates"` with `slowMs`, `windowMs` and `includeControlled`.
+
 ## Reliable agent reads
 
 ```sh
@@ -90,7 +156,7 @@ Request filters are combined before pagination: `--url` is a case-sensitive
 substring; method/resource type/status/state match exactly. `--kind` is `all`,
 `business`, `resource` or `extension`. `--fields` selects optional metadata;
 identity, body availability and intervention/replay provenance always remain.
-Ordinary query results default to a 32 KiB UTF-8 JSON budget, configurable from
+Ordinary query results default to a 64 KiB UTF-8 JSON budget, configurable from
 4 KiB to 256 KiB. Data URLs are compacted in agent output. `output.omitted` and
 `output.truncated` describe projection loss, independently of capture/storage
 loss. The stored evidence is unchanged. Increase the budget, narrow a query or

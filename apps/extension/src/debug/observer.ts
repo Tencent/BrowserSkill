@@ -1,10 +1,16 @@
 import type { DebugCdp } from "./manager";
+import { installPerformance } from "./performance-observer";
 import { redactText } from "./redact";
 import type { DebugField } from "./types";
 
 // This function runs only in a named CDP isolated world of the captured main frame.
 // Keep it self-contained: its compiled source is also installed on future documents.
-function installObserver(binding: string, slot: string) {
+function installObserver(
+  binding: string,
+  slot: string,
+  observePerformance: typeof installPerformance,
+  early: boolean,
+) {
   if (window !== window.top) return;
   const host = globalThis as unknown as Record<string, unknown>;
   (host[slot] as { dispose?: () => void } | undefined)?.dispose?.();
@@ -201,7 +207,15 @@ function installObserver(binding: string, slot: string) {
     }, 700);
   });
   mutations.observe(document, { subtree: true, childList: true, characterData: true });
+  let performanceCapture: ReturnType<typeof observePerformance> | undefined;
+  try {
+    performanceCapture = observePerformance((data) => emit({ kind: "performance", data }), early);
+  } catch {
+    emit({ kind: "performance_error" });
+  }
   host[slot] = {
+    performance: () => performanceCapture?.snapshot(),
+    finishPerformance: () => performanceCapture?.finish(),
     snapshot,
     flush,
     agent(value: boolean) {
@@ -211,6 +225,7 @@ function installObserver(binding: string, slot: string) {
     dispose() {
       abort.abort();
       mutations.disconnect();
+      performanceCapture?.dispose();
       clearTimeout(timer);
       clearTimeout(changedTimer);
       delete host[slot];
@@ -324,7 +339,8 @@ export class DebugObserver {
   async start(): Promise<void> {
     const tree = await this.send<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
     this.rootFrame = tree.frameTree.frame.id;
-    const source = `(${installObserver.toString()})(${JSON.stringify(this.binding)},${JSON.stringify(this.world)})`;
+    const source = (early: boolean) =>
+      `(${installObserver.toString()})(${JSON.stringify(this.binding)},${JSON.stringify(this.world)},(${installPerformance.toString()}),${early})`;
     await this.send("Runtime.addBinding", { name: this.binding, executionContextName: this.world });
     if (this.stopped) {
       await this.dispose();
@@ -332,7 +348,7 @@ export class DebugObserver {
     }
     const script = await this.send<{ identifier: string }>(
       "Page.addScriptToEvaluateOnNewDocument",
-      { source, worldName: this.world },
+      { source: source(true), worldName: this.world },
     );
     this.script = script.identifier;
     if (this.stopped) {
@@ -346,10 +362,13 @@ export class DebugObserver {
     this.context = created.executionContextId;
     this.contexts.add(created.executionContextId);
     if (!this.stopped)
-      await this.send("Runtime.evaluate", { expression: source, contextId: this.context });
+      await this.send("Runtime.evaluate", { expression: source(false), contextId: this.context });
     else await this.dispose();
   }
-  async call<T>(method: "snapshot" | "agent" | "flush", value?: boolean): Promise<T | undefined> {
+  async call<T>(
+    method: "snapshot" | "agent" | "flush" | "performance" | "finishPerformance",
+    value?: boolean,
+  ): Promise<T | undefined> {
     if (this.context === undefined || this.stopped) return undefined;
     const result = await this.send<{ result?: { value?: T } }>("Runtime.evaluate", {
       expression: `globalThis[${JSON.stringify(this.world)}]?.${method}(${value === undefined ? "" : String(value)})`,

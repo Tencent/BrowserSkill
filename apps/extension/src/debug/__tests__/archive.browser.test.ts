@@ -9,7 +9,15 @@ import { describe, expect, it } from "vitest";
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", () => {
   it("survives reload, recovers interrupted checkpoints, expires and bounds records, and deletes atomically", async () => {
     const scripts = new Map(
-      ["archive", "journal", "query", "capabilities", "evidence-model"].map((name) => [
+      [
+        "archive",
+        "journal",
+        "query",
+        "capabilities",
+        "evidence-model",
+        "performance",
+        "redact",
+      ].map((name) => [
         name,
         ts.transpileModule(readFileSync(new URL(`../${name}.ts`, import.meta.url), "utf8"), {
           compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
@@ -64,10 +72,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
           legacy.close();
           const archive = new LocalDebugArchive(undefined, () => now);
           if (!(await archive.get('dlegacy'))?.requests[0].request_body.text.includes('Alice')) throw Error('v1 history migration failed');
-          await archive.put(record('dactive', now, 'capturing'));
+          const active = record('dactive', now, 'capturing');
+          active.performance = [{id:'dactive:p1',sequence:1,document_key:'1000:0',time_origin:1000,started_at:1000,observed_at:now,url:'https://site.test',navigation:'navigate',state:'capturing',early:true,scope:'main_frame',metrics:{cls:{value:0.2,state:'provisional',reasons:[]}},visibility:[],visibility_truncated:false,long_tasks:[],long_tasks_truncated:false,coverage:[]}];
+          await archive.put(active);
           const recovered = new LocalDebugArchive(undefined, () => now);
           const saved = await recovered.get('dactive');
           if (saved.run.state !== 'stopped' || saved.run.stop_reason !== 'browser_restarted' || saved.requests[0].response_body.state !== 'unavailable' || saved.operations[0].state !== 'interrupted') throw Error('checkpoint recovery failed');
+          if (saved.performance[0].state !== 'interrupted' || saved.performance[0].metrics.cls.state !== 'partial' || saved.performance[0].metrics.cls.value !== 0.2) throw Error('performance recovery failed');
           await recovered.put(record('dexpired', now - HISTORY_AGE_MS - 1));
           if (await recovered.get('dexpired')) throw Error('expiry failed');
           for (let i=0;i<52;i++) await recovered.put(record('d'+i, now+i));

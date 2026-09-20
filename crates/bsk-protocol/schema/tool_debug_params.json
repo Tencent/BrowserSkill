@@ -40,6 +40,12 @@
         "null"
       ]
     },
+    "include_controlled": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "kind": {
       "type": [
         "string",
@@ -140,6 +146,15 @@
       "format": "uint64",
       "minimum": 0.0
     },
+    "slow_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 60000.0,
+      "minimum": 0.0
+    },
     "state": {
       "type": [
         "string",
@@ -176,12 +191,24 @@
       "format": "uint32",
       "maximum": 60000.0,
       "minimum": 0.0
+    },
+    "window_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 10000.0,
+      "minimum": 100.0
     }
   },
   "definitions": {
     "DebugAction": {
       "type": "string",
       "enum": [
+        "performance",
+        "aggregate",
+        "duplicates",
         "capabilities",
         "activity",
         "wait",

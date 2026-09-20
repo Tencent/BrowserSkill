@@ -321,7 +321,7 @@ application data can still be sensitive. Do not print or request secrets.
 
 Discover actual limits/builds with `bsk debug capabilities --session <id>`;
 without a session this returns only the CLI schema, not browser capabilities.
-Query output defaults to 32 KiB; `--budget` accepts 4096..262144 bytes.
+Query output defaults to 64 KiB; `--budget` accepts 4096..262144 bytes.
 `requests` accepts URL substring `--url`, exact `--method`, `--resource-type`,
 `--status`, `--state`, `--kind business|resource|extension|all`, and optional
 `--fields status,duration_ms`. `--limit` is 1..100. Follow `next_since` for lists,
@@ -342,6 +342,21 @@ When a command reports `session_busy`, it was not dispatched. Read
 waits for idle. Completion means no longer running, not successful; check the
 original command result. Waiting never resends work; cancelling it leaves the
 original command alone. Keep ordinary browser commands serial within a task.
+
+### Performance and request analysis
+
+Use `bsk debug performance --session <id>` for native main-frame navigation,
+FCP/LCP/CLS and long-task evidence. Start capture before navigation; inspect each
+metric's `state`/`reasons` and visibility history. Hidden, late, interrupted or
+unsupported measurements are not final Core Web Vitals; INP/CPU profiles are absent.
+`bsk debug aggregate --session <id> --url /api/ --slow-ms 1000` groups exact method
+and origin/path, with known timing samples, P95, errors, slow calls and request IDs.
+`bsk debug duplicates --session <id> --window-ms 1000` finds suspected equal
+method/URL/body/frame/document bursts; missing or redacted comparison data is
+uncertain. Inspect referenced requests; retries or deliberate calls can be valid.
+Both default to business traffic, excluding rules/replays; `--include-controlled`
+opts in. Filters apply before analysis. Use top-level `next_offset`/`--offset`;
+stop capture for stable pagination. Summaries cover retained evidence only.
 
 ### Controlled HTTP experiments
 

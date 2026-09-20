@@ -14,6 +14,7 @@ import { DebugJournal, mergeRequest } from "./journal";
 import { DebugNetworkControl } from "./network-control";
 import { DebugNetworkStore, requestProjection } from "./network-store";
 import { DebugObserver, sanitizeFields } from "./observer";
+import { interruptPerformance, PERFORMANCE_LIMIT, performanceSnapshot } from "./performance";
 import { readRecording } from "./recording";
 import { redactText, redactUrl } from "./redact";
 import type {
@@ -21,6 +22,7 @@ import type {
   DebugOperation,
   DebugPage,
   DebugParams,
+  DebugPerformance,
   DebugRecording,
   DebugResult,
   DebugRun,
@@ -72,6 +74,8 @@ interface RunState {
   nextConsole: number;
   targets: Set<string>;
   pages: DebugPage[];
+  performance: DebugPerformance[];
+  nextPerformance: number;
   pagePending?: boolean;
   released?: boolean;
   archiveTimer?: ReturnType<typeof setTimeout>;
@@ -227,6 +231,8 @@ export class DebugManager {
       nextConsole: 0,
       targets: new Set(),
       pages: [],
+      performance: [],
+      nextPerformance: 0,
     };
     if (this.archive?.retain)
       state.journal = new DebugJournal(
@@ -289,6 +295,7 @@ export class DebugManager {
       state.observer = new DebugObserver(this.cdp, tabId, id);
       await deadline(state.observer.start(), 2500).catch(() => {
         this.coverage(state, "manual_capture_unavailable");
+        this.coverage(state, "performance_capture_unavailable");
         void state.observer?.dispose();
       });
       await this.capturePage(state);
@@ -539,10 +546,26 @@ export class DebugManager {
   }
 
   private manualEvent(state: RunState, payload: string): void {
-    let event: { kind?: string; at?: number; target?: string; before?: unknown; after?: unknown };
+    let event: {
+      kind?: string;
+      at?: number;
+      target?: string;
+      before?: unknown;
+      after?: unknown;
+      data?: unknown;
+    };
     try {
       event = JSON.parse(payload);
+      if (event?.kind === "performance") {
+        this.capturePerformance(state, event.data);
+        return;
+      }
     } catch {
+      return;
+    }
+    if (!event || typeof event !== "object") return;
+    if (event.kind === "performance_error") {
+      this.coverage(state, "performance_capture_unavailable");
       return;
     }
     if (event.kind === "changed") {
@@ -769,6 +792,7 @@ export class DebugManager {
     state.run.stop_reason = reason;
     clearTimeout(state.timer);
     void state.observer?.dispose();
+    for (const entry of state.performance) interruptPerformance(entry, "capture_interrupted");
     state.checkpoints?.forEach(clearTimeout);
     if (state.current) {
       state.current.window_end = Math.min(state.current.window_end ?? this.now(), this.now());
@@ -917,6 +941,41 @@ export class DebugManager {
     }
   }
 
+  private capturePerformance(state: RunState, value: unknown): void {
+    if (state.run.state !== "capturing") return;
+    const data = performanceSnapshot(value);
+    if (!data) return;
+    const index = state.performance.findIndex((item) => item.document_key === data.document_key);
+    if (index >= 0 && state.performance[index].observed_at > data.observed_at) return;
+    const entry = {
+      ...data,
+      id: index >= 0 ? state.performance[index].id : `${state.run.id}:p${++state.nextPerformance}`,
+      sequence: this.change(state),
+    };
+    if (index >= 0) state.performance[index] = entry;
+    else {
+      for (const previous of state.performance)
+        interruptPerformance(previous, "navigation_checkpoint_missing");
+      state.performance.push(entry);
+      if (state.performance.length > PERFORMANCE_LIMIT) {
+        state.performance.shift();
+        this.coverage(state, "performance_record_limit");
+      }
+    }
+  }
+  private async refreshPerformance(state: RunState, finish = false): Promise<void> {
+    if (state.run.state !== "capturing" || !state.observer) return;
+    try {
+      const data = await deadline(
+        state.observer.call(finish ? "finishPerformance" : "performance"),
+        600,
+      );
+      if (data) this.capturePerformance(state, data);
+    } catch {
+      this.coverage(state, "performance_read_failed");
+    }
+  }
+
   private recording(state: RunState): DebugRecording {
     return {
       version: 1,
@@ -926,6 +985,7 @@ export class DebugManager {
       operations: state.operations.map((operation) => this.operation(state, operation)),
       console: state.console,
       pages: state.pages,
+      performance: state.performance,
       rules: state.controls?.list(),
       replays: state.controls?.replays(),
     };
@@ -1040,7 +1100,11 @@ export class DebugManager {
           : indexed;
       }
     }
-    const bodies = ["operation", "export"].includes(params.action);
+    if (live && params.action === "performance") {
+      await this.refreshPerformance(live);
+      return readRecording(this.recording(live), params);
+    }
+    const bodies = ["operation", "export", "duplicates"].includes(params.action);
     const recording = live
       ? await this.evidenceRecording(live, bodies)
       : await this.archive?.get(params.run_id, bodies);
@@ -1102,6 +1166,7 @@ export class DebugManager {
       throw new Error("debug capture not found; start capture before reproducing the issue");
     if (params.action === "stop") {
       await deadline(state.observer?.call("flush") ?? Promise.resolve(), 600).catch(() => {});
+      await this.refreshPerformance(state, true);
       this.stopState(state, "requested");
       await state.controlCleanup;
       await this.persist(state);
@@ -1166,7 +1231,14 @@ export class DebugManager {
       }
     }
     if (params.action !== "operation") {
-      const recording = await this.evidenceRecording(state, params.action === "export");
+      if (params.action === "performance") {
+        await this.refreshPerformance(state);
+        return readRecording(this.recording(state), params);
+      }
+      const recording = await this.evidenceRecording(
+        state,
+        ["export", "duplicates"].includes(params.action),
+      );
       if (params.action === "request" && params.id) {
         const saved = await this.archive?.request?.(state.run.id, params.id).catch(() => {
           this.coverage(state, "evidence_read_failed");

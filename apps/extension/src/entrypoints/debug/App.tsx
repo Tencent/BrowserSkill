@@ -21,6 +21,7 @@ import type {
   DebugRun,
 } from "@/debug/types";
 import { useDebugTasks } from "@/debug/use-tasks";
+import { AnalysisPanel, PerformancePanel } from "./analysis";
 import {
   ConsoleList,
   clock,
@@ -54,7 +55,9 @@ export function DebugApp() {
   const [messages, setMessages] = useState<DebugConsole[]>([]);
   const [pages, setPages] = useState<DebugPage[]>([]);
   const [operationId, setOperationId] = useState("");
-  const [mode, setMode] = useState<"requests" | "console" | "pages" | "rules">("requests");
+  const [mode, setMode] = useState<
+    "requests" | "console" | "pages" | "rules" | "performance" | "analysis"
+  >("requests");
   const [detail, setDetail] = useState<DebugResult>();
   const [selectedRequest, setSelectedRequest] = useState<DebugRequest>();
   const [requestPart, setRequestPart] = useState<"request" | "response">("response");
@@ -570,7 +573,9 @@ export function DebugApp() {
                 <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">
                   {t("debug.timeline")}
                 </h2>
-                {(["requests", "console", "pages", "rules"] as const).map((value) => (
+                {(
+                  ["requests", "console", "pages", "performance", "analysis", "rules"] as const
+                ).map((value) => (
                   <button
                     type="button"
                     key={value}
@@ -590,7 +595,9 @@ export function DebugApp() {
                           ? messages.length
                           : value === "rules"
                             ? (run.active_rules ?? 0)
-                            : pages.length}
+                            : value === "pages"
+                              ? pages.length
+                              : ""}
                     </span>
                   </button>
                 ))}
@@ -738,6 +745,31 @@ export function DebugApp() {
                     pulse={pulse}
                     active={!!task && run.state === "capturing"}
                     onChange={() => setRevision((value) => value + 1)}
+                  />
+                ) : mode === "performance" ? (
+                  <PerformancePanel key={run.id} session={sessionId} run={run.id} pulse={pulse} />
+                ) : mode === "analysis" ? (
+                  <AnalysisPanel
+                    key={run.id}
+                    session={sessionId}
+                    run={run.id}
+                    pulse={pulse}
+                    onRequest={(id) => {
+                      const request = requests.find((entry) => entry.id === id);
+                      if (request) openRequest(request);
+                      else
+                        void recordingRequest({
+                          session_id: sessionId,
+                          run_id: run.id,
+                          action: "request",
+                          id,
+                        }).then(
+                          (result) => {
+                            if (result.request) openRequest(result.request);
+                          },
+                          (reason) => setError(String(reason)),
+                        );
+                    }}
                   />
                 ) : mode === "requests" ? (
                   <Panel title={t("debug.requests")}>

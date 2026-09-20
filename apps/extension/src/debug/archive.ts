@@ -6,6 +6,7 @@ import {
   mergeRequest,
   retentionPriority,
 } from "./journal";
+import { interruptPerformance } from "./performance";
 import { matchesRequest, projectFields } from "./query";
 import type { DebugParams, DebugRecording, DebugRequest, DebugResult, DebugRun } from "./types";
 
@@ -104,6 +105,7 @@ export function interrupted(recording: DebugRecording): DebugRecording {
       }
     }
   }
+  for (const entry of recording.performance ?? []) interruptPerformance(entry, "browser_restarted");
   for (const operation of recording.operations) {
     if (operation.state === "running") operation.state = "interrupted";
   }

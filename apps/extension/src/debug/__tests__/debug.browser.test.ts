@@ -393,6 +393,26 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
             const finalRecord = (
               await debug.read({ action: "export", session_id: "website-debug" })
             ).recording!;
+            expect(finalRecord.performance?.length).toBeGreaterThan(0);
+            const performance = await debug.read({
+              action: "performance",
+              session_id: "website-debug",
+            });
+            expect(performance.performance).toEqual(finalRecord.performance);
+            expect(performance.performance?.some((p) => p.metrics.load_ms.value! > 0)).toBe(true);
+            expect(performance.performance?.every((p) => p.state !== "capturing")).toBe(true);
+            expect(finalRecord.requests.some((r) => r.loader_id && r.frame_id)).toBe(true);
+            const summary = await debug.read({
+              action: "aggregate",
+              session_id: "website-debug",
+              url: "/api/save",
+            });
+            expect(summary.aggregates?.[0].count).toBeGreaterThan(0);
+            expect(
+              summary.aggregates?.[0].request_ids.every((id) =>
+                finalRecord.requests.some((r) => r.id === id),
+              ),
+            ).toBe(true);
             expect(finalRecord.operations.at(-1)).toMatchObject({
               source: "human",
               method: "tool.fill",
