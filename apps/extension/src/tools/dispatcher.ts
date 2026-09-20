@@ -2,6 +2,7 @@ import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
 import type { SessionManager } from "@/session-manager/manager";
+import { withTaskPopups } from "@/session-manager/task-popups";
 import type { Transport } from "@/transport/transport";
 import type {
   BlurParams,
@@ -168,6 +169,18 @@ export interface DispatcherDeps {
  * completed compensation; only the separate cancel acknowledgement
  * takes the fast path.
  */
+/** Tools whose page input can make the page open another tab or window. */
+const OPENS_TABS = new Set([
+  "tool.click",
+  "tool.press_key",
+  "tool.evaluate",
+  "tool.navigate",
+  "tool.navigate_back",
+  "tool.navigate_forward",
+  "tool.fill",
+  "tool.select",
+]);
+
 export class ToolDispatcher {
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
@@ -276,7 +289,16 @@ export class ToolDispatcher {
       } catch {
         /* The daemon still has the original operation metadata. */
       }
-      const result = await this.invoke(req, ac.signal);
+      // Tools that drive a page can make it open a tab; the dispatcher watches
+      // the action so Chrome's own navigation targets can be attributed to it.
+      const result = OPENS_TABS.has(req.method)
+        ? await withTaskPopups(
+            this.sessions,
+            (req.params ?? {}) as { session_id?: string; tab_id?: number },
+            () => this.invoke(req, ac.signal),
+            this.onAgentTabClaimed,
+          )
+        : await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
         body = { id: req.id, error: classifyCdpError(result) };
       } else {
