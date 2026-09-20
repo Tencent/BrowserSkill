@@ -8,4 +8,7 @@ pub mod rpc_reason {
 }
 pub mod skill_install;
 
+#[cfg(windows)]
+mod windows_process;
+
 pub use cli::{Cli, Command};

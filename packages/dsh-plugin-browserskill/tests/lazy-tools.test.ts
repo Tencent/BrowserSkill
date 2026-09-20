@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import { apply } from "../src/index";
 import { armLazyTools, hasSuccessfulSkillInvocation } from "../src/lazy-tools";
 import type { BskRunOptions, BskRunResult } from "../src/runner";
+import { memoryStartJournal } from "../src/start-journal";
 
 function fakeEventCtx(sessions?: { list(): { events: unknown[] }[] }) {
   const listeners = new Map<string, (...args: never[]) => void>();
@@ -205,7 +206,10 @@ describe("lazyTools wiring in apply()", () => {
       killAll() {},
       killFor: () => 0,
     };
-    apply(ctx as never, config, { runnerFactory: () => runner as never });
+    apply(ctx as never, config, {
+      runnerFactory: () => runner as never,
+      startJournal: memoryStartJournal(),
+    });
     return { tools, listeners };
   }
 

@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
+import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
 import { handleObserve } from "../observation";
 import type { CdpRunner } from "../shared";
@@ -80,7 +81,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           const foreground = await page(false);
           const manager = new SessionManager({
             agentWindow: {
-              create: async () => 100,
+              create: async () => ({ windowId: 100, initialTabIds: [] }),
               remove: async () => {},
               ensureActiveTab: async () => 4,
             },
@@ -230,14 +231,28 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             if (event.method === "DOM.documentUpdated") documentUpdates++;
             for (const listener of listeners) listener({ tabId: 4 }, event.method, event.params);
           };
+          const readinessCommands: { method: string; elapsedMs?: number; state: string }[] = [];
           const api: CdpDebuggerApi = {
             // page() already attached the root debugger session.
             attach: async () => {},
             detach: async () => {
               await send("Target.detachFromTarget", { sessionId: target.sessionId });
             },
-            sendCommand: (debuggee, method, params) =>
-              send(method, params, debuggee.sessionId ?? target.sessionId),
+            sendCommand: async (debuggee, method, params) => {
+              const call = { method, state: "pending", elapsedMs: undefined as number | undefined };
+              readinessCommands.push(call);
+              const started = performance.now();
+              try {
+                const result = await send(method, params, debuggee.sessionId ?? target.sessionId);
+                call.state = "complete";
+                return result;
+              } catch (error) {
+                call.state = "failed";
+                throw error;
+              } finally {
+                call.elapsedMs = Math.round(performance.now() - started);
+              }
+            },
             onEvent: {
               addListener: (listener: CdpEventListener) => listeners.add(listener),
               removeListener: (listener: CdpEventListener) => listeners.delete(listener),
@@ -261,6 +276,22 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             await cdp.send(4, "DOM.enable");
             const tab = { id: 4, windowId: 100, active: false, url } as chrome.tabs.Tab;
             const tabsApi = { get: async () => tab, query: async () => [tab] };
+            // Model the controlled request boundary used by the real dispatcher.
+            // The raw-runner cases above separately cover temporary hidden input.
+            ctx.agentCreatedTabs.add(4);
+            const prepare = (method: string) =>
+              prepareBackgroundExecution(
+                manager,
+                {
+                  id: "controlled-input",
+                  method,
+                  params: { session_id: ctx.sessionId, tab_id: 4 },
+                },
+                cdp,
+                tabsApi,
+                new AbortController().signal,
+              );
+            expect(await prepare("tool.observe")).toBeUndefined();
             const observed = await handleObserve(
               manager,
               { session_id: ctx.sessionId, tab_id: 4 },
@@ -272,12 +303,17 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             )?.[0];
             expect(ref).toBeDefined();
             expect(documentChanges).toBe(0);
+            expect(await prepare("tool.click")).toBeUndefined();
+            readinessCommands.length = 0;
             const clicked = await handleClick(
               manager,
               { session_id: ctx.sessionId, tab_id: 4, ref: ref! },
               { cdp, tabsApi },
             );
-            expect(clicked, JSON.stringify(clicked)).not.toHaveProperty("code");
+            expect(
+              clicked,
+              JSON.stringify({ clicked, commands: readinessCommands }),
+            ).not.toHaveProperty("code");
             expect(await target.evaluate("window.clicks")).toEqual([true]);
             expect(documentChanges).toBe(0);
             expect(ctx.refStore.resolve(ref!, { tabId: 4 })).not.toBeNull();
@@ -290,10 +326,8 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               { timeout: 5000 },
             );
 
-            // Simulate a leftover override and observe from another CDP session:
-            // ending the owning session must restore the hidden tab's real focus.
-            expect(await target.evaluate("document.hasFocus()")).toBe(false);
-            await cdp.send(4, "Emulation.setFocusEmulationEnabled", { enabled: true });
+            // The controlled policy persists across calls and navigation. Ending
+            // its owner must restore real focus, observed from another CDP session.
             expect(await target.evaluate("document.hasFocus()")).toBe(true);
             const observer = await send<{ sessionId: string }>("Target.attachToTarget", {
               targetId: target.targetId,
@@ -308,6 +342,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             expect(focus.result.value).toBe(false);
             expect(await foreground.evaluate("document.visibilityState")).toBe("visible");
           } finally {
+            ctx.agentCreatedTabs.delete(4);
             cdp.dispose();
             onEvent = undefined;
             await send("Target.closeTarget", { targetId: target.targetId });

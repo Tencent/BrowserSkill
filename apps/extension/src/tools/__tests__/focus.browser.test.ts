@@ -53,7 +53,7 @@ async function withFocusBrowser(
       );
       const manager = new SessionManager({
         agentWindow: {
-          create: async () => 100,
+          create: async () => ({ windowId: 100, initialTabIds: [] }),
           remove: async () => {},
           ensureActiveTab: async () => 4,
         },

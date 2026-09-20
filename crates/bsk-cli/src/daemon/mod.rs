@@ -14,6 +14,7 @@ pub(crate) mod probe;
 pub mod queue;
 pub mod remote;
 pub mod session_interrupt;
+pub mod session_requests;
 pub mod sessions;
 pub mod start;
 pub mod state;

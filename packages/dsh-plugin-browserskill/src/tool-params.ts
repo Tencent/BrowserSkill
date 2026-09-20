@@ -7,6 +7,21 @@ export const SESSION_PARAM = {
     "Omit to use the current session (the one most recently started or used).",
 } as const;
 
+export const SESSION_STOP_PARAMS = {
+  session: {
+    type: "string",
+    description:
+      "For stop: owned session ID; mutually exclusive with requestId. Omit both targets to retry " +
+      "an unacknowledged stop before using the current session.",
+  },
+  requestId: {
+    type: "string",
+    description:
+      "For stop: owned lifecycle request ID to stop or acknowledge; mutually exclusive with session. " +
+      "Targets the original start even if its short session ID is reused or was never received.",
+  },
+} as const;
+
 export const TAB_ID_PARAM = {
   type: "integer",
   description: "Target tab id. Omit to use the Agent Window's active tab.",

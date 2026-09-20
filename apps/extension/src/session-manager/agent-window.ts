@@ -8,7 +8,7 @@
  */
 
 export interface AgentWindowApi {
-  create(url: string, opts?: AgentWindowCreateOptions): Promise<number>;
+  create(url: string, opts?: AgentWindowCreateOptions): Promise<AgentWindowCreation>;
   remove(windowId: number): Promise<void>;
   /**
    * Guarantee the Agent Window has an active, CDP-navigable tab.
@@ -18,7 +18,13 @@ export interface AgentWindowApi {
    * Resolves with the id of the activated (or newly created) tab, so callers
    * can track the session's home tab without re-querying Chrome.
    */
-  ensureActiveTab(windowId: number, url: string): Promise<number>;
+  ensureActiveTab(windowId: number, url: string, ownedTabIds: ReadonlySet<number>): Promise<number>;
+}
+
+/** Resource identities captured from the creation result, before initialization. */
+export interface AgentWindowCreation {
+  windowId: number;
+  initialTabIds: number[];
 }
 
 /** Creation hints for a new Agent Window. */
@@ -33,7 +39,7 @@ export interface AgentWindowCreateOptions {
 export const AGENT_WINDOW_HOME = "about:blank";
 
 export const chromeAgentWindowApi: AgentWindowApi = {
-  async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<number> {
+  async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<AgentWindowCreation> {
     const win = await chrome.windows.create({
       type: "normal",
       focused: opts.focused ?? true,
@@ -43,7 +49,12 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     if (typeof win?.id !== "number") {
       throw new Error("[bh] chrome.windows.create returned no window id");
     }
-    return win.id;
+    return {
+      windowId: win.id,
+      initialTabIds: (win.tabs ?? []).flatMap((tab) =>
+        typeof tab.id === "number" ? [tab.id] : [],
+      ),
+    };
   },
   async remove(windowId: number): Promise<void> {
     // Callers decide whether a missing/failed removal is benign. In
@@ -52,9 +63,15 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     // cancellation success while the Agent Window remains open.
     await chrome.windows.remove(windowId);
   },
-  async ensureActiveTab(windowId: number, url: string): Promise<number> {
+  async ensureActiveTab(
+    windowId: number,
+    url: string,
+    ownedTabIds: ReadonlySet<number>,
+  ): Promise<number> {
     const tabs = await chrome.tabs.query({ windowId });
-    const first = tabs.find((t) => typeof t.id === "number");
+    // A user may have opened a tab while window initialization was pending.
+    // Reuse only a tab whose identity came from our creation result.
+    const first = tabs.find((t) => t.id !== undefined && ownedTabIds.has(t.id));
     if (first?.id !== undefined) {
       if (!first.active) {
         await chrome.tabs.update(first.id, { active: true });

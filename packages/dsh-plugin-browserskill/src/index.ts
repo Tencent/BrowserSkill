@@ -19,9 +19,11 @@ import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
 import { type BskRunner, createBskRunner } from "./runner";
+import { SessionStarts } from "./session-starts";
 import { SessionRegistry } from "./sessions";
 import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
-import type { PluginConfig } from "./tools";
+import { DiskStartJournal, defaultStartJournalDirectory, type StartJournal } from "./start-journal";
+import type { PluginConfig, ToolDeps } from "./tools";
 
 export const name = "@wxg-prc-cpg/browser-skill-dsh-plugin";
 export const inject = ["tools"];
@@ -31,6 +33,9 @@ export const Config = Schema.object({
   bskPath: Schema.string()
     .default("bsk")
     .description("Path to the bsk CLI binary (defaults to resolving `bsk` from PATH)."),
+  sessionStateDirectory: Schema.string().description(
+    "Directory for durable browser start recovery records; defaults to BSK_HOME/dsh-starts scoped by working directory and CLI.",
+  ),
   defaultTimeoutMs: Schema.number()
     .default(120_000)
     .description("Default per-command timeout in milliseconds."),
@@ -59,6 +64,7 @@ export type Config = PluginConfig;
 /** Test seams: swap the process runner (unit tests never spawn a real bsk). */
 export interface ApplyOptions {
   runnerFactory?: (bskPath: string) => BskRunner;
+  startJournal?: StartJournal;
 }
 
 export function apply(
@@ -68,6 +74,7 @@ export function apply(
 ): void {
   const resolved: PluginConfig = {
     bskPath: config.bskPath ?? "bsk",
+    sessionStateDirectory: config.sessionStateDirectory,
     defaultTimeoutMs: config.defaultTimeoutMs ?? 120_000,
     maxSessions: config.maxSessions ?? 5,
     observationEnabled: config.observationEnabled ?? true,
@@ -90,6 +97,16 @@ export function apply(
     },
   });
 
+  const deps: ToolDeps = { ctx, runner, registry, config: resolved, observation, queue };
+  const journal =
+    options.startJournal ??
+    new DiskStartJournal(
+      resolved.sessionStateDirectory ?? defaultStartJournalDirectory(resolved.bskPath),
+    );
+  if (journal instanceof DiskStartJournal) journal.recover();
+  const starts = (deps.starts = new SessionStarts(deps, journal));
+  void starts.reconcile().catch((error) => console.warn("Browser start recovery failed", error));
+
   // Progressive disclosure of the BSK agent skill (catalog entry resident,
   // body on demand) through the official skill seam; silent no-op when the
   // composition lacks it. With lazyTools on, the skill entry is initially the
@@ -101,21 +118,20 @@ export function apply(
   // exact agent context at startup so DSH always loads the browser_* protocol
   // instructions; the shared CLI skill remains untouched for other agents.
   const disarmAgentSkill = armAgentScopedBskSkill(ctx);
-  const registerSuite = () =>
-    registerBrowserTools({ ctx, runner, registry, config: resolved, observation, queue });
+  const registerSuite = () => registerBrowserTools(deps);
   const removeSuite = resolved.lazyTools ? armLazyTools(ctx, registerSuite) : registerSuite();
   // Route registration rides ctx.inject: the webServer service may be provided
   // AFTER this plugin loads, and in headless compositions it never appears (the
   // callback simply never runs, leaving the rest of the plugin unaffected).
   let removeRoutes: () => void = () => {};
   ctx.inject(["webServer"], (injected) => {
-    removeRoutes = registerObservationRoutes(injected, observation);
+    removeRoutes = registerObservationRoutes(injected, observation, starts);
     return () => removeRoutes();
   });
   // Reap a conversation's browsers when the conversation itself is archived:
   // archived sessions are hidden from every surface, so their Agent Windows
   // would otherwise linger unreachable until idle timeout or unload.
-  const disarmArchiveCleanup = armArchiveCleanup(ctx, registry, observation);
+  const disarmArchiveCleanup = armArchiveCleanup(ctx, starts);
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error. Uses --version on
@@ -143,11 +159,7 @@ export function apply(
       unregisterSkill();
       removeRoutes();
       disarmArchiveCleanup();
-      runner.killAll();
-      const stops = registry
-        .ownedIds()
-        .map((sessionId) => observation.stopSession(sessionId).catch(() => false));
-      return Promise.all(stops).then(() => observation.dispose());
+      return starts.dispose().then(() => observation.dispose());
     };
   });
 }

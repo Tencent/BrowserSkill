@@ -7,7 +7,13 @@
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { DEBUG_PARAMETERS } from "./debug-tool";
-import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM, WAIT_UNTIL_PARAM } from "./tool-params";
+import {
+  SESSION_PARAM,
+  SESSION_STOP_PARAMS,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+  WAIT_UNTIL_PARAM,
+} from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
 
 const DEVICE_PRESETS = [
@@ -100,14 +106,16 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     description:
       "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
       "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/browser " +
-      "are optional. For stop, session is optional and defaults to the current owned session.",
+      "are optional. For stop, specify session or requestId (not both), or omit both to retry an " +
+      "unacknowledged stop before selecting the current owned session. If several stops await " +
+      "acknowledgement, specify a target. Once accepted, cleanup continues if the call is aborted.",
     actions: {
       start: "session.start",
       stop: "session.stop",
       list: "session.list",
     },
     parameters: {
-      session: SESSION_PARAM,
+      ...SESSION_STOP_PARAMS,
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },

@@ -25,6 +25,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Context } from "@deepseek-ai/cordis";
 import type { ObservationService } from "./observation";
+import type { SessionStarts } from "./session-starts";
 
 /** Structural view of the dsh-host-webserver route seam. */
 interface WebServerLike {
@@ -101,6 +102,7 @@ function fenceRejected(req: IncomingMessage, res: ServerResponse): boolean {
 export function registerObservationRoutes(
   ctx: Context,
   observation: ObservationService,
+  lifecycle: Pick<SessionStarts, "stop">,
 ): () => void {
   const webServer = ctx.get("webServer") as WebServerLike | undefined;
   if (webServer === undefined) {
@@ -232,8 +234,8 @@ export function registerObservationRoutes(
             sendJson(res, 400, { error: "sessionId required" });
             return;
           }
-          void observation.stopSession(sessionId).then(
-            (stopped) => sendJson(res, 200, { stopped }),
+          void lifecycle.stop({ sessionId }).then(
+            () => sendJson(res, 200, { stopped: true }),
             () => sendJson(res, 500, { error: "stop failed" }),
           );
         });

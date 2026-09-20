@@ -140,7 +140,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
           const cdp = new ChromiumCdp(api);
           const sessions = new SessionManager({
             agentWindow: {
-              create: async () => 100,
+              create: async () => ({ windowId: 100, initialTabIds: [7] }),
               remove: async () => {},
               ensureActiveTab: async () => 7,
             },

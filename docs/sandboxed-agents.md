@@ -10,6 +10,35 @@ The same setup applies to Windows agents whose shell tasks terminate child proce
 Ordinary local use still auto-starts the daemon. No sandbox detection, service
 installation or global change to home-directory resolution is required.
 
+## Windows background startup
+
+On Windows, background startup inherits only dedicated standard handles and
+requests breakaway from the launching process's Job Object. The daemon is
+resumed only after verifying it belongs to no Job, including outer Jobs in a
+nested hierarchy. The command returns success after verifying local IPC; its
+captured stdout and stderr can reach EOF independently of the daemon lifetime.
+
+A host that prohibits breakaway cannot launch an independent background daemon
+through this path. `bsk daemon start` and implicit startup return a bounded
+error with setup instructions instead of retrying as a host-owned background
+process. An already reachable daemon is still reused, even from a restrictive
+Job. Use the persistent host setup below when breakaway is unavailable.
+
+`--foreground` deliberately remains owned by its host task. Run that task
+outside the per-command Job and keep it alive; the flag does not bypass Job
+termination. Breakaway is also not a guarantee against an explicit process-tree
+kill or host shutdown. Windows Job termination does not give a daemon an
+opportunity to log a shutdown reason.
+
+Query commands retain their existing automatic-start behavior. Set
+`BSK_AUTO_START=0` for probes that must not start a daemon, regardless of whether
+stdout is a terminal or a pipe.
+
+The startup deadline limits how long the initiating command waits. It does not
+cancel a running daemon: another caller may already be using that service, or
+it may finish publishing immediately after the deadline. Initialization errors
+exit in the daemon itself; use `bsk daemon stop` for an explicit shutdown.
+
 ## 1. Reuse or choose the daemon directory
 
 For an existing daemon, reuse its `BSK_HOME` and OS user, or its default directory

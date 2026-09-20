@@ -48,7 +48,23 @@ function fakeRunner(responses: Record<string, unknown>) {
     calls,
     runner: {
       async run(args: string[], options: BskRunOptions = {}): Promise<BskRunResult> {
-        calls.push({ args, options });
+        // Generic tool tests omit the claim acknowledgement from their business-call log; lifecycle tests exercise it explicitly.
+        if (!args.includes("--claim") && !args.includes("--prepare")) calls.push({ args, options });
+        if (args[0] === "session" && args[1] === "request") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              state: args.includes("--prepare")
+                ? "prepared"
+                : args.includes("--claim")
+                  ? "active"
+                  : "closed",
+            }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
         if (options.signal?.aborted) {
           return { code: null, stdout: "", stderr: "", timedOut: false, aborted: true };
         }
@@ -232,6 +248,23 @@ describe("tool registration", () => {
     }
   });
 
+  it("exposes optional stop targets and retry guidance in the public session schema", () => {
+    const { tools } = setup({});
+    const tool = tools.get("browser_session")!;
+    const properties = tool.parameters.properties as Record<string, unknown> | undefined;
+    expect(properties?.requestId).toMatchObject({
+      type: "string",
+      description: expect.stringMatching(/stop.*mutually exclusive with session/i),
+    });
+    expect(properties?.session).toMatchObject({
+      type: "string",
+      description: expect.stringMatching(/unacknowledged stop.*current session/i),
+    });
+    expect(tool.parameters.required).toEqual(["action"]);
+    expect(tool.description).toMatch(/session or requestId/);
+    expect(tool.description).toMatch(/unacknowledged stop/);
+  });
+
   it("requires an action on every public tool", async () => {
     const { tools } = setup({});
     for (const name of Object.keys(EXPECTED_ACTIONS)) {
@@ -278,7 +311,7 @@ describe("action dispatch", () => {
 
     expect(registry.current()).toBe("s1");
     expect(calls.map(({ args }) => args)).toEqual([
-      ["session", "start"],
+      ["session", "start", "--request-id", expect.any(String)],
       ["navigate", "--session", "s1", "https://example.test/"],
       ["observe", "--session", "s1"],
       ["fill", "--session", "s1", "--value", "hello", "@e1"],
@@ -322,6 +355,8 @@ describe("session.start", () => {
     expect(calls[0].args).toEqual([
       "session",
       "start",
+      "--request-id",
+      expect.any(String),
       "--width",
       "1280",
       "--height",
@@ -348,7 +383,7 @@ describe("session.start", () => {
     await expect(tool?.execute({ url: "https://example.com" }, makeExec())).rejects.toThrow(
       /navigate/,
     );
-    expect(calls.some((c) => c.args.join(" ") === "session stop s1")).toBe(true);
+    expect(calls.some((c) => c.args[1] === "request" && c.args.includes("--cancel"))).toBe(true);
     expect(registry.current()).toBeUndefined();
   });
 });
@@ -460,7 +495,7 @@ describe("session.stop / list", () => {
     const stop = tools.get("session.stop");
     const value = (await stop?.execute({}, makeExec())) as { stopped: string };
     expect(value.stopped).toBe("s1");
-    expect(calls[1].args).toEqual(["session", "stop", "s1"]);
+    expect(calls[1].args).toEqual(["session", "request", expect.any(String), "--cancel"]);
     expect(registry.current()).toBeUndefined();
   });
 
@@ -475,8 +510,20 @@ describe("session.stop / list", () => {
       sessions: { sessionId: string; current: boolean }[];
     };
     expect(value.sessions).toEqual([
-      { sessionId: "s1", browserInstanceId: "chrome-1", current: false },
-      { sessionId: "s2", browserInstanceId: "chrome-1", current: true },
+      {
+        sessionId: "s1",
+        browserInstanceId: "chrome-1",
+        current: false,
+        state: "active",
+        requestId: expect.any(String),
+      },
+      {
+        sessionId: "s2",
+        browserInstanceId: "chrome-1",
+        current: true,
+        state: "active",
+        requestId: expect.any(String),
+      },
     ]);
     // Registry-only: listing must not call the daemon at all.
     expect(calls.some((c) => c.args.join(" ").startsWith("session list"))).toBe(false);
@@ -1239,7 +1286,17 @@ describe("screenshot scratch file lifecycle", () => {
           if (args[0] === "session") {
             return {
               code: 0,
-              stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+              stdout: JSON.stringify(
+                args[1] === "request"
+                  ? {
+                      state: args.includes("--prepare")
+                        ? "prepared"
+                        : args.includes("--claim")
+                          ? "active"
+                          : "closed",
+                    }
+                  : { session_id: "s1", browser_instance_id: "chrome-1" },
+              ),
               stderr: "",
               timedOut: false,
               aborted: false,
@@ -1346,7 +1403,17 @@ describe("observation action instrumentation timing", () => {
         if (args[0] === "session") {
           return {
             code: 0,
-            stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+            stdout: JSON.stringify(
+              args[1] === "request"
+                ? {
+                    state: args.includes("--prepare")
+                      ? "prepared"
+                      : args.includes("--claim")
+                        ? "active"
+                        : "closed",
+                  }
+                : { session_id: "s1", browser_instance_id: "chrome-1" },
+            ),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -1492,7 +1559,7 @@ describe("wheel action", () => {
 
 it("inspect.observe forwards continuation cursors and exposes the next cursor", async () => {
   const { tools, calls } = setup({
-    "session start": { session_id: "s1", agent_window_id: 100 },
+    "session start": { session_id: "s1", browser_instance_id: "b1", agent_window_id: 100 },
     observe: { ...SNAPSHOT_REPLY, truncated: true, next_cursor: "page-three" },
   });
   await startSession(tools);

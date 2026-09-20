@@ -135,6 +135,7 @@ function makeFakeCdp(
   let busyUntil = 0;
   const handlers: Record<string, (params: unknown, tabId: number) => unknown> = {
     "Page.enable": () => ({}),
+    "Network.enable": () => ({}),
     "Page.setLifecycleEventsEnabled": () => ({}),
     "Page.getFrameTree": () => ({
       frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } },

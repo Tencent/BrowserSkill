@@ -74,20 +74,17 @@ const KILL_GRACE_MS = 3000;
 // Windows IPC may spend 5s connecting, 2s cancelling, 2s settling,
 // and up to 5s releasing the entire batch of caller-owned transfers.
 const WINDOWS_KILL_GRACE_MS = 15_000;
+// A descendant may retain stdio after the CLI exits, preventing close.
+const EXIT_DRAIN_GRACE_MS = 1000;
 const SESSION_BUSY_RETRY_DELAY_MS = 100;
 
 export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): BskRunner {
   const live = new Map<ChildProcess, string | undefined>();
   const windows = process.platform === "win32";
-  const cancelling = new Set<ChildProcess>();
+  const cancelling = new Map<ChildProcess, ReturnType<typeof setTimeout>>();
 
   function killChild(child: ChildProcess): void {
     if (child.exitCode !== null || child.signalCode !== null || cancelling.has(child)) return;
-    cancelling.add(child);
-    // Node kills Windows children outright for SIGINT. EOF asks the CLI to
-    // send its existing cancel RPC and wait for browser reconciliation.
-    if (windows && child.stdin) child.stdin.end();
-    else child.kill("SIGINT");
     const force = setTimeout(
       () => {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -95,10 +92,11 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
       windows ? WINDOWS_KILL_GRACE_MS : KILL_GRACE_MS,
     );
     force.unref();
-    child.once("close", () => {
-      clearTimeout(force);
-      cancelling.delete(child);
-    });
+    cancelling.set(child, force);
+    // Node kills Windows children outright for SIGINT. EOF asks the CLI to
+    // send its existing cancel RPC and wait for browser reconciliation.
+    if (windows && child.stdin) child.stdin.end();
+    else child.kill("SIGINT");
   }
 
   return {
@@ -126,7 +124,7 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
               : undefined,
           );
           // A child exiting while cancellation closes stdin may report EPIPE.
-          // Its close/error event remains the authority for the run result.
+          // Process completion remains the authority for the run result.
           child.stdin?.on("error", () => {});
         } catch (error) {
           reject(error);
@@ -159,26 +157,47 @@ export function createBskRunner(bskPath: string, spawnImpl: SpawnImpl = spawn): 
           aborted = true;
           killChild(child);
         };
+        let settled = false;
+        let drainTimer: ReturnType<typeof setTimeout> | undefined;
+        const settle = () => {
+          if (settled) return false;
+          settled = true;
+          if (timer !== undefined) clearTimeout(timer);
+          if (drainTimer !== undefined) clearTimeout(drainTimer);
+          const force = cancelling.get(child);
+          if (force !== undefined) clearTimeout(force);
+          cancelling.delete(child);
+          options.signal?.removeEventListener("abort", onAbort);
+          child.off("exit", onExit);
+          child.off("close", onClose);
+          live.delete(child);
+          return true;
+        };
+        const onClose = (code: number | null) => {
+          if (!settle()) return;
+          resolve({ code, stdout, stderr, timedOut, aborted });
+        };
+        const onExit = (code: number | null) => {
+          // Keep collecting buffered output; normal close still finishes immediately.
+          // Keep this timer referenced if exit released the last process handle.
+          drainTimer = setTimeout(() => {
+            onClose(code);
+            child.stdin?.destroy();
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+          }, EXIT_DRAIN_GRACE_MS);
+        };
+
+        child.on("error", (error) => {
+          if (settle()) reject(error);
+        });
+        child.on("close", onClose);
+        child.once("exit", onExit);
         if (options.signal?.aborted) {
           onAbort();
         } else {
           options.signal?.addEventListener("abort", onAbort, { once: true });
         }
-
-        const settle = () => {
-          if (timer !== undefined) clearTimeout(timer);
-          options.signal?.removeEventListener("abort", onAbort);
-          live.delete(child);
-        };
-
-        child.on("error", (error) => {
-          settle();
-          reject(error);
-        });
-        child.on("close", (code) => {
-          settle();
-          resolve({ code, stdout, stderr, timedOut, aborted });
-        });
       });
     },
     killAll() {

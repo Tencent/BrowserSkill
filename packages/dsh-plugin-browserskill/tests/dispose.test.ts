@@ -7,6 +7,7 @@ import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
 import { describe, expect, it } from "vitest";
 import { apply } from "../src/index";
 import type { BskRunOptions, BskRunResult } from "../src/runner";
+import { memoryStartJournal } from "../src/start-journal";
 
 interface FakeCall {
   args: string[];
@@ -46,6 +47,14 @@ describe("dispose cleanup ownership", () => {
         calls.push({ args });
         const joined = args.join(" ");
         if (joined.startsWith("status")) return ok({});
+        if (joined.startsWith("session request"))
+          return ok({
+            state: args.includes("--prepare")
+              ? "prepared"
+              : args.includes("--claim")
+                ? "active"
+                : "closed",
+          });
         if (joined.startsWith("session start")) return ok(startReplies.shift());
         if (joined.startsWith("snapshot")) {
           return ok({ text: "x", ref_count: 1, tab_id: 7, truncated: false });
@@ -71,7 +80,11 @@ describe("dispose cleanup ownership", () => {
         disposers.push(fn());
       },
     };
-    apply(ctx as never, { maxSessions: 5, lazyTools: false }, { runnerFactory: () => runner });
+    apply(
+      ctx as never,
+      { maxSessions: 5, lazyTools: false },
+      { runnerFactory: () => runner, startJournal: memoryStartJournal() },
+    );
 
     const session = tools.get("browser_session");
     const inspect = tools.get("browser_inspect");
@@ -87,8 +100,9 @@ describe("dispose cleanup ownership", () => {
 
     const stops = calls
       .map((call) => call.args.join(" "))
-      .filter((joined) => joined.startsWith("session stop"));
-    expect(stops.sort()).toEqual(["session stop own1", "session stop own2"]);
+      .filter((joined) => joined.startsWith("session request") && joined.endsWith("--cancel"));
+    expect(stops).toHaveLength(2);
+    expect(new Set(stops).size).toBe(2);
     expect(stops.some((joined) => joined.includes("ext9"))).toBe(false);
   });
 });

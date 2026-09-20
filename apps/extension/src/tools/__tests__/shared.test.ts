@@ -12,7 +12,7 @@ import {
 
 function fakeAgentWindow() {
   return {
-    create: vi.fn(async () => 100),
+    create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
   };

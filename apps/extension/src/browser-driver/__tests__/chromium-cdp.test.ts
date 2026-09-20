@@ -955,3 +955,146 @@ describe("document-bound references", () => {
     cdp.dispose();
   });
 });
+describe("controlled background execution", () => {
+  it("does not emulate passive reads and releases control while retaining passive attachments", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    cdp.trackSessionTab("reader", 4);
+    await cdp.send(4, "Runtime.evaluate", {});
+    expect(api.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      expect.anything(),
+    );
+    await cdp.acquireBackgroundExecution("agent", 4);
+    await cdp.acquireBackgroundExecution("agent", 4);
+    await cdp.releaseSessionTab("agent", 4);
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      { enabled: false },
+    );
+    expect(api.detach).not.toHaveBeenCalled();
+    await cdp.detachSession("reader");
+    expect(api.detach).toHaveBeenCalledOnce();
+    cdp.dispose();
+  });
+
+  it("restores desired execution on reattach before sending page commands", async () => {
+    const { api, onDetach } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.acquireBackgroundExecution("agent", 4);
+    onDetach.fire({ tabId: 4 }, "canceled_by_user");
+    vi.mocked(api.sendCommand).mockClear();
+    await cdp.send(4, "Runtime.evaluate", {});
+    const calls = vi.mocked(api.sendCommand).mock.calls.map((call) => call[1]);
+    expect(calls.indexOf("Emulation.setFocusEmulationEnabled")).toBeLessThan(
+      calls.indexOf("Runtime.evaluate"),
+    );
+    await cdp.detachSession("agent");
+    expect(api.detach).toHaveBeenCalled();
+    cdp.dispose();
+  });
+
+  it("does not disable another controller and never applies to a different tab", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.acquireBackgroundExecution("one", 4);
+    await cdp.acquireBackgroundExecution("two", 4);
+    await cdp.send(5, "Runtime.evaluate", {});
+    await cdp.releaseSessionTab("one", 4);
+    expect(api.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      { enabled: false },
+    );
+    expect(api.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 5 },
+      "Emulation.setFocusEmulationEnabled",
+      expect.anything(),
+    );
+    await cdp.releaseSessionTab("two", 4);
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      { enabled: false },
+    );
+    cdp.dispose();
+  });
+
+  it("undoes an in-flight enable when stop wins the race", async () => {
+    const { api } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    let finish!: () => void;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method, params) => {
+      if (
+        method === "Emulation.setFocusEmulationEnabled" &&
+        (params as { enabled: boolean }).enabled
+      ) {
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      }
+      return {};
+    });
+    const acquiring = cdp.acquireBackgroundExecution("agent", 4);
+    const rejected = expect(acquiring).rejects.toThrow("released");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    const releasing = cdp.detachSession("agent");
+    finish();
+    await rejected;
+    await releasing;
+    expect(api.sendCommand).toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      { enabled: false },
+    );
+    expect(cdp.isAttached(4)).toBe(false);
+    cdp.dispose();
+  });
+
+  it("reports unsupported emulation and leaves no desired policy to restore", async () => {
+    const { api, onDetach } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Emulation.setFocusEmulationEnabled") throw new Error("Method not found");
+      return {};
+    });
+    await expect(cdp.acquireBackgroundExecution("agent", 4)).rejects.toThrow("Method not found");
+    onDetach.fire({ tabId: 4 }, "canceled_by_user");
+    vi.mocked(api.sendCommand).mockClear();
+    await cdp.send(4, "Runtime.evaluate", {});
+    expect(api.sendCommand).not.toHaveBeenCalledWith(
+      { tabId: 4 },
+      "Emulation.setFocusEmulationEnabled",
+      expect.anything(),
+    );
+    await cdp.detachSession("agent");
+    cdp.dispose();
+  });
+});
+
+it("detaches on failed policy release even when a passive reader remains", async () => {
+  const { api } = fakeApi();
+  const cdp = new ChromiumCdp(api);
+  await cdp.acquireBackgroundExecution("agent", 4);
+  cdp.trackSessionTab("reader", 4);
+  vi.mocked(api.sendCommand).mockImplementation(async (_target, method, params) => {
+    if (
+      method === "Emulation.setFocusEmulationEnabled" &&
+      !(params as { enabled: boolean }).enabled
+    )
+      throw new Error("disable failed");
+    return {};
+  });
+  await expect(cdp.releaseSessionTab("agent", 4)).rejects.toThrow("disable failed");
+  expect(api.detach).toHaveBeenCalledWith({ tabId: 4 });
+  vi.mocked(api.sendCommand).mockClear();
+  await cdp.send(4, "Runtime.evaluate", {});
+  expect(api.sendCommand).not.toHaveBeenCalledWith(
+    { tabId: 4 },
+    "Emulation.setFocusEmulationEnabled",
+    expect.anything(),
+  );
+  cdp.dispose();
+});

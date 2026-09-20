@@ -62,6 +62,11 @@ unknown effects or switch backends to bypass limits. Borrow confirmation still a
 
 - Stale ref: observe, then retry the intended action once.
 - Unknown tab/session: list owned resources or start a session; never guess IDs.
+- Failed or interrupted session stop: accepted cleanup continues in the background.
+  Retry the same stop; a completed previous stop returns `alreadyClosed: true`.
+  If several stops are pending, specify `session` or the owned `requestId` from the
+  result/list/error (not both). A request ID targets the original operation even if
+  the short session ID is reused. Never switch to another session just to retry cleanup.
 - Timeout/unknown effect: inspect before retrying; the action may have happened.
 - Unconfirmed fill: read the field. Formatting may satisfy the goal; correct only a
   remaining difference instead of blindly refilling or requesting help.
@@ -93,27 +98,24 @@ new observe/snapshot or changed page identity invalidates it.
 
 ## Website debugging
 
-Use `browser_inspect(action: "debug", session, debugAction)`. Discover `capabilities`;
-`start` before reproduction. Read `operations`/`requests`, then `operation`/`request`
-by `id` (`part: "response"` for bodies). Missing is unknown; HTTP 200 is not success.
-Output defaults to 64 KiB; `budget`: 4096..262144, `limit`: 1..100.
-Filters: `url`, `method`, `resourceType`, `status`, `state`, `kind`; `fields` selects metadata.
-Follow `next_since`/`next_offset`; check `output.omitted`, `run.storage`, `run.coverage`.
-`pin`/`unpin` protect completed requests against capacity eviction, not expiry.
-`stop` saves. `export` with a new `output` path avoids filling context.
-`activity` gives command ID. `wait(commandId, waitMs: 0..60000)` observes completion,
-not success; it never resends or cancels the original command.
+`browser_inspect(action: "debug", session, debugAction)`: read `capabilities` for
+limits/filters (default 64 KiB); `start` before reproduction.
+List `operations`/`requests`; read `operation`/`request` by `id`, `part: "response"`
+for bodies. Missing is unknown; HTTP 200 is not success.
+Follow `next_since`/`next_offset`; inspect `output.omitted`, `run.storage`, `run.coverage`.
+`pin`/`unpin` protect completed requests from capacity eviction, not expiry.
+`stop` saves; `export` to a new `output` file.
+`activity` gives command ID; `wait`: completion, not success; never resends/cancels.
 
-`performance` returns native navigation/paint/CLS/long-task metrics; check states, reasons and visibility.
-`aggregate` groups method/path with P95/errors/slow counts (`slowMs`, default 1000).
-`duplicates` finds suspected equal URL/body/document bursts (`windowMs`, default 1000); retries may be valid.
-Both default to business traffic, excluding rules/replays; `includeControlled` opts in.
-Inspect request IDs and gaps; paginate with `offset`/`next_offset` after capture stops.
+`performance`: navigation/paint/CLS/long tasks; check states/reasons/visibility.
+`aggregate`: method/path, P95/errors/slow counts. `duplicates`: suspected equal
+URL/body/document bursts; retries may be valid. Both default to business traffic;
+`includeControlled` adds rules/replays. Inspect request IDs/gaps; paginate with
+`offset`/`next_offset` after stopping.
 
-Authorized `rule_add` takes JSON-string `rule` (see schema).
-Default one Fetch/XHR match; first rule wins. `rules` lists state;
-`rule_enable`, `rule_disable`, `rule_remove` take `id`. Capture end clears rules.
-`replay` takes source `id` and JSON-string `replay`: `{"key":"attempt-1"}`.
-It may write server data. Reuse the key on uncertain retries. Same-origin only,
-using current cookies; replace missing/redacted values. It does not update the UI.
-Controls need active capture; history retains provenance.
+Authorized `rule_add` takes JSON-string `rule` (schema): one Fetch/XHR match by
+default, first wins. `rules` lists state; `rule_enable`/`rule_disable`/`rule_remove` take `id`.
+Capture end clears rules. `replay`: source `id`, JSON-string `replay` with `key`.
+May write server data; reuse the key on uncertain retries. Same-origin,
+current cookies; replace missing/redacted values. No UI update. Controls require
+active capture; history retains provenance.

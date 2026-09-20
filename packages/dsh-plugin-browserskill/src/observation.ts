@@ -19,7 +19,7 @@ import { join } from "node:path";
 import type { Context } from "@deepseek-ai/cordis";
 import { sniffImageMediaType } from "./image";
 import type { KeyedExecutor } from "./queue";
-import { BskError, type BskRunner, parseBskJson, runWithSessionBusyRetry } from "./runner";
+import type { BskRunner } from "./runner";
 import type { SessionRegistry } from "./sessions";
 
 /** One owned session's live observation record (wire-stable shape). */
@@ -203,7 +203,7 @@ export class ObservationService {
     this.put({
       sessionId,
       ...(url !== undefined ? { url } : {}),
-      action: "idle",
+      action: this.restingAction(sessionId),
       since: this.scheduler.now(),
       ...(dshSessionIds.length > 0 ? { dshSessionIds } : {}),
     });
@@ -281,7 +281,11 @@ export class ObservationService {
     if (entry === undefined || entry.dead === true) return;
     const now = this.scheduler.now();
     this.lastActivity.set(sessionId, now);
-    const next: SessionObservation = { ...entry, action: "idle", since: now };
+    const next: SessionObservation = {
+      ...entry,
+      action: this.restingAction(sessionId),
+      since: now,
+    };
     if (error !== undefined) next.lastError = error;
     else delete next.lastError;
     this.put(next);
@@ -307,55 +311,6 @@ export class ObservationService {
     const target = sessionId ?? this.deps.registry.current();
     if (target === undefined || !this.deps.registry.isOwned(target)) return false;
     return this.deps.runner.killFor(target) > 0;
-  }
-
-  /**
-   * Stop one owned session and close its Agent Window (the overlay's stop
-   * button — same end state as `browser_session` action=stop). Never waits behind a
-   * hung in-flight command: tool children are killed first so the session's
-   * keyed queue drains immediately, and no further captures queue up. A
-   * session the daemon already forgot stops idempotently — the goal state
-   * (entry gone) is identical.
-   * @returns false only for a foreign session; bsk failures reject so callers
-   * can preserve the structured error instead of silently leaving a ghost.
-   */
-  async stopSession(sessionId: string, signal?: AbortSignal): Promise<boolean> {
-    if (!this.deps.registry.isOwned(sessionId)) return false;
-    const releaseForeground = this.acquireForeground(sessionId);
-    let actionError: string | undefined;
-    this.beginAction(sessionId, "stopping");
-    try {
-      this.deps.runner.killFor(sessionId);
-      const result = await this.deps.queue.run(
-        sessionId,
-        () =>
-          runWithSessionBusyRetry(
-            () =>
-              this.deps.runner.run(["session", "stop", sessionId], {
-                signal,
-                timeoutMs: 30_000,
-                tag: sessionId,
-              }),
-            signal,
-          ),
-        signal,
-      );
-      if (result.aborted) throw abortError();
-      try {
-        parseBskJson(result, "session stop");
-      } catch (error) {
-        if (!isSessionNotFoundError(error)) throw error;
-      }
-      this.deps.registry.remove(sessionId);
-      this.removeSession(sessionId);
-      return true;
-    } catch (error) {
-      actionError = error instanceof Error ? error.message.split("\n")[0] : String(error);
-      throw error;
-    } finally {
-      this.endAction(sessionId, actionError);
-      releaseForeground();
-    }
   }
 
   /**
@@ -408,12 +363,18 @@ export class ObservationService {
     const entry = this.observations.get(sessionId);
     return (
       this.deps.options.enabled &&
+      this.deps.registry.isUsable(sessionId) &&
       !this.disposed &&
       this.thumbnailViewers > 0 &&
       !this.foregroundDepth.has(sessionId) &&
       entry !== undefined &&
       entry.dead !== true
     );
+  }
+
+  private restingAction(sessionId: string): string {
+    const state = this.deps.registry.stateFor(sessionId);
+    return state === "cleanup" ? "awaiting cleanup" : state === "starting" ? "starting" : "idle";
   }
 
   /** Schedule the next capture for a session; `delayMs` 0 means "as soon as the event loop allows". */
@@ -533,16 +494,6 @@ export class ObservationService {
 
 function isSessionNotFoundCode(code: string | undefined): boolean {
   return code === "not_found" || code === "session_not_found";
-}
-
-function isSessionNotFoundError(error: unknown): boolean {
-  return error instanceof BskError && isSessionNotFoundCode(error.code);
-}
-
-function abortError(): Error {
-  const error = new Error("tool call aborted");
-  error.name = "AbortError";
-  return error;
 }
 
 /** Map a bsk command label onto its observation action verb. */

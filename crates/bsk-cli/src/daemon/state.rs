@@ -31,6 +31,7 @@ pub struct DaemonState {
     pub config: DaemonConfig,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
+    pub session_requests: super::session_requests::SessionRequests,
     /// Per-session serial dispatch queues for `tool.*` RPCs (M6.5,
     /// design §5). Populated by `start_session`, drained by
     /// `stop_session` / browser disconnect.
@@ -81,6 +82,7 @@ impl DaemonState {
             config,
             browsers,
             sessions,
+            session_requests: Default::default(),
             tool_queues,
             abort_registry,
             tool_inflight,

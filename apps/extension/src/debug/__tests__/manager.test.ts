@@ -11,7 +11,7 @@ async function fixture(archive?: DebugArchive) {
   let window = 100;
   const sessions = new SessionManager({
     agentWindow: {
-      create: async () => window++,
+      create: async () => ({ windowId: window++, initialTabIds: [7] }),
       remove: async () => {},
       ensureActiveTab: async () => 7,
     },

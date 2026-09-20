@@ -33,6 +33,11 @@ pub enum Method {
 
     #[serde(rename = "session.start")]
     SessionStart,
+    /// Recoverable CLI start; distinct method prevents unsafe fallback on old daemons.
+    #[serde(rename = "session.start_tracked")]
+    SessionStartTracked,
+    #[serde(rename = "session.request")]
+    SessionRequest,
     #[serde(rename = "session.stop")]
     SessionStop,
     #[serde(rename = "session.stop_all")]
@@ -224,6 +229,8 @@ impl Method {
 
             // Session lifecycle — not gated.
             Method::SessionStart
+            | Method::SessionStartTracked
+            | Method::SessionRequest
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList

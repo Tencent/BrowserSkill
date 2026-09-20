@@ -31,6 +31,7 @@ import type {
   NetworkEntryKind,
   NetworkResult,
 } from "@/transport/types";
+import { BackgroundExecution } from "./background-execution";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -167,6 +168,11 @@ export class ChromiumCdp {
   private readonly attachmentIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
+  private readonly backgroundExecution = new BackgroundExecution(
+    (tabId) => this.attachmentIds.get(tabId),
+    (tabId, enabled) =>
+      this.api.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled }),
+  );
   private readonly tabOwners = new Map<number, Set<string>>();
   private readonly dialogBuffers = new Map<number, JavaScriptDialogInfo[]>();
   private readonly dialogSequences = new Map<number, number>();
@@ -208,6 +214,30 @@ export class ChromiumCdp {
 
   /** Attach to `tabId` if we haven't already in this driver. */
   async ensureAttached(tabId: number): Promise<void> {
+    await this.ensureRawAttached(tabId);
+    await this.backgroundExecution.synchronize(tabId);
+  }
+
+  /** Only explicit automation control may retain the focus/visibility override. */
+  async acquireBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
+    const retained = this.backgroundExecution.has(sessionId, tabId);
+    this.trackSessionTab(sessionId, tabId);
+    this.backgroundExecution.retain(sessionId, tabId);
+    try {
+      await this.ensureAttached(tabId);
+      if (!this.backgroundExecution.has(sessionId, tabId)) {
+        throw new Error("Background execution was released during setup");
+      }
+    } catch (error) {
+      if (!retained) {
+        this.backgroundExecution.release(sessionId, tabId);
+        await this.backgroundExecution.synchronize(tabId).catch(() => {});
+      }
+      throw error;
+    }
+  }
+
+  private async ensureRawAttached(tabId: number): Promise<void> {
     // Returning a tab clears the cache before Chrome finishes detaching.
     // New observers must wait before opening the next connection to that tab.
     const detaching = this.detachInFlight.get(tabId);
@@ -263,9 +293,7 @@ export class ChromiumCdp {
    * `chrome.runtime.lastError`.
    */
   async send<T = unknown>(tabId: number, method: string, params?: object): Promise<T> {
-    if (!this.attachedTabs.has(tabId)) {
-      await this.ensureAttached(tabId);
-    }
+    await this.ensureAttached(tabId);
     try {
       const result = await this.api.sendCommand({ tabId }, method, params ?? {});
       return result as T;
@@ -275,9 +303,7 @@ export class ChromiumCdp {
   }
 
   async sendToTarget<T = unknown>(target: CdpTarget, method: string, params?: object): Promise<T> {
-    if (!this.attachedTabs.has(target.tabId)) {
-      await this.ensureAttached(target.tabId);
-    }
+    await this.ensureAttached(target.tabId);
     try {
       return (await this.api.sendCommand(target, method, params ?? {})) as T;
     } catch (err) {
@@ -455,6 +481,7 @@ export class ChromiumCdp {
     this.attachedTabs.delete(tabId);
     this.attachmentIds.delete(tabId);
     this.options.onDocumentChanged?.(tabId);
+    this.backgroundExecution.invalidate(tabId);
     this.clearDialogState(tabId);
     this.clearConsoleState(tabId);
     this.clearNetworkState(tabId);
@@ -488,13 +515,23 @@ export class ChromiumCdp {
 
   /** Release one session's claim, preserving attachments still used by another. */
   async releaseSessionTab(sessionId: string, tabId: number): Promise<void> {
+    this.backgroundExecution.release(sessionId, tabId);
     const owners = this.tabOwners.get(tabId);
-    if (!owners?.delete(sessionId) || owners.size > 0) return;
-    this.tabOwners.delete(tabId);
-    // An observation may still be attaching when the tab is returned. Wait
-    // for it so detach cannot miss the attachment or remove a new owner's claim.
+    owners?.delete(sessionId);
+    if (owners?.size === 0) this.tabOwners.delete(tabId);
+    // Remove the old claim before yielding: a new acquisition must survive this
+    // cleanup, including when it uses the same session id.
     await this.attachInFlight.get(tabId)?.catch(() => {});
-    if (!this.tabOwners.has(tabId)) await this.detach(tabId);
+    try {
+      await this.backgroundExecution.synchronize(tabId);
+    } catch (error) {
+      // A failed disable must not leave a returned user page emulated just
+      // because a passive reader still owns the debugger. Readers can reattach.
+      await this.detach(tabId);
+      throw error;
+    } finally {
+      if (!this.tabOwners.has(tabId)) await this.detach(tabId);
+    }
   }
 
   /** Debug body reads must never resurrect a detached / returned tab. */
@@ -522,6 +559,7 @@ export class ChromiumCdp {
     const tabs = Array.from(this.attachedTabs);
     this.attachInFlight.clear();
     this.tabOwners.clear();
+    this.backgroundExecution.clear();
     this.attachedTabs.clear();
     this.attachmentIds.clear();
     for (const tabId of tabs) this.options.onDocumentChanged?.(tabId);
@@ -887,7 +925,11 @@ export class ChromiumCdp {
         this.attachedTabs.delete(source.tabId);
         this.attachmentIds.delete(source.tabId);
         this.attachInFlight.delete(source.tabId);
-        this.tabOwners.delete(source.tabId);
+        this.backgroundExecution.invalidate(source.tabId);
+        if (_reason === "target_closed") {
+          this.tabOwners.delete(source.tabId);
+          this.backgroundExecution.forget(source.tabId);
+        }
         this.clearDialogState(source.tabId);
         this.clearConsoleState(source.tabId);
         this.clearNetworkState(source.tabId);

@@ -66,6 +66,116 @@ describe("page capture cleanup", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
+  it("measures fractional CSS viewport dimensions while retaining scrollbar gutters", async () => {
+    vi.stubGlobal("innerWidth", 815);
+    vi.stubGlobal("innerHeight", 615);
+    vi.stubGlobal("visualViewport", { width: 800.4, height: 600.6, scale: 1 });
+    expect(await send({ action: "probe" })).toMatchObject({
+      viewportWidth: 800.4,
+      viewportHeight: 600.6,
+      innerWidth: 815.4,
+      innerHeight: 615.6,
+    });
+  });
+
+  it("does not substitute a pinched visual viewport for layout geometry", async () => {
+    vi.stubGlobal("innerWidth", 815);
+    vi.stubGlobal("innerHeight", 615);
+    vi.stubGlobal("visualViewport", { width: 400, height: 300, scale: 2 });
+    expect(await send({ action: "probe" })).toMatchObject({
+      viewportWidth: 800,
+      viewportHeight: 600,
+      innerWidth: 815,
+      innerHeight: 615,
+    });
+  });
+
+  it.each([
+    "finish",
+    "cancel",
+    "watchdog",
+    "dispose",
+    "hidden",
+    "navigation",
+  ])("restores root scrollbar styles after %s without changing nested scrollbars", async (end) => {
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    const root = document.documentElement;
+    root.style.setProperty("scrollbar-width", "thin", "important");
+    const nested = document.createElement("div");
+    nested.style.cssText = "overflow:auto;scrollbar-width:thin";
+    document.body.append(nested);
+    const nestedStyle = nested.getAttribute("style");
+    try {
+      const before = await send({ action: "probe" });
+      expect(await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" })).toEqual(
+        before,
+      );
+      expect(root.style.getPropertyValue("scrollbar-width")).toBe("none");
+      if (end === "finish") await send({ action: "finish" });
+      else if (end === "cancel")
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      else if (end === "watchdog") await vi.advanceTimersByTimeAsync(15_001);
+      else if (end === "hidden") {
+        vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+        document.dispatchEvent(new Event("visibilitychange"));
+      } else if (end === "navigation") window.dispatchEvent(new Event("pagehide"));
+      else capture.dispose();
+      expect(root.style.getPropertyValue("scrollbar-width")).toBe("thin");
+      expect(root.style.getPropertyPriority("scrollbar-width")).toBe("important");
+      expect(nested.getAttribute("style")).toBe(nestedStyle);
+      expect(window.scrollY).toBe(350);
+    } finally {
+      capture.dispose();
+      root.removeAttribute("style");
+    }
+  });
+
+  it.each([
+    [815, 600],
+    [800, 615],
+  ])("preserves reserved scrollbar space at %s/%s", async (width, height) => {
+    vi.stubGlobal("innerWidth", width);
+    vi.stubGlobal("innerHeight", height);
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    expect(document.documentElement.style.getPropertyValue("scrollbar-width")).toBe("");
+  });
+
+  it.each([
+    undefined,
+    "color: red;",
+  ])("restores the root style attribute across repeated captures (%s)", async (original) => {
+    vi.stubGlobal("innerWidth", 800);
+    vi.stubGlobal("innerHeight", 600);
+    vi.stubGlobal("visualViewport", { width: 800.4, height: 600.6, scale: 1 });
+    const root = document.documentElement;
+    if (original === undefined) root.removeAttribute("style");
+    else root.setAttribute("style", original);
+    const beforeStyle = root.getAttribute("style");
+    const beforeMetrics = await send({ action: "probe" });
+    try {
+      for (const initialY of [100, 350]) {
+        window.scrollTo({ top: initialY, left: 12 });
+        await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+        expect(root.style.getPropertyValue("scrollbar-width")).toBe("none");
+        expect(await send({ action: "probe" })).toMatchObject({
+          viewportWidth: 800.4,
+          viewportHeight: 600.6,
+          innerWidth: 800.4,
+          innerHeight: 600.6,
+        });
+        await send({ action: "finish" });
+        expect(root.getAttribute("style")).toBe(beforeStyle);
+        expect(window.scrollX).toBe(12);
+        expect(window.scrollY).toBe(initialY);
+        expect(await send({ action: "probe" })).toEqual({ ...beforeMetrics, y: initialY });
+      }
+    } finally {
+      capture.dispose();
+      root.removeAttribute("style");
+    }
+  });
+
   it("restores each changed CSS property and the original two-dimensional scroll", async () => {
     await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
     const moving = send({ action: "move", y: 800, capture: true });
