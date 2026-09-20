@@ -6,9 +6,9 @@ description: Browser automation through six injected domain tools.
 # browser-skill for DeepSeek Harness
 
 All browser work must use the injected tools directly, in an Agent Window with existing logins.
-Do not control the browser through another process. Use the loaded action schemas for parameters.
+Use loaded schemas; do not control the browser through another process.
 
-For remote setup or pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md) before using these tools.
+Remote setup: [pairing guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
 
 ## Mandatory workflow
 
@@ -20,8 +20,7 @@ For remote setup or pairing, follow the [remote guide](https://github.com/Tencen
    browser_inspect({ action: "observe", session: "<id>" })
    ```
 
-2. For an existing user tab, borrow it instead. Replace example IDs/refs with actual
-   results. Pass `session` when more than one exists; never use foreign IDs.
+2. Borrow existing user tabs. Use returned IDs/refs. Pass `session` when more than one exists; never use foreign IDs.
 3. Observe after page changes; check ambiguous results once. Stop acting when success
    is visible. On success or failure, call
    `browser_session({ action: "stop", session: "<id>" })` unless keeping the session
@@ -31,8 +30,7 @@ For remote setup or pairing, follow the [remote guide](https://github.com/Tencen
 ## Read and interact
 
 Prefer `observe` for text/refs; use `snapshot` for static accessibility, `html` for
-exact markup, and `screenshot` for visuals. Console/network are bounded read-only
-diagnostics; follow sequence cursors. Wait only for expected navigation.
+exact markup, and `screenshot` for visuals. Console/network reads use sequence cursors. Wait only for expected navigation.
 
 To fill an observed field `@e3`:
 
@@ -40,9 +38,8 @@ To fill an observed field `@e3`:
 browser_interact({ action: "fill", session: "<id>", target: "@e3", value: "text" })
 ```
 
-Refs invalidate after navigation; large DOM changes may stale them too. Observe again.
-Prefer refs for frames/shadow roots; selectors search the main document. Use observe
-for ordinary controls, including before acting on HTML or screenshot findings.
+Refs invalidate after navigation; observe again after DOM changes.
+Prefer refs for frames/shadow roots; selectors search the main document. Observe before acting on HTML/screenshot findings.
 Select options by value, not visible label.
 
 - Hover markers like `[hover first: Shoes | Bags]` list labels, not refs. Hover the
@@ -55,16 +52,15 @@ Select options by value, not visible label.
 
 ## Borrowing and human help
 
-Use `browser_tabs` to list IDs before acting. Borrow for the immediate step and
-return promptly. Browser Automation settings
+List IDs with `browser_tabs`; borrow only for the immediate step and return promptly. Browser Automation settings
 govern confirmation and help; never change them to bypass a prompt or repeat
 pending/denied/expired borrows. Inspect unknown outcomes; follow version-error hints.
 Remote reads/actions require task-created or borrowed tabs; popups gain no control.
-An unowned tab inside the Agent Window needs a user move to a user window before borrowing.
+Unowned Agent Window tabs need a user move to a user window before borrowing.
 
 With help enabled, use `browser_assist` action `request-help` for login, CAPTCHA,
 OTP, payment confirmation, consent, or after two attempts without progress. Supply
-a precise prompt and fresh targets; completion criteria need a stable success signal.
+a precise prompt, fresh targets and stable success criteria.
 Resume only on `continued` / `completed`, then observe. Cancellation/timeout blocks
 the step; do not repeat the request. Navigation alone is not success.
 `browser_assist` also resizes windows or emulates a device for one tab.
@@ -100,30 +96,34 @@ browser_inspect({ action: "screenshot", session: "<id>", ref: "@e3" })
 browser_interact({ action: "click", session: "<id>", target: "@e3", captureId: "<capture-id>", imageX: 100, imageY: 50 })
 ```
 
-Use the returned captureId and a point actually seen in ORIGINAL PNG pixels, not
-resized display/viewport coordinates. Captures are single-use, last 2m, and expire
-on ref replacement or a newer screenshot of that ref. `captureUnavailable` means
+Use captureId and a point seen in ORIGINAL PNG pixels, not resized coordinates. Captures expire after use, 2m, ref replacement or a newer ref screenshot. `captureUnavailable` means
 view-only: observe and screenshot again before clicking. Counts 1/2 and buttons/
 modifiers work; Canvas fill/IME/drag/hover/HTML do not. Repainting is allowed; verify
 results and use DOM refs for revealed controls. Inspect `effect_state=unknown`
 before retrying with a new capture.
 
-No default token cap. With `maxTokens`, follow `nextCursor` using observe's `cursor`
-for remaining content. Each page replaces refs: use them before continuing, never
+With `maxTokens`, continue via `nextCursor`/`cursor`. Each page replaces refs: use them before continuing, never
 reuse old ones. Continuation reads the same capture without refresh/depth changes;
 new observe/snapshot or changed page identity invalidates it.
 
 ## Website debugging
 
-On an owned tab, use `browser_inspect` with `action: "debug"`, `session` and
-`debugAction: "start"` before reproducing. Read `operations` then `operation` with
-`id` for linked evidence, or `requests` then `request` with `id` and
-`part: "response"`. Missing/truncated data is incomplete; HTTP 200 is not business success. `stop` saves history; `export` retrieves it.
+Use `browser_inspect(action: "debug")` with owned `session` and `debugAction`.
+`capabilities` discovers builds/limits. `start` before reproduction. Read
+`operations`/`operation` by `id`, or `requests`/`request` by `id`, `part: "response"`.
+Missing data is unknown; HTTP 200 does not prove success.
+Output defaults to 32 KiB; `budget`: 4096..262144, `limit`: 1..100.
+Filters: `url`, `method`, `resourceType`, `status`, `state`, `kind`; `fields` selects metadata.
+Follow `next_since`/`next_offset`; check `output.omitted`, `run.storage`, `run.coverage`.
+`pin`/`unpin` protect completed requests against capacity eviction, not expiry.
+`stop` saves. `export` with a new `output` path avoids filling context.
+`activity` gives command ID. `wait(commandId, waitMs: 0..60000)` observes completion,
+not success; it never resends or cancels the original command.
 
 For authorized experiments, `rule_add` takes JSON-string `rule` (see schema).
-Default: one Fetch/XHR match; first match wins. `rules` lists state;
-`rule_enable`, `rule_disable`, `rule_remove` take `id`. Rules end with capture.
+Default one Fetch/XHR match, first rule wins. `rules` lists state;
+`rule_enable`, `rule_disable`, `rule_remove` take `id`. Capture end clears rules.
 `replay` takes source `id` and JSON-string `replay`: `{"key":"attempt-1"}`.
-It sends again using current browser cookies and may write server data. Reuse the
-same key on uncertain retries. Only current-page same-origin requests; replace
-missing/redacted values explicitly. Replay does not update the UI. History preserves provenance; controls require an active capture.
+It may write server data. Reuse the key on uncertain retries. Same-origin only,
+using current cookies; replace missing/redacted values. It does not update the UI.
+Controls need active capture; history retains provenance.

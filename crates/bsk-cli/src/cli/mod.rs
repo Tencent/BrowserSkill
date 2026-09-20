@@ -158,7 +158,7 @@ pub enum Command {
     Network(NetworkArgs),
 
     /// Opt-in website debugging: requests, page context, and recording export.
-    Debug(debug::DebugArgs),
+    Debug(Box<debug::DebugArgs>),
 
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]

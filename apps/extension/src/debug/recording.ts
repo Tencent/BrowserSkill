@@ -1,5 +1,6 @@
 import { operationEvidence, operationWindow } from "./evidence-model";
 import { requestProjection } from "./network-store";
+import { matchesRequest, projectFields } from "./query";
 import type { DebugParams, DebugRecording, DebugResult } from "./types";
 
 /** Read retained data only. This path never attaches to or evaluates a website. */
@@ -10,8 +11,16 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
   if (params.action === "export") return { ...result, recording };
   if (params.action === "rules")
     return { ...result, rules: recording.rules ?? [], replays: recording.replays ?? [] };
-  if (params.action === "pages") return { ...result, pages: recording.pages };
-  if (params.action === "console") return { ...result, console: recording.console };
+  if (params.action === "pages" || params.action === "console") {
+    const values = recording[params.action];
+    const offset = params.offset ?? 0;
+    const end = Math.min(values.length, offset + (params.limit ?? values.length));
+    return {
+      ...result,
+      [params.action]: values.slice(offset, end),
+      ...(end < values.length ? { next_offset: end, truncated: true } : {}),
+    };
+  }
   if (params.action === "request") {
     const entry = recording.requests.find((item) => item.id === params.id);
     if (!entry) throw new Error("request not found or evicted");
@@ -28,7 +37,11 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
   }
   if (params.action === "requests" || params.action === "operations") {
     const requests = params.action === "requests";
-    const entries = (requests ? recording.requests : recording.operations)
+    const entries = (
+      requests
+        ? recording.requests.filter((entry) => matchesRequest(entry, params))
+        : recording.operations
+    )
       .filter((entry) => entry.sequence > since)
       .sort((a, b) => a.sequence - b.sequence);
     const page = entries.slice(0, limit);
@@ -37,7 +50,7 @@ export function readRecording(recording: DebugRecording, params: DebugParams): D
           requests: recording.requests
             .filter((item) => page.includes(item))
             .sort((a, b) => a.sequence - b.sequence)
-            .map((item) => requestProjection(item)),
+            .map((item) => projectFields(requestProjection(item), params.fields)),
         }
       : {
           operations: recording.operations

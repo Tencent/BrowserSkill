@@ -524,6 +524,14 @@
     "gap_control_block": "本次操作有请求被规则阻断。",
     "gap_control_failed": "有请求规则执行失败或被取消，修改内容不能视为已发送。",
     "gap_request_replayed": "此时间段包含单独重放的请求，未将其合并进页面操作的字段链。",
-    "gap_control_pending": "请求规则仍在执行，结果尚未确定。"
+    "gap_control_pending": "请求规则仍在执行，结果尚未确定。",
+    "moreRequests": "显示更多请求（还有 {{count}} 个）",
+    "pinEvidence": "固定关键证据",
+    "unpinEvidence": "取消固定",
+    "storageSaved": "已在本地保存 {{count}} 个请求",
+    "gap_evidence_storage_limit": "本地证据容量已达上限，部分未固定请求已被移除。",
+    "gap_evidence_write_backlog": "证据写入积压，部分请求更新未能保存。",
+    "gap_evidence_write_failed": "部分请求证据未能保存到本地。",
+    "gap_evidence_read_failed": "本地证据读取失败，当前可能仅显示内存中的记录。"
   }
 }

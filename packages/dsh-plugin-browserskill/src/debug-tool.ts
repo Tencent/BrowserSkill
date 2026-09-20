@@ -7,6 +7,11 @@ export const DEBUG_PARAMETERS = {
   debugAction: {
     type: "string",
     enum: [
+      "capabilities",
+      "activity",
+      "wait",
+      "pin",
+      "unpin",
       "start",
       "stop",
       "status",
@@ -37,6 +42,47 @@ export const DEBUG_PARAMETERS = {
     description:
       'JSON for replay: {key:"unique-attempt",url?,method?,headers?,body?}. Sends once; reuse key on retry. Same-origin only; missing/redacted data must be replaced. A replay may write server data.',
   },
+  budget: {
+    type: "integer",
+    description:
+      "Total JSON output bytes: 4096..262144, default 32768; export exempt. Inspect output.omitted and follow next_since/next_offset.",
+  },
+  url: { type: "string", description: "requests only: case-sensitive URL substring." },
+  method: { type: "string", description: "requests only: exact HTTP method." },
+  resourceType: {
+    type: "string",
+    description: "requests only: exact resource type, e.g. Fetch or XHR.",
+  },
+  status: { type: "integer", description: "requests only: exact HTTP status, 100..599." },
+  state: {
+    type: "string",
+    enum: ["pending", "complete", "failed", "redirected", "interrupted"],
+    description: "requests only: capture state.",
+  },
+  kind: {
+    type: "string",
+    enum: ["all", "business", "resource", "extension"],
+    description: "requests only: traffic category.",
+  },
+  fields: {
+    type: "string",
+    description:
+      "Comma-separated optional request fields; identity and body availability always remain. Discover allowed fields with capabilities.",
+  },
+  waitMs: {
+    type: "integer",
+    description: "wait only: 0..60000 ms, default 10000; observes execution, never resends it.",
+  },
+  commandId: {
+    type: "string",
+    description:
+      "wait only: command ID from activity or session_busy. Omit to wait for idle. Completion is not proof of success.",
+  },
+  output: {
+    type: "string",
+    description:
+      "export only: new local JSON file path. Returns path and size instead of the full recording.",
+  },
   runId: { type: "string", description: "Capture ID; defaults to the latest capture." },
   id: {
     type: "string",
@@ -48,7 +94,10 @@ export const DEBUG_PARAMETERS = {
     enum: ["metadata", "request", "response", "headers", "timing"],
     description: "Request detail projection; defaults to metadata without body text.",
   },
-  offset: { type: "integer", description: "Body character offset, 0..65536." },
+  offset: {
+    type: "integer",
+    description: "Body character or pages/console entry offset, 0..65536.",
+  },
   maxChars: { type: "integer", description: "Body slice size, 1..16384; default 4096." },
   pointer: {
     type: "string",
@@ -78,14 +127,22 @@ export function registerDebugTool(
         schema: { type: "json" },
         render: (_args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }],
       },
+      isConcurrencySafe: (args) => ["activity", "wait"].includes(args.debugAction),
       // Keep observation/capture ordering in the existing per-session queue.
       async execute(args, exec) {
         if (!DEBUG_PARAMETERS.debugAction.enum.includes(args.debugAction))
           throw new Error("invalid debug action");
         if (
-          ["request", "operation", "rule_enable", "rule_disable", "rule_remove", "replay"].includes(
-            args.debugAction,
-          ) &&
+          [
+            "request",
+            "operation",
+            "rule_enable",
+            "rule_disable",
+            "rule_remove",
+            "replay",
+            "pin",
+            "unpin",
+          ].includes(args.debugAction) &&
           !args.id?.trim()
         )
           throw new Error("id is required");
@@ -96,6 +153,9 @@ export function registerDebugTool(
           ["limit", 1, 100],
           ["offset", 0, 65536],
           ["maxChars", 1, 16384],
+          ["budget", 4096, 262144],
+          ["status", 100, 599],
+          ["waitMs", 0, 60000],
         ] as const) {
           const value = args[key];
           if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max))
@@ -126,9 +186,28 @@ export function registerDebugTool(
           ["pointer", "pointer"],
           ["since", "since"],
           ["limit", "limit"],
+          ["budget", "budget"],
+          ["url", "url"],
+          ["method", "method"],
+          ["resourceType", "resource-type"],
+          ["status", "status"],
+          ["state", "state"],
+          ["kind", "kind"],
+          ["fields", "fields"],
+          ["waitMs", "wait-ms"],
+          ["commandId", "command-id"],
+          ["output", "output"],
         ] as const)
           if (args[key] !== undefined) command.push(`--${flag}`, String(args[key]));
-        return (await runtime.run(exec, command, "debug", session)) as never;
+        return (await runtime.run(
+          exec,
+          command,
+          "debug",
+          ["activity", "wait"].includes(args.debugAction) ? undefined : session,
+          args.debugAction === "wait"
+            ? Math.max(deps.config.defaultTimeoutMs, (args.waitMs ?? 10000) + 15000)
+            : undefined,
+        )) as never;
       },
       presentCall: (args) => ({
         card: "terminal",

@@ -474,6 +474,7 @@ export class DebugNetworkControl {
         }),
       ).catch(() => {});
     } finally {
+      annotate();
       this.changed();
     }
   }

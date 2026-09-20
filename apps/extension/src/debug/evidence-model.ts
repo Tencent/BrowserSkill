@@ -136,7 +136,9 @@ export function operationEvidence(
   const requests = record.requests.filter((request) =>
     links.some((link) => link.request_id === request.id),
   );
-  const gaps = new Set<string>();
+  const gaps = new Set<string>(
+    record.run.coverage.filter((value) => value.startsWith("evidence_")),
+  );
   if (operation.state === "running") gaps.add("operation_running");
   if (operation.state === "interrupted") gaps.add("operation_interrupted");
   if (record.run.dropped_requests || record.run.dropped_operations || record.run.dropped_console)

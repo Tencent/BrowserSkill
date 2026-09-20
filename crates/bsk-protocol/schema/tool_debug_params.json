@@ -10,7 +10,37 @@
     "action": {
       "$ref": "#/definitions/DebugAction"
     },
+    "budget": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 262144.0,
+      "minimum": 4096.0
+    },
+    "command_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fields": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
     "id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "kind": {
       "type": [
         "string",
         "null"
@@ -22,7 +52,8 @@
         "null"
       ],
       "format": "uint32",
-      "minimum": 0.0
+      "maximum": 100.0,
+      "minimum": 1.0
     },
     "max_chars": {
       "type": [
@@ -30,7 +61,14 @@
         "null"
       ],
       "format": "uint32",
-      "minimum": 0.0
+      "maximum": 16384.0,
+      "minimum": 1.0
+    },
+    "method": {
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "name": {
       "type": [
@@ -44,6 +82,7 @@
         "null"
       ],
       "format": "uint32",
+      "maximum": 65536.0,
       "minimum": 0.0
     },
     "part": {
@@ -66,6 +105,12 @@
         {
           "type": "null"
         }
+      ]
+    },
+    "resource_type": {
+      "type": [
+        "string",
+        "null"
       ]
     },
     "rule": {
@@ -95,18 +140,53 @@
       "format": "uint64",
       "minimum": 0.0
     },
+    "state": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint16",
+      "maximum": 599.0,
+      "minimum": 100.0
+    },
     "tab_id": {
       "type": [
         "integer",
         "null"
       ],
       "format": "int64"
+    },
+    "url": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wait_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "maximum": 60000.0,
+      "minimum": 0.0
     }
   },
   "definitions": {
     "DebugAction": {
       "type": "string",
       "enum": [
+        "capabilities",
+        "activity",
+        "wait",
+        "pin",
+        "unpin",
         "start",
         "stop",
         "status",

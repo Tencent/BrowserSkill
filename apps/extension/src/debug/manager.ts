@@ -8,7 +8,9 @@ import { isAgentControlledTab, type SessionManager } from "@/session-manager/man
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
 import type { DebugArchive } from "./archive";
+import { debugCapabilities } from "./capabilities";
 import { consoleSource } from "./evidence-model";
+import { DebugJournal, mergeRequest } from "./journal";
 import { DebugNetworkControl } from "./network-control";
 import { DebugNetworkStore, requestProjection } from "./network-store";
 import { DebugObserver, sanitizeFields } from "./observer";
@@ -60,6 +62,7 @@ interface RunState {
   run: DebugRun;
   network: DebugNetworkStore;
   controls?: DebugNetworkControl;
+  journal?: DebugJournal;
   controlCleanup?: Promise<void>;
   operations: DebugOperation[];
   console: DebugConsole[];
@@ -213,6 +216,7 @@ export class DebugManager {
       },
       () => this.change(state),
       this.now,
+      (entry) => state.journal?.retain(entry),
     );
     const state: RunState = {
       run,
@@ -224,6 +228,12 @@ export class DebugManager {
       targets: new Set(),
       pages: [],
     };
+    if (this.archive?.retain)
+      state.journal = new DebugJournal(
+        this.archive,
+        () => this.summary(state),
+        (reason) => this.coverage(state, reason),
+      );
     state.controls = new DebugNetworkControl(
       id,
       tabId,
@@ -737,13 +747,18 @@ export class DebugManager {
     return {
       ...state.run,
       active_rules: state.controls?.activeCount ?? 0,
-      requests: state.network.entries.size,
+      requests: Math.max(state.network.entries.size, state.run.storage?.requests ?? 0),
       operations: state.operations.length,
       errors: state.console
         .filter((entry) => entry.level === "error")
         .reduce((sum, entry) => sum + entry.count, 0),
-      dropped_requests: state.network.dropped,
-      coverage: [...state.run.coverage],
+      dropped_requests: state.run.storage?.dropped ?? (state.journal ? 0 : state.network.dropped),
+      coverage: [
+        ...new Set([
+          ...state.run.coverage,
+          ...(state.run.storage?.dropped ? ["evidence_storage_limit"] : []),
+        ]),
+      ],
     };
   }
 
@@ -769,6 +784,7 @@ export class DebugManager {
           .finally(() => {
             state.controlCleanup = undefined;
             this.pruneListener();
+            state.network.checkpoint();
             void this.persist(state);
           })
       : undefined;
@@ -927,6 +943,7 @@ export class DebugManager {
 
   private async persist(state: RunState): Promise<void> {
     if (!this.archive) return;
+    await state.journal?.flush();
     clearTimeout(state.archiveTimer);
     state.archiveTimer = undefined;
     while (state.saving) await state.saving;
@@ -935,7 +952,7 @@ export class DebugManager {
     recording.run.saved_at = recording.saved_at;
     delete recording.run.storage_error;
     state.dirty = false;
-    const save = this.archive.put(recording).then(
+    const save = this.archive.put(state.journal ? { ...recording, requests: [] } : recording).then(
       () => {
         state.run.saved_at = recording.saved_at;
         delete state.run.storage_error;
@@ -969,12 +986,76 @@ export class DebugManager {
     };
   }
 
+  private async evidenceRecording(state: RunState, bodies = true): Promise<DebugRecording> {
+    await state.journal?.flush();
+    const live = this.recording(state);
+    if (!state.journal) return live;
+    try {
+      const saved = await this.archive?.get(state.run.id, bodies);
+      if (!saved) return live;
+      const entries = new Map(saved.requests.map((entry) => [entry.id, entry]));
+      for (const entry of live.requests)
+        entries.set(entry.id, mergeRequest(entries.get(entry.id), entry));
+      live.requests = [...entries.values()].sort(
+        (a, b) => a.started_at - b.started_at || a.sequence - b.sequence,
+      );
+      live.run.requests = live.requests.length;
+      state.run.storage = saved.run.storage;
+      live.run.storage = saved.run.storage;
+      live.run.dropped_requests = saved.run.storage?.dropped ?? live.run.dropped_requests;
+      if (saved.run.storage?.dropped)
+        live.run.coverage = [...new Set([...live.run.coverage, "evidence_storage_limit"])];
+      return live;
+    } catch {
+      this.coverage(state, "evidence_read_failed");
+      live.run.coverage = [...state.run.coverage];
+      return live;
+    }
+  }
+
   /** Extension UI only. Task RPCs cannot use this browser-wide history reader. */
   async readHistory(params: DebugParams): Promise<DebugResult> {
     this.sync();
     if (!params.run_id) throw new Error("recording ID is required");
     const live = this.runs.get(params.run_id);
-    const recording = live ? this.recording(live) : await this.archive?.get(params.run_id);
+    if (params.action === "requests" && (!live || live.journal)) {
+      await live?.journal?.flush();
+      const indexed = await this.archive?.query?.(params.run_id, params).catch((error) => {
+        if (!live) throw error;
+        this.coverage(live, "evidence_read_failed");
+        return undefined;
+      });
+      if (indexed) {
+        if (live) live.run.storage = indexed.run?.storage;
+        return live
+          ? {
+              ...indexed,
+              run: {
+                ...this.summary(live),
+                storage: indexed.run?.storage,
+                requests: indexed.run!.requests,
+                dropped_requests: indexed.run!.dropped_requests,
+              },
+            }
+          : indexed;
+      }
+    }
+    const bodies = ["operation", "export"].includes(params.action);
+    const recording = live
+      ? await this.evidenceRecording(live, bodies)
+      : await this.archive?.get(params.run_id, bodies);
+    if (recording && params.action === "request" && params.id) {
+      const stored = await this.archive?.request?.(params.run_id, params.id).catch((error) => {
+        if (!live) throw error;
+        this.coverage(live, "evidence_read_failed");
+        recording.run.coverage = [...live.run.coverage];
+        return undefined;
+      });
+      if (stored) {
+        const current = recording.requests.find((entry) => entry.id === params.id);
+        recording.requests = [current ? mergeRequest(stored, current) : stored];
+      }
+    }
     if (!recording) throw new Error("debug recording not found or expired");
     return readRecording(recording, params);
   }
@@ -996,6 +1077,8 @@ export class DebugManager {
     this.sync();
     if (!this.sessions.has(params.session_id)) throw new Error("session not found");
     const result: DebugResult = { session_id: params.session_id };
+    if (params.action === "capabilities")
+      return { ...result, capabilities: debugCapabilities(!!this.archive?.retain) };
     const states = [...this.runs.values()].filter(
       ({ run, released }) =>
         !released &&
@@ -1009,6 +1092,7 @@ export class DebugManager {
       : params.id
         ? states.find(
             (entry) =>
+              params.id!.startsWith(`${entry.run.id}:n`) ||
               entry.network.get(params.id!) ||
               entry.controls?.has(params.id!) ||
               entry.operations.some((operation) => operation.id === params.id),
@@ -1022,6 +1106,17 @@ export class DebugManager {
       await state.controlCleanup;
       await this.persist(state);
       return { ...result, run: this.summary(state) };
+    }
+    if (["pin", "unpin"].includes(params.action)) {
+      if (!state.journal || !this.archive?.pin) throw new Error("persistent evidence unavailable");
+      await state.journal.flush();
+      await this.archive.pin(state.run.id, params.id!, params.action === "pin", this.change(state));
+      const request = await this.archive.request?.(state.run.id, params.id!);
+      return {
+        ...result,
+        run: this.summary(state),
+        request: request && requestProjection(request),
+      };
     }
     if (params.action.startsWith("rule_") || params.action === "replay") {
       if (this.starting.has(`${state.run.session_id}:${state.run.tab_id}`))
@@ -1037,7 +1132,10 @@ export class DebugManager {
       if (signal?.aborted) throw new Error("debug action cancelled");
       if (params.action === "rule_add") await state.controls.add(params.rule!, signal);
       else if (params.action === "replay") {
-        const source = state.network.get(params.id!);
+        await state.journal?.flush();
+        const saved = await this.archive?.request?.(state.run.id, params.id!);
+        const current = state.network.get(params.id!);
+        const source = current ? mergeRequest(saved, current) : saved;
         if (!source) throw new Error("request not found or evicted");
         const replay = await state.controls.replay(source, params.replay!, tab.url ?? "", signal);
         return { ...result, run: this.summary(state), replay };
@@ -1049,49 +1147,36 @@ export class DebugManager {
         );
       return { ...result, run: this.summary(state), rules: state.controls.list() };
     }
-    if (["export", "console", "pages", "rules"].includes(params.action))
-      return readRecording(this.recording(state), params);
-    result.run = this.summary(state);
-    const limit = params.limit ?? 30;
-    const since = params.since ?? 0;
-    if (params.action === "requests") {
-      const entries = state.network
-        .list()
-        .filter((entry) => entry.sequence > since)
-        .sort((a, b) => a.sequence - b.sequence);
-      const page = entries.slice(0, limit);
-      return {
-        ...result,
-        requests: page.map((entry) => requestProjection(entry)),
-        next_since: page.at(-1)?.sequence ?? state.run.next_since,
-        truncated: entries.length > limit || state.network.dropped > 0,
-      };
+    if (params.action === "requests" && state.journal) {
+      await state.journal.flush();
+      const indexed = await this.archive?.query?.(state.run.id, params).catch(() => {
+        this.coverage(state, "evidence_read_failed");
+        return undefined;
+      });
+      if (indexed) {
+        state.run.storage = indexed.run?.storage;
+        return {
+          ...indexed,
+          run: {
+            ...this.summary(state),
+            requests: indexed.run!.requests,
+            dropped_requests: indexed.run!.dropped_requests,
+          },
+        };
+      }
     }
-    if (params.action === "request") {
-      const entry = state.network.get(params.id ?? "");
-      if (!entry) throw new Error("request not found or evicted");
-      return {
-        ...result,
-        request: requestProjection(
-          entry,
-          params.part,
-          params.offset,
-          params.max_chars,
-          params.pointer,
-        ),
-      };
-    }
-    if (params.action === "operations") {
-      const entries = state.operations
-        .filter((entry) => entry.sequence > since)
-        .sort((a, b) => a.sequence - b.sequence);
-      const page = entries.slice(0, limit);
-      return {
-        ...result,
-        operations: page.map((operation) => this.operation(state, operation, false)),
-        next_since: page.at(-1)?.sequence ?? state.run.next_since,
-        truncated: entries.length > limit || state.run.dropped_operations > 0,
-      };
+    if (params.action !== "operation") {
+      const recording = await this.evidenceRecording(state, params.action === "export");
+      if (params.action === "request" && params.id) {
+        const saved = await this.archive?.request?.(state.run.id, params.id).catch(() => {
+          this.coverage(state, "evidence_read_failed");
+          return undefined;
+        });
+        const current = state.network.get(params.id);
+        if (saved || current)
+          recording.requests = [current ? mergeRequest(saved, current) : saved!];
+      }
+      return readRecording(recording, params);
     }
     const operation = state.operations.find((entry) => entry.id === params.id);
     if (!operation) throw new Error("operation not found or evicted");
@@ -1105,6 +1190,6 @@ export class DebugManager {
       operation.after = await this.page(state);
       operation.sequence = this.change(state);
     }
-    return readRecording(this.recording(state), params);
+    return readRecording(await this.evidenceRecording(state), params);
   }
 }

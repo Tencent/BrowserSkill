@@ -1,5 +1,10 @@
 /** Opt-in, task-owned evidence. All timestamps are epoch milliseconds. */
 export type DebugAction =
+  | "capabilities"
+  | "activity"
+  | "wait"
+  | "pin"
+  | "unpin"
   | "start"
   | "stop"
   | "status"
@@ -87,6 +92,17 @@ export interface DebugParams {
   pointer?: string;
   rule?: DebugRuleSpec;
   replay?: DebugReplaySpec;
+  /** UTF-8 bytes of JSON output (default 32768; export is exempt). */
+  budget?: number;
+  url?: string;
+  method?: string;
+  resource_type?: string;
+  status?: number;
+  state?: DebugRequest["state"];
+  kind?: "business" | "resource" | "extension" | "all";
+  fields?: string[];
+  wait_ms?: number;
+  command_id?: string;
 }
 
 export interface DebugBody {
@@ -129,6 +145,7 @@ export interface DebugRequest {
   intervention?: DebugIntervention;
   replay_from?: string;
   replay_id?: string;
+  pinned?: boolean;
 }
 
 export interface DebugConsole {
@@ -208,6 +225,7 @@ export interface DebugRun {
   active_rules?: number;
   saved_at?: number;
   storage_error?: string;
+  storage?: { requests: number; bytes: number; dropped: number; pins: number };
   environment?: { extension_version?: string; user_agent?: string };
 }
 
@@ -269,8 +287,20 @@ export interface DebugResult {
   rules?: DebugRule[];
   replays?: DebugReplay[];
   replay?: DebugReplay;
+  next_offset?: number;
   next_since?: number;
   truncated?: boolean;
+  capabilities?: Record<string, unknown>;
+  output?: { budget: number; truncated: boolean; omitted: string[] };
+  activity?: {
+    state: string;
+    command_id?: string;
+    method?: string;
+    started_at?: number;
+    elapsed_ms?: number;
+    wait_complete?: boolean;
+    wait_timed_out?: boolean;
+  };
 }
 
 export interface DebugTask {

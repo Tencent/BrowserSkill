@@ -524,6 +524,14 @@
     "gap_control_block": "이 동작의 요청이 규칙에 의해 차단되었습니다.",
     "gap_control_failed": "규칙이 실패하거나 취소되어 변경 내용이 전송되지 않았을 수 있습니다.",
     "gap_request_replayed": "이 구간의 별도 재전송은 페이지 동작의 필드 체인에서 제외됩니다.",
-    "gap_control_pending": "요청 규칙이 실행 중이며 결과가 아직 확인되지 않았습니다."
+    "gap_control_pending": "요청 규칙이 실행 중이며 결과가 아직 확인되지 않았습니다.",
+    "moreRequests": "요청 더 보기 ({{count}}개 남음)",
+    "pinEvidence": "핵심 증거 고정",
+    "unpinEvidence": "고정 해제",
+    "storageSaved": "요청 {{count}}개를 로컬에 저장함",
+    "gap_evidence_storage_limit": "로컬 증거 저장 한도에 도달하여 고정되지 않은 일부 요청이 삭제되었습니다.",
+    "gap_evidence_write_backlog": "증거 저장이 지연되어 일부 요청 업데이트가 저장되지 않았습니다.",
+    "gap_evidence_write_failed": "일부 요청 증거를 로컬에 저장하지 못했습니다.",
+    "gap_evidence_read_failed": "저장된 증거를 읽지 못했습니다. 메모리에 있는 기록만 표시될 수 있습니다."
   }
 }

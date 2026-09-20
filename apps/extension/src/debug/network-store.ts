@@ -107,6 +107,7 @@ export class DebugNetworkStore {
     private readonly cdp: CdpRunner,
     private readonly changed: () => number,
     private readonly now: () => number = Date.now,
+    private readonly retain?: (entry: DebugRequest) => void,
   ) {}
 
   private key(source: CdpDebuggee, requestId: string): string {
@@ -151,6 +152,7 @@ export class DebugNetworkStore {
         this.response(previous, event.redirectResponse);
         this.finish(previous, event, "redirected");
         previous.entry.response_body = { state: "unavailable", reason: "redirect" };
+        this.retain?.(previous.entry);
       }
       const headers = redactHeaders(event.request.headers);
       const id = `${this.runId}:n${++this.serial}`;
@@ -198,6 +200,7 @@ export class DebugNetworkStore {
       }
       this.applyExtra(chain);
       this.applyAnnotation(key, record);
+      this.retain?.(entry);
       while (this.entries.size > MAX_REQUESTS) {
         const oldest = this.entries.values().next().value as RequestRecord;
         this.evict(oldest);
@@ -276,6 +279,7 @@ export class DebugNetworkStore {
         return;
     }
     entry.sequence = this.changed();
+    this.retain?.(entry);
   }
 
   private applyExtra(chain: Chain): void {
@@ -296,6 +300,7 @@ export class DebugNetworkStore {
         if (!this.entries.has(record.entry.id)) continue;
         record.entry[side === "request" ? "request_headers" : "response_headers"] = headers;
         record.entry.sequence = this.changed();
+        this.retain?.(record.entry);
       }
     }
   }
@@ -314,6 +319,7 @@ export class DebugNetworkStore {
           .slice(0, 30),
       );
     entry.sequence = this.changed();
+    this.retain?.(entry);
   }
 
   private finish(record: RequestRecord, event: Event, state: DebugRequest["state"]): void {
@@ -364,8 +370,10 @@ export class DebugNetworkStore {
         })
         .finally(() => {
           this.jobs -= 1;
-          if (this.alive && this.entries.has(record.entry.id))
+          if (this.alive && this.entries.has(record.entry.id)) {
             record.entry.sequence = this.changed();
+            this.retain?.(record.entry);
+          }
           this.pump();
         });
     }
@@ -392,11 +400,13 @@ export class DebugNetworkStore {
       ...(body.truncated ? { reason: "body_limit" } : {}),
     };
     this.retainedChars += body.text.length;
+    this.retain?.(record.entry);
     for (const item of this.entries.values()) {
       if (this.retainedChars <= MAX_BODY_CHARS) break;
       for (const part of ["request_body", "response_body"] as const) {
         const length = item.entry[part].text?.length ?? 0;
         if (!length) continue;
+        this.retain?.(item.entry);
         this.retainedChars -= length;
         item.entry[part] = { state: "evicted", reason: "memory_limit" };
         item.entry.sequence = this.changed();
@@ -405,6 +415,7 @@ export class DebugNetworkStore {
   }
 
   private evict(record: RequestRecord): void {
+    this.retain?.(record.entry);
     this.retainedChars -=
       (record.entry.request_body.text?.length ?? 0) +
       (record.entry.response_body.text?.length ?? 0);
@@ -514,6 +525,11 @@ export class DebugNetworkStore {
       );
     }
     record.entry.sequence = this.changed();
+    this.retain?.(record.entry);
+  }
+
+  checkpoint(): void {
+    for (const { entry } of this.entries.values()) this.retain?.(entry);
   }
 
   list(): DebugRequest[] {
@@ -531,6 +547,7 @@ export class DebugNetworkStore {
       entry.finished_at = this.now();
       entry.response_body = { state: "unavailable", reason: "frame_detached" };
       entry.sequence = this.changed();
+      this.retain?.(entry);
     }
   }
 
@@ -550,6 +567,7 @@ export class DebugNetworkStore {
       if (entry.response_body.state === "pending")
         entry.response_body = { state: "unavailable", reason: "capture_stopped" };
       entry.sequence = this.changed();
+      this.retain?.(entry);
     }
   }
 }
@@ -577,7 +595,14 @@ export function bodySlice(
     }
     text = JSON.stringify(value, null, 2);
   }
-  const end = Math.min(text.length, offset + maxChars);
+  const splitsCharacter = (at: number) =>
+    /[\uD800-\uDBFF]/.test(text.charAt(at - 1)) && /[\uDC00-\uDFFF]/.test(text.charAt(at));
+  if (splitsCharacter(offset))
+    throw new Error("offset splits a Unicode character; use next_offset");
+  let end = Math.min(text.length, offset + maxChars);
+  if (splitsCharacter(end)) end--;
+  if (end === offset && offset < text.length)
+    throw new Error("max_chars too small for a complete Unicode character");
   return {
     ...body,
     text: text.slice(offset, end),

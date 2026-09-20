@@ -8,7 +8,7 @@ import {
   RiCodeSSlashLine,
 } from "@remixicon/react";
 import { useEffect, useState } from "react";
-import { recordingRequest } from "@/debug/client";
+import { debugRequest, recordingRequest } from "@/debug/client";
 import { requestKind } from "@/debug/evidence-model";
 import type {
   DebugBody,
@@ -59,15 +59,17 @@ export function RequestList({
 }) {
   const { t } = useTranslation("extension");
   const [showNoise, setShowNoise] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(100);
   const primary = requests.filter((request) => requestKind(request) === "business");
   const noise = requests.length - primary.length;
+  const visible = showNoise ? requests : primary;
   if (!requests.length) return <Quiet>{t("debug.noRequests")}</Quiet>;
   return (
     <div className="divide-y divide-border/60">
       {!primary.length && !showNoise && (
         <p className="px-5 py-4 text-xs text-muted-foreground">{t("debug.noPrimaryRequests")}</p>
       )}
-      {(showNoise ? requests : primary).map((request) => (
+      {visible.slice(0, visibleCount).map((request) => (
         <button
           key={request.id}
           type="button"
@@ -108,6 +110,15 @@ export function RequestList({
           />
         </button>
       ))}
+      {visible.length > visibleCount && (
+        <button
+          type="button"
+          onClick={() => setVisibleCount((value) => value + 100)}
+          className="w-full px-5 py-3 text-left text-xs text-foreground"
+        >
+          {t("debug.moreRequests", { count: visible.length - visibleCount })}
+        </button>
+      )}
       {noise > 0 && (
         <button
           type="button"
@@ -383,6 +394,24 @@ export function RequestDetail({
         )}
         {onControl && (
           <div className="mt-5 flex flex-wrap gap-2 border-t border-border/60 pt-4">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const pinned = !(data ?? request).pinned;
+                void debugRequest({
+                  session_id: session,
+                  run_id: request.run_id,
+                  action: pinned ? "pin" : "unpin",
+                  id: request.id,
+                }).then(
+                  () => setData((value) => ({ ...(value ?? request), pinned })),
+                  (reason) => setError(String(reason)),
+                );
+              }}
+            >
+              {t((data ?? request).pinned ? "debug.unpinEvidence" : "debug.pinEvidence")}
+            </Button>
             {(["replay", "modify", "mock", "block"] as const).map((action) => (
               <Button key={action} size="sm" variant="outline" onClick={() => onControl(action)}>
                 {t(`debug.${action}`)}

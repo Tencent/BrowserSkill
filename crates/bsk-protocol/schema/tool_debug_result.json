@@ -6,6 +6,17 @@
     "session_id"
   ],
   "properties": {
+    "activity": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/DebugActivity"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capabilities": true,
     "console": {
       "type": [
         "array",
@@ -24,6 +35,14 @@
           "type": "null"
         }
       ]
+    },
+    "next_offset": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
     },
     "next_since": {
       "type": [
@@ -52,6 +71,7 @@
         "$ref": "#/definitions/DebugOperation"
       }
     },
+    "output": true,
     "pages": {
       "type": [
         "array",
@@ -148,6 +168,58 @@
     }
   },
   "definitions": {
+    "DebugActivity": {
+      "description": "Daemon-owned execution status. Waiting observes completion; it never resends a command.",
+      "type": "object",
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "command_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elapsed_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "state": {
+          "type": "string"
+        },
+        "wait_complete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "wait_timed_out": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    },
     "DebugBody": {
       "type": "object",
       "required": [
@@ -849,6 +921,12 @@
             "null"
           ]
         },
+        "pinned": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "redirect_from": {
           "type": [
             "string",
@@ -1277,6 +1355,7 @@
           ],
           "format": "double"
         },
+        "storage": true,
         "storage_error": {
           "type": [
             "string",

@@ -1605,6 +1605,55 @@ describe("website debug", () => {
         .execute({ action: "debug", debugAction: "status", session: "foreign" }, makeExec()),
     ).rejects.toThrow();
   });
+  it("forwards query controls and observes activity outside the per-session queue", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "debug requests": { requests: [] },
+      "debug wait": { activity: { wait_complete: true } },
+    });
+    await startSession(tools);
+    await tools.get("browser_inspect")!.execute(
+      {
+        action: "debug",
+        debugAction: "requests",
+        url: "/api",
+        method: "POST",
+        resourceType: "Fetch",
+        status: 503,
+        budget: 4096,
+        fields: "status,duration_ms",
+      },
+      makeExec(),
+    );
+    expect(calls.at(-1)!.args).toEqual(
+      expect.arrayContaining([
+        "--url",
+        "/api",
+        "--resource-type",
+        "Fetch",
+        "--budget",
+        "4096",
+        "--fields",
+        "status,duration_ms",
+      ]),
+    );
+    await tools
+      .get("browser_inspect")!
+      .execute(
+        { action: "debug", debugAction: "wait", commandId: "active", waitMs: 60000 },
+        makeExec(),
+      );
+    expect(calls.at(-1)!.args).toEqual(
+      expect.arrayContaining(["--command-id", "active", "--wait-ms", "60000"]),
+    );
+    expect(
+      tools
+        .get("browser_inspect")!
+        .isConcurrencySafe?.({ action: "debug", debugAction: "wait" } as never),
+    ).toBe(true);
+    expect(calls.at(-1)!.options.tag).toBeUndefined();
+    expect(calls.at(-1)!.options.timeoutMs).toBeGreaterThanOrEqual(75000);
+  });
   it("validates debug arguments before spawning a CLI command", async () => {
     const { tools, calls } = setup({});
     for (const args of [

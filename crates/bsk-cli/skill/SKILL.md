@@ -299,7 +299,7 @@ opt-in and not retroactive. Keep the tab/session open while investigating.
    `bsk debug pages --session <id>` for page-load context, including evidence outside
    action windows. Report concrete evidence IDs, omissions and uncertainty.
 4. Stop capture with `bsk debug stop --session <id>`. To hand off results, export
-   before ending the task: `bsk debug export --session <id> > website-debug.json`.
+   before ending the task: `bsk debug export --session <id> --output website-debug.json`.
    Choose a new filename to avoid overwriting an existing file. The exported JSON
    includes retained bodies, headers, operations, console and page context.
 5. Follow the normal session cleanup rules. Stopping/ending a task preserves saved
@@ -316,6 +316,32 @@ A request to observe a problem does not by itself authorize extra submissions or
 changing network behavior. Follow the user’s requested experiment scope; never
 send evidence elsewhere without authorization. Common credential fields are redacted; free-form
 application data can still be sensitive. Do not print or request secrets.
+
+### Reliable evidence reads
+
+Discover actual limits/builds with `bsk debug capabilities --session <id>`;
+without a session this returns only the CLI schema, not browser capabilities.
+Query output defaults to 32 KiB; `--budget` accepts 4096..262144 bytes.
+`requests` accepts URL substring `--url`, exact `--method`, `--resource-type`,
+`--status`, `--state`, `--kind business|resource|extension|all`, and optional
+`--fields status,duration_ms`. `--limit` is 1..100. Follow `next_since` for lists,
+body `next_offset` for text, and top-level `next_offset` for console/pages.
+Check `output.omitted`/`output.truncated`; projection loss does not mean missing
+stored evidence. Narrow reads or export to a new `--output` file for full evidence.
+
+Completed requests can be fixed against capture-level eviction using
+`bsk debug pin <request-id> --session <id>` (`unpin` reverses it). The journal
+keeps up to 2,000 requests / 8 MiB per capture, with 20 pins and prioritized
+failed/business requests. Pins do not prevent whole-record expiration/deletion.
+Inspect `run.storage` and `run.coverage`: storage, backlog or read failures must
+be reported as missing evidence. Never equate a partial record with no event.
+
+When a command reports `session_busy`, it was not dispatched. Read
+`bsk debug activity --session <id>` or `bsk debug wait --session <id>
+--command-id <returned-command-id> --wait-ms 10000` (0..60000). Omitting the ID
+waits for idle. Completion means no longer running, not successful; check the
+original command result. Waiting never resends work; cancelling it leaves the
+original command alone. Keep ordinary browser commands serial within a task.
 
 ### Controlled HTTP experiments
 

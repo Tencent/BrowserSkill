@@ -157,7 +157,7 @@ export function DebugApp() {
       ]);
       const entries: DebugRequest[] = [];
       let since = 0;
-      for (let page = 0; page < 2; page++) {
+      for (let page = 0; page < 20; page++) {
         if (cancelled) return;
         const batch = await recordingRequest({ ...base, action: "requests", since, limit: 100 });
         entries.push(...(batch.requests ?? []));
@@ -549,6 +549,22 @@ export function DebugApp() {
               run.coverage.includes("interrupted_checkpoint")) && (
               <p className="mb-4 text-xs text-[var(--debug-accent)]">{t("debug.partial")}</p>
             )}
+            {run.storage && (
+              <p className="mb-4 text-[11px] text-muted-foreground">
+                {t("debug.storageSaved", { count: run.storage.requests })}
+              </p>
+            )}
+            {run.coverage
+              .filter((gap) => gap.startsWith("evidence_"))
+              .map((gap) => (
+                <p
+                  key={gap}
+                  role="status"
+                  className="mb-3 rounded-xl border border-border bg-card p-3 text-xs text-[var(--debug-accent)]"
+                >
+                  {t(`debug.gap_${gap}` as "debug.partial", { defaultValue: gap })}
+                </p>
+              ))}
             <div className="grid items-start gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
               <aside className="overflow-hidden rounded-2xl border border-border/80 bg-card">
                 <h2 className="border-b border-border/70 px-5 py-4 text-xs font-medium">

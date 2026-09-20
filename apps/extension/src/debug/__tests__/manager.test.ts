@@ -3,8 +3,9 @@ import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleDebug, validateDebugParams } from "@/tools/debug";
 import type { DebugArchive } from "../archive";
+import { mergeRequest } from "../journal";
 import { DebugManager } from "../manager";
-import type { DebugParams, DebugRecording } from "../types";
+import type { DebugParams, DebugRecording, DebugRequest, DebugRun } from "../types";
 
 async function fixture(archive?: DebugArchive) {
   let window = 100;
@@ -310,6 +311,108 @@ class MemoryArchive implements DebugArchive {
 }
 
 describe("persistent debugging records", () => {
+  it("journals early bodies before hot-cache eviction, survives stop and preserves task isolation", async () => {
+    const archive = new MemoryArchive();
+    const requests = new Map<string, DebugRequest>();
+    const journalArchive: DebugArchive = {
+      list: () => archive.list(),
+      delete: (id) => archive.delete(id),
+      put: (record) => archive.put(record),
+      retain: async (_run: DebugRun, entries: DebugRequest[]) => {
+        for (const entry of entries)
+          requests.set(entry.id, structuredClone(mergeRequest(requests.get(entry.id), entry)));
+      },
+      request: async (_run, id) => structuredClone(requests.get(id)),
+      get: async (id) => {
+        const record = await archive.get(id);
+        return (
+          record && {
+            ...record,
+            run: {
+              ...record.run,
+              storage: { requests: requests.size, bytes: 1, pins: 0, dropped: 0 },
+            },
+            requests: structuredClone([...requests.values()]),
+          }
+        );
+      },
+    };
+    const f = await fixture(journalArchive);
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    for (let i = 0; i < 230; i++) {
+      f.event("Network.requestWillBeSent", {
+        requestId: `post-${i}`,
+        type: "Fetch",
+        request: {
+          url: "https://site.test/save",
+          method: "POST",
+          hasPostData: true,
+          headers: { "content-type": "text/plain" },
+          postData: "x".repeat(8192),
+        },
+      });
+      f.event("Network.loadingFailed", { requestId: `post-${i}`, errorText: "test failure" });
+      if (i % 20 === 0) await Promise.resolve();
+    }
+    const first = `${run.id}:n1`;
+    const body = await f.manager.read({
+      session_id: "s1",
+      action: "request",
+      id: first,
+      part: "request",
+      max_chars: 10000,
+    });
+    expect(body.request!.request_body.text).toHaveLength(8192);
+    expect(body.run!.dropped_requests).toBe(0);
+    await f.manager.read({ session_id: "s1", action: "stop" });
+    const saved = await f.manager.read({ session_id: "s1", action: "export" });
+    expect(saved.recording!.requests).toHaveLength(230);
+    expect(saved.run!.coverage).not.toContain("evidence_write_backlog");
+    await f.sessions.start("s2");
+    await expect(
+      f.manager.read({ session_id: "s2", action: "request", id: first }),
+    ).rejects.toThrow("not found");
+    f.manager.releaseSession("s1");
+    const restored = await f.manager.readHistory({
+      session_id: "",
+      run_id: run.id,
+      action: "request",
+      id: first,
+      part: "request",
+    });
+    expect(restored.request!.request_body.text).toHaveLength(4096);
+  });
+
+  it("reports failed persistent reads and still exposes live evidence", async () => {
+    const archive = new MemoryArchive();
+    const failure = async (): Promise<never> => {
+      throw new Error("storage unavailable");
+    };
+    const f = await fixture({
+      list: () => archive.list(),
+      put: (record) => archive.put(record),
+      delete: (id) => archive.delete(id),
+      get: failure,
+      query: failure,
+      request: failure,
+      retain: failure,
+    });
+    active.push(f.manager);
+    await f.manager.start("s1", 7);
+    f.request("live");
+    const list = await f.manager.read({ session_id: "s1", action: "requests" });
+    expect(list.requests).toHaveLength(1);
+    expect(list.run!.coverage).toEqual(
+      expect.arrayContaining(["evidence_write_failed", "evidence_read_failed"]),
+    );
+    const read = await f.manager.read({
+      session_id: "s1",
+      action: "request",
+      id: list.requests![0].id,
+    });
+    expect(read.request!.url).toBe("https://site.test/live");
+  });
   it("retains redacted evidence after task release and reads it without attaching to the tab", async () => {
     const archive = new MemoryArchive();
     const f = await fixture(archive);

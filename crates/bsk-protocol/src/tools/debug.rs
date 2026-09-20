@@ -6,6 +6,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DebugAction {
+    Capabilities,
+    Activity,
+    Wait,
+    Pin,
+    Unpin,
     Start,
     Stop,
     Status,
@@ -39,12 +44,15 @@ pub struct DebugParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 100))]
     pub limit: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 65536))]
     pub offset: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 16384))]
     pub max_chars: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pointer: Option<String>,
@@ -52,6 +60,29 @@ pub struct DebugParams {
     pub rule: Option<DebugRuleSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay: Option<DebugReplaySpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 4096, max = 262144))]
+    pub budget: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 100, max = 599))]
+    pub status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0, max = 60000))]
+    pub wait_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -121,6 +152,8 @@ pub struct DebugRequest {
     pub replay_from: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replay_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugConsole {
@@ -228,6 +261,8 @@ pub struct DebugRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<BTreeMap<String, String>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -325,7 +360,15 @@ pub struct DebugResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activity: Option<DebugActivity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -428,4 +471,26 @@ pub struct DebugIntervention {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<Vec<String>>,
+}
+
+/// Daemon-owned execution status. Waiting observes completion; it never resends a command.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugActivity {
+    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_timed_out: Option<bool>,
+}
+
+pub fn debug_parameter_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(DebugParams)).expect("debug schema serializes")
 }

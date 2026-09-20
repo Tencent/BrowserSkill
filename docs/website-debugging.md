@@ -47,7 +47,7 @@ bsk debug request <request-id> --session <id> --part headers
 bsk debug console --session <id>
 bsk debug pages --session <id>
 bsk debug stop --session <id>
-bsk debug export --session <id> > website-debug.json
+bsk debug export --session <id> --output website-debug.json
 bsk session stop <id>
 ```
 
@@ -72,6 +72,66 @@ subcommand, and camelCase options (`runId`, `tabId`, `maxChars`). The six public
 tools, existing session ownership, cancellation and queue remain unchanged.
 The wire endpoint is `tool.debug`; schemas are in `crates/bsk-protocol/schema`.
 Older extensions reject it without altering the existing `console`/`network` tools.
+
+## Reliable agent reads
+
+```sh
+# Offline CLI schema; extension is null because no browser was queried.
+bsk debug capabilities
+# Actual extension actions, build identity, limits and unsupported features.
+bsk debug capabilities --session <id>
+bsk debug requests --session <id> --kind business --url /api/ --method POST --status 500 --limit 20 --budget 8192
+bsk debug requests --session <id> --fields status,duration_ms,resource_type
+bsk debug pin <request-id> --session <id>
+bsk debug unpin <request-id> --session <id>
+```
+
+Request filters are combined before pagination: `--url` is a case-sensitive
+substring; method/resource type/status/state match exactly. `--kind` is `all`,
+`business`, `resource` or `extension`. `--fields` selects optional metadata;
+identity, body availability and intervention/replay provenance always remain.
+Ordinary query results default to a 32 KiB UTF-8 JSON budget, configurable from
+4 KiB to 256 KiB. Data URLs are compacted in agent output. `output.omitted` and
+`output.truncated` describe projection loss, independently of capture/storage
+loss. The stored evidence is unchanged. Increase the budget, narrow a query or
+export for full retained details. An insufficient budget returns an explicit error.
+
+Request/operation lists paginate at whole entries using `next_since`; console
+and page lists use top-level `next_offset` with `--offset`. Body reads use the
+body's `next_offset` and preserve exact text without splitting Unicode characters.
+Large narrative strings may be shortened with an omission path. Export is exempt
+from the output budget; prefer `--output` to keep it out of the agent context.
+
+Pinning protects a completed request from **that capture's** capacity eviction.
+It does not extend whole-record expiration, prevent user deletion, or recover
+content that was never captured. The active request detail toolbar offers the
+same pin/unpin action. The evidence page shows saved request counts and explicit
+storage-limit, write-backlog, write-failure and read-failure gaps. A storage failure
+leaves in-memory evidence readable while available. `run.storage` reports saved
+counts, logical bytes, pins and capacity evictions; `run.coverage` reports other
+storage gaps. Pins and priority cannot guarantee preservation across a crash,
+browser storage deletion or failed writes.
+
+## Busy state and waiting
+
+The CLI still runs one browser command per session. Independent sessions remain
+independent. A `session_busy` error includes `dispatched: false`, `activity` with
+`command_id`, method, start time and elapsed time, and a wait hint.
+
+```sh
+bsk debug activity --session <id>
+bsk debug wait --session <id> --command-id <running-command-id> --wait-ms 10000
+```
+
+These two daemon-local reads work while the browser command is running; no capture
+is required and nothing is sent to the page. Omitting `--command-id` waits for idle.
+`--wait-ms` accepts 0..60000 (default 10000); zero is a poll. A timeout returns
+`wait_complete: false, wait_timed_out: true`. `wait_complete: true` means the
+specified command is no longer running, **not** that it succeeded; consult its
+original result and page evidence. Cancelling the waiter does not cancel the
+original command. Waiting never retries, replays or automatically queues a command.
+DSH keeps its existing per-session execution queue; debug activity/wait bypass
+that queue to observe ongoing work, still using the owned session.
 
 ## Evidence interpretation
 
@@ -131,15 +191,21 @@ including when connected to a remote daemon. They are separate from daemon-side 
 No new daemon storage or browser permission is required. Removing the extension or
 clearing its storage removes local history; previously exported files remain.
 
-Changed captures are checkpointed at most once per two seconds, with an immediate
+Request updates are coalesced and journaled to IndexedDB about every 100 ms,
+with early flushes for batches. Reads and final saves flush pending writes.
+Other capture context is checkpointed at most once per two seconds, with an immediate
 save at start and stop. A crash can lose changes since the last checkpoint; recovered
 records explicitly identify interruption and unavailable pending bodies. Storage
 failures are displayed; live data remains exportable while retained in memory.
 
 History keeps recent stopped records for 30 days, up to 50 records / 50 MiB total,
 evicting the oldest stopped records first. Active captures are protected within
-these limits. The existing per-capture limits still apply: history preserves the
-retained evidence, not an unlimited archive of all traffic. Export important records
+these limits. Requests have a separate journal of up to 2,000 entries / 8 MiB of serialized
+request evidence per capture. This survives the smaller live-cache eviction.
+Failed requests, HTTP errors, controlled/replayed requests and Fetch/XHR/JSON traffic
+have retention priority over ordinary resources. Old unpinned entries of the
+lowest priority are removed first. Other context keeps its existing capture limits.
+These are logical serialized-data budgets, not exact physical IndexedDB sizes. Export important records
 before automatic expiration. Lists read only metadata; bodies are fetched on demand.
 
 The JSON document contains `version: 1`, `saved_at`, `run`, `requests` (including
@@ -150,7 +216,8 @@ operations to requests and console entries. Capacity counters, omissions and sto
 reasons are preserved. Exporting an active capture produces a point-in-time snapshot.
 
 `bsk debug export` writes this document directly to stdout while the owning task is
-alive; stop capture before exporting a final record. After task teardown, use the
+alive. Add `--output <new-file.json>` to save atomically without overwriting a file,
+returning only path, byte count and run ID to the agent; stop capture before exporting a final record. After task teardown, use the
 extension's history page to inspect/export the record, then give the JSON file to an
 agent for analysis or comparison. Historical records are available to extension UI
 only: creating another task or reusing a short session ID does not grant an agent
@@ -165,8 +232,11 @@ access to older tasks' data. There is no built-in comparison or repair action.
 | Page-load observations | 20 per capture |
 | Fields / value length | 16 / 256 characters per page observation |
 | Follow-up observations | 4 retained changes per operation, within 15 seconds |
-| Requests / operations / console entries | 200 / 64 / 100 per capture |
-| Retained request + response text | 512 Ki UTF-16 code units per capture |
+| Live request cache / operations / console entries | 200 / 64 / 100 per capture |
+| Persistent request journal | 2,000 requests / 8 MiB per capture |
+| Pinned requests | 20 completed requests per capture, each at most 8 MiB / 20 |
+| Pending journal writes | 256 entries / 4 MiB, plus one batch in flight |
+| Live request + response text cache | 512 Ki UTF-16 code units per capture; journal is separate |
 | Individual body | 64 Ki code units, with explicit truncation/omission |
 | Response acquisition | 4 concurrent jobs, 32 queued, 2.5 s command deadline |
 | Browser response buffers | 2 MiB per target, 256 KiB per resource |

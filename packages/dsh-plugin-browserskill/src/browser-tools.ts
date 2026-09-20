@@ -167,7 +167,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ref: { type: "string", description: "Fresh ref for scoped html or cropped screenshot." },
       maxBytes: { type: "integer", description: "HTML byte cap." },
       since: { type: "integer", description: "Console/network sequence cursor." },
-      limit: { type: "integer", description: "Console/network entry cap." },
+      limit: {
+        type: "integer",
+        description: "Console/network entry cap; debug lists: 1..100, default 30.",
+      },
       maxTextChars: { type: "integer", description: "Console/network per-entry text cap." },
       includeStack: { type: "boolean", description: "Include console stack frames." },
     },

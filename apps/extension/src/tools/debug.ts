@@ -1,5 +1,7 @@
+import { DEBUG_ACTIONS, DEBUG_FIELDS, QUERY_LIMITS } from "@/debug/capabilities";
 import { validateReplay, validateRule } from "@/debug/control-model";
 import type { DebugManager } from "@/debug/manager";
+import { budgetResult } from "@/debug/query";
 import type { DebugParams, DebugResult } from "@/debug/types";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
@@ -12,24 +14,7 @@ import {
   resolveTargetTab,
 } from "./shared";
 
-const ACTIONS = new Set([
-  "start",
-  "stop",
-  "status",
-  "requests",
-  "request",
-  "operations",
-  "operation",
-  "console",
-  "pages",
-  "export",
-  "rules",
-  "rule_add",
-  "rule_enable",
-  "rule_disable",
-  "rule_remove",
-  "replay",
-]);
+const ACTIONS = new Set<string>(DEBUG_ACTIONS);
 const PARTS = new Set(["metadata", "request", "response", "headers", "timing"]);
 
 export function validateDebugParams(params: DebugParams): string | undefined {
@@ -38,7 +23,9 @@ export function validateDebugParams(params: DebugParams): string | undefined {
   for (const [key, max, min] of [
     ["since", Number.MAX_SAFE_INTEGER, 0],
     ["offset", 64 * 1024, 0],
-    ["limit", 100, 1],
+    ["limit", QUERY_LIMITS.limit.max, QUERY_LIMITS.limit.min],
+    ["budget", QUERY_LIMITS.budget.max, QUERY_LIMITS.budget.min],
+    ["status", 599, 100],
     ["max_chars", 16 * 1024, 1],
     ["tab_id", Number.MAX_SAFE_INTEGER, 0],
   ] as const) {
@@ -46,7 +33,15 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     if (value !== undefined && (!Number.isSafeInteger(value) || value < min || value > max))
       return `${key} must be an integer between ${min} and ${max}`;
   }
-  for (const key of ["id", "run_id", "name", "pointer"] as const) {
+  for (const key of [
+    "id",
+    "run_id",
+    "name",
+    "pointer",
+    "url",
+    "method",
+    "resource_type",
+  ] as const) {
     const value = params[key];
     if (
       value !== undefined &&
@@ -64,6 +59,51 @@ export function validateDebugParams(params: DebugParams): string | undefined {
     !params.id
   )
     return "id is required";
+  if (["pin", "unpin"].includes(params.action) && !params.id) return "id is required";
+  if (
+    ["url", "method", "resource_type", "status", "state", "kind"].some(
+      (key) => params[key as keyof DebugParams] !== undefined,
+    ) &&
+    params.action !== "requests"
+  )
+    return "filters require requests action";
+  if (
+    params.state !== undefined &&
+    !["pending", "complete", "failed", "redirected", "interrupted"].includes(params.state)
+  )
+    return "invalid request state";
+  if (
+    params.kind !== undefined &&
+    !["all", "business", "resource", "extension"].includes(params.kind)
+  )
+    return "invalid request kind";
+  if (
+    params.fields !== undefined &&
+    (!Array.isArray(params.fields) ||
+      params.fields.length > 32 ||
+      !["request", "requests"].includes(params.action) ||
+      params.fields.some(
+        (field) =>
+          ![
+            ...DEBUG_FIELDS,
+            "id",
+            "run_id",
+            "sequence",
+            "started_at",
+            "method",
+            "url",
+            "state",
+            "request_body",
+            "response_body",
+            "truncated",
+            "intervention",
+            "replay_from",
+            "replay_id",
+            "pinned",
+          ].includes(field),
+      ))
+  )
+    return "invalid request fields";
   try {
     if (params.action === "rule_add") validateRule(params.rule);
     else if (params.rule !== undefined) return "rule is only accepted by rule_add";
@@ -105,9 +145,9 @@ export async function handleDebug(
         debug.stopTab(target.tabId, "cancelled");
         return { code: "cancelled", message: "debug aborted" };
       }
-      return { session_id: context.sessionId, run };
+      return budgetResult({ session_id: context.sessionId, run }, params);
     }
-    return await debug.read(params, signal);
+    return budgetResult(await debug.read(params, signal), params);
   } catch (error) {
     return {
       code: "invalid_params",
