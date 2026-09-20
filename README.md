@@ -181,6 +181,11 @@ Run `bsk doctor` and follow its hints. Open the extension popup and confirm it i
 connected. Explain any warnings and resolve failures before testing browser use.
 Doctor can pass with no skill installed (`N/A`); verify skill discovery separately.
 
+Connection state can be green while actions still time out — metadata commands
+keep answering during a reconnect cycle. See
+[when actions time out but everything looks connected](docs/troubleshooting-wedged-actions.md)
+for the log signature to check before reloading anything.
+
 </details>
 
 Start a new Agent session, confirm `browser-skill` is available in the harness,
@@ -350,7 +355,9 @@ through the [plugin](#deepseek-harness-plugin): the agent calls injected
 ## For Developers
 
 The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol
-and plugin entry points, visible bounds and interruption behavior.
+and plugin entry points, visible bounds and interruption behavior. The
+[troubleshooting note](docs/troubleshooting-wedged-actions.md) covers the
+"connected but actions time out" state and its daemon-log signature.
 
 The repository is a Cargo + pnpm workspace:
 
