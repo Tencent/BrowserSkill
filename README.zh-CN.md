@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
 ## BrowserSkill 的优势
 
 - **复用真实登录态**：Agent 可以操作你已经登录的网站，不需要额外测试账号。
-- **不中断你的工作**：浏览器任务在独立可见的 Agent Window 中运行，不影响你继续使用自己的浏览器。
+- **不中断你的工作**：浏览器任务默认在独立可见的 Agent Window 中运行，不影响你继续使用自己的浏览器。
 - **支持任意 Agent**：只要 Agent 能调用 Shell，就可以通过 `bsk` CLI 使用 BrowserSkill，不绑定特定模型、Agent 框架或 harness。
 - **内置 human-in-loop**：遇到 captcha、登录、确认弹窗等必须由人处理的步骤时，Agent 可以主动请求你接管，完成后再继续任务。
 
@@ -216,6 +216,10 @@ bsk update --yes
 需要指定 Chrome Profile 时，在目标 Profile 的扩展弹窗中点击“复制此 Profile 的指令”，
 再发给 Agent。指令通过 `--browser` 为每个新会话固定实例，即使只有一个浏览器在线也不省略。
 详见[浏览器 Profile 选择](docs/browser-profiles.md)。
+本地会话可添加 `--in-window`，在最近聚焦的普通用户窗口中新建受控标签页，清理时不主动关闭宿主窗口。
+此模式要求 daemon 与扩展支持协议 1.4，不支持远程连接或窗口尺寸参数。
+组合 `--in-window --no-focus` 会创建非活动页，但不解决 #242 的后台输入限制；`record start` 仍使用独立窗口。
+
 无人值守由用户在插件中关闭相应开关。`--unattended`、`tab borrow --no-confirm`、
 `BSK_REQUEST_HELP=off` 保留兼容识别，但已弃用，不能覆盖插件开关。CLI 使用这些输入时会输出说明，
 Daemon 也会为自身继承的旧环境设置记录说明。原先只依靠这些输入避免等待的脚本，现在需要遵循浏览器设置。
@@ -293,7 +297,7 @@ flowchart TB
   style UserWindows fill:#f8fafc,stroke:#cbd5e1,color:#334155
 ```
 
-Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
+Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在会话的独立窗口或显式选择的共享窗口中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
 
 ## 面向开发者
 

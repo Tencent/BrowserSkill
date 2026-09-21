@@ -47,6 +47,7 @@ impl std::fmt::Display for SessionId {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub container_mode: Option<String>,
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub id: SessionId,
     pub browser_id: BrowserId,
@@ -57,6 +58,7 @@ pub struct Session {
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
         SessionStatusEntry {
+            container_mode: self.container_mode.clone(),
             interaction: self.interaction,
             session_id: self.id.0.clone(),
             browser_instance_id: self.browser_id.0.clone(),
@@ -153,6 +155,7 @@ impl SessionRegistry {
             guard.insert(
                 candidate.clone(),
                 Session {
+                    container_mode: None,
                     interaction: None,
                     id: candidate.clone(),
                     browser_id: browser_id.clone(),
@@ -454,6 +457,7 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentWindowOptions {
+    pub in_window: bool,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: focused).
@@ -527,6 +531,22 @@ pub(crate) async fn start_session_recoverable(
             instance_ids,
         },
     })?;
+    if window.in_window
+        && !bsk_protocol::tools::session::supports_shared_window(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "Shared sessions require extension protocol 1.4".into(),
+            data: None,
+        }));
+    }
+    if window.in_window && window.size.is_some() {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "Shared sessions do not accept window dimensions".into(),
+            data: None,
+        }));
+    }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
@@ -534,6 +554,7 @@ pub(crate) async fn start_session_recoverable(
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
     let params = SessionStartParams {
+        in_window: window.in_window,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),
@@ -669,10 +690,27 @@ pub(crate) async fn start_session_recoverable(
             return Err(StartSessionError::ExtensionError(err));
         }
     };
+    if window.in_window && start_result.container_mode.as_deref() != Some("in_window") {
+        let cleanup = rollback_extension_session(&client, &session_id).await;
+        sessions.cancel_reservation(&session_id);
+        if let Err(message) = cleanup {
+            return Err(StartSessionError::CleanupFailed {
+                session_id,
+                agent_window_id: start_result.agent_window_id,
+                message,
+            });
+        }
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "Extension did not confirm in_window mode".into(),
+            data: None,
+        }));
+    }
     {
         let mut guard = sessions.inner.lock().expect("session registry poisoned");
         if let Some(session) = guard.get_mut(&session_id) {
             session.interaction = session.interaction.or(start_result.interaction);
+            session.container_mode = start_result.container_mode.clone();
         }
     }
     let session = sessions

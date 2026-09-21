@@ -52,6 +52,9 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Create session tabs in the last-focused user window (local only).
+    #[arg(long, conflicts_with_all = ["width", "height"])]
+    pub in_window: bool,
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
@@ -76,7 +79,7 @@ pub struct SessionStartArgs {
     #[arg(long, value_parser = window_size)]
     pub height: Option<u32>,
 
-    /// Open the Agent Window in the background without stealing focus.
+    /// Start without stealing focus (an inactive tab with --in-window).
     #[arg(long)]
     pub no_focus: bool,
 }
@@ -119,6 +122,8 @@ pub struct SessionRequestArgs {
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_window: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +140,8 @@ struct StartParams {
 
 #[derive(Debug, Deserialize)]
 pub struct StartReply {
+    #[serde(default)]
+    pub container_mode: Option<String>,
     #[serde(default)]
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
@@ -239,6 +246,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     let result = start_session(
         sock,
         SessionStartOptions {
+            in_window: args.in_window,
             name: args.name,
             request_id: args.request_id,
             browser: args.browser,
@@ -257,6 +265,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
                         "session_id": reply.session_id,
                         "browser_instance_id": reply.browser_instance_id,
                         "agent_window_id": reply.agent_window_id,
+                        "container_mode": reply.container_mode,
                         "interaction": reply.interaction,
                     }))
                     .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
@@ -277,6 +286,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
     pub request_id: Option<String>,
+    pub in_window: bool,
     pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
@@ -286,6 +296,26 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.in_window {
+        let status: bsk_protocol::StatusResult = call(
+            sock.clone(),
+            Method::SystemStatus,
+            None::<serde_json::Value>,
+            Duration::from_secs(10),
+        )?;
+        if !bsk_protocol::tools::session::supports_shared_window(&status.protocol_version) {
+            return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                code: bsk_protocol::ErrorCode::Unsupported,
+                message:
+                    "Shared sessions require daemon protocol 1.4; restart or update the daemon"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "component": "daemon",
+                    "required_protocol": "1.4", "actual_protocol": status.protocol_version,
+                })),
+            }));
+        }
+    }
     call(
         sock,
         if opts.request_id.is_some() {
@@ -294,6 +324,7 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             Method::SessionStart
         },
         Some(StartParams {
+            in_window: opts.in_window,
             request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
@@ -542,7 +573,7 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 println!("(no active sessions)");
                 return Ok(());
             }
-            let headers = ("SESSION", "BROWSER", "AGENT WINDOW");
+            let headers = ("SESSION", "BROWSER", "WINDOW / MODE");
             let session_w = reply
                 .sessions
                 .iter()
@@ -567,8 +598,11 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                     .map(|w| w.to_string())
                     .unwrap_or_else(|| "-".into());
                 println!(
-                    "{:<session_w$}  {:<browser_w$}  {}",
-                    s.session_id, s.browser_instance_id, window,
+                    "{:<session_w$}  {:<browser_w$}  {} / {}",
+                    s.session_id,
+                    s.browser_instance_id,
+                    window,
+                    s.container_mode.as_deref().unwrap_or("window"),
                 );
             }
         }
@@ -631,6 +665,7 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                in_window: false,
                 request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,

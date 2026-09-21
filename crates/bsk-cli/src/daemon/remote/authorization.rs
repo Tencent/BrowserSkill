@@ -131,9 +131,15 @@ impl AuthorizationStore {
         loop {
             match FileExt::try_lock_exclusive(&lock) {
                 Ok(()) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
                     if Instant::now() >= deadline {
-                        return Err(error).context("authorization store is busy");
+                        // Normalize the platform-specific lock error for the HTTP
+                        // layer: Windows reports ERROR_LOCK_VIOLATION, not WouldBlock.
+                        return Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, error))
+                            .context("authorization store is busy");
                     }
                     std::thread::sleep(Duration::from_millis(10));
                 }

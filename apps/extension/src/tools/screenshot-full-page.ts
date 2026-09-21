@@ -4,6 +4,7 @@ import { capturePage } from "@/long-screenshot/capture";
 import type { ScreenshotExports } from "@/long-screenshot/exports";
 import { createPageClient } from "@/long-screenshot/page-client";
 import { exportPng } from "@/long-screenshot/png";
+import { openScreenshotSource } from "@/long-screenshot/source";
 import { TileWriter } from "@/long-screenshot/tiles";
 import {
   type CaptureCancelReason,
@@ -155,6 +156,7 @@ export async function handleFullPageScreenshot(
   let phase = "preparing";
   let frames = 0;
   let progress = 0;
+  let source: Awaited<ReturnType<typeof openScreenshotSource>> | undefined;
   const cursor = markDialogCursor(deps.cdp, target.tabId);
   try {
     await deps.exports.prepare();
@@ -165,13 +167,40 @@ export async function handleFullPageScreenshot(
     await waitForReply(deps.cdp.send(target.tabId, "Page.getFrameTree"), controller.signal);
     attachmentId = deps.cdp.getAttachmentId?.(target.tabId);
     if (!attachmentId) throw new ScreenshotError("changed");
-    const platform = await waitForReply(chrome.runtime.getPlatformInfo(), controller.signal);
     await client.prepare();
     await withScreenshotOverlayHidden(
       target.tabId,
       client.documentId!,
       controller.signal,
       async () => {
+        phase = "opening capture source";
+        source = await openScreenshotSource(
+          target.tabId,
+          target.windowId,
+          controller.signal,
+          checkTab,
+          true,
+          async () => {
+            deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+            await deps.cdp.ensureAttachedToUrl?.(target.tabId, target.url);
+            return {
+              async capture() {
+                const shot = await waitForReply(
+                  deps.cdp.send<{ data: string }>(target.tabId, "Page.captureScreenshot", {
+                    format: "png",
+                    fromSurface: true,
+                    captureBeyondViewport: false,
+                  }),
+                  controller.signal,
+                );
+                if (!shot.data) throw new ScreenshotError("captureFailed");
+                return `data:image/png;base64,${shot.data}`;
+              },
+              async close() {}, // The session retains ownership of its debugger.
+            };
+          },
+          ctx.container.mode === "in_window",
+        );
         phase = "capturing";
         await capturePage({
           page: (command) => {
@@ -183,16 +212,7 @@ export async function handleFullPageScreenshot(
             phase = "reading viewport pixels";
             await checkTab();
             checkOwnership();
-            const shot = await waitForReply(
-              deps.cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
-                format: "png",
-                fromSurface: true,
-                captureBeyondViewport: false,
-              }),
-              controller.signal,
-            );
-            if (!shot.data) throw new ScreenshotError("captureFailed");
-            const data = `data:image/png;base64,${shot.data}`;
+            const data = await source!.capture();
             await checkTab();
             phase = "decoding viewport pixels";
             return createImageBitmap(await (await fetch(data)).blob());
@@ -200,8 +220,7 @@ export async function handleFullPageScreenshot(
           write: (...args) => writer.write(...args, controller.signal),
           scope: params.scope,
           loadingTimeoutMs: 30_000,
-          // Preserve the Windows stale-frame guard with the target-only CDP source.
-          checkFreshness: platform.os === "win",
+          checkFreshness: source.checkFreshness ?? false,
           progress: (_phase, value, count) => {
             progress = value;
             frames = count;
@@ -292,6 +311,7 @@ export async function handleFullPageScreenshot(
     chrome.tabs.onRemoved.removeListener(removed);
     chrome.tabs.onAttached.removeListener(removed);
     chrome.runtime.onMessage.removeListener(cancelled);
+    await source?.close();
     if (!retained) await deps.exports.discard(id);
   }
 }

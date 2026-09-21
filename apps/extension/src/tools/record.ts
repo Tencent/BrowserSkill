@@ -32,7 +32,11 @@ import {
 import { RecordingTabCoordinator, type TabActivation } from "@/lib/recording/tab-coordinator";
 import { buildTraceV2 } from "@/lib/recording/trace-reducer-v2";
 import type { RecordingDraftStep } from "@/lib/recording/types";
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionManager,
+  sessionWindowId,
+} from "@/session-manager/manager";
 import { EXTENSION_VERSION } from "@/transport/handshake";
 import type {
   RecordAwaitParams,
@@ -493,7 +497,7 @@ async function clearRearmTimersForRecording(
   try {
     const tabs = await deps.tabsApi.query({ windowId: recording.agentWindowId });
     for (const tab of tabs) {
-      if (typeof tab.id === "number") clearRearmTimer(tab.id);
+      if (typeof tab.id === "number" && recording.isTabAllowed(tab.id)) clearRearmTimer(tab.id);
     }
   } catch {
     // Best-effort cleanup.
@@ -884,7 +888,8 @@ export async function handleRecordStart(
   // Cancellation can precede record_await; keep its rejection handled.
   void finishPromise.catch(() => {});
   const isTabAllowed = (tabId: number) =>
-    !ctx.remote || (manager.get(ctx.sessionId) === ctx && isAgentControlledTab(ctx, tabId));
+    (!ctx.remote && ctx.container.mode === "window") ||
+    (manager.get(ctx.sessionId) === ctx && isAgentControlledTab(ctx, tabId));
   const navigateUrl = params.url ?? RECORD_DEFAULT_START_URL;
   const startedAtMs = Date.now();
   const maxPageTokens = params.max_page_tokens;
@@ -892,7 +897,7 @@ export async function handleRecordStart(
   recordings.set(params.session_id, {
     requestId,
     tabs: new RecordingTabCoordinator(target.tabId, navigateUrl),
-    agentWindowId: ctx.agentWindowId,
+    agentWindowId: sessionWindowId(ctx),
     isTabAllowed,
     startUrl: navigateUrl,
     ...(params.purpose ? { purpose: params.purpose } : {}),

@@ -26,7 +26,7 @@ https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
 
 - **Reuse real login state**: Agents can work with sites you are already signed
   into, without separate test accounts.
-- **Keep working uninterrupted**: browser tasks run in a separate, visible
+- **Keep working uninterrupted**: by default, browser tasks run in a separate, visible
   Agent Window, so you can keep using your own browser.
 - **Support any Agent**: any Agent that can call a shell can use BrowserSkill
   through the `bsk` CLI, with no lock-in to a specific model, Agent framework, or
@@ -251,6 +251,11 @@ Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Age
 For a specific Chrome profile, use **Copy profile instructions** in that profile's extension
 popup and send them to your agent. This pins each new session to its instance with `--browser`,
 even when only one browser is online. See [browser profile selection](docs/browser-profiles.md).
+For local sessions, `--in-window` creates a controlled tab in the last-focused normal
+user window and preserves that host during session cleanup. It requires daemon and
+extension protocol 1.4 and cannot be combined with window dimensions or remote mode.
+`--in-window --no-focus` creates an inactive tab; background input remains subject to
+the limitations in #242. `record start` continues to use a dedicated window.
 For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
 `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
 deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
@@ -346,7 +351,7 @@ flowchart TB
 
 The agent never talks to the browser directly. It asks the `bsk` CLI to perform a
 browser task; the local daemon routes that request to the extension; the
-extension runs it in an Agent Window. DeepSeek Harness takes the same path
+extension runs it in the session's dedicated or explicitly selected shared window. DeepSeek Harness takes the same path
 through the [plugin](#deepseek-harness-plugin): the agent calls injected
 `browser_*` tools, and the plugin invokes `bsk` on its behalf.
 

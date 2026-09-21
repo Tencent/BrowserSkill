@@ -31,8 +31,10 @@ one session and tab. CSS selectors search the main document; use refs for
 iframe or shadow-root elements. Unknown, stale and cross-tab refs fail instead
 of falling back to the viewport.
 
-`--session` is required. `--tab-id` defaults to the Agent Window's active tab;
-user tabs must first be borrowed into that window. `--timeout` defaults to
+`--session` is required. `--tab-id` defaults to the Agent Window's active tab,
+or the session's selected controlled tab in local `--in-window` mode.
+User tabs must first be borrowed by the session; same-window borrowing does not
+move the page. `--timeout` defaults to
 `30s` and must be positive. Modifiers are comma-separated `alt,ctrl,meta,shift`.
 
 ## Input and result contract

@@ -18,7 +18,6 @@ use bsk_protocol::{
     ResponseBody, ResponseFrame, RpcError,
 };
 use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -29,13 +28,7 @@ use support::{wait_for_abort_registered, wait_for_inflight_forwarded, wait_until
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
 fn tempfile_path(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let mut rng = rand::thread_rng();
-    let suffix: String = (0..8)
-        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
-        .collect();
-    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
-    p
+    support::ipc_endpoint(prefix)
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
@@ -203,6 +196,7 @@ async fn cancel_forwards_to_extension_when_tool_is_inflight() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
@@ -427,6 +421,7 @@ async fn cancel_arriving_during_promote_critical_section_keeps_request_cancel_in
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
@@ -627,6 +622,7 @@ async fn cancel_keeps_session_busy_until_delayed_extension_cleanup_finishes() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
