@@ -378,7 +378,16 @@ pub enum StartSessionError {
         browsers: Vec<BrowserStatusEntry>,
     },
     #[error("requested browser is not connected")]
-    BrowserNotFound,
+    BrowserNotFound {
+        /// Snapshot of every currently connected browser, attached to
+        /// the daemon's structured error so a selector miss can list
+        /// the candidates the caller could have meant instead of
+        /// making the caller run `bsk browsers` and retry one instance
+        /// after another. Empty when nothing is connected, in which
+        /// case no `browsers` payload is emitted at all and the error
+        /// keeps its pre-existing wire shape.
+        browsers: Vec<BrowserStatusEntry>,
+    },
     #[error("label '{label}' matches {} connected browsers", instance_ids.len())]
     AmbiguousBrowserLabel {
         label: String,
@@ -407,7 +416,7 @@ impl StartSessionError {
         match self {
             StartSessionError::NoBrowserConnected => "no_browser_connected",
             StartSessionError::MultipleBrowsersOnline { .. } => "multiple_browsers_online",
-            StartSessionError::BrowserNotFound => "not_found",
+            StartSessionError::BrowserNotFound { .. } => "not_found",
             StartSessionError::AmbiguousBrowserLabel { .. } => "invalid_params",
             StartSessionError::IdExhausted => "protocol_error",
             StartSessionError::Timeout => "timeout",
@@ -518,7 +527,14 @@ pub(crate) async fn start_session_recoverable(
         SelectError::MultipleBrowsersOnline => StartSessionError::MultipleBrowsersOnline {
             browsers: snapshot_status_entries(registry, sessions),
         },
-        SelectError::NotFound => StartSessionError::BrowserNotFound,
+        // A selector miss is the one selection failure that used to
+        // carry no candidates, which pushed callers into enumerating
+        // `bsk browsers` and retrying instances one by one. Attach the
+        // same snapshot `multiple_browsers_online` already uses so the
+        // CLI can answer the miss in a single round trip.
+        SelectError::NotFound => StartSessionError::BrowserNotFound {
+            browsers: snapshot_status_entries(registry, sessions),
+        },
         SelectError::AmbiguousLabel {
             label,
             instance_ids,
