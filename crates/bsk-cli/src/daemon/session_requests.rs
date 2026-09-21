@@ -506,6 +506,7 @@ mod ownership_tests {
 
     fn session(id: &str, window: i64) -> Session {
         Session {
+            container_mode: None,
             id: SessionId(id.into()),
             browser_id: BrowserId("browser".into()),
             agent_window_id: Some(window),
