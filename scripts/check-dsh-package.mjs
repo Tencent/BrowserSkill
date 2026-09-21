@@ -1,7 +1,7 @@
 // Run after the plugin build. Inspect an actual npm archive, then load its runtime
 // from an unrelated directory with a fake runner (no browser/daemon side effects).
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,19 +17,21 @@ const cwd = process.cwd();
 const disposers = [];
 try {
   const [archive] = JSON.parse(
-    execFileSync(
-      "npm",
-      [
-        "pack",
-        "--ignore-scripts",
-        "--json",
-        "--cache",
-        join(temp, "npm-cache"),
-        "--pack-destination",
-        temp,
-      ],
-      { cwd: pkg, encoding: "utf8" },
-    ),
+    // The shell launches npm.cmd on Windows. Pass paths through npm's config
+    // environment so spaces and shell metacharacters remain literal path bytes.
+    execSync("npm pack --ignore-scripts --json", {
+      cwd: pkg,
+      encoding: "utf8",
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([name]) => !/^npm_config_(?:cache|pack_destination)$/i.test(name),
+          ),
+        ),
+        npm_config_cache: join(temp, "npm-cache"),
+        npm_config_pack_destination: temp,
+      },
+    }),
   );
   execFileSync("tar", ["-xzf", join(temp, archive.filename), "-C", temp]);
   const unpacked = join(temp, "package");

@@ -155,6 +155,34 @@ jobs:
       - name: Build extension
         run: pnpm ext:build
 
+  windows-dsh-package:
+    name: Windows DSH npm package
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the DSH plugin
+        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+
+      - name: Verify the npm archive and runtime resource paths
+        env:
+          TEMP: ${{ runner.temp }}/bsk package & cache
+          TMP: ${{ runner.temp }}/bsk package & cache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          node scripts/check-dsh-package.mjs
+
   browser-input:
     name: Browser input readiness regression
     runs-on: ubuntu-latest
