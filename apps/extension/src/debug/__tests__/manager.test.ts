@@ -4,7 +4,7 @@ import { SessionManager } from "@/session-manager/manager";
 import { handleDebug, validateDebugParams } from "@/tools/debug";
 import type { DebugArchive } from "../archive";
 import { mergeRequest } from "../journal";
-import { DebugManager } from "../manager";
+import { DEBUG_START_TIMEOUT_MS, DebugManager } from "../manager";
 import type { DebugParams, DebugRecording, DebugRequest, DebugRun } from "../types";
 
 async function fixture(archive?: DebugArchive) {
@@ -23,17 +23,18 @@ async function fixture(archive?: DebugArchive) {
   const dispose = vi.fn(() => {
     listener = undefined;
   });
-  const sendAttached = vi.fn(async (_target: CdpDebuggee, method: string) =>
-    method === "Accessibility.getFullAXTree"
-      ? {
-          nodes: [
-            { role: { value: "StaticText" }, name: { value: "Save failed" } },
-            { role: { value: "textbox" }, name: { value: "not retained" } },
-          ],
-        }
-      : method === "Network.getResponseBody"
-        ? { body: '{"ok":false}' }
-        : {},
+  const sendAttached = vi.fn(
+    async (_target: CdpDebuggee, method: string): Promise<unknown> =>
+      method === "Accessibility.getFullAXTree"
+        ? {
+            nodes: [
+              { role: { value: "StaticText" }, name: { value: "Save failed" } },
+              { role: { value: "textbox" }, name: { value: "not retained" } },
+            ],
+          }
+        : method === "Network.getResponseBody"
+          ? { body: '{"ok":false}' }
+          : {},
   );
   const cdp = {
     send: vi.fn(),
@@ -86,6 +87,114 @@ afterEach(() => {
 });
 
 describe("task-scoped debug lifecycle", () => {
+  it("cancels a hung Network.enable promptly, stops events, and ignores late completion", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    let resolve!: () => void;
+    f.cdp.ensureNetworkCapture.mockImplementationOnce(
+      () =>
+        new Promise<void>((done) => {
+          resolve = done;
+        }),
+    );
+    const abort = new AbortController();
+    const starting = handleDebug(
+      f.sessions,
+      { session_id: "s1", action: "start", tab_id: 7 },
+      f.manager,
+      f.tabs,
+      abort.signal,
+    );
+    await vi.waitFor(() => expect(f.cdp.ensureNetworkCapture).toHaveBeenCalled());
+    f.request("before-cancel");
+    abort.abort();
+    f.request("after-cancel");
+    expect(await starting).toMatchObject({ code: "cancelled" });
+    expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toEqual([]);
+    expect(f.dispose).toHaveBeenCalledTimes(1);
+    resolve();
+    await Promise.resolve();
+    expect(f.sendAttached).not.toHaveBeenCalled();
+    expect((await f.manager.start("s1", 7)).state).toBe("capturing");
+  });
+
+  it("applies one startup deadline across successive CDP waits and releases the start lock", async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    active.push(f.manager);
+    f.cdp.ensureNetworkCapture.mockImplementationOnce(
+      () => new Promise<void>((done) => setTimeout(done, 8000)),
+    );
+    const graph = vi.fn(() => new Promise<never>(() => {}));
+    Object.assign(f.cdp, { getFrameGraph: graph });
+    const starting = expect(f.manager.start("s1", 7)).rejects.toThrow("debug start timeout");
+    await vi.advanceTimersByTimeAsync(DEBUG_START_TIMEOUT_MS);
+    await starting;
+    expect(graph).toHaveBeenCalledTimes(1);
+    expect((await f.manager.read({ session_id: "s1", action: "status" })).runs).toEqual([]);
+    Object.assign(f.cdp, { getFrameGraph: undefined });
+    expect((await f.manager.start("s1", 7)).state).toBe("capturing");
+  });
+
+  it("does not install an observer after startup was cancelled while reading the frame tree", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    let resolve!: (value: object) => void;
+    f.sendAttached.mockImplementation(async (_target, method) =>
+      method === "Page.getFrameTree"
+        ? new Promise((done) => {
+            resolve = done;
+          })
+        : {},
+    );
+    const abort = new AbortController();
+    const starting = expect(f.manager.start("s1", 7, "", abort.signal)).rejects.toThrow(
+      "cancelled",
+    );
+    await vi.waitFor(() => expect(resolve).toBeDefined());
+    abort.abort();
+    await starting;
+    resolve({ frameTree: { frame: { id: "root" } } });
+    await Promise.resolve();
+    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+      "Runtime.addBinding",
+    );
+    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+      "Page.addScriptToEvaluateOnNewDocument",
+    );
+  });
+
+  it("removes a new-document script whose identifier arrives after startup cancellation", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    let resolve!: (value: object) => void;
+    f.sendAttached.mockImplementation(async (_target, method) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "root" } } };
+      if (method === "Page.addScriptToEvaluateOnNewDocument")
+        return new Promise((done) => {
+          resolve = done;
+        });
+      return {};
+    });
+    const abort = new AbortController();
+    const starting = expect(f.manager.start("s1", 7, "", abort.signal)).rejects.toThrow(
+      "cancelled",
+    );
+    await vi.waitFor(() => expect(resolve).toBeDefined());
+    abort.abort();
+    await starting;
+    resolve({ identifier: "late-script" });
+    await vi.waitFor(() =>
+      expect(f.sendAttached).toHaveBeenCalledWith(
+        { tabId: 7 },
+        "Page.removeScriptToEvaluateOnNewDocument",
+        { identifier: "late-script" },
+      ),
+    );
+    expect(f.sendAttached.mock.calls.map(([, method]) => method)).not.toContain(
+      "Page.createIsolatedWorld",
+    );
+  });
   it("refuses capture outside the Agent Window and clears evidence on a manual tab move", async () => {
     const f = await fixture();
     active.push(f.manager);
@@ -405,7 +514,7 @@ describe("persistent debugging records", () => {
     for (let i = 0; i < 6; i++) await Promise.resolve();
     await f.manager.read({ session_id: "s1", action: "stop" });
     const source = await archive.get(run.id);
-    expect(source?.requests[0].response_body.text).toContain('"ok": false');
+    expect(source?.requests[0].response_body.text).toContain('"ok":false');
     const reader = new DebugManager(f.sessions, f.cdp, f.tabs, Date.now, {
       ...archive,
       put: (record) => archive.put(record),
@@ -434,7 +543,7 @@ describe("persistent debugging records", () => {
         id: `${run.id}:n1`,
         part,
       });
-      if (part === "response") expect(result.request?.response_body.text).toContain('"ok": false');
+      if (part === "response") expect(result.request?.response_body.text).toContain('"ok":false');
       if (part === "headers") expect(result.request?.response_headers?.["x-source"]).toBe("legacy");
       if (part === "timing") expect(result.request?.timing?.receiveHeadersEnd).toBe(42);
     }

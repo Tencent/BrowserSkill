@@ -79,6 +79,7 @@ export function debugCapabilities(persistent = true): Record<string, unknown> {
           "started_at",
           "method",
           "url",
+          "integrity",
           "state",
           "request_body",
           "response_body",
@@ -142,6 +143,10 @@ export function debugCapabilities(persistent = true): Record<string, unknown> {
       replay_limit: 20,
       replay_same_origin: true,
       replay_requires_key: true,
+      url_max_chars: 16384,
+      retained_url_max_chars: 2048,
+      replay_fidelity:
+        "Reuse requires integrity.url=complete, complete metadata and request_body.replay_safe=true. Replace changed, missing or legacy URL/body explicitly; redacted placeholders are rejected.",
     },
     unsupported: [
       "cpu_profiling",

@@ -346,6 +346,7 @@ export class DebugObserver {
   }
   async start(): Promise<void> {
     const tree = await this.send<{ frameTree: { frame: { id: string } } }>("Page.getFrameTree");
+    if (this.stopped) return;
     this.rootFrame = tree.frameTree.frame.id;
     const source = (early: boolean) =>
       `(${installObserver.toString()})(${JSON.stringify(this.binding)},${JSON.stringify(this.world)},(${installPerformance.toString()}),${early})`;

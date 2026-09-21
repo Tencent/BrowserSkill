@@ -110,6 +110,7 @@ export function validateDebugParams(params: DebugParams): string | undefined {
             "started_at",
             "method",
             "url",
+            "integrity",
             "state",
             "request_body",
             "response_body",
@@ -158,7 +159,7 @@ export async function handleDebug(
           message: "debug requires a task-created or borrowed tab",
         };
       if (signal?.aborted) return { code: "cancelled", message: "debug aborted" };
-      const run = await debug.start(context.sessionId, target.tabId, params.name);
+      const run = await debug.start(context.sessionId, target.tabId, params.name, signal);
       if (signal?.aborted) {
         debug.stopTab(target.tabId, "cancelled");
         return { code: "cancelled", message: "debug aborted" };
@@ -168,7 +169,7 @@ export async function handleDebug(
     return budgetResult(await debug.read(params, signal), params);
   } catch (error) {
     return {
-      code: "invalid_params",
+      code: signal?.aborted ? "cancelled" : "invalid_params",
       message: error instanceof Error ? error.message : String(error),
     };
   }

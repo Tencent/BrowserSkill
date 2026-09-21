@@ -246,7 +246,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser website debugging",
                   part: "request",
                 })
               ).request?.request_body.text,
-            ).toContain('"name": "Alice"');
+            ).toContain('"name":"Alice"');
             fixed = true;
             const second = await click("after");
             await vi.waitFor(

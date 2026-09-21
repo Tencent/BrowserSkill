@@ -33,6 +33,7 @@ import type {
   DebugTask,
 } from "./types";
 
+export const DEBUG_START_TIMEOUT_MS = 10000;
 const MAX_RUNS = 4;
 const MAX_OPERATIONS = 64;
 const MAX_CONSOLE = 100;
@@ -104,7 +105,12 @@ async function deadline<T>(promise: Promise<T>, ms: number, signal?: AbortSignal
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("debug observation timeout")), ms);
-        abort = () => reject(new Error("debug observation cancelled"));
+        abort = () =>
+          reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error("debug observation cancelled"),
+          );
         signal?.addEventListener("abort", abort, { once: true });
         if (signal?.aborted) abort();
       }),
@@ -156,7 +162,13 @@ export class DebugManager {
     return sequence;
   }
 
-  async start(sessionId: string, tabId: number, name = ""): Promise<DebugRun> {
+  async start(
+    sessionId: string,
+    tabId: number,
+    name = "",
+    signal?: AbortSignal,
+  ): Promise<DebugRun> {
+    if (signal?.aborted) throw new Error("debug start cancelled");
     this.sync();
     if (!this.owned(sessionId, tabId)) throw new Error("tab is not owned by this task");
     const owner = this.sessions.get(sessionId)!;
@@ -167,173 +179,204 @@ export class DebugManager {
     if (!this.cdp.onEvent) throw new Error("debug event capture is unavailable");
     if (this.active(sessionId))
       throw new Error("stop the task's current capture before selecting another tab");
-    while (this.runs.size >= MAX_RUNS) {
-      const stopped = [...this.runs.values()].find(({ run }) => run.state === "stopped");
-      if (!stopped) throw new Error("debug capture limit reached; stop another capture first");
-      await stopped.controlCleanup;
-      await this.persist(stopped);
-      if (stopped.run.storage_error)
-        throw new Error(
-          "debug history save failed; export the stopped capture before starting another",
-        );
-      this.runs.delete(stopped.run.id);
-    }
     this.starting.add(key);
-    await Promise.all(
-      [...this.runs.values()]
-        .filter((item) => item.run.tab_id === tabId)
-        .map((item) => item.controlCleanup),
-    );
-    const id = `d${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
-    const run: DebugRun = {
-      id,
-      session_id: sessionId,
-      tab_id: tabId,
-      name: redactText(name, 120),
-      url: "",
-      started_at: this.now(),
-      state: "capturing",
-      requests: 0,
-      operations: 0,
-      errors: 0,
-      dropped_requests: 0,
-      dropped_operations: 0,
-      dropped_console: 0,
-      next_since: 0,
-      coverage: [
-        "from_start",
-        "task_tab",
-        "text_bodies_bounded",
-        "time_window_not_causality",
-        "page_main_frame",
-        "worker_targets_not_captured",
-        "manual_main_frame_only",
-      ],
-      environment: {
-        ...(typeof __BSK_EXT_VERSION__ === "string"
-          ? { extension_version: __BSK_EXT_VERSION__ }
-          : {}),
-        ...(typeof navigator !== "undefined"
-          ? { user_agent: redactText(navigator.userAgent, 300) }
-          : {}),
-      },
-    };
-    const network = new DebugNetworkStore(
-      id,
-      {
-        send: async <T>(targetTab: number, method: string, params?: object) => {
-          if (!this.owned(sessionId, targetTab) || state.run.state !== "capturing")
-            throw new Error("capture stopped");
-          return deadline(this.cdp.sendAttached<T>({ tabId: targetTab }, method, params), 2500);
-        },
-        sendToTarget: async <T>(
-          target: CdpDebuggee & { tabId: number },
-          method: string,
-          params?: object,
-        ) => {
-          if (!this.owned(sessionId, target.tabId) || state.run.state !== "capturing")
-            throw new Error("capture stopped");
-          return deadline(this.cdp.sendAttached<T>(target, method, params), 2500);
-        },
-      },
-      () => this.change(state),
-      this.now,
-      (entry) => state.journal?.retain(entry),
-    );
-    const state: RunState = {
-      run,
-      owner,
-      network,
-      operations: [],
-      console: [],
-      nextOperation: 0,
-      nextConsole: 0,
-      targets: new Set(),
-      pages: [],
-      performance: [],
-      nextPerformance: 0,
-    };
-    if (this.archive?.retain)
-      state.journal = new DebugJournal(
-        this.archive,
-        () => this.summary(state),
-        (reason) => this.coverage(state, reason),
+    const startup = new AbortController();
+    let rollback = (_reason: string) => {};
+    const cancel = (reason: string) => {
+      // Stop retaining events synchronously, even if Chrome never resolves its command.
+      rollback(reason);
+      startup.abort(
+        new Error(reason === "cancelled" ? "debug start cancelled" : "debug start timeout"),
       );
-    state.controls = new DebugNetworkControl(
-      id,
-      tabId,
-      this.cdp,
-      network,
-      () => {
-        this.change(state);
-      },
-      () => state.run.state === "capturing" && this.owned(sessionId, tabId),
-      this.now,
-    );
-    this.runs.set(id, state);
-    let ownedRuns = this.ownedRuns.get(state.owner);
-    if (!ownedRuns) this.ownedRuns.set(state.owner, (ownedRuns = new Map()));
-    ownedRuns.set(id, tabId);
-    while (ownedRuns.size > HISTORY_LIMIT + MAX_RUNS)
-      ownedRuns.delete(ownedRuns.keys().next().value!);
-    this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
-      this.onEvent(source, method, params),
-    );
+    };
+    const abort = () => cancel("cancelled");
+    signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(() => cancel("start_timeout"), DEBUG_START_TIMEOUT_MS);
+    const wait = <T>(promise: Promise<T>) =>
+      deadline(promise, DEBUG_START_TIMEOUT_MS, startup.signal);
     try {
-      if (this.sessions.get(sessionId) !== owner) throw new Error("task ended during debug start");
-      const tab = await this.tabs.get(tabId);
-      if (tab.windowId !== this.sessions.get(sessionId)?.agentWindowId)
-        throw new Error("debug tab must remain in its Agent Window");
-      if (!this.runs.has(id) || state.run.state !== "capturing")
-        throw new Error("capture stopped during debug start");
-      this.cdp.trackSessionTab?.(sessionId, tabId);
-      await this.cdp.ensureNetworkCapture(tabId);
-      if (!this.owned(sessionId, tabId) || !this.runs.has(id))
-        throw new Error("task ended during debug start");
-      if (state.run.state !== "capturing") return this.summary(state);
-      await this.enableTarget(state, { tabId });
-      if (state.run.state !== "capturing") return this.summary(state);
-      const graph = await this.cdp.getFrameGraph?.(tabId).catch(() => {
-        this.coverage(state, "child_capture_partial");
-        return undefined;
-      });
-      if (graph) {
-        // Frame graph discovery already belongs to the driver. Debug adds only
-        // bounded Network/Runtime listeners on its existing child attachments.
-        const targets = new Map<string, CdpDebuggee & { tabId: number }>();
-        for (const frame of graph.frames)
-          if (frame.target.sessionId) targets.set(frame.target.sessionId, frame.target);
-        await Promise.all(
-          [...targets.values()]
-            .slice(0, 16)
-            .map((target) =>
-              this.enableTarget(state, target).catch(() =>
-                this.coverage(state, "child_capture_partial"),
-              ),
-            ),
-        );
+      while (this.runs.size >= MAX_RUNS) {
+        const stopped = [...this.runs.values()].find(({ run }) => run.state === "stopped");
+        if (!stopped) throw new Error("debug capture limit reached; stop another capture first");
+        await wait(Promise.resolve(stopped.controlCleanup));
+        await wait(this.persist(stopped));
+        if (stopped.run.storage_error)
+          throw new Error(
+            "debug history save failed; export the stopped capture before starting another",
+          );
+        this.runs.delete(stopped.run.id);
       }
-      run.url = redactUrl((await this.tabs.get(tabId)).url ?? "");
-      if (!this.owned(sessionId, tabId) || !this.runs.has(id))
-        throw new Error("task ended during debug start");
-      if (/^https?:/.test(run.url)) this.coverage(state, "initial_load_not_recorded");
-      state.observer = new DebugObserver(this.cdp, tabId, id);
-      await deadline(state.observer.start(), 2500).catch(() => {
-        this.coverage(state, "manual_capture_unavailable");
-        this.coverage(state, "performance_capture_unavailable");
-        void state.observer?.dispose();
-      });
-      await this.capturePage(state);
-      await this.persist(state);
-      return this.summary(state);
-    } catch (error) {
-      this.stopState(state, "start_failed");
-      clearTimeout(state.archiveTimer);
-      this.runs.delete(id);
-      ownedRuns.delete(id);
-      this.pruneListener();
-      throw error;
+      await wait(
+        Promise.all(
+          [...this.runs.values()]
+            .filter((item) => item.run.tab_id === tabId)
+            .map((item) => item.controlCleanup),
+        ),
+      );
+      const id = `d${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const run: DebugRun = {
+        id,
+        session_id: sessionId,
+        tab_id: tabId,
+        name: redactText(name, 120),
+        url: "",
+        started_at: this.now(),
+        state: "capturing",
+        requests: 0,
+        operations: 0,
+        errors: 0,
+        dropped_requests: 0,
+        dropped_operations: 0,
+        dropped_console: 0,
+        next_since: 0,
+        coverage: [
+          "from_start",
+          "task_tab",
+          "text_bodies_bounded",
+          "time_window_not_causality",
+          "page_main_frame",
+          "worker_targets_not_captured",
+          "manual_main_frame_only",
+        ],
+        environment: {
+          ...(typeof __BSK_EXT_VERSION__ === "string"
+            ? { extension_version: __BSK_EXT_VERSION__ }
+            : {}),
+          ...(typeof navigator !== "undefined"
+            ? { user_agent: redactText(navigator.userAgent, 300) }
+            : {}),
+        },
+      };
+      const network = new DebugNetworkStore(
+        id,
+        {
+          send: async <T>(targetTab: number, method: string, params?: object) => {
+            if (!this.owned(sessionId, targetTab) || state.run.state !== "capturing")
+              throw new Error("capture stopped");
+            return deadline(this.cdp.sendAttached<T>({ tabId: targetTab }, method, params), 2500);
+          },
+          sendToTarget: async <T>(
+            target: CdpDebuggee & { tabId: number },
+            method: string,
+            params?: object,
+          ) => {
+            if (!this.owned(sessionId, target.tabId) || state.run.state !== "capturing")
+              throw new Error("capture stopped");
+            return deadline(this.cdp.sendAttached<T>(target, method, params), 2500);
+          },
+        },
+        () => this.change(state),
+        this.now,
+        (entry) => state.journal?.retain(entry),
+      );
+      const state: RunState = {
+        run,
+        owner,
+        network,
+        operations: [],
+        console: [],
+        nextOperation: 0,
+        nextConsole: 0,
+        targets: new Set(),
+        pages: [],
+        performance: [],
+        nextPerformance: 0,
+      };
+      if (this.archive?.retain)
+        state.journal = new DebugJournal(
+          this.archive,
+          () => this.summary(state),
+          (reason) => this.coverage(state, reason),
+        );
+      state.controls = new DebugNetworkControl(
+        id,
+        tabId,
+        this.cdp,
+        network,
+        () => {
+          this.change(state);
+        },
+        () => state.run.state === "capturing" && this.owned(sessionId, tabId),
+        this.now,
+      );
+      rollback = (reason) => this.stopState(state, reason);
+      this.runs.set(id, state);
+      let ownedRuns = this.ownedRuns.get(state.owner);
+      if (!ownedRuns) this.ownedRuns.set(state.owner, (ownedRuns = new Map()));
+      ownedRuns.set(id, tabId);
+      while (ownedRuns.size > HISTORY_LIMIT + MAX_RUNS)
+        ownedRuns.delete(ownedRuns.keys().next().value!);
+      this.subscription ??= this.cdp.onEvent?.((source, method, params) =>
+        this.onEvent(source, method, params),
+      );
+      try {
+        if (this.sessions.get(sessionId) !== owner)
+          throw new Error("task ended during debug start");
+        const tab = await wait(this.tabs.get(tabId));
+        if (tab.windowId !== this.sessions.get(sessionId)?.agentWindowId)
+          throw new Error("debug tab must remain in its Agent Window");
+        if (!this.runs.has(id) || state.run.state !== "capturing")
+          throw new Error("capture stopped during debug start");
+        this.cdp.trackSessionTab?.(sessionId, tabId);
+        await wait(this.cdp.ensureNetworkCapture(tabId));
+        if (!this.owned(sessionId, tabId) || !this.runs.has(id))
+          throw new Error("task ended during debug start");
+        if (state.run.state !== "capturing") return this.summary(state);
+        await wait(this.enableTarget(state, { tabId }, startup.signal));
+        if (state.run.state !== "capturing") return this.summary(state);
+        const graph = await wait(
+          Promise.resolve(
+            this.cdp.getFrameGraph?.(tabId).catch(() => {
+              this.coverage(state, "child_capture_partial");
+              return undefined;
+            }),
+          ),
+        );
+        if (graph) {
+          // Frame graph discovery already belongs to the driver. Debug adds only
+          // bounded Network/Runtime listeners on its existing child attachments.
+          const targets = new Map<string, CdpDebuggee & { tabId: number }>();
+          for (const frame of graph.frames)
+            if (frame.target.sessionId) targets.set(frame.target.sessionId, frame.target);
+          await wait(
+            Promise.all(
+              [...targets.values()]
+                .slice(0, 16)
+                .map((target) =>
+                  this.enableTarget(state, target, startup.signal).catch(() =>
+                    this.coverage(state, "child_capture_partial"),
+                  ),
+                ),
+            ),
+          );
+        }
+        run.url = redactUrl((await wait(this.tabs.get(tabId))).url ?? "");
+        if (!this.owned(sessionId, tabId) || !this.runs.has(id))
+          throw new Error("task ended during debug start");
+        if (/^https?:/.test(run.url)) this.coverage(state, "initial_load_not_recorded");
+        state.observer = new DebugObserver(this.cdp, tabId, id);
+        await wait(
+          deadline(state.observer.start(), 2500, startup.signal).catch((error) => {
+            if (startup.signal.aborted) throw error;
+            this.coverage(state, "manual_capture_unavailable");
+            this.coverage(state, "performance_capture_unavailable");
+            void state.observer?.dispose();
+          }),
+        );
+        await wait(this.capturePage(state));
+        await wait(this.persist(state));
+        return this.summary(state);
+      } catch (error) {
+        this.stopState(state, "start_failed");
+        clearTimeout(state.archiveTimer);
+        this.runs.delete(id);
+        ownedRuns.delete(id);
+        this.pruneListener();
+        throw error;
+      }
     } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       this.starting.delete(key);
     }
   }
@@ -341,6 +384,7 @@ export class DebugManager {
   private async enableTarget(
     state: RunState,
     target: CdpDebuggee & { tabId: number },
+    signal?: AbortSignal,
   ): Promise<void> {
     const key = target.sessionId ?? "root";
     if (
@@ -355,18 +399,23 @@ export class DebugManager {
     }
     state.targets.add(key);
     try {
-      await this.cdp.sendAttached(target, "Network.enable", {
-        maxTotalBufferSize: 2 * 1024 * 1024,
-        maxResourceBufferSize: 256 * 1024,
-        maxPostDataSize: 64 * 1024,
-      });
+      await deadline(
+        this.cdp.sendAttached(target, "Network.enable", {
+          maxTotalBufferSize: 2 * 1024 * 1024,
+          maxResourceBufferSize: 256 * 1024,
+          maxPostDataSize: 64 * 1024,
+        }),
+        2500,
+        signal,
+      );
       if (
         target.sessionId &&
         state.run.state === "capturing" &&
         this.owned(state.run.session_id, target.tabId)
       )
-        await this.cdp.sendAttached(target, "Runtime.enable");
-      await state.controls?.target(target);
+        await deadline(this.cdp.sendAttached(target, "Runtime.enable"), 2500, signal);
+      if (state.run.state === "capturing" && !signal?.aborted)
+        await deadline(Promise.resolve(state.controls?.target(target)), 2500, signal);
     } catch (error) {
       state.targets.delete(key);
       throw error;

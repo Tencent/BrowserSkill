@@ -376,6 +376,9 @@ export function RequestDetail({
           <span className="ml-auto font-mono text-[10px] text-muted-foreground">{request.id}</span>
         </div>
         <h3 className="break-all font-mono text-sm leading-relaxed">{data?.url ?? request.url}</h3>
+        {(data ?? request).integrity?.url === "truncated" && (
+          <p className="mt-2 text-xs text-[var(--debug-accent)]">{t("debug.urlIncomplete")}</p>
+        )}
         <div className="mt-3 flex flex-wrap gap-2">
           <RequestBadges request={data ?? request} />
         </div>

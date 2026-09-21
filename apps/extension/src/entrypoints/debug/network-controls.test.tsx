@@ -14,9 +14,10 @@ const request: DebugRequest = {
   started_at: 0,
   url: "https://site.test/save",
   method: "POST",
+  integrity: { url: "complete", metadata: "complete" },
   state: "complete",
   request_headers: { cookie: "[redacted]", "content-type": "application/json" },
-  request_body: { state: "available", text: '{"name":"Alice"}' },
+  request_body: { state: "available", replay_safe: true, text: '{"name":"Alice"}' },
   response_body: { state: "empty" },
 };
 beforeEach(async () => {
@@ -26,6 +27,67 @@ beforeEach(async () => {
   vi.mocked(recordingRequest).mockResolvedValue({ session_id: "s1", request, rules: [] });
 });
 describe("request control UI", () => {
+  it("does not turn a truncated URL or legacy body draft into an implicit replacement", async () => {
+    const entry: DebugRequest = {
+      ...request,
+      integrity: { url: "truncated", metadata: "complete" },
+      request_body: { state: "available", text: '{"orderId":9007199254740992}' },
+    };
+    vi.mocked(recordingRequest).mockResolvedValue({ session_id: "s1", request: entry });
+    render(
+      <ReplayEditor
+        session="s1"
+        request={entry}
+        onChange={() => {}}
+        onCancel={() => {}}
+        onRequest={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("正文") as HTMLTextAreaElement).value).toContain(
+        "9007199254740992",
+      ),
+    );
+    const url = screen.getByRole("textbox", { name: /^URL/ }) as HTMLInputElement;
+    const send = screen.getByRole("button", { name: "发送一次" }) as HTMLButtonElement;
+    expect(url.value).toBe("");
+    expect(send.disabled).toBe(true);
+    fireEvent.change(url, { target: { value: "https://site.test/save?mode=dry-run" } });
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByLabelText("正文"), {
+      target: { value: '{"orderId":9007199254740993}' },
+    });
+    fireEvent.click(send);
+    await waitFor(() => expect(debugRequest).toHaveBeenCalledTimes(1));
+    expect(debugRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replay: expect.objectContaining({
+          url: "https://site.test/save?mode=dry-run",
+          body: '{"orderId":9007199254740993}',
+        }),
+      }),
+    );
+  });
+
+  it("reuses verified evidence by ID without supplying untouched drafts as overrides", async () => {
+    render(
+      <ReplayEditor
+        session="s1"
+        request={request}
+        onChange={() => {}}
+        onCancel={() => {}}
+        onRequest={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect((screen.getByLabelText("正文") as HTMLTextAreaElement).value).toContain("Alice"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "发送一次" }));
+    await waitFor(() => expect(debugRequest).toHaveBeenCalledTimes(1));
+    const replay = vi.mocked(debugRequest).mock.calls[0][0].replay!;
+    expect(replay).not.toHaveProperty("body");
+    expect(replay).not.toHaveProperty("url");
+  });
   it("creates a one-shot mock from a selected request without changing its URL/method", async () => {
     const done = vi.fn();
     render(

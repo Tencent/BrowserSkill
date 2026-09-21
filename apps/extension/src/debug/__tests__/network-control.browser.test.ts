@@ -34,7 +34,8 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
       req.on("end", () => {
         hits.push({ url: req.url!, body, header: req.headers["x-test"] as string | undefined });
         res.setHeader("Content-Type", "application/json");
-        res.end(JSON.stringify({ source: "server", body: body ? JSON.parse(body) : null }));
+        // Echo JSON tokens verbatim so the fixture itself does not round 64-bit IDs.
+        res.end(`{"source":"server","body":${body || "null"}}`);
       });
     });
     await new Promise<void>((resolve, reject) => {
@@ -218,6 +219,71 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
               expect(replayed?.id).toBe(first.replay?.request_id);
               expect(replayed?.response_body.state).toBe("available");
             });
+
+            const original = '{"orderId":9007199254740993,"action":"cancel"}';
+            await evaluate(
+              `fetch('${url}/precision',{method:'POST',headers:{'content-type':'application/json'},body:${JSON.stringify(original)}}).then(r=>r.text())`,
+            );
+            await vi.waitFor(async () =>
+              expect(
+                (await read("requests")).requests?.find((item) => item.url.endsWith("/precision"))
+                  ?.response_body.state,
+              ).toBe("available"),
+            );
+            const precise = (await read("export")).recording!.requests.find((item) =>
+              item.url.endsWith("/precision"),
+            )!;
+            expect(precise.request_body).toMatchObject({ text: original, replay_safe: true });
+            expect(precise.response_body.text).toContain("9007199254740993");
+            await debug.read({
+              session_id: "network-controls",
+              action: "replay",
+              id: precise.id,
+              replay: { key: "precision" },
+            });
+            expect(hits.filter((hit) => hit.url === "/precision").map((hit) => hit.body)).toEqual([
+              original,
+              original,
+            ]);
+
+            await add({
+              match: { url: `${url}/precision-edit` },
+              effect: { type: "modify", json: { set: { action: "inspect" } } },
+            });
+            await evaluate(
+              `fetch('${url}/precision-edit',{method:'POST',headers:{'content-type':'application/json'},body:${JSON.stringify(original)}}).then(r=>r.text())`,
+            );
+            expect(hits.find((hit) => hit.url === "/precision-edit")?.body).toBe(
+              '{"orderId":9007199254740993,"action":"inspect"}',
+            );
+
+            const longPath = `/long?q=${"x".repeat(2200)}&mode=dry-run`;
+            await fetch(longPath);
+            await vi.waitFor(async () =>
+              expect(
+                (await read("requests")).requests?.find((item) =>
+                  item.url.startsWith(`${url}/long?`),
+                )?.response_body.state,
+              ).toBe("available"),
+            );
+            const longRequest = (await read("requests")).requests!.find((item) =>
+              item.url.startsWith(`${url}/long?`),
+            )!;
+            const longReplay = {
+              session_id: "network-controls",
+              action: "replay" as const,
+              id: longRequest.id,
+              replay: { key: "long-url" },
+            };
+            await expect(debug.read(longReplay)).rejects.toThrow("replacement URL");
+            expect(hits.filter((hit) => hit.url.startsWith("/long?"))).toHaveLength(1);
+            await debug.read({
+              ...longReplay,
+              replay: { ...longReplay.replay, url: url + longPath },
+            });
+            expect(
+              hits.filter((hit) => hit.url.startsWith("/long?")).map((hit) => hit.url),
+            ).toEqual([longPath, longPath]);
 
             // Existing child targets receive the same bounded rule configuration.
             await evaluate(

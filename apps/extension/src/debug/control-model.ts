@@ -1,9 +1,11 @@
+import { parseJsonSource } from "./json-source";
 import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "./redact";
 import type { DebugReplaySpec, DebugRequest, DebugRequestEdit, DebugRuleSpec } from "./types";
 
 export const MAX_RULES = 32;
 export const MAX_REPLAYS = 20;
 const METHODS = /^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/;
+const CONTROL_URL_CHARS = 16 * 1024;
 const PLACEHOLDER = /\[redacted\]|%5bredacted%5d|\[depth limit\]/i;
 const FORBIDDEN_HEADER =
   /^(?:host|content-length|cookie|cookie2|origin|referer|user-agent|accept-encoding|connection|transfer-encoding|upgrade|proxy-.*|sec-.*|access-control-request-.*)$/i;
@@ -20,7 +22,7 @@ function keys(value: Record<string, unknown>, allowed: string[]): void {
 }
 export function httpUrl(value: string): URL {
   requireValue(
-    typeof value === "string" && value.length <= 2048 && !PLACEHOLDER.test(value),
+    typeof value === "string" && value.length <= CONTROL_URL_CHARS && !PLACEHOLDER.test(value),
     "URL is missing, redacted or too long",
   );
   const url = new URL(value);
@@ -35,6 +37,18 @@ function body(value: unknown): asserts value is string {
     typeof value === "string" && value.length <= BODY_CHARS && !PLACEHOLDER.test(value),
     "body must be complete text up to 65536 characters, without redacted placeholders",
   );
+}
+function jsonEditValue(value: unknown): string {
+  const text = JSON.stringify(value, (_key, item) => {
+    requireValue(
+      typeof item !== "number" ||
+        (Number.isFinite(item) && (!Number.isInteger(item) || Number.isSafeInteger(item))),
+      "JSON edits cannot carry unsafe numeric values; use an exact text body replacement",
+    );
+    return item;
+  });
+  requireValue(text !== undefined, "JSON edit value is not serializable");
+  return text;
 }
 export function checkedHeaders(value: unknown, response = false): Record<string, string | null> {
   requireValue(own(value), "headers must be an object");
@@ -78,7 +92,10 @@ export function validateEdit(edit: DebugRequestEdit): void {
   if (edit.json !== undefined) {
     requireValue(own(edit.json), "JSON edits must be an object");
     keys(edit.json, ["set", "remove", "rename"]);
-    if (edit.json.set !== undefined) requireValue(own(edit.json.set), "JSON set must be an object");
+    if (edit.json.set !== undefined) {
+      requireValue(own(edit.json.set), "JSON set must be an object");
+      jsonEditValue(edit.json.set);
+    }
     if (edit.json.rename !== undefined) {
       requireValue(own(edit.json.rename), "JSON rename must be an object");
       requireValue(
@@ -223,30 +240,27 @@ export function editRequest(request: LiveRequest, edit: DebugRequestEdit): LiveR
         /json/i.test(headers["content-type"] ?? ""),
       "JSON edits require a complete JSON request body",
     );
-    const value: unknown = JSON.parse(postData);
-    requireValue(own(value), "JSON edits require a top-level object");
+    const source = parseJsonSource(postData);
+    requireValue(source.kind === "object", "JSON edits require a top-level object");
+    const value = new Map(
+      source.children!.map(({ key, value }) => [key, postData!.slice(value.start, value.end)]),
+    );
+    requireValue(
+      value.size === source.children!.length,
+      "JSON edits require unique top-level keys",
+    );
     for (const [from, to] of Object.entries(edit.json.rename ?? {})) {
       requireValue(
-        Object.hasOwn(value, from) && !Object.hasOwn(value, to),
+        value.has(from) && !value.has(to),
         "JSON rename source missing or destination already exists",
       );
-      Object.defineProperty(value, to, {
-        value: value[from],
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-      delete value[from];
+      value.set(to, value.get(from)!);
+      value.delete(from);
     }
-    for (const key of edit.json.remove ?? []) delete value[key];
+    for (const key of edit.json.remove ?? []) value.delete(key);
     for (const [key, item] of Object.entries(edit.json.set ?? {}))
-      Object.defineProperty(value, key, {
-        value: item,
-        enumerable: true,
-        configurable: true,
-        writable: true,
-      });
-    postData = JSON.stringify(value);
+      value.set(key, jsonEditValue(item));
+    postData = `{${[...value].map(([key, raw]) => `${JSON.stringify(key)}:${raw}`).join(",")}}`;
   }
   requireValue(postData === undefined || postData.length <= BODY_CHARS, "request body too large");
   requireValue(
@@ -268,6 +282,10 @@ export function replayRequest(
   spec: DebugReplaySpec,
   pageUrl: string,
 ): LiveRequest {
+  requireValue(
+    spec.url !== undefined || source.integrity?.url === "complete",
+    "source URL is incomplete, redacted or unverified; provide a complete replacement URL",
+  );
   const url = httpUrl(spec.url ?? source.url);
   requireValue(
     url.origin === httpUrl(new URL(pageUrl).origin).origin &&
@@ -275,7 +293,7 @@ export function replayRequest(
     "replay currently requires the source request and active page to share an origin",
   );
   requireValue(
-    !source.truncated,
+    source.integrity ? source.integrity.metadata === "complete" : !source.truncated,
     "source request is incomplete; reproduce it to capture a complete request",
   );
   requireValue(
@@ -289,8 +307,11 @@ export function replayRequest(
   }
   if (spec.body === undefined)
     requireValue(
-      ["available", "empty"].includes(source.request_body.state),
-      "source body is missing or truncated; provide a complete replacement body",
+      ["available", "empty"].includes(source.request_body.state) &&
+        source.request_body.replay_safe === true &&
+        !source.request_body.redacted &&
+        (source.request_body.state === "empty" || source.request_body.text !== undefined),
+      "source body is missing, changed or unverified; provide a complete replacement body",
     );
   const result = editRequest(
     { url: url.href, method: source.method, headers, postData: source.request_body.text },

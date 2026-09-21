@@ -33,7 +33,7 @@ export const DEBUG_PARAMETERS = {
       "replay",
     ],
     description:
-      "Start capture before visiting the page; inspect requests, console, page context and operations, or export the recording.",
+      "Start capture before visiting the page; read/export evidence. rule_add/rule_enable can block, modify or mock live traffic; replay sends a new request and may change server data.",
   },
   rule: {
     type: "string",
@@ -43,7 +43,7 @@ export const DEBUG_PARAMETERS = {
   replay: {
     type: "string",
     description:
-      'JSON for replay: {key:"unique-attempt",url?,method?,headers?,body?}. Sends once; reuse key on retry. Same-origin only; missing/redacted data must be replaced. A replay may write server data.',
+      'JSON for replay: {key:"unique-attempt",url?,method?,headers?,body?}. Sends once; reuse key on retry. Same-origin only; changed, truncated or unverified URL/body require complete replacements. URL up to 16384 characters; captured URL up to 2048. A replay may write server data.',
   },
   slowMs: {
     type: "integer",
@@ -248,7 +248,7 @@ export function registerDebugTool(
           "--session",
           args.session ?? "(current)",
         ]),
-        description: "Inspect task-owned website evidence",
+        description: "Inspect website evidence or apply explicit network controls",
       }),
       presentResult: runtime.presentTerminalResult,
     }),

@@ -17,6 +17,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
         "evidence-model",
         "performance",
         "redact",
+        "json-source",
       ].map((name) => [
         name,
         ts.transpileModule(readFileSync(new URL(`../${name}.ts`, import.meta.url), "utf8"), {
@@ -61,6 +62,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
           };
           const result = await evaluate(`(async () => {
           const { LocalDebugArchive, HISTORY_AGE_MS } = await import('/archive.js');
+          const { redactBody } = await import('/redact.js');
           const now = Date.now();
           // Upgrade a real v1 database without deleting its old recording stores.
           const legacy = await new Promise((resolve,reject)=>{const r=indexedDB.open('bsk-debug-history',1);r.onupgradeneeded=()=>{r.result.createObjectStore('runs',{keyPath:'run.id'});r.result.createObjectStore('recordings',{keyPath:'run.id'});};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});
@@ -115,7 +117,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
           if (await recovered.request('djournal','djournal:n0')) throw Error('journal deletion failed');
           const reloadRecord = {...record('dreload', now+100, 'capturing'), requests:[]};
           await recovered.put(reloadRecord);
-          await recovered.retain(reloadRecord.run, [{...entry(1), id:'dreload:n1',run_id:'dreload',request_body:{state:'available',text:'{"name":"Alice"}'}}]);
+          await recovered.retain(reloadRecord.run, [{...entry(1), id:'dreload:n1',run_id:'dreload',request_body:{state:'available',...redactBody('{"orderId":9007199254740993,"user[password]":"private"}','application/json')},integrity:{url:'complete',metadata:'complete'}}]);
           return { records: (await recovered.list()).length, recovered: saved.run.stop_reason };
         })()`);
           expect(result).toEqual({ records: 50, recovered: "browser_restarted" });
@@ -133,7 +135,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
             }
             await new Promise((resolve) => setTimeout(resolve, 50));
           }
-          expect(reloaded).toBe('{"name":"Alice"}');
+          expect(reloaded).toBe('{"orderId":9007199254740993,"user[password]":"[redacted]"}');
         },
       );
     } finally {

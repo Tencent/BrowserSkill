@@ -111,7 +111,16 @@ pub struct DebugBody {
     pub next_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted: Option<bool>,
+    /// True only for complete retained text identical to the captured body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replay_safe: Option<bool>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DebugRequestIntegrity {
+    pub url: String,
+    pub metadata: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugRequest {
     pub id: String,
@@ -122,6 +131,8 @@ pub struct DebugRequest {
     pub finished_at: Option<f64>,
     pub method: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub integrity: Option<DebugRequestIntegrity>,
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<String>,
@@ -616,4 +627,35 @@ pub struct DebugAnalysis {
     pub slow_ms: u32,
     pub coverage: Vec<String>,
     pub semantics: String,
+}
+
+#[cfg(test)]
+mod fidelity_tests {
+    use super::DebugRequest;
+    use serde_json::{from_value, json, to_value};
+
+    #[test]
+    fn request_fidelity_survives_cli_serialization_and_legacy_fields_stay_absent() {
+        let mut value = json!({
+            "id": "d:n1", "run_id": "d", "sequence": 1, "started_at": 1.0,
+            "method": "POST", "url": "https://site.test/save", "state": "complete",
+            "integrity": { "url": "truncated", "metadata": "complete" },
+            "request_body": {
+                "state": "available", "replay_safe": true,
+                "text": "{\"orderId\":9007199254740993}"
+            },
+            "response_body": { "state": "empty" }
+        });
+        let request: DebugRequest = from_value(value.clone()).unwrap();
+        assert_eq!(to_value(request).unwrap(), value);
+        value.as_object_mut().unwrap().remove("integrity");
+        value["request_body"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replay_safe");
+        let legacy: DebugRequest = from_value(value.clone()).unwrap();
+        assert!(legacy.integrity.is_none());
+        assert!(legacy.request_body.replay_safe.is_none());
+        assert_eq!(to_value(legacy).unwrap(), value);
+    }
 }

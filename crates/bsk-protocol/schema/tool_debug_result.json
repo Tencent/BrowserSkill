@@ -371,6 +371,13 @@
             "null"
           ]
         },
+        "replay_safe": {
+          "description": "True only for complete retained text identical to the captured body.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "state": {
           "type": "string"
         },
@@ -1386,6 +1393,16 @@
             "null"
           ]
         },
+        "integrity": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DebugRequestIntegrity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "intervention": {
           "anyOf": [
             {
@@ -1510,6 +1527,21 @@
             "boolean",
             "null"
           ]
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "DebugRequestIntegrity": {
+      "type": "object",
+      "required": [
+        "metadata",
+        "url"
+      ],
+      "properties": {
+        "metadata": {
+          "type": "string"
         },
         "url": {
           "type": "string"

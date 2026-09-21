@@ -59,9 +59,55 @@ const settle = async () => {
 };
 
 describe("debug network evidence", () => {
+  it("retains URL integrity in request metadata, including annotations arriving before events", () => {
+    const f = fixture();
+    const url = `https://site.test/save?q=${"x".repeat(2200)}&mode=dry-run`;
+    f.request({ request: { url, method: "GET" } });
+    expect(requestProjection(f.store.list()[0])).toMatchObject({
+      truncated: true,
+      integrity: { url: "truncated", metadata: "complete" },
+      request_body: { state: "empty", replay_safe: true },
+    });
+    const second = fixture();
+    second.store.annotate({ tabId: 7 }, "raw", { effective: { url, method: "GET", headers: {} } });
+    second.request();
+    expect(second.store.list()[0]).toMatchObject({
+      truncated: true,
+      url: url.slice(0, 2048),
+      integrity: { url: "truncated" },
+    });
+  });
+
+  it("keeps nested form secrets out of retained evidence and preserves numeric IDs in detail slices", () => {
+    const f = fixture();
+    f.request({
+      request: {
+        url: "https://site.test",
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        postData:
+          "user[password]=private&credentials.password=private&password_confirmation=private&orderId=9007199254740993",
+      },
+    });
+    const entry = f.store.list()[0];
+    expect(entry.request_body).toMatchObject({
+      state: "available",
+      redacted: true,
+      replay_safe: false,
+    });
+    expect(JSON.stringify(entry)).not.toContain("private");
+    expect(entry.request_body.text).toContain("9007199254740993");
+    expect(
+      bodySlice({ state: "available", text: '{"id":9007199254740993}' }, 0, 100, "/id").text,
+    ).toBe("9007199254740993");
+  });
   it("preserves truncation and redaction when control annotations precede network events", () => {
     const f = fixture();
-    const body = JSON.stringify({ password: "private-value", values: Array(14000).fill(1) });
+    const base = JSON.stringify({ password: "pwd", values: "" });
+    const body = JSON.stringify({
+      password: "pwd",
+      values: "a".repeat(BODY_CHARS - base.length - 1),
+    });
     expect(body.length).toBeLessThan(BODY_CHARS);
     f.store.annotate({ tabId: 7 }, "raw", {
       intervention: { rule_id: "r1", type: "mock", state: "applied" },
@@ -78,7 +124,7 @@ describe("debug network evidence", () => {
     for (const retained of [entry.request_body, entry.response_body]) {
       expect(retained.state).toBe("truncated");
       expect(retained.redacted).toBe(true);
-      expect(retained.text).not.toContain("private-value");
+      expect(retained.text).not.toContain('"password":"pwd"');
     }
     expect(entry.truncated).toBe(true);
   });
@@ -106,7 +152,7 @@ describe("debug network evidence", () => {
     expect(entry.url).not.toContain("private");
     expect(entry.request_headers?.authorization).toBe("[redacted]");
     expect(entry.request_body.text).not.toContain("hidden");
-    expect(entry.response_body.text).toContain('"ok": false');
+    expect(entry.response_body.text).toContain('"ok":false');
     expect(entry.response_body.text).not.toContain("secret");
     const summary = requestProjection(entry);
     expect(summary.response_body.text).toBeUndefined();

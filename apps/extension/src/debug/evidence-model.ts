@@ -1,3 +1,4 @@
+import { type JsonSource, parseJsonSource } from "./json-source";
 import type {
   DebugConsole,
   DebugEvidence,
@@ -107,22 +108,26 @@ function payload(request: DebugRequest, part: "request" | "response"): Leaf[] {
   const body = part === "request" ? request.request_body : request.response_body;
   if (body.state !== "available" || !body.text || body.text.length > 65536) return [];
   const result: Leaf[] = [];
-  const visit = (data: unknown, path: string, name: string, depth: number) => {
+  const text = body.text;
+  const visit = (data: JsonSource, path: string, name: string, depth: number) => {
     if (depth > 5 || result.length >= 32) return;
-    if (data !== null && typeof data === "object") {
-      if (Array.isArray(data)) return; // Array indices and repeated names are not field identities.
-      for (const [key, child] of Object.entries(data).slice(0, 32))
-        visit(child, `${path}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`, key, depth + 1);
-    } else
+    if (data.children) {
+      if (data.kind === "array") return; // Array indices and repeated names are not field identities.
+      for (const { key, value } of data.children.slice(0, 32))
+        visit(value, `${path}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`, key, depth + 1);
+    } else {
+      const raw = text.slice(data.start, data.end);
+      const value: string = data.kind === "string" ? JSON.parse(raw) : raw;
       result.push({
         path,
         name,
-        value: String(data).slice(0, 256),
-        truncated: String(data).length > 256,
+        value: value.slice(0, 256),
+        truncated: value.length > 256,
       });
+    }
   };
   try {
-    visit(JSON.parse(body.text), "", "", 0);
+    visit(parseJsonSource(text), "", "", 0);
   } catch {
     if (
       part === "request" &&

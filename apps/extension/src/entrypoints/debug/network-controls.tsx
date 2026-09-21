@@ -483,7 +483,7 @@ export function ReplayEditor({
   onRequest: (id: string) => void;
 }) {
   const { t } = useTranslation("extension");
-  const [url, setUrl] = useState(request.url),
+  const [url, setUrl] = useState(request.integrity?.url === "complete" ? request.url : ""),
     [method, setMethod] = useState(request.method),
     [headers, setHeaders] = useState("{}"),
     [body, setBody] = useState("");
@@ -513,7 +513,7 @@ export function ReplayEditor({
         ).request!;
         const value = item.request_body;
         text += value.text ?? "";
-        full = ["available", "empty"].includes(value.state);
+        full = ["available", "empty"].includes(value.state) && value.replay_safe === true;
         if (value.next_offset === undefined) break;
         offset = value.next_offset;
         full = false;
@@ -549,10 +549,10 @@ export function ReplayEditor({
         id: request.id,
         replay: {
           key: attempt.current,
-          url,
+          ...(url !== request.url || request.integrity?.url !== "complete" ? { url } : {}),
           method,
           headers: objectJson(headers),
-          ...(complete || touched ? { body } : {}),
+          ...(touched ? { body } : {}),
         },
       });
       setResult(value.replay);
@@ -589,7 +589,15 @@ export function ReplayEditor({
           </label>
           <label className={labelClass}>
             URL
-            <input className={inputClass} value={url} onChange={(e) => setUrl(e.target.value)} />
+            <input
+              required
+              className={inputClass}
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+            {request.integrity?.url !== "complete" && (
+              <span className="text-xs text-[var(--debug-accent)]">{t("debug.urlIncomplete")}</span>
+            )}
           </label>
         </div>
         <label className={labelClass}>
@@ -623,7 +631,11 @@ export function ReplayEditor({
           {t("debug.cancel")}
         </Button>
         {!result && (
-          <Button size="sm" type="submit" disabled={!loaded || busy}>
+          <Button
+            size="sm"
+            type="submit"
+            disabled={!loaded || busy || !url.trim() || (!complete && !touched)}
+          >
             {t(busy ? "debug.working" : "debug.sendReplay")}
           </Button>
         )}

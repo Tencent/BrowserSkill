@@ -2,7 +2,15 @@ import type { CdpDebuggee } from "@/browser-driver/chromium-cdp";
 import type { CdpRunner } from "@/tools/shared";
 import { sendToCdpTarget } from "@/tools/shared";
 import { requestMetadata } from "./journal";
-import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "./redact";
+import { jsonPointer } from "./json-source";
+import {
+  BODY_CHARS,
+  redactBody,
+  redactHeaders,
+  redactRequestUrl,
+  redactText,
+  redactUrl,
+} from "./redact";
 import type { DebugBody, DebugIntervention, DebugRequest } from "./types";
 
 export const MAX_REQUESTS = 200;
@@ -84,6 +92,11 @@ function headersLimited(headers?: Record<string, string>): boolean {
   );
 }
 
+function incompleteMetadata(entry: DebugRequest): void {
+  entry.truncated = true;
+  if (entry.integrity) entry.integrity.metadata = "truncated";
+}
+
 export class DebugNetworkStore {
   readonly entries = new Map<string, RequestRecord>();
   // Recent traffic must not erase the CDP identity of a slow request or body job.
@@ -97,6 +110,7 @@ export class DebugNetworkStore {
       requestBody?: ReturnType<typeof redactBody>;
       responseBody?: ReturnType<typeof redactBody>;
       headersTruncated: boolean;
+      urlState?: ReturnType<typeof redactRequestUrl>["state"];
     }
   >();
   private jobs = 0;
@@ -178,6 +192,8 @@ export class DebugNetworkStore {
         this.retain?.(previous.entry);
       }
       const headers = redactHeaders(event.request.headers);
+      const url = redactRequestUrl(event.request.url);
+      const metadataTruncated = chain.partial === true || headersLimited(event.request.headers);
       const id = `${this.runId}:n${++this.serial}`;
       const entry: DebugRequest = {
         id,
@@ -185,15 +201,17 @@ export class DebugNetworkStore {
         sequence: this.changed(),
         started_at: this.now(),
         method: redactText(event.request.method ?? "GET", 24),
-        url: redactUrl(event.request.url),
+        url: url.text,
+        integrity: { url: url.state, metadata: metadataTruncated ? "truncated" : "complete" },
         resource_type: event.type,
         frame_id: event.frameId,
         loader_id: event.loaderId,
         state: "pending",
-        truncated: chain.partial === true || headersLimited(event.request.headers),
+        truncated: metadataTruncated || url.state === "truncated",
         request_headers: headers,
         request_body: {
           state: event.request.hasPostData ? "unavailable" : "empty",
+          replay_safe: !event.request.hasPostData,
           ...(event.request.hasPostData ? { reason: "not_in_event" } : {}),
         },
         response_body: { state: "pending" },
@@ -238,7 +256,7 @@ export class DebugNetworkStore {
               lost.entry.finished_at = this.now();
               lost.entry.error = "tracking_limit";
             }
-            lost.entry.truncated = true;
+            incompleteMetadata(lost.entry);
             if (lost.entry.response_body.state === "pending")
               lost.entry.response_body = { state: "unavailable", reason: "tracking_limit" };
             lost.entry.sequence = this.changed();
@@ -260,14 +278,14 @@ export class DebugNetworkStore {
       if (queue.length < 8 && this.pendingHeaders < 64) {
         if (headersLimited(event.headers)) {
           const latest = chain.hops.at(-1);
-          if (latest) latest.entry.truncated = true;
+          if (latest) incompleteMetadata(latest.entry);
         }
         queue.push(redactHeaders(event.headers));
         this.pendingHeaders += 1;
       } else {
         chain.partial = true;
         const latest = chain.hops.at(-1);
-        if (latest) latest.entry.truncated = true;
+        if (latest) incompleteMetadata(latest.entry);
       }
       this.applyExtra(chain);
       return;
@@ -435,11 +453,18 @@ export class DebugNetworkStore {
     const body = retained ?? redactBody(text, mime);
     this.retainedChars -= record.entry[key].text?.length ?? 0;
     record.entry[key] = {
-      state: body.truncated ? "truncated" : body.text.length ? "available" : "empty",
+      state: body.reason
+        ? "omitted"
+        : body.truncated
+          ? "truncated"
+          : body.text.length
+            ? "available"
+            : "empty",
       text: body.text,
       chars: body.text.length,
       redacted: body.redacted,
-      ...(body.truncated ? { reason: "body_limit" } : {}),
+      replay_safe: body.replay_safe,
+      ...(body.reason ? { reason: body.reason } : body.truncated ? { reason: "body_limit" } : {}),
     };
     this.retainedChars += body.text.length;
     this.retain?.(record.entry);
@@ -484,7 +509,7 @@ export class DebugNetworkStore {
           this.pendingHeaders -= chain.requestHeaders.length + chain.responseHeaders.length;
           chain.requestHeaders.length = 0;
           chain.responseHeaders.length = 0;
-          for (const hop of chain.hops) hop.entry.truncated = true;
+          for (const hop of chain.hops) incompleteMetadata(hop.entry);
         }
         if (chain.requestIndex > index) chain.requestIndex -= 1;
         if (chain.responseIndex > index) chain.responseIndex -= 1;
@@ -505,18 +530,21 @@ export class DebugNetworkStore {
     const key = this.key(source, rawId);
     let requestBody: ReturnType<typeof redactBody> | undefined;
     let responseBody: ReturnType<typeof redactBody> | undefined;
+    let urlState: ReturnType<typeof redactRequestUrl>["state"] | undefined;
     const headersTruncated = headersLimited(annotation.effective?.headers);
     // Pending annotations must obey the same redaction boundary as live records.
     // Preserve the original completeness flags when formatting expands a JSON body.
     if (annotation.effective) {
       const value = annotation.effective;
+      const url = redactRequestUrl(value.url);
+      urlState = url.state;
       if (value.postData !== undefined)
         requestBody = redactBody(value.postData, value.headers["content-type"] ?? "");
       annotation = {
         ...annotation,
         effective: {
           ...value,
-          url: redactUrl(value.url),
+          url: url.text,
           headers: redactHeaders(value.headers),
           ...(value.postData === undefined ? {} : { postData: requestBody!.text }),
         },
@@ -534,7 +562,13 @@ export class DebugNetworkStore {
         },
       };
     }
-    this.annotations.set(key, { value: annotation, requestBody, responseBody, headersTruncated });
+    this.annotations.set(key, {
+      value: annotation,
+      requestBody,
+      responseBody,
+      headersTruncated,
+      urlState,
+    });
     while (this.annotations.size > 64)
       this.annotations.delete(this.annotations.keys().next().value!);
     const record = this.chains.get(key)?.hops.at(-1);
@@ -547,8 +581,11 @@ export class DebugNetworkStore {
     const { effective, mock, ...metadata } = retained.value;
     Object.assign(record.entry, metadata);
     if (effective) {
-      if (retained.headersTruncated) record.entry.truncated = true;
-      record.entry.url = redactUrl(effective.url);
+      if (retained.headersTruncated) incompleteMetadata(record.entry);
+      record.entry.url = effective.url;
+      record.entry.integrity!.url = retained.urlState!;
+      record.entry.truncated =
+        record.entry.integrity!.metadata === "truncated" || retained.urlState === "truncated";
       record.entry.method = effective.method;
       record.entry.request_headers = redactHeaders(effective.headers);
       if (effective.postData !== undefined)
@@ -635,17 +672,7 @@ export function bodySlice(
   if (pointer !== undefined) {
     if (body.state !== "available" && body.state !== "empty")
       throw new Error("JSON pointer requires a complete body");
-    if (pointer !== "" && !pointer.startsWith("/"))
-      throw new Error("pointer must be an RFC 6901 JSON pointer");
-    let value: unknown = JSON.parse(text);
-    for (const token of pointer === "" ? [] : pointer.slice(1).split("/")) {
-      if (/~(?:[^01]|$)/.test(token)) throw new Error("invalid JSON pointer escape");
-      const key = token.replaceAll("~1", "/").replaceAll("~0", "~");
-      if (!value || typeof value !== "object" || !Object.hasOwn(value, key))
-        throw new Error("JSON pointer not found");
-      value = (value as Record<string, unknown>)[key];
-    }
-    text = JSON.stringify(value, null, 2);
+    text = jsonPointer(text, pointer);
   }
   const splitsCharacter = (at: number) =>
     /[\uD800-\uDBFF]/.test(text.charAt(at - 1)) && /[\uDC00-\uDFFF]/.test(text.charAt(at));

@@ -119,6 +119,8 @@ export interface DebugBody {
   offset?: number;
   next_offset?: number;
   redacted?: boolean;
+  /** True only when complete retained text is identical to the captured body. */
+  replay_safe?: boolean;
 }
 
 export interface DebugRequest {
@@ -129,6 +131,11 @@ export interface DebugRequest {
   finished_at?: number;
   method: string;
   url: string;
+  /** Absent on older evidence, whose URL/body fidelity cannot be established. */
+  integrity?: {
+    url: "complete" | "redacted" | "truncated";
+    metadata: "complete" | "truncated";
+  };
   resource_type?: string;
   frame_id?: string;
   loader_id?: string;

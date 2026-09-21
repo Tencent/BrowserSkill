@@ -305,6 +305,8 @@ access to older tasks' data. There is no built-in comparison or repair action.
 | Pending journal writes | 256 entries / 4 MiB, plus one batch in flight |
 | Live request + response text cache | 512 Ki UTF-16 code units per capture; journal is separate |
 | Individual body | 64 Ki code units, with explicit truncation/omission |
+| Capture startup | 10 s total, including previous cleanup and storage waits; cancellation immediately stops retention and rolls back setup |
+| Retained URL / explicit control URL | 2048 / 16384 characters; truncation is recorded separately from metadata completeness |
 | Response acquisition | 4 concurrent jobs, 32 queued, 2.5 s command deadline |
 | Browser response buffers | 2 MiB per target, 256 KiB per resource |
 | Attached capture targets | Root + up to 16 existing/new iframe targets |
@@ -314,12 +316,19 @@ Known credential headers, URL parameters, JSON keys, form fields and common text
 assignments are redacted before storage. This is not a guarantee that arbitrary
 application data contains no secrets. Evidence is saved in browser-local history and returned when requested by the
 owning agent or extension UI; it is not added to audit storage.
+Bracket/dotted field paths and common password variants (for example
+`user[password]`, `credentials.password`, `password_confirmation` and `newPassword`)
+are covered in JSON, forms and URL parameters. Untouched JSON tokens, including
+64-bit numeric IDs, retain their original text and precision. JSON-pointer and
+field-chain views also preserve numeric tokens. Malformed or over-deep JSON is
+omitted because its nested secrets cannot be inspected reliably.
 
 Body states distinguish `pending`, `available`, `empty`, `truncated`, `unavailable`,
 `omitted` and `evicted`, with reasons. Binary bodies, multipart content, oversized
 structured bodies, saturated queues and missing browser buffers are explicit;
-missing POST data in the event is `not_in_event`. Bounded redacted JSON can be
-reformatted; a truncated result is not suitable for a JSON-pointer query.
+missing POST data in the event is `not_in_event`. Redaction changes only necessary
+JSON source ranges; it does not parse and reserialize numeric values. A truncated
+result is not suitable for a JSON-pointer query.
 
 Capture starts at enable time; earlier traffic cannot be reconstructed. Worker
 and service-worker internal requests, WebSocket frames, SSE chunks, screenshots,
@@ -383,7 +392,10 @@ Effects:
 - `modify`: optional same-origin `url`, `method`, `headers` (string values replace,
   `null` removes), and either a complete text `body` or `json` edits. JSON edits
   support top-level `set`, `remove`, and `rename`; missing rename sources or
-  occupied destinations abort the request rather than guessing. Browser-managed
+  occupied destinations and duplicate top-level keys abort the request rather than guessing.
+  Unchanged values retain their original numeric tokens. Unsafe numeric values in
+  `set` are rejected; use a complete text `body` when supplying exact large numbers.
+  Browser-managed
   headers are not editable. Binary/multipart body edits are unsupported.
 - `mock`: required `status` and text `body`, optional response `headers` and
   `delay_ms` (0..10000). Defaults to JSON content type. Status is 200..599 excluding
@@ -416,8 +428,16 @@ proxy. Source request, destination and current page must share an HTTP(S) origin
 Cross-origin replay, redirects and binary/multipart bodies are rejected. Browser
 controlled headers (including Cookie, Origin and Content-Length) are supplied by
 the browser. Other captured headers are merged with explicit overrides; replace
-redacted values or remove them with `null`. Missing/truncated bodies require an
-explicit complete replacement. Redacted placeholders are never sent. Page
+redacted values or remove them with `null`. Reusing retained data requires
+`integrity.url: "complete"`, complete request metadata and
+`request_body.replay_safe: true`. The body flag means the complete stored body is
+byte-for-byte unchanged as text; `available` alone only promises displayable evidence.
+Missing, truncated, transformed or unverified bodies require an explicit complete
+replacement. A truncated or transformed URL requires a complete same-origin `url`
+replacement; replacing the URL does not override incomplete headers/metadata.
+Older records lacking these markers remain readable, but require explicit URL/body
+replacements. The replay editor leaves an unverified URL empty and never silently
+submits an untouched evidence draft as a replacement. Redacted placeholders are never sent. Page
 navigation/context loss can interrupt the attempt.
 
 A caller-provided `key` is required. Reusing it within the same capture returns

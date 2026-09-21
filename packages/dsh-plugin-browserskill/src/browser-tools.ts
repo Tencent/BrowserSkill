@@ -149,10 +149,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: "browser_inspect",
     description:
-      "Read page state without arbitrary script execution. Actions: observe, snapshot, html, " +
+      "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
       "screenshot, console, network. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
-      "debug with debugAction starts/stops task-scoped capture, reads request details and operation evidence, or exports a recording for later analysis. Start before visiting the page.",
+      "debug with debugAction starts/stops capture, reads/exports evidence, or explicitly controls network traffic. " +
+      "rule_add/rule_enable can block, modify or mock live requests; replay sends a new request and may change server data. Start capture before visiting the page.",
     actions: {
       observe: "inspect.observe",
       snapshot: "inspect.snapshot",

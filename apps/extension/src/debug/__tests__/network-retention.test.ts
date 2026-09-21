@@ -50,7 +50,7 @@ describe("in-flight evidence retention", () => {
       state: "complete",
       status: 503,
       duration_ms: 19000,
-      response_body: { state: "available", text: '{\n  "saved": false\n}' },
+      response_body: { state: "available", text: '{"saved":false}' },
     });
     expect(f.send).toHaveBeenCalledWith(7, "Network.getResponseBody", { requestId: "slow" });
   });
@@ -70,7 +70,7 @@ describe("in-flight evidence retention", () => {
     for (let i = 0; i < MAX_REQUESTS; i++) f.start(`asset-${i}`);
     resolve({ body: '{"saved":false}' });
     await settle();
-    expect(f.saved.get("d1:n1")?.response_body.text).toContain('"saved": false');
+    expect(f.saved.get("d1:n1")?.response_body.text).toContain('"saved":false');
     f.store.stop("requested");
   });
 
