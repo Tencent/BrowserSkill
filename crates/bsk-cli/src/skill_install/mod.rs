@@ -1,6 +1,7 @@
 //! Install bundled or custom browser-skill packages into agent skill directories.
 
 mod bundle;
+mod conflicts;
 pub mod harness;
 mod provenance;
 mod storage;
@@ -145,22 +146,36 @@ fn install_one_at_home(
 ) -> Result<(PathBuf, InstallStatus)> {
     let dest_dir = harness.skill_dest_dir_for_home(home);
     let dest_file = dest_dir.join("SKILL.md");
+    let marker = dest_dir.join(SOURCE_MARKER_FILE);
 
-    // A no-op install needs no write access. Recheck under the lock before writing
-    // so two installers that both observed a missing file cannot overwrite it.
-    if dest_file.exists() && !force {
+    // Completed installs remain read-only no-ops. A pending install needs
+    // verification even if the entry point was written before the interruption.
+    let should_skip = || {
+        dest_file.exists()
+            && !force
+            && !matches!(provenance::read(&marker), Ok(provenance::Provenance::Bundle(record)) if record.previous.is_some())
+    };
+    if should_skip() {
         return Ok((dest_file, InstallStatus::Skipped));
     }
     fs::create_dir_all(&dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
     let _lock = storage::SkillLock::acquire(&dest_dir)
         .with_context(|| format!("lock {}", dest_dir.display()))?;
 
-    if dest_file.exists() && !force {
+    // Another installer may have completed while this one waited for the lock.
+    if should_skip() {
         return Ok((dest_file, InstallStatus::Skipped));
     }
 
     let existed = dest_file.exists();
-    let marker = dest_dir.join(SOURCE_MARKER_FILE);
+    let ownership = if source_kind == SkillSource::Bundled || !force {
+        provenance::read(&marker)?
+    } else {
+        provenance::Provenance::Missing
+    };
+    if !force {
+        verify_install(&dest_dir, source, source_kind, &ownership)?;
+    }
     match source_kind {
         SkillSource::Custom => {
             let mut files: Vec<_> = source.files.iter().collect();
@@ -183,10 +198,14 @@ fn install_one_at_home(
             // Force replaces current bundled paths, but retires only unchanged
             // previously managed resources. Unknown/user files remain untouched.
             let mut obsolete = std::collections::BTreeSet::new();
-            if let provenance::Provenance::Bundle(old) = provenance::read(&marker)? {
-                for (name, hash) in old.files {
+            if let provenance::Provenance::Bundle(old) = ownership {
+                // Pending manifests also own resources retired by that update.
+                let mut managed = old.previous.unwrap_or_default();
+                managed.extend(old.files.into_iter().map(|(name, hash)| (name, Some(hash))));
+                for (name, hash) in managed {
                     if !source.files.contains_key(&name)
-                        && bundle::file_hash(&dest_dir, &name)?.as_ref() == Some(&hash)
+                        && hash.is_some()
+                        && bundle::file_hash(&dest_dir, &name)? == hash
                     {
                         obsolete.insert(name);
                     }
@@ -202,6 +221,51 @@ fn install_one_at_home(
         InstallStatus::Installed
     };
     Ok((dest_file, status))
+}
+
+/// A missing entry point permits repair, not replacement of local resources.
+fn verify_install(
+    dir: &Path,
+    source: &SkillBundle,
+    source_kind: SkillSource,
+    ownership: &provenance::Provenance,
+) -> Result<()> {
+    use provenance::Provenance;
+
+    let target = source.hashes();
+    let mut baseline = provenance::FileHashes::new();
+    let mut conflicts = match ownership {
+        Provenance::Bundle(record) => {
+            if let Some(previous) = &record.previous {
+                if source_kind != SkillSource::Bundled || record.files != target {
+                    bail!(
+                        "{}: unfinished update targets another skill package; use --force to replace it",
+                        dir.join(SOURCE_MARKER_FILE).display()
+                    );
+                }
+                baseline = record.files.clone();
+                conflicts::pending(dir, &target, previous)?
+            } else {
+                baseline = record.files.clone();
+                // Only the missing entry point is being explicitly repaired.
+                baseline.remove("SKILL.md");
+                conflicts::managed(dir, &baseline)?
+            }
+        }
+        Provenance::Invalid => bail!(
+            "{}: invalid source marker; use --force to replace it",
+            dir.join(SOURCE_MARKER_FILE).display()
+        ),
+        _ => Vec::new(),
+    };
+    conflicts.extend(conflicts::unowned(dir, &target, &baseline)?);
+    if !conflicts.is_empty() {
+        bail!(
+            "skill installation conflicts; content preserved:\n{}\nUse --force to replace conflicting skill files.",
+            conflicts.join("\n")
+        );
+    }
+    Ok(())
 }
 
 /// Harnesses visible in the interactive installer (detected on this machine only).

@@ -67,6 +67,18 @@ jobs:
       - name: Run Windows skill bundle installation and migration tests
         run: cargo test -p bsk --lib --test skill_install_legacy --locked skill_install
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Validate Windows skill metadata, resources and Cargo package
+        run: |
+          node --test scripts/check-skill-bundles.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-skill-bundles.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-crate-skill.mjs
+
       - name: Run Windows update tests
         run: cargo test -p bsk --lib --locked cli::update::tests
 

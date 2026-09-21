@@ -262,6 +262,13 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             "automatic updates paused for {id}: {}; content preserved",
             reason.description()
         ));
+        for (_, conflicts) in report
+            .conflict_details
+            .iter()
+            .filter(|(id, _)| id == harness)
+        {
+            details.extend(conflicts.iter().cloned());
+        }
         hints.push(format!(
             "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
         ));
@@ -576,6 +583,7 @@ mod m2_tests {
             busy: vec![HarnessId::Hermes],
             errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
             paused: Vec::new(),
+            ..Default::default()
         });
         assert_eq!(check.status, CheckStatus::Fail);
         for text in [
@@ -642,6 +650,30 @@ mod m2_tests {
                 assert!(failed.hint.as_ref().unwrap().contains("--harness cursor"));
                 assert!(has_failures(&[failed]));
             }
+        }
+    }
+
+    #[test]
+    fn skill_check_includes_each_conflict_in_text_and_json() {
+        use crate::skill_install::{
+            HarnessId,
+            sync::{PauseReason, SyncReport},
+        };
+        let conflicts = vec![
+            "references/changed.md: modified".into(),
+            "references/missing.md: deleted".into(),
+            "references/new.md: new resource conflicts with an existing file".into(),
+        ];
+        let check = skill_check_from_report(&SyncReport {
+            paused: vec![(HarnessId::Cursor, PauseReason::LocalChanges)],
+            conflict_details: vec![(HarnessId::Cursor, conflicts.clone())],
+            ..Default::default()
+        });
+        assert_eq!(check.status, CheckStatus::Warning);
+        let json = serde_json::to_value(&check).unwrap();
+        for conflict in conflicts {
+            assert!(check.detail.contains(&conflict));
+            assert!(json["detail"].as_str().unwrap().contains(&conflict));
         }
     }
 

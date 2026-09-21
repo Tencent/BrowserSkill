@@ -22,9 +22,11 @@ export function validateSkillDirectory(directory, { maxEntryBytes, browserTools 
   assert(source, `Missing SKILL.md in ${root}`);
   const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(source);
   assert(frontmatter, `Missing frontmatter in ${root}`);
-  const name = /^name: (.+)$/m.exec(frontmatter[1])?.[1].trim();
+  // Normalize metadata for parsing only; keep resource bytes and body offsets intact.
+  const metadata = frontmatter[1].replaceAll("\r\n", "\n");
+  const name = /^name: (.+)$/m.exec(metadata)?.[1].trim();
   const description = /^description: (.+(?:\n[ \t]+[^\n]+)*)/m
-    .exec(frontmatter[1])?.[1]
+    .exec(metadata)?.[1]
     .replace(/^[|>]\s*/, "")
     .replace(/\s+/g, " ")
     .trim();

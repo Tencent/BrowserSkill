@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { validateSkillDirectory } from "../packages/dsh-plugin-browserskill/scripts/validate-skill.mjs";
 
 function fixture(t, files) {
@@ -27,6 +28,41 @@ test("validates metadata and linked resources without injecting their bodies", (
   assert.equal(skill.description, "Read pages and fill forms.");
   assert.equal(skill.content, "[details](references/details.md)\n");
   assert.equal(skill.files.size, 2);
+});
+
+test("LF and CRLF multiline metadata agree without changing resource bytes", (t) => {
+  for (const style of ["|", ">"]) {
+    for (const newline of ["\n", "\r\n"]) {
+      const files = {
+        "SKILL.md": `${metadata.replace("description: |", `description: ${style}`)}[details](references/details.md)\n\nBody\n`,
+        "references/details.md": "Instructions\nSecond line\n",
+      };
+      for (const name of Object.keys(files)) files[name] = files[name].replaceAll("\n", newline);
+      const root = fixture(t, files);
+      const skill = validateSkillDirectory(root);
+      assert.equal(skill.name, "browser-skill");
+      assert.equal(skill.description, "Read pages and fill forms.");
+      for (const [name, source] of Object.entries(files)) {
+        assert.equal(skill.files.get(name), source);
+        assert.deepEqual(readFileSync(join(root, name)), Buffer.from(source));
+      }
+    }
+  }
+});
+
+test("both authored skill packages validate in LF and CRLF checkouts", (t) => {
+  for (const path of ["crates/bsk-cli/skill", "packages/dsh-plugin-browserskill/skill"]) {
+    const original = validateSkillDirectory(fileURLToPath(new URL(`../${path}`, import.meta.url)));
+    for (const newline of ["\n", "\r\n"]) {
+      const files = Object.fromEntries(
+        [...original.files].map(([name, content]) => [name, content.replace(/\r?\n/g, newline)]),
+      );
+      const skill = validateSkillDirectory(fixture(t, files));
+      assert.equal(skill.name, original.name);
+      assert.equal(skill.description, original.description);
+      assert.deepEqual(Object.fromEntries(skill.files), files);
+    }
+  }
 });
 
 test("rejects missing, escaping and unrouted resources", (t) => {

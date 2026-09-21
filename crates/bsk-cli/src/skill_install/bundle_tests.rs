@@ -200,6 +200,18 @@ fn edited_or_deleted_managed_files_pause_the_entire_bundle() {
                 "{name}"
             );
             assert!(report.errors.is_empty());
+            let reason = if edited.is_some() {
+                "modified"
+            } else {
+                "deleted"
+            };
+            assert_eq!(
+                report.conflict_details,
+                [(
+                    HarnessId::Cursor,
+                    vec![format!("{}: {reason}", dir.join(name).display())]
+                )]
+            );
             assert_eq!(fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap(), marker);
             for (path, bytes) in &before.files {
                 if path != name {
@@ -219,9 +231,20 @@ fn new_resource_collisions_are_preserved_until_explicit_force() {
     fs::create_dir(dir.join("references")).unwrap();
     fs::write(dir.join("references/new.md"), "user file").unwrap();
     let after = bundle("new", &[("references/new.md", "official")]);
+    let report = sync_with_bundle(home.path(), &after);
     assert_eq!(
-        sync_with_bundle(home.path(), &after).paused,
+        report.paused,
         [(HarnessId::Cursor, PauseReason::LocalChanges)]
+    );
+    assert_eq!(
+        report.conflict_details,
+        [(
+            HarnessId::Cursor,
+            vec![format!(
+                "{}: new resource conflicts with an existing file",
+                dir.join("references/new.md").display()
+            )]
+        )]
     );
     assert_eq!(
         fs::read_to_string(dir.join("references/new.md")).unwrap(),
@@ -229,6 +252,196 @@ fn new_resource_collisions_are_preserved_until_explicit_force() {
     );
     install(home.path(), &after, SkillSource::Bundled, true);
     assert_bundle(&dir, &after);
+}
+
+#[test]
+fn missing_entrypoint_does_not_authorize_overwriting_references() {
+    for kind in [SkillSource::Bundled, SkillSource::Custom] {
+        for managed in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let source = bundle("main", &[("references/files.md", "official")]);
+            let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
+            if managed {
+                install(home.path(), &source, SkillSource::Bundled, false);
+                fs::remove_file(dir.join("SKILL.md")).unwrap();
+            } else {
+                fs::create_dir_all(dir.join("references")).unwrap();
+            }
+            fs::write(dir.join("references/files.md"), "local edit").unwrap();
+            fs::write(dir.join("notes.md"), "keep").unwrap();
+            let marker = fs::read(dir.join(SOURCE_MARKER_FILE)).ok();
+            let error = install_one_at_home(home.path(), HarnessId::Cursor, &source, kind, false)
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("files.md"));
+            assert!(!dir.join("SKILL.md").exists());
+            assert_eq!(fs::read(dir.join(SOURCE_MARKER_FILE)).ok(), marker);
+            assert_eq!(
+                fs::read_to_string(dir.join("references/files.md")).unwrap(),
+                "local edit"
+            );
+            install(home.path(), &source, kind, true);
+            for (name, bytes) in &source.files {
+                assert_eq!(fs::read(dir.join(name)).unwrap(), *bytes);
+            }
+            assert_eq!(fs::read_to_string(dir.join("notes.md")).unwrap(), "keep");
+        }
+    }
+}
+
+#[test]
+fn ordinary_install_resumes_pending_writes_but_preserves_later_edits() {
+    for failed_file in ["references/a.md", "SKILL.md", "final marker"] {
+        for edited in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let source = bundle("main", &[("references/a.md", "official")]);
+            let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
+            let marker_writes = std::cell::Cell::new(0);
+            let result = with_replace_hook(
+                move |path| {
+                    if path.file_name().unwrap() == SOURCE_MARKER_FILE {
+                        marker_writes.set(marker_writes.get() + 1);
+                    }
+                    if path.ends_with(failed_file)
+                        || (failed_file == "final marker"
+                            && path.file_name().unwrap() == SOURCE_MARKER_FILE
+                            && marker_writes.get() == 2)
+                    {
+                        Err(std::io::Error::other("interrupted"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    install_one_at_home(
+                        home.path(),
+                        HarnessId::Cursor,
+                        &source,
+                        SkillSource::Bundled,
+                        false,
+                    )
+                },
+            );
+            assert!(result.is_err());
+            let marker = fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap();
+            if edited {
+                fs::write(dir.join("references/a.md"), "edit after interruption").unwrap();
+            }
+            let result = install_one_at_home(
+                home.path(),
+                HarnessId::Cursor,
+                &source,
+                SkillSource::Bundled,
+                false,
+            );
+            if edited {
+                assert!(format!("{:#}", result.unwrap_err()).contains("a.md"));
+                assert_eq!(dir.join("SKILL.md").exists(), failed_file == "final marker");
+                assert_eq!(fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap(), marker);
+                assert_eq!(
+                    fs::read_to_string(dir.join("references/a.md")).unwrap(),
+                    "edit after interruption"
+                );
+            } else {
+                result.unwrap();
+                assert_bundle(&dir, &source);
+            }
+        }
+    }
+}
+
+#[test]
+fn missing_entrypoint_repairs_only_unchanged_or_identical_resources() {
+    for managed in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let before = bundle("old", &[("references/a.md", "a1")]);
+        let dir = install(home.path(), &before, SkillSource::Bundled, false);
+        fs::remove_file(dir.join("SKILL.md")).unwrap();
+        if !managed {
+            fs::remove_file(dir.join(SOURCE_MARKER_FILE)).unwrap();
+        }
+        let after = if managed {
+            bundle("new", &[("references/a.md", "a2")])
+        } else {
+            before
+        };
+        install(home.path(), &after, SkillSource::Bundled, false);
+        assert_bundle(&dir, &after);
+    }
+}
+
+#[test]
+fn ordinary_install_recovers_old_and_retired_pending_resources_safely() {
+    for failed_file in ["references/a.md", "SKILL.md"] {
+        for edit_retired in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let before = bundle(
+                "old",
+                &[
+                    ("references/a.md", "a1"),
+                    ("references/retire.md", "retired"),
+                ],
+            );
+            let dir = install(home.path(), &before, SkillSource::Bundled, false);
+            fs::remove_file(dir.join("SKILL.md")).unwrap();
+            let after = bundle("new", &[("references/a.md", "a2")]);
+            let result = with_replace_hook(
+                move |path| {
+                    if path.ends_with(failed_file) {
+                        Err(std::io::Error::other("interrupted"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    install_one_at_home(
+                        home.path(),
+                        HarnessId::Cursor,
+                        &after,
+                        SkillSource::Bundled,
+                        false,
+                    )
+                },
+            );
+            assert!(result.is_err());
+            // A different package cannot replace an unfinished transaction implicitly.
+            assert!(
+                install_one_at_home(
+                    home.path(),
+                    HarnessId::Cursor,
+                    &before,
+                    SkillSource::Bundled,
+                    false
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("unfinished update")
+            );
+            if edit_retired {
+                fs::write(dir.join("references/retire.md"), "keep my edit").unwrap();
+            }
+            let marker = fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap();
+            let result = install_one_at_home(
+                home.path(),
+                HarnessId::Cursor,
+                &after,
+                SkillSource::Bundled,
+                false,
+            );
+            if edit_retired {
+                assert!(result.unwrap_err().to_string().contains("retire.md"));
+                assert_eq!(
+                    fs::read_to_string(dir.join("references/retire.md")).unwrap(),
+                    "keep my edit"
+                );
+                assert_eq!(fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap(), marker);
+                assert!(!dir.join("SKILL.md").exists());
+            } else {
+                result.unwrap();
+                assert_bundle(&dir, &after);
+                assert!(!dir.join("references/retire.md").exists());
+            }
+        }
+    }
 }
 
 #[test]

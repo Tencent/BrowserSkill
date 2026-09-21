@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use super::{
     SOURCE_MARKER_FILE, SkillBundle,
     bundle::file_hash,
+    conflicts,
     harness::HarnessId,
     provenance::{self, Provenance},
     storage::SkillLock,
@@ -25,6 +26,8 @@ pub struct SyncReport {
     pub protected: Vec<HarnessId>,
     /// Content preserved because safe automatic updates need user attention.
     pub paused: Vec<(HarnessId, PauseReason)>,
+    /// Paths and reasons for conflicts that paused a harness, captured under its lock.
+    pub conflict_details: Vec<(HarnessId, Vec<String>)>,
     /// Another install/sync holds the lock; retry on a later sync pass.
     pub busy: Vec<HarnessId>,
     /// Harnesses that have an installed `SKILL.md` but the sync attempt
@@ -75,7 +78,12 @@ pub(super) fn sync_with_bundle(home: &Path, source: &SkillBundle) -> SyncReport 
             Ok(SyncOne::UpToDate) => report.up_to_date.push(harness),
             Ok(SyncOne::Updated) => report.updated.push(harness),
             Ok(SyncOne::Protected) => report.protected.push(harness),
-            Ok(SyncOne::Paused(reason)) => report.paused.push((harness, reason)),
+            Ok(SyncOne::Paused(reason, conflicts)) => {
+                report.paused.push((harness, reason));
+                if !conflicts.is_empty() {
+                    report.conflict_details.push((harness, conflicts));
+                }
+            }
             Ok(SyncOne::Busy) => report.busy.push(harness),
             Err(err) => report.errors.push((harness, format!("{err:#}"))),
         }
@@ -88,7 +96,7 @@ enum SyncOne {
     UpToDate,
     Updated,
     Protected,
-    Paused(PauseReason),
+    Paused(PauseReason, Vec<String>),
     Busy,
 }
 
@@ -108,19 +116,29 @@ fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
     let ownership = provenance::read(&marker)?;
     let target = source.hashes();
     let mut baseline = std::collections::BTreeMap::new();
+    let mut conflicts = Vec::new();
     match &ownership {
         Provenance::Custom => return Ok(SyncOne::Protected),
-        Provenance::Invalid => return Ok(SyncOne::Paused(PauseReason::InvalidMarker)),
+        Provenance::Invalid => {
+            return Ok(SyncOne::Paused(
+                PauseReason::InvalidMarker,
+                vec![format!("{}: invalid source marker", marker.display())],
+            ));
+        }
         Provenance::Bundle(record) => {
             if let Some(previous) = &record.previous {
                 if record.files != target {
-                    return Ok(SyncOne::Paused(PauseReason::InterruptedUpdate));
+                    return Ok(SyncOne::Paused(
+                        PauseReason::InterruptedUpdate,
+                        vec![format!(
+                            "{}: unfinished update targets another skill package",
+                            marker.display()
+                        )],
+                    ));
                 }
-                for (name, old_hash) in previous {
-                    let current = file_hash(dir, name)?;
-                    if current != *old_hash && current.as_ref() != record.files.get(name) {
-                        return Ok(SyncOne::Paused(PauseReason::LocalChanges));
-                    }
+                let conflicts = conflicts::pending(dir, &target, previous)?;
+                if !conflicts.is_empty() {
+                    return Ok(SyncOne::Paused(PauseReason::LocalChanges, conflicts));
                 }
                 let obsolete = previous
                     .keys()
@@ -131,15 +149,14 @@ fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
                 return Ok(SyncOne::Updated);
             }
             baseline = record.files.clone();
-            for (name, hash) in &baseline {
-                if file_hash(dir, name)?.as_ref() != Some(hash) {
-                    return Ok(SyncOne::Paused(PauseReason::LocalChanges));
-                }
-            }
+            conflicts = conflicts::managed(dir, &baseline)?;
         }
         legacy => {
             let Some(hash) = file_hash(dir, "SKILL.md")? else {
-                return Ok(SyncOne::Paused(PauseReason::LocalChanges));
+                return Ok(SyncOne::Paused(
+                    PauseReason::LocalChanges,
+                    vec![format!("{}: deleted", dest.display())],
+                ));
             };
             let trusted = match legacy {
                 Provenance::Bundled { sha256 } => {
@@ -148,23 +165,24 @@ fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
                 _ => provenance::known_legacy(&hash) || target.get("SKILL.md") == Some(&hash),
             };
             if !trusted {
-                return Ok(SyncOne::Paused(match legacy {
+                let reason = match legacy {
                     Provenance::Missing => PauseReason::Untracked,
                     Provenance::LegacyBundled => PauseReason::MissingBaseline,
                     _ => PauseReason::LocalChanges,
-                }));
+                };
+                return Ok(SyncOne::Paused(
+                    reason,
+                    vec![format!("{}: {}", dest.display(), reason.description())],
+                ));
             }
             baseline.insert("SKILL.md".into(), hash);
         }
     }
     // New resource paths may already contain user files. Adopt identical bytes,
     // but never overwrite an unowned file that differs from the target.
-    for (name, hash) in &target {
-        if !baseline.contains_key(name)
-            && file_hash(dir, name)?.is_some_and(|current| current != *hash)
-        {
-            return Ok(SyncOne::Paused(PauseReason::LocalChanges));
-        }
+    conflicts.extend(conflicts::unowned(dir, &target, &baseline)?);
+    if !conflicts.is_empty() {
+        return Ok(SyncOne::Paused(PauseReason::LocalChanges, conflicts));
     }
     let obsolete = baseline
         .keys()
