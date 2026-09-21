@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 
 /// View scope for [`TabListParams`] (§6 sandbox table).
 ///
-/// * `User` — tabs that live in any window other than an Agent Window.
-/// * `Agent` — tabs in the requesting session's Agent Window only.
+/// * `User` — user pages outside dedicated Agent Windows, including shared hosts.
+/// * `Agent` — pages in the requesting session's dedicated Agent Window,
+///   or explicitly controlled pages in its shared host.
 /// * `All` — both of the above; never reveals other sessions' Agent
 ///   Windows (cross-session isolation per §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
@@ -58,9 +59,8 @@ pub struct TabListResult {
 // tab_create (M8.1)
 // ---------------------------------------------------------------------------
 
-/// Params for `tool.tab_create`. The new tab is always created inside
-/// the requesting session's Agent Window (design §6 sandbox rule —
-/// agents never spawn tabs in user windows).
+/// Params for `tool.tab_create`. The new tab is created in the session's
+/// dedicated Agent Window or explicitly selected shared host window.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TabCreateParams {
     pub session_id: String,
@@ -70,7 +70,7 @@ pub struct TabCreateParams {
     /// Focus the new tab? Defaults to `true` (matches `chrome.tabs.create`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<bool>,
-    /// Insertion index within the Agent Window's tab strip. Omit to
+    /// Insertion index within the session window's tab strip. Omit to
     /// append at the end.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<i32>,

@@ -1,4 +1,8 @@
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  sessionWindowId,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type { RequestFrame, RpcError } from "@/transport/types";
 import {
   type CdpRunner,
@@ -67,7 +71,7 @@ export async function prepareBackgroundExecution(
     )
   )
     return;
-  if (!isAgentControlledTab(ctx, target.tabId) || target.windowId !== ctx.agentWindowId) return;
+  if (!isAgentControlledTab(ctx, target.tabId) || target.windowId !== sessionWindowId(ctx)) return;
   // Other page tools cannot establish execution on browser-internal documents.
   if (cdpBlockedUrlReason(target.url)) return;
   if (signal.aborted) return { code: "cancelled", message: "Background execution setup cancelled" };

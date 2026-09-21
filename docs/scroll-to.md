@@ -26,10 +26,12 @@ Refs accept `@e3` and `e3`. CSS selectors search only the main document; use ref
 for elements in iframes (including out-of-process iframes) or shadow roots.
 Refs belong to one session and tab and may become stale after page changes.
 
-`--session` is required. `--tab-id` defaults to the Agent Window's active tab.
+`--session` is required. `--tab-id` defaults to the Agent Window's active tab,
+or the session's selected controlled tab in local `--in-window` mode.
 `--timeout` defaults to `30s` and must be positive; durations such as `5000ms` and
-`5s` are accepted. The command operates on Agent Window tabs, including user tabs
-explicitly borrowed into that window.
+`5s` are accepted. The command operates on Agent Window tabs, or explicitly
+controlled tabs in a shared host. User tabs require borrowing; same-window
+borrowing grants control without moving the page.
 
 Example JSON output:
 
@@ -111,7 +113,7 @@ The wire response uses the normal `error.code`, `error.message` and optional
 | `invalid_params` | — | Missing/conflicting target or invalid timeout/tab id |
 | `not_found` | `ref_not_found` | Ref is unknown, expired or belongs to another tab |
 | `not_found` | `selector_not_found` | Main-document selector matched no element |
-| `permission_denied` | `agent_window_scope` | Target tab has not been borrowed into the Agent Window |
+| `permission_denied` | `agent_window_scope` | Target tab is outside the session window; borrow it into the session first |
 | `permission_denied` | `element_not_visible` | No visible area remains after scrolling |
 | `cancelled` | — | The call was cancelled |
 | `timeout` | — | The action deadline expired |

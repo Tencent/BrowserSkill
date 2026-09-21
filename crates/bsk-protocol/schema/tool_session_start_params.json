@@ -28,6 +28,9 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "in_window": {
+      "type": "boolean"
+    },
     "session_id": {
       "type": "string"
     },

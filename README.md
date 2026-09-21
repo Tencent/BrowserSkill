@@ -227,6 +227,13 @@ The extension has two independent **Automation settings**, both enabled by defau
 | **Confirm before borrowing tabs** | Ask before an agent takes control of one of your existing tabs. Turning it off permits borrowing without that prompt. |
 | **Allow requests for human help** | Let the agent ask you to handle login, verification, or another step that needs your participation. |
 
+By default, sessions use a dedicated Agent Window. For a local session,
+`session start --in-window` instead creates an agent-controlled tab in the
+last-focused normal user window and leaves that host window open during cleanup.
+This mode requires protocol 1.4 and cannot be combined with remote mode or window
+dimensions. Adding `--no-focus` starts the tab inactive; `record start` continues
+to use a dedicated window.
+
 These browser settings apply to existing and new sessions. Legacy `--unattended`, `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` inputs cannot override them. Disabling human help does not mean the requested step was completed. Close the Agent Window to stop its tasks.
 
 BrowserSkill does not operate a mandatory cloud service or collect product telemetry. Automation results go to your selected daemon or gateway and the agent using it; that agent or service may process or retain them under its own policies. The extension does not independently call an AI provider.

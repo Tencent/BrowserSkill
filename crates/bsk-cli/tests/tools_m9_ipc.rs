@@ -26,7 +26,6 @@ use bsk_protocol::{
 };
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -42,13 +41,7 @@ use support::wait_for_abort_registered;
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
 fn tempfile_path(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let mut rng = rand::thread_rng();
-    let suffix: String = (0..8)
-        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
-        .collect();
-    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
-    p
+    support::ipc_endpoint(prefix)
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
@@ -144,6 +137,7 @@ where
                     window_id += 1;
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(id),
                         })

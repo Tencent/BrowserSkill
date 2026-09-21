@@ -4,6 +4,7 @@ import type {
   AgentWindowCreateOptions,
   AgentWindowCreation,
 } from "../agent-window";
+import { sessionWindowId } from "@/session-manager/manager";
 import { isAgentControlledTab, SessionManager } from "../manager";
 
 function fakeAgentWindow(): AgentWindowApi & {
@@ -38,7 +39,7 @@ describe("SessionManager", () => {
     expect(aw.ensureActiveTabMock).toHaveBeenCalledOnce();
     expect(aw.ensureActiveTabMock).toHaveBeenCalledWith(100, "about:blank", expect.any(Set));
     expect(ctx.sessionId).toBe("aa11");
-    expect(ctx.agentWindowId).toBe(100);
+    expect(sessionWindowId(ctx)).toBe(100);
     expect(ctx.createdAtMs).toBe(1700000000000);
     expect(ctx.refStore.isEmpty()).toBe(true);
     expect(ctx.borrowedTabs.size).toBe(0);
@@ -50,7 +51,7 @@ describe("SessionManager", () => {
     expect(aw.createMock).toHaveBeenCalledWith("about:blank", {
       size: { width: 1280, height: 800 },
     });
-    expect(ctx.agentWindowId).toBe(100);
+    expect(sessionWindowId(ctx)).toBe(100);
   });
 
   it("forwards an explicit unfocused start to the Agent Window", async () => {
@@ -68,7 +69,7 @@ describe("SessionManager", () => {
     const ctx = await sm.start("aa11");
     expect(sm.has("aa11")).toBe(true);
     expect(sm.get("aa11")).toBe(ctx);
-    expect(sm.findByWindowId(ctx.agentWindowId)).toBe(ctx);
+    expect(sm.findByWindowId(sessionWindowId(ctx))).toBe(ctx);
     expect(sm.findByWindowId(99999)).toBeNull();
     expect(sm.list().length).toBe(1);
   });
@@ -136,9 +137,9 @@ describe("SessionManager", () => {
     const ctx = await sm.start("aa11");
     const removed = await sm.stop("aa11");
     expect(removed).toBe(ctx);
-    expect(aw.removeMock).toHaveBeenCalledWith(ctx.agentWindowId);
+    expect(aw.removeMock).toHaveBeenCalledWith(sessionWindowId(ctx));
     expect(sm.has("aa11")).toBe(false);
-    expect(sm.findByWindowId(ctx.agentWindowId)).toBeNull();
+    expect(sm.findByWindowId(sessionWindowId(ctx))).toBeNull();
   });
 
   it("stop({ dropOnly: true }) skips the chrome.windows.remove call", async () => {

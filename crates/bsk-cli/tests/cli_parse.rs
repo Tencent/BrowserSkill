@@ -15,6 +15,38 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn shared_window_is_opt_in_and_rejects_dimensions() {
+    for in_window in [false, true] {
+        let mut argv = vec!["bsk", "session", "start", "--no-focus"];
+        if in_window {
+            argv.push("--in-window");
+        }
+        let Command::Session(SessionCmd {
+            sub: SessionSub::Start(args),
+        }) = parse(&argv).command
+        else {
+            panic!("session start expected")
+        };
+        assert_eq!(args.in_window, in_window);
+        assert!(args.no_focus);
+    }
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "session",
+            "start",
+            "--in-window",
+            "--width",
+            "800",
+            "--height",
+            "600"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["bsk", "record", "start", "--in-window"]).is_err());
+}
+
+#[test]
 fn parses_unattended_session_without_changing_normal_defaults() {
     for unattended in [false, true] {
         let mut argv = vec!["bsk", "session", "start"];

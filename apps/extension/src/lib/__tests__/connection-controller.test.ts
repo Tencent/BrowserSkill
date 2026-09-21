@@ -28,13 +28,13 @@ function handshake(
 
 describe("computeConnectedState (protocol-based compat)", () => {
   it("returns connected when daemon protocol equals extension protocol", () => {
-    expect(computeConnectedState(handshake("1.3", "1.3"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
+    expect(computeConnectedState(handshake("1.4", "1.3"), MIN_COMPATIBLE_PROTOCOL)).toEqual({
       kind: "connected",
     });
   });
 
   it("returns version_skew when daemon protocol minor is newer", () => {
-    expect(computeConnectedState(handshake("1.4", "1.3"))).toEqual({
+    expect(computeConnectedState(handshake("1.5", "1.3"))).toEqual({
       kind: "version_skew",
     });
   });
@@ -66,7 +66,7 @@ describe("computeConnectedState (protocol-based compat)", () => {
     const result = computeConnectedState({
       server: "browser-skill-daemon",
       version: "0.1.0",
-      protocol_version: "1.3",
+      protocol_version: "1.4",
       min_compatible_peer: "0.1.0",
     });
     expect(result).toEqual({ kind: "connected" });
@@ -299,11 +299,11 @@ describe("ConnectionController connectionEnabled", () => {
     const second = transport.send.mock.calls[1]?.[0] as { id: string };
     expect(second.id).not.toBe(first.id);
 
-    transport.emitMessage({ id: first.id, result: handshake("1.3", "1.3") });
+    transport.emitMessage({ id: first.id, result: handshake("1.4", "1.3") });
     await Promise.resolve();
     expect(controller.snapshot().state).not.toBe("connected");
 
-    transport.emitMessage({ id: second.id, result: handshake("1.3", "1.3") });
+    transport.emitMessage({ id: second.id, result: handshake("1.4", "1.3") });
     await vi.waitFor(() => expect(controller.snapshot().state).toBe("connected"));
   });
 });

@@ -1,3 +1,5 @@
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -120,6 +122,7 @@ fn run_extension(
                         serde_json::from_value(request.params.clone().unwrap()).unwrap();
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(100),
                         })
@@ -199,7 +202,7 @@ async fn run_record_stop(home: &Path, output: &Path) -> std::process::Output {
 
 async fn setup_daemon(temp: &Path) -> (bsk::daemon::DaemonHandle, PathBuf, PathBuf) {
     let home = temp.join("bsk-home");
-    let sock = temp.join("daemon.sock");
+    let sock = support::ipc_endpoint("bsk-record");
     let daemon = daemon::run(DaemonConfig::new(0), Some(sock.clone()))
         .await
         .unwrap();

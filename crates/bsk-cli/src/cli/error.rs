@@ -433,7 +433,7 @@ mod tests {
         let stderr = render_human_to_string(&cli, None);
         assert!(stderr.contains("target element has no visible geometry"));
         assert!(stderr.contains("rerun snapshot"));
-        assert!(!stderr.contains("Agent Window sandbox"));
+        assert!(!stderr.contains("session's access policy"));
         assert!(!stderr.contains("tab borrow"));
         assert!(stderr.contains("details: element not visible"));
     }
@@ -446,7 +446,7 @@ mod tests {
             data: Some(serde_json::json!({ "reason": "agent_window_scope" })),
         });
         let stderr = render_human_to_string(&cli, None);
-        assert!(stderr.contains("operation denied by the Agent Window sandbox"));
+        assert!(stderr.contains("operation denied by the session's access policy"));
         assert!(stderr.contains("tab borrow"));
     }
 

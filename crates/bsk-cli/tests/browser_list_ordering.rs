@@ -3,6 +3,8 @@
 //! `snapshot_status_entries(...)` which sorts by `connected_at_ms`
 //! ascending with `instance_id` as a deterministic tiebreaker.
 
+mod support;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,18 +16,11 @@ use bsk::daemon::{self, DaemonConfig};
 use bsk::ipc_client::IpcClient;
 use bsk_protocol::system::BrowserStatusEntry;
 use bsk_protocol::{ErrorCode, Method};
-use rand::Rng;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
 fn tempfile_path(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let mut rng = rand::thread_rng();
-    let suffix: String = (0..8)
-        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
-        .collect();
-    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
-    p
+    support::ipc_endpoint(prefix)
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {

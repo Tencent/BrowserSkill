@@ -37,6 +37,7 @@ import {
 } from "@/lib/capture-suppress-bridge";
 import {
   isAgentControlledTab,
+  sessionWindowId,
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
@@ -360,7 +361,7 @@ export async function handleScreenshot(
 
   // Pin controlled captures to their page, including when initially active:
   // the user can select another tab while overlay suppression is pending.
-  if (isAgentControlledTab(ctx, target.tabId) && target.windowId === ctx.agentWindowId) {
+  if (isAgentControlledTab(ctx, target.tabId) && target.windowId === sessionWindowId(ctx)) {
     const cdp = deps.cdp;
     if (!cdp) {
       return rpcError(
@@ -381,7 +382,7 @@ export async function handleScreenshot(
           manager.get(ctx.sessionId) === ctx &&
           isAgentControlledTab(ctx, target.tabId) &&
           tab.id === target.tabId &&
-          tab.windowId === ctx.agentWindowId
+          tab.windowId === sessionWindowId(ctx)
         );
       },
       signal,

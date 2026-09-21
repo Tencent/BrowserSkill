@@ -35,7 +35,7 @@ export default defineConfig({
   manifest: {
     name: "BrowserSkill",
     description:
-      "Let AI agents use your logged-in browser in a separate Agent Window—without interrupting your work. Powered by the bsk CLI.",
+      "Let AI agents use your logged-in browser in dedicated or opt-in shared-window sessions. Powered by the bsk CLI.",
     // Flat debugger sessions are required to address out-of-process iframes.
     minimum_chrome_version: "125",
     permissions: [
