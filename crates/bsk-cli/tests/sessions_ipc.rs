@@ -1742,6 +1742,7 @@ mod recoverable_starts {
             .unwrap();
         assert_eq!(conflicting.unwrap_err().code, ErrorCode::InvalidParams);
         let foreign = bsk::daemon::sessions::Session {
+            container_mode: None,
             id: bsk::daemon::sessions::SessionId("foreign".into()),
             browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
             agent_window_id: Some(999),
