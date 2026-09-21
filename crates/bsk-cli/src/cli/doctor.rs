@@ -263,7 +263,7 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             reason.description()
         ));
         hints.push(format!(
-            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-SKILL.md> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
         ));
     }
     for (harness, message) in &report.errors {
@@ -601,6 +601,7 @@ mod m2_tests {
             PauseReason::MissingBaseline,
             PauseReason::LocalChanges,
             PauseReason::InvalidMarker,
+            PauseReason::InterruptedUpdate,
         ] {
             for updated in [false, true] {
                 let mut report = SyncReport {
@@ -622,7 +623,9 @@ mod m2_tests {
                 assert_eq!(json["status"], "warn");
                 assert_eq!(json["ok"], true);
                 let hint = json["hint"].as_str().unwrap();
-                assert!(hint.contains("--harness cursor --source <existing-SKILL.md> --force"));
+                assert!(
+                    hint.contains("--harness cursor --source <existing-skill-directory> --force")
+                );
                 assert!(hint.contains("--harness cursor --force"));
                 assert!(hint.contains("overwrites existing instructions"));
                 // An I/O failure takes precedence without hiding paused installations.

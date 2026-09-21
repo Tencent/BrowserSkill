@@ -1,23 +1,24 @@
-//! Keep installed `SKILL.md` files in sync with the `bsk` binary's
-//! bundled copy. Best-effort: I/O errors are recorded, never thrown.
+//! Keep installed skill packages in sync with the binary's embedded bundle.
+//! Best-effort: I/O errors are recorded, never thrown.
 
 use std::path::Path;
 
 use anyhow::{Context, Result};
 
 use super::{
-    DEFAULT_SKILL_MD, SOURCE_MARKER_FILE,
+    SOURCE_MARKER_FILE, SkillBundle,
+    bundle::file_hash,
     harness::HarnessId,
     provenance::{self, Provenance},
-    storage::{PendingWrite, SkillLock},
+    storage::SkillLock,
 };
 
 /// Per-harness outcome of a sync pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SyncReport {
-    /// Harnesses whose on-disk `SKILL.md` differed and was rewritten.
+    /// Harnesses whose managed package differed and was updated.
     pub updated: Vec<HarnessId>,
-    /// Managed harnesses whose on-disk `SKILL.md` already matched the bundled
+    /// Managed harnesses whose managed files already matched the bundled
     /// content; no write happened, mtime preserved.
     pub up_to_date: Vec<HarnessId>,
     /// Explicit custom installations that intentionally opt out of updates.
@@ -37,6 +38,7 @@ pub enum PauseReason {
     MissingBaseline,
     LocalChanges,
     InvalidMarker,
+    InterruptedUpdate,
 }
 
 impl PauseReason {
@@ -46,18 +48,25 @@ impl PauseReason {
             Self::MissingBaseline => "older bundled installation has no content baseline",
             Self::LocalChanges => "local changes detected",
             Self::InvalidMarker => "unrecognized or damaged source marker",
+            Self::InterruptedUpdate => {
+                "another skill version has an unfinished update; reinstall with --force"
+            }
         }
     }
 }
 
-/// Iterates `HarnessId::ALL`, syncing harnesses with an existing
-/// `SKILL.md` and leaving the rest untouched.
+/// Sync installed packages and recover pending installs; leave other harnesses untouched.
 pub fn sync_installed_skills(home: &Path) -> SyncReport {
-    sync_with_source(home, DEFAULT_SKILL_MD)
+    sync_with_bundle(home, &SkillBundle::bundled())
 }
 
 /// Test seam: lets unit tests inject a synthetic "bundled" payload.
+#[cfg(test)]
 pub(crate) fn sync_with_source(home: &Path, source: &str) -> SyncReport {
+    sync_with_bundle(home, &SkillBundle::single(source))
+}
+
+pub(super) fn sync_with_bundle(home: &Path, source: &SkillBundle) -> SyncReport {
     let mut report = SyncReport::default();
     for &harness in HarnessId::ALL {
         let dest = harness.skill_dest_dir_for_home(home).join("SKILL.md");
@@ -83,50 +92,98 @@ enum SyncOne {
     Busy,
 }
 
-fn sync_one(dest: &Path, source: &str) -> Result<SyncOne> {
-    // Do not create directories or locks for uninstalled harnesses.
-    if !dest.is_file() {
+fn sync_one(dest: &Path, source: &SkillBundle) -> Result<SyncOne> {
+    let dir = dest.parent().context("skill destination has no parent")?;
+    let marker = dir.join(SOURCE_MARKER_FILE);
+    // Include incomplete new installs and missing managed entry points, without
+    // creating anything for harnesses that have never installed this skill.
+    if !dest.try_exists()? && !marker.try_exists()? {
         return Ok(SyncOne::Missing);
     }
-    let dir = dest.parent().context("skill destination has no parent")?;
     let Some(_lock) =
         SkillLock::try_acquire(dir).with_context(|| format!("lock {}", dir.display()))?
     else {
         return Ok(SyncOne::Busy);
     };
-
-    // Explicit custom intent wins over byte equality; unknown metadata is never
-    // silently claimed. Only missing or recognized legacy markers can migrate.
-    let marker = dir.join(SOURCE_MARKER_FILE);
     let ownership = provenance::read(&marker)?;
-    match ownership {
+    let target = source.hashes();
+    let mut baseline = std::collections::BTreeMap::new();
+    match &ownership {
         Provenance::Custom => return Ok(SyncOne::Protected),
         Provenance::Invalid => return Ok(SyncOne::Paused(PauseReason::InvalidMarker)),
-        _ => {}
+        Provenance::Bundle(record) => {
+            if let Some(previous) = &record.previous {
+                if record.files != target {
+                    return Ok(SyncOne::Paused(PauseReason::InterruptedUpdate));
+                }
+                for (name, old_hash) in previous {
+                    let current = file_hash(dir, name)?;
+                    if current != *old_hash && current.as_ref() != record.files.get(name) {
+                        return Ok(SyncOne::Paused(PauseReason::LocalChanges));
+                    }
+                }
+                let obsolete = previous
+                    .keys()
+                    .filter(|name| !target.contains_key(*name))
+                    .cloned()
+                    .collect();
+                super::transaction::write_bundle(dir, source, &obsolete)?;
+                return Ok(SyncOne::Updated);
+            }
+            baseline = record.files.clone();
+            for (name, hash) in &baseline {
+                if file_hash(dir, name)?.as_ref() != Some(hash) {
+                    return Ok(SyncOne::Paused(PauseReason::LocalChanges));
+                }
+            }
+        }
+        legacy => {
+            let Some(hash) = file_hash(dir, "SKILL.md")? else {
+                return Ok(SyncOne::Paused(PauseReason::LocalChanges));
+            };
+            let trusted = match legacy {
+                Provenance::Bundled { sha256 } => {
+                    *sha256 == hash || target.get("SKILL.md") == Some(&hash)
+                }
+                _ => provenance::known_legacy(&hash) || target.get("SKILL.md") == Some(&hash),
+            };
+            if !trusted {
+                return Ok(SyncOne::Paused(match legacy {
+                    Provenance::Missing => PauseReason::Untracked,
+                    Provenance::LegacyBundled => PauseReason::MissingBaseline,
+                    _ => PauseReason::LocalChanges,
+                }));
+            }
+            baseline.insert("SKILL.md".into(), hash);
+        }
     }
-    let on_disk = match std::fs::read(dest) {
-        Ok(content) => content,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(SyncOne::Missing),
-        Err(err) => return Err(err).with_context(|| format!("read {}", dest.display())),
-    };
-    let matches_baseline = matches!(&ownership, Provenance::Bundled { sha256 }
-        if *sha256 == provenance::digest(&on_disk));
-    if on_disk == source.as_bytes() {
-        if !matches_baseline {
-            // Also recovers a content update whose final marker write failed.
-            // Neither adoption nor recovery rewrites SKILL.md or its mtime.
-            let metadata = provenance::bundled_marker(&on_disk)?;
-            PendingWrite::prepare(&marker, &metadata)?.commit()?;
+    // New resource paths may already contain user files. Adopt identical bytes,
+    // but never overwrite an unowned file that differs from the target.
+    for (name, hash) in &target {
+        if !baseline.contains_key(name)
+            && file_hash(dir, name)?.is_some_and(|current| current != *hash)
+        {
+            return Ok(SyncOne::Paused(PauseReason::LocalChanges));
+        }
+    }
+    let obsolete = baseline
+        .keys()
+        .filter(|name| !target.contains_key(*name))
+        .cloned()
+        .collect();
+    let matches = target
+        .iter()
+        .try_fold(true, |matches, (name, hash)| -> Result<bool> {
+            Ok(matches && file_hash(dir, name)?.as_ref() == Some(hash))
+        })?;
+    if matches && baseline.keys().all(|name| target.contains_key(name)) {
+        if !matches!(&ownership, Provenance::Bundle(record) if record.files == target) {
+            let metadata = provenance::BundleMarker::new(target, None).encode()?;
+            super::storage::PendingWrite::prepare(&marker, &metadata)?.commit()?;
         }
         return Ok(SyncOne::UpToDate);
     }
-    match ownership {
-        Provenance::Missing => return Ok(SyncOne::Paused(PauseReason::Untracked)),
-        Provenance::LegacyBundled => return Ok(SyncOne::Paused(PauseReason::MissingBaseline)),
-        Provenance::Bundled { .. } if matches_baseline => {}
-        _ => return Ok(SyncOne::Paused(PauseReason::LocalChanges)),
-    }
-    super::write_bundled_skill(dest, source)?;
+    super::transaction::write_bundle(dir, source, &obsolete)?;
     Ok(SyncOne::Updated)
 }
 
@@ -408,9 +465,10 @@ mod tests {
             assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), mtime);
             assert_eq!(
                 provenance::read(&marker).unwrap(),
-                Provenance::Bundled {
-                    sha256: provenance::digest(b"current bundle")
-                }
+                Provenance::Bundle(provenance::BundleMarker::new(
+                    SkillBundle::single(b"current bundle").hashes(),
+                    None
+                ))
             );
             let marker_mtime = std::fs::metadata(&marker).unwrap().modified().unwrap();
             assert_eq!(
@@ -521,9 +579,10 @@ mod tests {
             );
             assert_eq!(
                 provenance::read(&dir.join(SOURCE_MARKER_FILE)).unwrap(),
-                Provenance::Bundled {
-                    sha256: provenance::digest(b"bundle v2")
-                }
+                Provenance::Bundle(provenance::BundleMarker::new(
+                    SkillBundle::single(b"bundle v2").hashes(),
+                    None
+                ))
             );
             // The updated baseline must protect edits made after an upgrade, too.
             std::fs::write(&dest, "v2 with local edits").unwrap();
@@ -532,54 +591,5 @@ mod tests {
                 vec![(HarnessId::Cursor, PauseReason::LocalChanges)]
             );
         }
-    }
-
-    #[test]
-    fn interrupted_sync_preserves_content_and_repairs_only_a_matching_bundle() {
-        use super::super::storage::test_support::{assert_no_temporary_files, with_replace_hook};
-        let home = TempDir::new().unwrap();
-        let dir = HarnessId::Cursor.skill_dest_dir_for_home(home.path());
-        std::fs::create_dir_all(&dir).unwrap();
-        let dest = dir.join("SKILL.md");
-        std::fs::write(&dest, "old bundle").unwrap();
-        mark_bundled(&dest);
-        let old_marker = std::fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap();
-        let report = with_replace_hook(
-            |dest| {
-                if dest.file_name().unwrap() == SOURCE_MARKER_FILE {
-                    Err(std::io::Error::other("injected marker failure"))
-                } else {
-                    Ok(())
-                }
-            },
-            || sync_with_source(home.path(), "new bundle"),
-        );
-        assert_eq!(report.errors.len(), 1);
-        assert!(
-            report.errors[0]
-                .1
-                .contains("bundled skill content installed")
-        );
-        assert_eq!(std::fs::read(&dest).unwrap(), b"new bundle");
-        assert_eq!(
-            std::fs::read(dir.join(SOURCE_MARKER_FILE)).unwrap(),
-            old_marker
-        );
-        assert_no_temporary_files(&dir);
-        // A different binary cannot guess the origin of this mismatch.
-        assert_eq!(
-            sync_with_source(home.path(), "another bundle").paused,
-            vec![(HarnessId::Cursor, PauseReason::LocalChanges)]
-        );
-        let mtime = std::fs::metadata(&dest).unwrap().modified().unwrap();
-        assert_eq!(
-            sync_with_source(home.path(), "new bundle").up_to_date,
-            vec![HarnessId::Cursor]
-        );
-        assert_eq!(std::fs::metadata(&dest).unwrap().modified().unwrap(), mtime);
-        assert_eq!(
-            sync_with_source(home.path(), "another bundle").updated,
-            vec![HarnessId::Cursor]
-        );
     }
 }

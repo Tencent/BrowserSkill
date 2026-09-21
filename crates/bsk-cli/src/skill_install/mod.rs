@@ -1,9 +1,11 @@
-//! Install bundled or custom browser-skill instructions into agent skill directories.
+//! Install bundled or custom browser-skill packages into agent skill directories.
 
+mod bundle;
 pub mod harness;
 mod provenance;
 mod storage;
 pub mod sync;
+mod transaction;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,7 @@ use console::{Style, style};
 use dialoguer::{MultiSelect, theme::ColorfulTheme};
 use serde::{Deserialize, Serialize};
 
+pub use bundle::SkillBundle;
 pub use harness::{HarnessId, HarnessReport, all_harness_reports, parse_harness_id};
 
 pub const SKILL_DIR_NAME: &str = "browser-skill";
@@ -86,7 +89,7 @@ pub struct InstallError {
 
 pub struct InstallOptions<'a> {
     pub harnesses: &'a [HarnessId],
-    pub source: &'a str,
+    pub source: &'a SkillBundle,
     pub source_kind: SkillSource,
     pub force: bool,
     /// When `Some`, installs under this home instead of the real `$HOME`.
@@ -136,7 +139,7 @@ pub fn install_to_harnesses_at_home(home: &Path, opts: &InstallOptions<'_>) -> I
 fn install_one_at_home(
     home: &Path,
     harness: HarnessId,
-    source: &str,
+    source: &SkillBundle,
     source_kind: SkillSource,
     force: bool,
 ) -> Result<(PathBuf, InstallStatus)> {
@@ -160,15 +163,36 @@ fn install_one_at_home(
     let marker = dest_dir.join(SOURCE_MARKER_FILE);
     match source_kind {
         SkillSource::Custom => {
-            let content = storage::PendingWrite::prepare(&dest_file, source)?;
+            let mut files: Vec<_> = source.files.iter().collect();
+            files.sort_by_key(|(name, _)| (*name == "SKILL.md", *name));
+            let mut writes = Vec::new();
+            for (name, bytes) in files {
+                let path = bundle::resource_path(&dest_dir, name)?;
+                fs::create_dir_all(path.parent().unwrap())?;
+                writes.push(storage::PendingWrite::prepare_bytes(&path, bytes)?);
+            }
             // Protection must be established before any custom content appears.
             storage::PendingWrite::prepare(&marker, SOURCE_CUSTOM)?.commit()?;
-            content
-                .commit()
-                .context("custom protection recorded, but skill content was not replaced")?;
+            for write in writes {
+                write
+                    .commit()
+                    .context("custom protection recorded, but skill content was not replaced")?;
+            }
         }
         SkillSource::Bundled => {
-            write_bundled_skill(&dest_file, source)?;
+            // Force replaces current bundled paths, but retires only unchanged
+            // previously managed resources. Unknown/user files remain untouched.
+            let mut obsolete = std::collections::BTreeSet::new();
+            if let provenance::Provenance::Bundle(old) = provenance::read(&marker)? {
+                for (name, hash) in old.files {
+                    if !source.files.contains_key(&name)
+                        && bundle::file_hash(&dest_dir, &name)?.as_ref() == Some(&hash)
+                    {
+                        obsolete.insert(name);
+                    }
+                }
+            }
+            transaction::write_bundle(&dest_dir, source, &obsolete)?;
         }
     }
 
@@ -178,22 +202,6 @@ fn install_one_at_home(
         InstallStatus::Installed
     };
     Ok((dest_file, status))
-}
-
-/// Callers hold the skill lock. Publish the baseline only after its content;
-/// a failed marker replacement leaves a conservative, detectable mismatch.
-fn write_bundled_skill(dest: &Path, source: &str) -> Result<()> {
-    let content = storage::PendingWrite::prepare(dest, source)?;
-    let marker = dest
-        .parent()
-        .context("skill destination has no parent")?
-        .join(SOURCE_MARKER_FILE);
-    let metadata = provenance::bundled_marker(source.as_bytes())?;
-    let marker = storage::PendingWrite::prepare(&marker, &metadata)?;
-    content.commit()?;
-    marker
-        .commit()
-        .context("bundled skill content installed, but its source marker was not updated")
 }
 
 /// Harnesses visible in the interactive installer (detected on this machine only).
@@ -328,18 +336,10 @@ pub fn print_harness_table(reports: &[HarnessReport], heading: &str) {
     }
 }
 
-pub fn load_source(path: Option<&Path>) -> Result<String> {
+pub fn load_source(path: Option<&Path>) -> Result<SkillBundle> {
     match path {
-        Some(path) => {
-            let meta = fs::metadata(path)
-                .with_context(|| format!("read skill source {}", path.display()))?;
-            if !meta.is_file() {
-                bail!("skill source must be a file: {}", path.display());
-            }
-            fs::read_to_string(path)
-                .with_context(|| format!("read skill source {}", path.display()))
-        }
-        None => Ok(DEFAULT_SKILL_MD.to_string()),
+        Some(path) => SkillBundle::load(path),
+        None => Ok(SkillBundle::bundled()),
     }
 }
 
@@ -347,6 +347,16 @@ pub fn load_source(path: Option<&Path>) -> Result<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn install_one_at_home(
+        home: &Path,
+        harness: HarnessId,
+        source: &str,
+        kind: SkillSource,
+        force: bool,
+    ) -> Result<(PathBuf, InstallStatus)> {
+        super::install_one_at_home(home, harness, &SkillBundle::single(source), kind, force)
+    }
 
     #[test]
     fn install_writes_skill_md() {
@@ -361,7 +371,7 @@ mod tests {
             &home,
             &InstallOptions {
                 harnesses: &[harness],
-                source: "# test skill\n",
+                source: &SkillBundle::single("# test skill\n"),
                 source_kind: SkillSource::Custom,
                 force: false,
                 home: Some(&home),
@@ -392,7 +402,7 @@ mod tests {
             &home,
             &InstallOptions {
                 harnesses: &[harness],
-                source: "new",
+                source: &SkillBundle::single("new"),
                 source_kind: SkillSource::Custom,
                 force: false,
                 home: Some(&home),
@@ -418,7 +428,7 @@ mod tests {
             &home,
             &InstallOptions {
                 harnesses: &[harness],
-                source: "new",
+                source: &SkillBundle::single("new"),
                 source_kind: SkillSource::Custom,
                 force: true,
                 home: Some(&home),
@@ -442,7 +452,7 @@ mod tests {
             &home,
             &InstallOptions {
                 harnesses: &[harness],
-                source: DEFAULT_SKILL_MD,
+                source: &SkillBundle::single(DEFAULT_SKILL_MD),
                 source_kind: SkillSource::Bundled,
                 force: false,
                 home: Some(&home),
@@ -455,9 +465,10 @@ mod tests {
             .join(SOURCE_MARKER_FILE);
         assert_eq!(
             provenance::read(&marker).unwrap(),
-            provenance::Provenance::Bundled {
-                sha256: provenance::digest(DEFAULT_SKILL_MD.as_bytes()),
-            }
+            provenance::Provenance::Bundle(provenance::BundleMarker::new(
+                SkillBundle::single(DEFAULT_SKILL_MD).hashes(),
+                None,
+            ))
         );
     }
 
@@ -472,7 +483,7 @@ mod tests {
             &home,
             &InstallOptions {
                 harnesses: &[harness],
-                source: "custom instructions",
+                source: &SkillBundle::single("custom instructions"),
                 source_kind: SkillSource::Custom,
                 force: false,
                 home: Some(&home),
@@ -558,45 +569,31 @@ mod tests {
                 )
                 .unwrap_err();
                 assert!(format!("{error:#}").contains("injected replacement failure"));
-                let bundled_content_installed =
-                    kind == SkillSource::Bundled && failed_file == SOURCE_MARKER_FILE;
-                let expected_content = if bundled_content_installed {
-                    "new content"
-                } else {
-                    "old content"
-                };
                 assert_eq!(
                     fs::read_to_string(dir.join("SKILL.md")).unwrap(),
-                    expected_content
-                );
-                if bundled_content_installed {
-                    assert!(
-                        error
-                            .to_string()
-                            .contains("bundled skill content installed")
-                    );
-                }
-                let still_bundled =
-                    kind == SkillSource::Custom && failed_file == SOURCE_MARKER_FILE;
-                let expected_marker = if still_bundled {
-                    original_marker.as_str()
-                } else {
-                    SOURCE_CUSTOM
-                };
-                assert_eq!(
-                    fs::read_to_string(dir.join(SOURCE_MARKER_FILE)).unwrap(),
-                    expected_marker
+                    "old content"
                 );
                 assert_no_temporary_files(&dir);
+                if failed_file == SOURCE_MARKER_FILE {
+                    assert_eq!(
+                        fs::read_to_string(dir.join(SOURCE_MARKER_FILE)).unwrap(),
+                        original_marker
+                    );
+                }
                 let report = sync::sync_with_source(home.path(), "next bundled version");
-                if still_bundled {
+                if kind == SkillSource::Custom && failed_file == SOURCE_MARKER_FILE {
                     assert_eq!(report.updated, vec![HarnessId::Cursor]);
+                } else if kind == SkillSource::Bundled && failed_file == "SKILL.md" {
+                    assert_eq!(
+                        report.paused,
+                        vec![(HarnessId::Cursor, sync::PauseReason::InterruptedUpdate)]
+                    );
+                    assert_eq!(
+                        sync::sync_with_source(home.path(), "new content").updated,
+                        vec![HarnessId::Cursor]
+                    );
                 } else {
                     assert_eq!(report.protected, vec![HarnessId::Cursor]);
-                    assert_eq!(
-                        fs::read_to_string(dir.join("SKILL.md")).unwrap(),
-                        expected_content
-                    );
                 }
             }
         }
@@ -730,3 +727,6 @@ mod tests {
         assert_eq!(json.exit_code, 1);
     }
 }
+
+#[cfg(test)]
+mod bundle_tests;

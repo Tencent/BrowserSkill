@@ -31,6 +31,9 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Check Cargo skill package contents
+        run: node scripts/check-crate-skill.mjs
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -60,6 +63,9 @@ jobs:
 
       - name: Run Windows process liveness tests
         run: cargo test -p bsk --lib --locked daemon::lockfile::tests
+
+      - name: Run Windows skill bundle installation and migration tests
+        run: cargo test -p bsk --lib --locked skill_install
 
       - name: Run Windows update tests
         run: cargo test -p bsk --lib --locked cli::update::tests
@@ -119,6 +125,9 @@ jobs:
       - name: Run lint checks
         run: pnpm lint
 
+      - name: Build and verify the DSH npm skill package
+        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build && node scripts/check-dsh-package.mjs
+
       - name: Compile extension TypeScript
         run: pnpm --filter @browser-skill/extension compile
 
@@ -169,6 +178,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+
+      - name: Validate skill references and entry point budgets
+        run: node scripts/check-skill-bundles.mjs
 
       - name: Run script tests
         run: node --test scripts/*.test.mjs
