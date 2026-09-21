@@ -237,6 +237,11 @@ export class ChromiumCdp {
     }
   }
 
+  /** True when this session owns the persistent focus/visibility override for the tab. */
+  ownsBackgroundExecution(sessionId: string, tabId: number): boolean {
+    return this.backgroundExecution.has(sessionId, tabId);
+  }
+
   private async ensureRawAttached(tabId: number): Promise<void> {
     // Returning a tab clears the cache before Chrome finishes detaching.
     // New observers must wait before opening the next connection to that tab.

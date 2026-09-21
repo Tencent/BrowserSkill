@@ -240,6 +240,84 @@ describe("ToolDispatcher", () => {
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
   });
 
+  it("uses the persistent background lease before dispatching a click", async () => {
+    const tab = { id: 7, windowId: 4242, active: true, url: "https://example.test" };
+    vi.stubGlobal("chrome", {
+      tabs: {
+        get: vi.fn(async () => tab),
+        query: vi.fn(async () => [tab]),
+        sendMessage: vi.fn(async () => undefined),
+      },
+    });
+    const sessions = new SessionManager({
+      agentWindow: {
+        create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [7] })),
+        remove: vi.fn(async () => {}),
+        ensureActiveTab: vi.fn(async () => 7),
+      },
+    });
+    const ctx = await sessions.start("aa11");
+    ctx.refStore.set("e1", 12, { tabId: 7 });
+    const { transport, sent, deliver } = fakeTransport();
+    const commands: string[] = [];
+    let leased = false;
+    const cdp = {
+      acquireBackgroundExecution: vi.fn(async (sessionId: string, tabId: number) => {
+        expect([sessionId, tabId]).toEqual(["aa11", 7]);
+        commands.push("acquire");
+        leased = true;
+      }),
+      ownsBackgroundExecution: vi.fn((sessionId: string, tabId: number) => {
+        expect([sessionId, tabId]).toEqual(["aa11", 7]);
+        commands.push("owns");
+        return leased;
+      }),
+      trackSessionTab: vi.fn(),
+      send: vi.fn(async (_tabId: number, method: string, params?: object) => {
+        commands.push(method);
+        if (
+          method === "Runtime.evaluate" &&
+          (params as { expression?: string })?.expression === "document.visibilityState"
+        )
+          throw new Error("persistent click must not use temporary readiness");
+        if (method === "DOM.scrollIntoViewIfNeeded") return {};
+        if (method === "DOM.getContentQuads") return { quads: [[0, 0, 40, 0, 40, 20, 0, 20]] };
+        if (method === "DOM.getBoxModel")
+          return { model: { content: [0, 0, 40, 0, 40, 20, 0, 20] } };
+        if (method === "Page.getLayoutMetrics")
+          return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+        if (method === "Runtime.evaluate")
+          return {
+            result: {
+              value: { overlayHostPresent: false, overlayHostConnected: false },
+            },
+          };
+        if (method === "Input.dispatchMouseEvent") return {};
+        throw new Error(`unexpected CDP call ${method}`);
+      }),
+    } as unknown as TestDispatcherCdp;
+    const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+    dispatcher.start();
+
+    deliver(makeRequest("tool.click", { session_id: "aa11", ref: "e1" }));
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+
+    expect(sent[0]).toMatchObject({ result: { tab_id: 7, used_ref: "e1", x: 20, y: 10 } });
+    expect(cdp.acquireBackgroundExecution).toHaveBeenCalledOnce();
+    expect(cdp.ownsBackgroundExecution).toHaveBeenCalledWith("aa11", 7);
+    const acquireIndex = commands.indexOf("acquire");
+    const ownsIndex = commands.indexOf("owns");
+    expect(acquireIndex).toBeGreaterThanOrEqual(0);
+    expect(ownsIndex).toBeGreaterThanOrEqual(0);
+    expect(acquireIndex).toBeLessThan(ownsIndex);
+    expect(commands).not.toContain("Emulation.setFocusEmulationEnabled");
+    expect(commands).not.toContain("Page.captureScreenshot");
+    expect(
+      vi.mocked(cdp.send).mock.calls.filter(([, method]) => method === "Input.dispatchMouseEvent"),
+    ).toHaveLength(3);
+    dispatcher.stop();
+  });
+
   it("wires the production tab APIs into tool.session_stop so a surviving user tab releases the window", async () => {
     // Regression guard for the deps that session_stop reads directly: when
     // `tabManagement.tabs` / `tabsQuery` are not injected by the dispatcher,

@@ -957,7 +957,7 @@ describe("document-bound references", () => {
 });
 describe("controlled background execution", () => {
   it("does not emulate passive reads and releases control while retaining passive attachments", async () => {
-    const { api } = fakeApi();
+    const { api, onDetach } = fakeApi();
     const cdp = new ChromiumCdp(api);
     cdp.trackSessionTab("reader", 4);
     await cdp.send(4, "Runtime.evaluate", {});
@@ -966,9 +966,15 @@ describe("controlled background execution", () => {
       "Emulation.setFocusEmulationEnabled",
       expect.anything(),
     );
+    expect(cdp.ownsBackgroundExecution("agent", 4)).toBe(false);
     await cdp.acquireBackgroundExecution("agent", 4);
+    expect(cdp.ownsBackgroundExecution("agent", 4)).toBe(true);
+    onDetach.fire({ tabId: 4 }, "canceled_by_user");
+    expect(cdp.ownsBackgroundExecution("agent", 4)).toBe(true);
+    await cdp.ensureAttached(4);
     await cdp.acquireBackgroundExecution("agent", 4);
     await cdp.releaseSessionTab("agent", 4);
+    expect(cdp.ownsBackgroundExecution("agent", 4)).toBe(false);
     expect(api.sendCommand).toHaveBeenCalledWith(
       { tabId: 4 },
       "Emulation.setFocusEmulationEnabled",
@@ -977,6 +983,10 @@ describe("controlled background execution", () => {
     expect(api.detach).not.toHaveBeenCalled();
     await cdp.detachSession("reader");
     expect(api.detach).toHaveBeenCalledOnce();
+    await cdp.acquireBackgroundExecution("closed", 5);
+    expect(cdp.ownsBackgroundExecution("closed", 5)).toBe(true);
+    onDetach.fire({ tabId: 5 }, "target_closed");
+    expect(cdp.ownsBackgroundExecution("closed", 5)).toBe(false);
     cdp.dispose();
   });
 

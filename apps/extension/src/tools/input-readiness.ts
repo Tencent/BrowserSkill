@@ -147,32 +147,37 @@ export async function withInputReady<T extends object>(
   try {
     checkActive();
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
-    const visibility = await waitForInputReply(
-      deps.cdp.send<{ result: { value?: string } }>(tabId, "Runtime.evaluate", {
-        expression: "document.visibilityState",
-        returnByValue: true,
-      }),
-      deps.signal,
-      5000,
-      deps.deadline,
-    );
-    const cancelled = abortError(deps.signal);
-    if (cancelled) return cancelled;
-    checkActive();
-    if (visibility.result.value === "hidden") {
-      attachmentId = deps.cdp.getAttachmentId?.(tabId);
-      // Mark ownership before awaiting: a failed reply may still have enabled it.
-      restoreFocus = true;
-      await waitForInputReply(
-        deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
+    // A persistent lease owns focus emulation for dispatcher-controlled tools;
+    // unowned direct-handler paths retain the bounded 0.3.0 fallback below.
+    const persistentLease = deps.cdp.ownsBackgroundExecution?.(ctx.sessionId, tabId) === true;
+    if (!persistentLease) {
+      const visibility = await waitForInputReply(
+        deps.cdp.send<{ result: { value?: string } }>(tabId, "Runtime.evaluate", {
+          expression: "document.visibilityState",
+          returnByValue: true,
+        }),
         deps.signal,
         5000,
         deps.deadline,
       );
+      const cancelled = abortError(deps.signal);
+      if (cancelled) return cancelled;
       checkActive();
-      await flushInputRendering(deps.cdp, tabId, deps.signal, deps.deadline);
-    } else if (visibility.result.value !== "visible") {
-      throw new Error("Could not determine input target visibility");
+      if (visibility.result.value === "hidden") {
+        attachmentId = deps.cdp.getAttachmentId?.(tabId);
+        // Mark ownership before awaiting: a failed reply may still have enabled it.
+        restoreFocus = true;
+        await waitForInputReply(
+          deps.cdp.send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true }),
+          deps.signal,
+          5000,
+          deps.deadline,
+        );
+        checkActive();
+        await flushInputRendering(deps.cdp, tabId, deps.signal, deps.deadline);
+      } else if (visibility.result.value !== "visible") {
+        throw new Error("Could not determine input target visibility");
+      }
     }
     const cancelledAfterEnable = abortError(deps.signal);
     if (cancelledAfterEnable) result = cancelledAfterEnable;
