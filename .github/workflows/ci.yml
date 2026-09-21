@@ -65,7 +65,7 @@ jobs:
         run: cargo test -p bsk --lib --locked daemon::lockfile::tests
 
       - name: Run Windows skill bundle installation and migration tests
-        run: cargo test -p bsk --lib --locked skill_install
+        run: cargo test -p bsk --lib --test skill_install_legacy --locked skill_install
 
       - name: Run Windows update tests
         run: cargo test -p bsk --lib --locked cli::update::tests

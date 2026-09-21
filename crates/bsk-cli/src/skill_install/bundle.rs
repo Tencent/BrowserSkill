@@ -34,8 +34,10 @@ impl SkillBundle {
     }
 
     pub fn load(path: &Path) -> Result<Self> {
-        let metadata = fs::symlink_metadata(path)
-            .with_context(|| format!("read skill source {}", path.display()))?;
+        // The user-selected source may be a symlink, as with the legacy file
+        // installer. Package entries and destination resources still reject links.
+        let metadata =
+            fs::metadata(path).with_context(|| format!("read skill source {}", path.display()))?;
         if metadata.is_file() {
             return Ok(Self::single(fs::read_to_string(path)?));
         }

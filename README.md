@@ -154,6 +154,8 @@ references only when the task needs them.
 
 To install your own package, use `bsk install-skill --harness cursor --source ./my-skill`.
 The directory must contain `SKILL.md`; a single `--source ./SKILL.md` is also supported.
+The explicitly selected source may be a symbolic link; links inside directory packages
+and installed resource paths are rejected.
 An explicit `--source` stays custom even if its contents match the bundled skill.
 Existing installations are skipped unless you add `--force`.
 
@@ -166,7 +168,7 @@ and no local changes are detected.
 
 Old single-file installations with a valid checksum migrate automatically. Older
 installations without a checksum migrate when their bytes match a known official
-historical skill or the current entry point. Explicit custom installations stay custom.
+historical skill (LF or CRLF) or the current entry point. Explicit custom installations stay custom.
 Unrecognized historical content, local edits, invalid metadata, or an unfinished update
 from another version produce a `doctor` warning with recovery options. Warnings do not
 fail the health check (`--json` reports `status: "warn"` and `ok: true`). Concurrent

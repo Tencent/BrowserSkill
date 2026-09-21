@@ -408,3 +408,37 @@ fn symlinked_resources_are_never_read_or_overwritten() {
         "private"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn explicit_source_file_symlinks_preserve_legacy_install_behavior() {
+    use std::os::unix::fs::symlink;
+    let source_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source_file = source_dir.path().join("instructions.md");
+    fs::write(&source_file, "My linked instructions\r\n").unwrap();
+    let link = source_dir.path().join("SKILL.md");
+    symlink("instructions.md", &link).unwrap();
+    let source = load_source(Some(&link)).unwrap();
+    let dir = install(home.path(), &source, SkillSource::Custom, false);
+    assert_eq!(
+        fs::read(dir.join("SKILL.md")).unwrap(),
+        fs::read(&source_file).unwrap()
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join(SOURCE_MARKER_FILE)).unwrap(),
+        SOURCE_CUSTOM
+    );
+    assert_eq!(
+        sync::sync_installed_skills(home.path()).protected,
+        [HarnessId::Cursor]
+    );
+    // Only the explicitly selected path follows links. A directory package must
+    // not import the same symlink implicitly as one of its resources.
+    assert!(load_source(Some(source_dir.path())).is_err());
+    fs::remove_file(source_file).unwrap();
+    assert!(
+        load_source(Some(&link)).is_err(),
+        "a broken source link must fail"
+    );
+}

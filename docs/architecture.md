@@ -199,7 +199,10 @@ SHA-256 checksums per file; automatic updates verify all managed files and new-p
 collisions before replacing anything. Resources precede the entry point, and a pending
 manifest records expected old/new hashes so interrupted writes can be resumed safely.
 Known historical single-file checksums in `src/skill_install/legacy-digests.txt` are
-migration data, not a third instruction source. Explicit custom installations opt out.
+migration data, not a third instruction source. They recognize exact LF originals
+and CRLF copies; recorded per-file checksums remain byte-exact. Frozen pre-bundle
+snapshots under `tests/fixtures/legacy-skills/` cover adoption and edit protection
+without requiring Git history during CI. Explicit custom installations opt out.
 
 The DSH build embeds only its entry point. Its npm package ships the complete `skill/`
 directory, registered with a module-relative `resourceBase` so agents can read references
