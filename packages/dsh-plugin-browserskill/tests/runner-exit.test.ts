@@ -2,7 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createBskRunner } from "../src/runner";
+import { createBskRunner, parseBskJson } from "../src/runner";
 
 /** Real streams, with process exit and stdio close deliberately independent. */
 class DrainingChild extends EventEmitter {
@@ -12,6 +12,7 @@ class DrainingChild extends EventEmitter {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   kill = vi.fn(() => true);
+  unref = vi.fn();
 
   exit(code: number | null, signal: NodeJS.Signals | null = null): void {
     this.exitCode = code;
@@ -49,7 +50,7 @@ describe.each(["win32", "linux"])("exited child output draining on %s", (platfor
     child.stdout.write('"owned"}');
     child.stderr.write("trailing diagnostic");
     if (completion === "close") child.emit("close", 0);
-    else await vi.advanceTimersByTimeAsync(500);
+    else await vi.advanceTimersByTimeAsync(1000);
     await Promise.resolve();
 
     expect(completed).toHaveBeenCalledExactlyOnceWith({
@@ -74,33 +75,96 @@ describe.each(["win32", "linux"])("exited child output draining on %s", (platfor
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it.each([
-    "timeout",
-    "abort",
-  ])("preserves %s while waiting for close after exit", async (cause) => {
+  it("allows trailing output to finish beyond the execution timeout", async () => {
+    const { child, runner } = setup();
+    const completed = vi.fn();
+    const promise = runner.run(["snapshot"], { timeoutMs: 1400 });
+    void promise.then(completed);
+    child.stdout.write('{"ok":');
+    child.exit(0);
+    await vi.advanceTimersByTimeAsync(500);
+    child.stdout.write("true}");
+    await vi.advanceTimersByTimeAsync(900); // execution deadline, still inside the drain window
+    expect(completed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(100); // one second since the trailing chunk
+
+    const result = await promise;
+    expect(result).toMatchObject({ code: 0, timedOut: false, aborted: false });
+    expect(parseBskJson(result, "snapshot")).toEqual({ ok: true });
+    expect(completed).toHaveBeenCalledOnce();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("honors an explicit abort immediately while output is still draining", async () => {
     const { child, runner } = setup();
     const controller = new AbortController();
-    const completed = vi.fn();
-    const promise = runner.run(["snapshot"], {
-      signal: controller.signal,
-      timeoutMs: cause === "timeout" ? 50 : 120_000,
-    });
-    void promise.then(completed);
-    child.stdout.write("{}");
+    const promise = runner.run(["snapshot"], { signal: controller.signal, timeoutMs: 120_000 });
+    child.stdout.write('{"ok":');
     child.exit(0);
-    if (cause === "abort") controller.abort();
-    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort();
 
-    expect(completed).toHaveBeenCalledExactlyOnceWith({
-      code: 0,
-      stdout: "{}",
-      stderr: "",
-      timedOut: cause === "timeout",
-      aborted: cause === "abort",
-    });
-    await promise;
-    expect(vi.getTimerCount()).toBe(0);
+    // No timer advancement: explicit cancellation must not wait for the drain.
+    expect(await promise).toMatchObject({ code: 0, timedOut: false, aborted: true });
     expect(child.kill).not.toHaveBeenCalled();
+    expect(child.stdin.destroyed).toBe(true);
+    expect(child.stdout.destroyed).toBe(true);
+    expect(child.stderr.destroyed).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["killFor", "killAll"])("preserves an exited child's output during %s", async (kind) => {
+    const { child, runner } = setup();
+    const completed = vi.fn();
+    const promise = runner.run(["snapshot"], { tag: "owned", timeoutMs: 120_000 });
+    void promise.then(completed);
+    child.stdout.write('{"ok":');
+    child.exit(0);
+    if (kind === "killFor") expect(runner.killFor("owned")).toBe(0);
+    else runner.killAll();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(completed).not.toHaveBeenCalled();
+    expect(child.stdout.destroyed).toBe(false);
+    child.stdout.write("true}");
+    child.emit("close", 0);
+
+    const result = await promise;
+    expect(result).toMatchObject({ code: 0, timedOut: false, aborted: false });
+    expect(parseBskJson(result, "snapshot")).toEqual({ ok: true });
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(completed).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("counts only running children with the requested tag", async () => {
+    const [draining, active, other] = [
+      new DrainingChild(),
+      new DrainingChild(),
+      new DrainingChild(),
+    ];
+    const children = [draining, active, other];
+    const runner = createBskRunner("bsk", () => children.shift() as unknown as ChildProcess);
+    const first = runner.run(["snapshot"], { tag: "owned" });
+    const second = runner.run(["snapshot"], { tag: "owned" });
+    const third = runner.run(["snapshot"], { tag: "other" });
+    draining.stdout.write("{}");
+    draining.exit(0);
+
+    expect(runner.killFor("owned")).toBe(1);
+    expect(draining.stdin.writableEnded).toBe(false);
+    expect(draining.kill).not.toHaveBeenCalled();
+    expect(other.stdin.writableEnded).toBe(false);
+    expect(other.kill).not.toHaveBeenCalled();
+    if (platform === "win32") expect(active.stdin.writableEnded).toBe(true);
+    else expect(active.kill).toHaveBeenCalledWith("SIGINT");
+
+    draining.emit("close", 0);
+    active.exit(2);
+    active.emit("close", 2);
+    other.exit(0);
+    other.emit("close", 0);
+    await Promise.all([first, second, third]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("waits for process exit after timeout, then bounds missing close", async () => {
