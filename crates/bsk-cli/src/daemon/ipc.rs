@@ -826,6 +826,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub in_window: bool,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -837,6 +839,8 @@ struct CliSessionStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
@@ -943,6 +947,7 @@ pub(super) async fn handle_session_start(
     let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
+            in_window: false,
             browser_instance_id: None,
             width: None,
             height: None,
@@ -974,6 +979,7 @@ pub(super) async fn handle_session_start(
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
+            in_window: params.in_window,
             size: window_size,
             focused: params.focused,
         },
@@ -989,6 +995,7 @@ pub(super) async fn handle_session_start(
                 state.audit.set_name(&session.id.0, &name);
             }
             let result = CliSessionStartResult {
+                container_mode: session.container_mode.clone(),
                 interaction: session.interaction,
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),
@@ -1468,8 +1475,8 @@ mod windows {
         first: Option<NamedPipeServer>,
     }
 
-    pub async fn bind(_path: &Path) -> Result<NamedPipeListener> {
-        let pipe_name = crate::daemon::paths::pipe_name();
+    pub async fn bind(path: &Path) -> Result<NamedPipeListener> {
+        let pipe_name = path.to_string_lossy().into_owned();
         let first = ServerOptions::new()
             .first_pipe_instance(true)
             .access_inbound(true)

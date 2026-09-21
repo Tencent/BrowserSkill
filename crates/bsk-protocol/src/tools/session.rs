@@ -40,6 +40,8 @@ pub struct InteractionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_window: bool,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
@@ -61,6 +63,8 @@ pub struct SessionStartParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction: Option<InteractionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,5 +163,41 @@ mod tests {
         let encoded = serde_json::to_value(result).unwrap();
         assert_eq!(encoded["returned_tab_ids"], json!([7, 8]));
         assert_eq!(encoded["return_failures"][0]["code"], "cdp_failed");
+    }
+}
+
+/// Shared-window support is optional within protocol major 1.
+pub fn supports_shared_window(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, "1.4"),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
+#[cfg(test)]
+mod shared_window_tests {
+    use super::*;
+    #[test]
+    fn support_is_optional_and_bounded_to_this_major() {
+        for version in ["1.0", "1.3", "2.0", "invalid"] {
+            assert!(!supports_shared_window(version));
+        }
+        for version in ["1.4", "1.5"] {
+            assert!(supports_shared_window(version));
+        }
+        let legacy: SessionStartParams =
+            serde_json::from_value(serde_json::json!({"session_id":"test"})).unwrap();
+        assert!(!legacy.in_window);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("in_window")
+                .is_none()
+        );
+        let shared: SessionStartParams =
+            serde_json::from_value(serde_json::json!({"session_id":"test", "in_window":true}))
+                .unwrap();
+        assert!(shared.in_window);
     }
 }

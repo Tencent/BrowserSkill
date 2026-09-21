@@ -10,6 +10,12 @@
       ],
       "format": "int64"
     },
+    "container_mode": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "interaction": {
       "anyOf": [
         {

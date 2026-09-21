@@ -3,9 +3,8 @@
 // §4 / §7, plan M9.2.
 //
 // Sandbox follows the same rules as the navigate / interaction tools:
-// `resolveTargetTab` + `enforceAgentWindow`. Borrowed tabs already
-// inside the Agent Window are allowed; user-window tabs are refused
-// with `permission_denied`.
+// `resolveTargetTab` + `enforceAgentWindow`. Targets must be in the session
+// window; shared/remote sessions also require explicit page ownership.
 //
 // Implementation: reuses the M7 helpers `ensureCdpReady` +
 // `waitForLifecyclePassive` (readyState probe + event listener) from

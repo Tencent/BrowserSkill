@@ -167,6 +167,12 @@
         "browser_instance_id": {
           "type": "string"
         },
+        "container_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at_ms": {
           "description": "Unix epoch milliseconds.",
           "type": "integer",

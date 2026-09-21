@@ -12,6 +12,7 @@ import {
   isAgentControlledTab,
   type SessionContext,
   type SessionManager,
+  sessionWindowId,
 } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
 import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
@@ -168,6 +169,7 @@ export function lookupSession(
       message: `session ${params.session_id} unknown`,
     };
   }
+  if (ctx.stopping) return { code: "cancelled", message: "Session is stopping" };
   return ctx;
 }
 
@@ -224,7 +226,7 @@ async function resolveVisibleTargetTab(
         message: `tab ${tabId} not found`,
       };
     }
-    const owner = manager.findByWindowId(tab.windowId);
+    const owner = manager.findByTabId(tabId) ?? manager.findByWindowId(tab.windowId);
     if (owner && owner.sessionId !== ctx.sessionId) {
       return {
         code: "not_found",
@@ -239,17 +241,26 @@ async function resolveVisibleTargetTab(
       pendingUrl: tab.pendingUrl,
     };
   }
-  const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
+  if (ctx.container.mode === "in_window") {
+    const tabs = await api.query({ windowId: sessionWindowId(ctx) });
+    const owned = tabs.filter((tab) => tab.id !== undefined && isAgentControlledTab(ctx, tab.id));
+    const tab =
+      owned.find((tab) => tab.id === ctx.activeTabId) ?? owned.sort((a, b) => a.index - b.index)[0];
+    if (!tab || tab.id === undefined)
+      return { code: "not_found", message: "No controlled tab in session" };
+    return { tabId: tab.id, windowId: tab.windowId, active: tab.active, url: tab.url };
+  }
+  const tabs = await api.query({ active: true, windowId: sessionWindowId(ctx) });
   const first = tabs.find((t) => typeof t.id === "number");
   if (!first || typeof first.id !== "number") {
     return {
       code: "not_found",
-      message: `no active tab in Agent Window ${ctx.agentWindowId}`,
+      message: `no active tab in Agent Window ${sessionWindowId(ctx)}`,
     };
   }
   return {
     tabId: first.id,
-    windowId: ctx.agentWindowId,
+    windowId: sessionWindowId(ctx),
     active: first.active === true,
     url: first.url,
     pendingUrl: first.pendingUrl,
@@ -308,7 +319,7 @@ export function enforceCdpAccessibleTarget(
   return rpcError(
     "permission_denied",
     "restricted_tab_url",
-    `${toolName} cannot access tab ${target.tabId} because its URL is ${target.url}; navigate the Agent Window to a web page first`,
+    `${toolName} cannot access tab ${target.tabId} because its URL is ${target.url}; navigate a session-controlled tab to a web page first`,
   );
 }
 
@@ -345,10 +356,18 @@ export async function resolveCdpAccessibleTargetTab(
   if (!restricted) return target;
   if (tabId !== undefined) return restricted;
 
-  const tabs = await api.query({ windowId: ctx.agentWindowId });
+  const tabs = await api.query({ windowId: sessionWindowId(ctx) });
   for (const tab of tabs) {
-    if (ctx.remote && (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))) continue;
-    const candidate = resolvedTargetFromChromeTab(tab, ctx.agentWindowId);
+    if (
+      (ctx.remote || ctx.container.mode === "in_window") &&
+      (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))
+    )
+      continue;
+    if (tab.id !== undefined) {
+      const owner = manager.findByTabId(tab.id);
+      if (owner && owner !== ctx) continue;
+    }
+    const candidate = resolvedTargetFromChromeTab(tab, sessionWindowId(ctx));
     if (!candidate) continue;
     if (!enforceCdpAccessibleTarget(candidate, toolName)) return candidate;
   }
@@ -357,28 +376,30 @@ export async function resolveCdpAccessibleTargetTab(
 
 /**
  * Sandbox guard: M7 write tools (click / fill / press / navigate*)
- * MUST refuse to touch a tab outside the session's Agent Window
- * (§6 — borrowing brings the tab into the Agent Window first).
+ * require the session's window and, for shared/remote sessions, explicit
+ * page ownership. Same-window borrowing grants ownership without a move.
  *
- * Returns an `RpcError` when the resolved target sits in a user window;
- * `null` on success.
+ * Returns an `RpcError` for an unauthorized target; `null` on success.
  */
 export function enforceAgentWindow(
   ctx: SessionContext,
   target: { tabId: number; windowId: number },
   toolName: string,
 ): RpcError | null {
-  if (ctx.remote && !isAgentControlledTab(ctx, target.tabId)) {
+  if (
+    ctx.stopping ||
+    ((ctx.remote || ctx.container.mode === "in_window") && !isAgentControlledTab(ctx, target.tabId))
+  ) {
     return {
       code: "permission_denied",
-      message: "This tab has not been authorized for the remote task",
+      message: "This tab has not been authorized for this session",
     };
   }
-  if (target.windowId !== ctx.agentWindowId) {
+  if (target.windowId !== sessionWindowId(ctx)) {
     return rpcError(
       "permission_denied",
       "agent_window_scope",
-      `${toolName} can only act on tabs inside the Agent Window (tab ${target.tabId} is in window ${target.windowId}; borrow it first)`,
+      `${toolName} can only act on tabs in its session window (tab ${target.tabId} is in window ${target.windowId}; borrow it into this session first)`,
     );
   }
   return null;
@@ -386,7 +407,7 @@ export function enforceAgentWindow(
 
 /**
  * Unified target-scope policy by tool effect. Passive reads may inspect user
- * tabs; any tool that dispatches page input must stay inside the Agent Window.
+ * tabs; page input must respect the session window and its ownership policy.
  */
 export function enforceToolTargetScope(
   ctx: SessionContext,

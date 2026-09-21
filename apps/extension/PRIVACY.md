@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** September 15, 2026
+**Last updated:** September 21, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -22,7 +22,7 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 
 | Category | What is accessed | Why |
 |---|---|---|
-| **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in the "Agent Window," tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
+| **Web page content** | The DOM, accessibility tree, HTML, and screenshots requested by the agent, including pages in a dedicated Agent Window, session-created or borrowed pages in a local shared window, and pages selected for user-initiated Quick Actions. Local passive reads may also inspect user pages; shared-window page input requires explicit session ownership. Remote content access requires task-created or borrowed pages. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Tab and window metadata** | Tab IDs, URLs, titles and window IDs, including user tabs listed to select a tab for borrowing. | Required to target automation commands at the correct tab/window. |
 | **Local extension storage** | A randomly generated 8-character instance ID, an optional user-supplied label, feature preferences including the audit toggle, and optionally a paired endpoint and device credential. | Used to recognize this browser instance and restore user settings. |
@@ -45,8 +45,8 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`activeTab`** — Allow temporary access to the active tab when the user invokes the Extension, for user-initiated Quick Actions.
 - **`scripting`** — Inject the full-page screenshot helper into the selected page when it is missing, such as after an extension reload.
 - **`webNavigation`** — Track page navigation and frames so captures, recordings, and human-help completion checks follow the correct document.
-- **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
-- **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
+- **`tabs`** — Query tab metadata and manage session tabs. Local `--in-window` sessions create tabs in a user window and control only explicitly created or borrowed tabs there; sharing a window does not authorize other user tabs.
+- **`windows`** — Create and manage dedicated Agent Windows; identify and optionally focus the host of a local shared-window session. Shared-session cleanup does not remove the host window.
 - **`alarms`** — Periodically wake the service worker to keep the selected connection alive and renew remote device authorization.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the selected WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before borrowing a user-owned tab when browser confirmation is enabled.
@@ -76,7 +76,7 @@ Users can at any time:
 
 - Uninstall the Extension from `chrome://extensions`, which removes extension storage. Audit files on the daemon host and exported copies must be deleted separately.
 - Turn operation audit off in Quick Features to stop collecting new operations while retaining existing history. Previously recorded tasks still receive their final lifecycle status.
-- Close the Agent Window to stop all agent automation immediately.
+- Stop an individual session with `bsk session stop SESSION_ID`, or all sessions with `bsk session stop --all`. Stopping returns borrowed pages and removes session-created tabs. Closing a dedicated Agent Window ends its session; a local shared-window session ends when its last controlled tab is closed. You do not need to close your user window to stop a shared session.
 - Enable confirmation before borrowing and deny tab-borrow prompts to keep existing tabs off-limits.
 - Disable the connection, choose Local connection, or stop the selected daemon to disconnect.
 - Revoke a paired device from the server with `bsk daemon revoke DEVICE_ID`, or use the gateway operator’s revocation controls.
