@@ -11,7 +11,8 @@ const packaged = new Set(
     encoding: "utf8",
   })
     .trim()
-    .split(/\r?\n/),
+    .split(/\r?\n/)
+    .map((file) => file.replaceAll("\\", "/")),
 );
 for (const file of files.keys())
   assert(packaged.has(`skill/${file}`), `Cargo package omits skill/${file}`);
