@@ -64,6 +64,9 @@ jobs:
       - name: Run Windows update tests
         run: cargo test -p bsk --lib --locked cli::update::tests
 
+      - name: Run Windows skill install harness tests
+        run: cargo test -p bsk --lib --locked skill_install::harness
+
       - name: Run Windows cancellation process tests
         run: cargo test -p bsk --test windows_parent_cancel --locked
 

@@ -417,6 +417,26 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner())
     }
 
+    /// The Hermes home [`hermes_home_for_user_home`] documents for this
+    /// platform when `HERMES_HOME` is unset: `%LOCALAPPDATA%\hermes` on
+    /// native Windows, else `~/.hermes`. Asserting `~/.hermes` unconditionally
+    /// fails on Windows, where the resolver deliberately mirrors Hermes's own
+    /// convention and never derives the path from `home`.
+    fn expected_hermes_home(home: &Path) -> PathBuf {
+        #[cfg(windows)]
+        {
+            match std::env::var("LOCALAPPDATA") {
+                Ok(local) if !local.trim().is_empty() => PathBuf::from(local.trim()).join("hermes"),
+                _ => home.join("AppData").join("Local").join("hermes"),
+            }
+        }
+
+        #[cfg(not(windows))]
+        {
+            home.join(".hermes")
+        }
+    }
+
     #[test]
     fn parse_aliases() {
         assert_eq!(parse_harness_id("codebody").unwrap(), HarnessId::Codebuddy);
@@ -484,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             HarnessId::Hermes.skills_dir_for_home(home),
-            PathBuf::from("/home/user/.hermes/skills")
+            expected_hermes_home(home).join("skills")
         );
         assert_eq!(
             HarnessId::KimiCode.skills_dir_for_home(home),
@@ -560,10 +580,37 @@ mod tests {
         let _env = lock_harness_env();
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path();
-        std::fs::create_dir_all(home.join(".hermes")).unwrap();
+
+        // On native Windows the resolver reads `%LOCALAPPDATA%\hermes` rather
+        // than a directory under `home`, so point LOCALAPPDATA at the temp home
+        // instead of creating `hermes` in the real user profile. The variable is
+        // restored before the assertions run, so a failure cannot leave it
+        // pointing at a deleted temp directory for the tests that follow.
+        #[cfg(windows)]
+        let previous_local = std::env::var("LOCALAPPDATA").ok();
+        #[cfg(windows)]
+        // SAFETY: holds `harness_env_lock`, which every test in this module that
+        // resolves a Hermes home also takes, so no sibling test calls `getenv`
+        // while this override is installed.
+        unsafe {
+            std::env::set_var("LOCALAPPDATA", home);
+        }
+
+        let hermes_home = expected_hermes_home(home);
+        std::fs::create_dir_all(&hermes_home).unwrap();
         let report = HarnessId::Hermes.report_for_home(home);
+
+        #[cfg(windows)]
+        // SAFETY: as above.
+        unsafe {
+            match previous_local {
+                Some(value) => std::env::set_var("LOCALAPPDATA", value),
+                None => std::env::remove_var("LOCALAPPDATA"),
+            }
+        }
+
         assert!(report.detected);
-        assert_eq!(report.skills_dir, home.join(".hermes").join("skills"));
+        assert_eq!(report.skills_dir, hermes_home.join("skills"));
     }
 
     #[test]
