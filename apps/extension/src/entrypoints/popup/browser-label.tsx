@@ -7,9 +7,11 @@ const MAX_LABEL_LENGTH = 48;
 
 export function BrowserLabel({
   label,
+  sessionCount,
   onSave,
 }: {
   label: string;
+  sessionCount: number;
   onSave: (value: string) => void;
 }) {
   const { t } = useTranslation("extension");
@@ -21,9 +23,10 @@ export function BrowserLabel({
 
   const normalized = draft.trim();
   const changed = normalized !== label;
+  const busy = sessionCount > 0;
   const looksLikeInstanceId = normalized !== "" && SHORT_INSTANCE_ID_PATTERN.test(normalized);
   const save = () => {
-    if (!changed || looksLikeInstanceId) return;
+    if (busy || !changed || looksLikeInstanceId) return;
     onSave(normalized);
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
@@ -46,6 +49,7 @@ export function BrowserLabel({
           type="text"
           value={draft}
           maxLength={MAX_LABEL_LENGTH}
+          disabled={busy}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={onKeyDown}
           placeholder={t("popup.browserLabel.placeholder")}
@@ -59,14 +63,18 @@ export function BrowserLabel({
           variant="secondary"
           size="sm"
           className="h-8 px-3 text-xs"
-          disabled={!changed || looksLikeInstanceId}
+          disabled={busy || !changed || looksLikeInstanceId}
           onClick={save}
           data-slot="popup-label-save"
         >
           {t("popup.browserLabel.save")}
         </Button>
       </div>
-      {looksLikeInstanceId ? (
+      {busy ? (
+        <p id="bsk-browser-label-hint" className="text-[11px] leading-snug text-muted-foreground">
+          {t("popup.browserLabel.busyHint")}
+        </p>
+      ) : looksLikeInstanceId ? (
         <p id="bsk-browser-label-hint" role="alert" className="text-[11px] text-destructive">
           {t("popup.browserLabel.instanceIdError")}
         </p>

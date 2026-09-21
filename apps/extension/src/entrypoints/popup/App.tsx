@@ -234,7 +234,11 @@ export function App() {
               connectionEnabled={snapshot.connectionEnabled}
               disconnected={isDisconnected && !snapshot.lastError}
             />
-            <BrowserLabel label={snapshot.label} onSave={setLabel} />
+            <BrowserLabel
+              label={snapshot.label}
+              sessionCount={snapshot.sessionCount}
+              onSave={setLabel}
+            />
             <ProfileInstructions instanceId={snapshot.instanceId} connected={connectionLive} />
           </section>
 

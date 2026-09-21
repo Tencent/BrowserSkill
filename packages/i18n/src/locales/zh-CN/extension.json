@@ -59,7 +59,8 @@
       "title": "浏览器名称",
       "placeholder": "例如：工作账号",
       "save": "保存",
-      "hint": "使用唯一名称，方便向 Agent 指定浏览器。保存会重新连接 BrowserSkill，并结束当前任务。",
+      "hint": "使用唯一名称，方便向 Agent 指定浏览器。保存时 BrowserSkill 会短暂重连。",
+      "busyHint": "当前浏览器有任务运行，任务结束后可修改名称。",
       "instanceIdError": "名称不能使用 8 位十六进制实例 ID 格式。"
     },
     "record": {

@@ -16,7 +16,7 @@ describe("browser label", () => {
 
   it("saves a trimmed human-readable browser name", () => {
     const onSave = vi.fn();
-    render(<BrowserLabel label="" onSave={onSave} />);
+    render(<BrowserLabel label="" sessionCount={0} onSave={onSave} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Browser name" }), {
       target: { value: "  Work profile  " },
@@ -28,7 +28,7 @@ describe("browser label", () => {
 
   it("supports Enter to save and Escape to discard", () => {
     const onSave = vi.fn();
-    render(<BrowserLabel label="Personal" onSave={onSave} />);
+    render(<BrowserLabel label="Personal" sessionCount={0} onSave={onSave} />);
     const input = screen.getByRole("textbox", { name: "Browser name" });
 
     fireEvent.change(input, { target: { value: "Work" } });
@@ -42,7 +42,7 @@ describe("browser label", () => {
 
   it("allows clearing a saved name", () => {
     const onSave = vi.fn();
-    render(<BrowserLabel label="Work" onSave={onSave} />);
+    render(<BrowserLabel label="Work" sessionCount={0} onSave={onSave} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Browser name" }), {
       target: { value: "" },
@@ -54,7 +54,7 @@ describe("browser label", () => {
 
   it("rejects names that can be confused with an instance id", () => {
     const onSave = vi.fn();
-    render(<BrowserLabel label="" onSave={onSave} />);
+    render(<BrowserLabel label="" sessionCount={0} onSave={onSave} />);
 
     fireEvent.change(screen.getByRole("textbox", { name: "Browser name" }), {
       target: { value: "deadbeef" },
@@ -67,9 +67,9 @@ describe("browser label", () => {
 
   it("follows a label update from the background snapshot", () => {
     const onSave = vi.fn();
-    const { rerender } = render(<BrowserLabel label="Personal" onSave={onSave} />);
+    const { rerender } = render(<BrowserLabel label="Personal" sessionCount={0} onSave={onSave} />);
 
-    rerender(<BrowserLabel label="Work" onSave={onSave} />);
+    rerender(<BrowserLabel label="Work" sessionCount={0} onSave={onSave} />);
 
     expect((screen.getByRole("textbox", { name: "Browser name" }) as HTMLInputElement).value).toBe(
       "Work",
@@ -77,12 +77,28 @@ describe("browser label", () => {
     expect(screen.getByRole("button", { name: "Save" }).hasAttribute("disabled")).toBe(true);
   });
 
+  it("disables renaming while a browser task is active", () => {
+    const onSave = vi.fn();
+    render(<BrowserLabel label="Personal" sessionCount={1} onSave={onSave} />);
+
+    const input = screen.getByRole("textbox", { name: "Browser name" });
+    const save = screen.getByRole("button", { name: "Save" });
+    expect(input.hasAttribute("disabled")).toBe(true);
+    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(
+      screen.getByText("Wait for active browser tasks to finish before changing this name."),
+    ).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(save);
+    expect(onSave).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["zh-CN", "浏览器名称", "保存"],
     ["ko-KR", "브라우저 이름", "저장"],
   ])("renders the naming controls in %s", async (locale, fieldName, saveName) => {
     await i18n.changeLanguage(locale);
-    render(<BrowserLabel label="" onSave={vi.fn()} />);
+    render(<BrowserLabel label="" sessionCount={0} onSave={vi.fn()} />);
 
     expect(screen.getByRole("textbox", { name: fieldName })).toBeTruthy();
     expect(screen.getByRole("button", { name: saveName })).toBeTruthy();

@@ -1,8 +1,8 @@
 import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SnapshotInfo } from "@/lib/connection-controller";
 import { STORAGE_KEYS } from "@/lib/instance-id";
+import type { PopupSnapshotInfo } from "@/lib/popup-bridge";
 import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
 import { EXTENSION_VERSION, PROTOCOL_VERSION } from "@/transport/handshake";
 import { App } from "./App";
@@ -17,7 +17,7 @@ const mockUseConnectionState = vi.mocked(useConnectionState);
 /** Arbitrary peer fixture — only used to distinguish daemon vs extension in the UI. */
 const mockDaemonVersion = "daemon-fixture";
 
-const baseSnapshot: SnapshotInfo = {
+const baseSnapshot: PopupSnapshotInfo = {
   state: "disconnected",
   instanceId: "",
   label: "",
@@ -25,6 +25,7 @@ const baseSnapshot: SnapshotInfo = {
   handshake: null,
   lastError: null,
   connectionEnabled: true,
+  sessionCount: 0,
 };
 
 function openRecordView() {

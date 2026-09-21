@@ -80,6 +80,7 @@ export default defineBackground(() => {
     },
   });
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
+  const popupSnapshotRefreshers = new Set<() => void>();
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
 
@@ -203,6 +204,7 @@ export default defineBackground(() => {
     }
     overlayGeneration += 1;
     pushAllAgentOverlayStates();
+    for (const refresh of popupSnapshotRefreshers) refresh();
   }
 
   function onBrowserControlResumed(sessionId: string): void {
@@ -247,9 +249,7 @@ export default defineBackground(() => {
       tabManagement: { tabs: chromeTabMutationApi },
       tabsQuery: chromeTabsApi,
     },
-    onSessionsChanged: () => {
-      void sessionsLive.syncFromManager();
-    },
+    onSessionsChanged: onOverlaySessionStateChanged,
   });
   const recordDeps = {
     tabsApi: chrome.tabs,
@@ -469,13 +469,26 @@ export default defineBackground(() => {
         console.debug("[browser-skill] popup post failed", err);
       }
     };
+    const postSnapshot = () => {
+      post({
+        kind: "snapshot",
+        data: { ...controller.snapshot(), sessionCount: sessions.list().length },
+      });
+    };
     const unsubscribe = controller.subscribe((snap) => {
-      post({ kind: "snapshot", data: snap });
+      post({ kind: "snapshot", data: { ...snap, sessionCount: sessions.list().length } });
     });
+    popupSnapshotRefreshers.add(postSnapshot);
     connection.onMessage.addListener((raw: unknown) => {
       const msg = raw as PopupOutbound;
       if (msg && typeof msg === "object" && "kind" in msg) {
         if (msg.kind === "set_label") {
+          // A reconnect is required for the daemon to receive the new label.
+          // Never turn a display-name edit into an implicit session teardown.
+          if (sessions.list().length > 0) {
+            postSnapshot();
+            return;
+          }
           void setLabel(msg.value)
             .then(() => controller.refreshLabel())
             .catch((err) => console.error("[browser-skill] label update failed", err));
@@ -490,7 +503,10 @@ export default defineBackground(() => {
         }
       }
     });
-    connection.onDisconnect.addListener(() => unsubscribe());
+    connection.onDisconnect.addListener(() => {
+      popupSnapshotRefreshers.delete(postSnapshot);
+      unsubscribe();
+    });
   });
 
   // Stash on globalThis so the SW DevTools can poke at internals.

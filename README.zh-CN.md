@@ -217,8 +217,8 @@ bsk update --yes
 再发给 Agent。指令通过 `--browser` 为每个新会话固定实例，即使只有一个浏览器在线也不省略。
 详见[浏览器 Profile 选择](docs/browser-profiles.md)。
 需要长期使用时，可以在同一弹窗中设置唯一的“浏览器名称”，并通过
-`--browser "工作账号"` 选择。保存名称会重新连接 BrowserSkill，并结束该浏览器中的当前任务，
-使 Daemon 立即使用新名称。
+`--browser "工作账号"` 选择。保存名称会短暂重连 BrowserSkill，使 Daemon 立即使用新名称；
+当前浏览器有任务运行时，名称编辑会暂时禁用，避免中断任务。
 无人值守由用户在插件中关闭相应开关。`--unattended`、`tab borrow --no-confirm`、
 `BSK_REQUEST_HELP=off` 保留兼容识别，但已弃用，不能覆盖插件开关。CLI 使用这些输入时会输出说明，
 Daemon 也会为自身继承的旧环境设置记录说明。原先只依靠这些输入避免等待的脚本，现在需要遵循浏览器设置。

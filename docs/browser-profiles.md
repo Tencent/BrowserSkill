@@ -28,8 +28,9 @@ The instruction only copies text: it does not start a session or change settings
 For a reusable human-readable selector, set **Browser name** in the extension popup,
 then confirm it appears in `bsk browsers`. Keep names unique among connected browsers;
 label matching is exact and duplicate labels are rejected as ambiguous. Saving a name
-reconnects BrowserSkill so the daemon sees it immediately, which ends active tasks in
-that browser. You can then start a session with, for example:
+briefly reconnects BrowserSkill so the daemon sees it immediately. Renaming is disabled
+while that browser has active tasks, so a display-name edit cannot interrupt them. You
+can then start a session with, for example:
 
 ```sh
 bsk session start --browser "Work profile" --json
