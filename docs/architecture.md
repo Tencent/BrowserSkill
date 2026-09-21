@@ -57,6 +57,33 @@ Key modules:
 - **Per-session queue** serializes tool calls targeting one session.
 - Forwards `tool.*` RPCs to the correct extension connection.
 
+<details>
+<summary><b>Windows: "cannot bind … excluded range" (os error 10013)</b></summary>
+
+Windows reserves parts of the TCP port range for the dynamic port
+allocator (Hyper-V, WSL, WinNAT). When the daemon's default port
+**52800** lands inside one of those ranges, `TcpListener::bind` fails
+with `WSAEACCES` (os error 10013) and the daemon cannot start. The CLI
+detects this and prints an actionable message.
+
+List the reserved ranges:
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+Pick a port outside every listed range and start the daemon there, then
+set the same port in the extension popup:
+
+```powershell
+bsk daemon start --port 53100
+```
+
+The extension connects to the port stored in its popup (default 52800),
+not to the port in `daemon.json`, so the two must match.
+
+</details>
+
 State files under `~/.bsk/`:
 
 | File | Purpose |

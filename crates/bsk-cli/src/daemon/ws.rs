@@ -26,7 +26,7 @@ use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::browsers::{BrowserClient, BrowserId, BrowserSink, Pending};
 use super::state::{
@@ -69,9 +69,16 @@ impl WsServer {
         if self.state.config.server.is_some() {
             return super::remote::bind(self.state, addr).await;
         }
-        let listener = TcpListener::bind(addr)
-            .await
-            .with_context(|| format!("bind WS server on {addr}"))?;
+        let listener = match TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                if let Some(msg) = excluded_port_bind_message(addr, &err) {
+                    error!(%addr, "WS bind failed: port is in a Windows excluded range");
+                    return Err(anyhow::anyhow!(msg));
+                }
+                return Err(err).with_context(|| format!("bind WS server on {addr}"));
+            }
+        };
         let local_addr = listener
             .local_addr()
             .with_context(|| "failed to read WS server local addr")?;
@@ -83,6 +90,31 @@ impl WsServer {
             task,
         })
     }
+}
+
+/// On Windows, `TcpListener::bind` fails with `WSAEACCES` (os error 10013)
+/// when the port falls inside a dynamically-excluded range — typically the
+/// dynamic port allocation range reserved by Hyper-V, WSL, or WinNAT. The
+/// error surfaces as a bare "access forbidden" with no hint, so we translate
+/// it into an actionable message.
+#[cfg(windows)]
+fn excluded_port_bind_message(addr: SocketAddr, err: &std::io::Error) -> Option<String> {
+    if err.kind() != std::io::ErrorKind::PermissionDenied {
+        return None;
+    }
+    Some(format!(
+        "port {} is in a Windows excluded range \
+         (usually reserved by Hyper-V, WSL, or WinNAT). \
+         Pick a port outside the excluded ranges with `bsk daemon start --port <port>` \
+         and set the same port in the extension popup. \
+         Run `netsh interface ipv4 show excludedportrange protocol=tcp` to list them.",
+        addr.port()
+    ))
+}
+
+#[cfg(not(windows))]
+fn excluded_port_bind_message(_addr: SocketAddr, _err: &std::io::Error) -> Option<String> {
+    None
 }
 
 pub struct WsHandle {
@@ -737,6 +769,39 @@ mod tests {
     #[test]
     fn origin_allowlist_bypassed_when_allow_any() {
         assert!(origin_allowed("http://localhost", true));
+    }
+
+    #[test]
+    fn excluded_port_message_for_permission_denied() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 52800));
+        let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "os error 10013");
+        let msg = excluded_port_bind_message(addr, &err);
+        // The translation is Windows-specific: the excluded-range failure
+        // mode does not exist elsewhere, so the helper is a no-op.
+        #[cfg(windows)]
+        let msg = msg.expect("permission-denied bind on Windows is translated");
+        #[cfg(not(windows))]
+        {
+            assert!(msg.is_none());
+            return;
+        }
+        #[cfg(windows)]
+        {
+            assert!(msg.contains("52800"), "message names the port: {msg}");
+            assert!(msg.contains("excluded range"), "{msg}");
+            assert!(msg.contains("--port"), "{msg}");
+            assert!(msg.contains("netsh"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn excluded_port_message_ignores_other_errors() {
+        let addr = SocketAddr::from(([127, 0, 0, 1], 52800));
+        let err = std::io::Error::new(std::io::ErrorKind::AddrInUse, "address in use");
+        assert!(
+            excluded_port_bind_message(addr, &err).is_none(),
+            "address-in-use is a different failure and must keep its original context"
+        );
     }
 }
 
