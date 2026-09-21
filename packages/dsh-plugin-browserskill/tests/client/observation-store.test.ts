@@ -457,3 +457,83 @@ describe("thumbnail viewer leases", () => {
     expect(esInstances).toHaveLength(2);
   });
 });
+
+describe("event stream recovery", () => {
+  function streamAt(sources: EventSourceLike[], index: number): EventSourceLike {
+    const source = sources[index];
+    if (source === undefined) throw new Error(`no event stream at index ${index}`);
+    return source;
+  }
+
+  it("recreates a fatally failed stream after the backoff", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances, eventUrls } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+    expect(store.getSnapshot().subscribed).toBe(true);
+
+    // A 404 from the observation route is fatal: CLOSED, never retried by the browser.
+    const failed = streamAt(esInstances, 0);
+    failed.readyState = 2;
+    failed.onerror?.({});
+    expect(esInstances).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(esInstances).toHaveLength(2);
+    expect(eventUrls).toEqual([
+      "/bsk-observation/events?thumbnails=0",
+      "/bsk-observation/events?thumbnails=0",
+    ]);
+    expect(failed.close).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().subscribed).toBe(true);
+    expect(store.getSnapshot().sessions).toEqual([OBS_IDLE]);
+  });
+
+  it("leaves a transient drop to the EventSource's own retry", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+
+    const dropped = streamAt(esInstances, 0);
+    dropped.readyState = 1;
+    dropped.onerror?.({});
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(esInstances).toHaveLength(1);
+  });
+
+  it("resets the backoff after healthy traffic", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+
+    const first = streamAt(esInstances, 0);
+    first.readyState = 2;
+    first.onerror?.({});
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(esInstances).toHaveLength(2);
+
+    // Any frame proves the new stream is healthy, so the next failure waits 1s again.
+    const second = streamAt(esInstances, 1);
+    emit(second, { type: "upsert", session: OBS_BUSY });
+    second.readyState = 2;
+    second.onerror?.({});
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(esInstances).toHaveLength(3);
+  });
+
+  it("cancels a pending reconnect on stop", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+
+    const failed = streamAt(esInstances, 0);
+    failed.readyState = 2;
+    failed.onerror?.({});
+    store.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(esInstances).toHaveLength(1);
+  });
+});

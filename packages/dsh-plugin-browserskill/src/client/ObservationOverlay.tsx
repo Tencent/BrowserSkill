@@ -325,6 +325,8 @@ export function OverlayBody(props: {
   focus: SessionObservation | undefined;
   sessions: readonly SessionObservation[];
   available: boolean;
+  /** Whether the live event stream is connected; false while reconnecting. */
+  subscribed: boolean;
   pinnedId: string | null;
   onTogglePin: (sessionId: string) => void;
   now: number;
@@ -342,6 +344,7 @@ export function OverlayBody(props: {
     focus,
     sessions,
     available,
+    subscribed,
     pinnedId,
     onTogglePin,
     now,
@@ -382,9 +385,11 @@ export function OverlayBody(props: {
 
   const statusText = !available
     ? "browser unavailable"
-    : focus === undefined
-      ? "no session"
-      : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
+    : !subscribed
+      ? "connecting…"
+      : focus === undefined
+        ? "no session"
+        : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
   const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
 
   return (
@@ -453,9 +458,11 @@ export function OverlayBody(props: {
           <div className={css.placeholder}>
             {!available
               ? "last frame kept"
-              : thumb?.status === "error"
-                ? "frame unavailable"
-                : "waiting for page"}
+              : !subscribed
+                ? "connection lost — retrying"
+                : thumb?.status === "error"
+                  ? "frame unavailable"
+                  : "waiting for page"}
           </div>
         )}
         {thumb?.status === "error" ? (
@@ -620,6 +627,7 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
       focus={focus}
       sessions={snapshot.sessions}
       available={snapshot.available}
+      subscribed={snapshot.subscribed}
       pinnedId={pinnedId}
       onTogglePin={onTogglePin}
       now={now}
@@ -650,8 +658,9 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   // The sidebar tab is the carrier now — no floating card, no capsule.
   if (!presentation.floating) return null;
 
-  // Hidden while no owned session exists (and no PiP is up).
-  if (snapshot.sessions.length === 0) return null;
+  // Hidden while no owned session exists and the feed is healthy; a dead feed
+  // still renders so the user sees "connecting…" instead of nothing.
+  if (snapshot.sessions.length === 0 && snapshot.subscribed) return null;
 
   if (collapsed) {
     const state = focus !== undefined ? statusOf(focus) : "idle";
