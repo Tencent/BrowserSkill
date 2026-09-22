@@ -81,6 +81,7 @@ export function AnalysisPanel({
               size="sm"
               variant={mode === value ? "default" : "outline"}
               onClick={() => {
+                if (mode === value) return;
                 setMode(value);
                 setOffsets([0]);
                 setData(undefined);

@@ -458,6 +458,7 @@ export function RequestDetail({
             type="button"
             aria-pressed={part === value}
             onClick={() => {
+              if (part === value) return;
               setPart(value);
               setOffset(0);
               setData(undefined);

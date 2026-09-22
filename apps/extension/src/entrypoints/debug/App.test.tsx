@@ -10,7 +10,7 @@ import {
 } from "@/debug/client";
 import type { DebugOperation, DebugRequest, DebugRun } from "@/debug/types";
 import { DebugApp } from "./App";
-import { RequestList } from "./evidence";
+import { RequestDetail, RequestList } from "./evidence";
 import { useRequests } from "./use-requests";
 
 vi.mock("@/debug/client", () => ({
@@ -290,6 +290,33 @@ describe("website evidence workspace", () => {
     render(<DebugApp />);
     expect(await screen.findByText("还没有调试记录")).toBeTruthy();
     expect(debugRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("request detail navigation", () => {
+  it.each([
+    { part: "response", label: "响应正文", content: '{"ok":false}' },
+    { part: "headers", label: "Headers", content: "[redacted]" },
+  ] as const)("keeps loaded $part evidence when its selected tab is clicked again", async ({
+    part,
+    label,
+    content,
+  }) => {
+    render(
+      <RequestDetail
+        session="s1"
+        request={request}
+        pulse={2}
+        initialPart={part}
+        onClose={() => {}}
+      />,
+    );
+    await screen.findByText(content);
+    const reads = vi.mocked(recordingRequest).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    expect(screen.getByText(content)).toBeTruthy();
+    expect(screen.queryByText("正在读取…")).toBeNull();
+    expect(recordingRequest).toHaveBeenCalledTimes(reads);
   });
 });
 
