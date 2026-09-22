@@ -20,6 +20,7 @@ function fixture() {
   const manager = { get: () => task } as unknown as SessionManager;
   const cdp = {
     getAttachmentId: vi.fn(() => "attachment"),
+    getSessionClaimId: vi.fn(() => undefined),
     acquireBackgroundExecution: vi.fn(async () => {}),
     releaseSessionTab: vi.fn(async () => {}),
     send: vi.fn(async () => ({ data: btoa("jpeg") })),

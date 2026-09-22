@@ -20,12 +20,19 @@ interface Activity {
   returning: Map<number, number>;
   operations: Set<UiOperation>;
   mutations: Map<Promise<unknown>, number>;
+  graced: WeakSet<Promise<unknown>>;
 }
 const activities = new WeakMap<SessionContext, Activity>();
 function activity(task: SessionContext): Activity {
   let state = activities.get(task);
   if (!state) {
-    state = { stopping: 0, returning: new Map(), operations: new Set(), mutations: new Map() };
+    state = {
+      stopping: 0,
+      returning: new Map(),
+      operations: new Set(),
+      mutations: new Map(),
+      graced: new WeakSet(),
+    };
     activities.set(task, state);
   }
   return state;
@@ -65,8 +72,8 @@ export function runTaskUi<T>(
     },
     mutate(tabId, action) {
       op.check();
-      // Register before starting the Chrome side effect. Teardown refuses to
-      // move/close the tab until already-issued focus mutations have settled.
+      // Register before starting the Chrome side effect. Teardown gives
+      // issued focus mutations a bounded grace period, then continues cleanup.
       const pending = Promise.resolve().then(() => {
         op.check();
         return action();
@@ -124,20 +131,18 @@ export async function withUiTeardown<T>(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const pending = [...state.mutations]
-      .filter(([, id]) => tabId === undefined || id === tabId)
+      .filter(([p, id]) => !state.graced.has(p) && (tabId === undefined || id === tabId))
       .map(([p]) => p);
     await Promise.race([
       Promise.allSettled(pending),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () =>
-            reject(
-              new UiTaskError("cancelled", "UI focus is still settling; retry cleanup", "ui_busy"),
-            ),
-          1000,
-        );
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, 1000);
       }),
     ]);
+    for (const p of pending) state.graced.add(p);
+    clearTimeout(timer);
+    // UI focus is best effort: it must never veto resource cleanup or reconnect.
+    // Already-issued Chrome calls cannot be recalled; op.check blocks later steps.
     return await run();
   } catch (error) {
     if (error instanceof UiTaskError) return uiError(error);

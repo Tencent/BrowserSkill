@@ -26,7 +26,6 @@ export type RpcErrorReason =
   | "target_unavailable"
   | "task_stopping"
   | "ui_deadline"
-  | "ui_busy"
   | "preview_busy"
   | "agent_window_scope"
   | "element_not_visible"

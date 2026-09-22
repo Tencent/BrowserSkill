@@ -292,7 +292,7 @@ it("keeps tool control after a transient Chrome lookup failure", async () => {
   expect(f.focus.get(5)).toBe(true);
 });
 
-it("bounds teardown waiting for stuck focus and allows a safe retry", async () => {
+it("continues teardown after the focus grace period without requiring a retry", async () => {
   vi.useFakeTimers();
   const f = await fixture();
   const gate = deferred<chrome.tabs.Tab>();
@@ -302,13 +302,12 @@ it("bounds teardown waiting for stuck focus and allows a safe retry", async () =
   await vi.advanceTimersByTimeAsync(0);
   const stop = handleSessionStop(f.manager, { session_id: "one" }, f.stopDeps);
   await vi.advanceTimersByTimeAsync(1000);
-  expect(await stop).toMatchObject({ code: "cancelled", data: { reason: "ui_busy" } });
-  expect(f.manager.has("one")).toBe(true);
-  expect(f.tabApi.move).not.toHaveBeenCalled();
+  expect(await stop).toMatchObject({ returned_tab_ids: [5] });
+  expect(f.manager.has("one")).toBe(false);
+  expect(f.tabApi.move).toHaveBeenCalled();
   gate.resolve({ id: 5, windowId: 10 } as chrome.tabs.Tab);
   await cancelled;
   await vi.advanceTimersByTimeAsync(0);
   expect(f.windows.update).not.toHaveBeenCalled();
-  await handleSessionStop(f.manager, { session_id: "one" }, f.stopDeps);
   expect(f.manager.has("one")).toBe(false);
 });

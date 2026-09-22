@@ -22,23 +22,30 @@ export function captureTaskPreview(
   const pending = previews.get(task);
   if (pending) return pending;
   const work = runTaskUi(manager, sessionId, async (op, task) => {
+    // Cleanup is independent of the UI deadline: a timed-out request must still
+    // release control of a tab that moved out of the task window. Pin the claim
+    // before lookup so a late lookup cannot release a newer tool acquisition.
+    const releaseIfUnauthorized = async () => {
+      const tabId = op.tabId;
+      if (tabId === undefined || manager.get(sessionId) !== task) return;
+      const claim = cdp.getSessionClaimId(sessionId, tabId);
+      if (!claim) return;
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+      if (manager.get(sessionId) !== task) return;
+      if (!isAgentControlledTab(task, tabId) || (tab && tab.windowId !== task.agentWindowId))
+        await cdp.releaseSessionTab(sessionId, tabId, { ifClaim: claim });
+    };
+    const onAbort = () => {
+      void releaseIfUnauthorized().catch(() => {});
+    };
+    op.signal.addEventListener("abort", onAbort, { once: true });
     try {
       return await capture(manager, cdp, sessionId, op, task);
     } catch (error) {
-      if (
-        error instanceof UiTaskError &&
-        error.reason === "target_unavailable" &&
-        op.tabId !== undefined &&
-        manager.get(sessionId) === task
-      ) {
-        // Recheck actual authority before removing a claim shared with tools.
-        // A transient lookup error or a restored target must not clear it.
-        const tab = await chrome.tabs.get(op.tabId).catch(() => undefined);
-        op.check();
-        if (!isAgentControlledTab(task, op.tabId) || (tab && tab.windowId !== task.agentWindowId))
-          await cdp.releaseSessionTab(sessionId, op.tabId);
-      }
+      await releaseIfUnauthorized().catch(() => {});
       throw error;
+    } finally {
+      op.signal.removeEventListener("abort", onAbort);
     }
   }).finally(() => {
     if (previews.get(task) === work) previews.delete(task);

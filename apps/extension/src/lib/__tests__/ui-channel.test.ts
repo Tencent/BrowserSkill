@@ -60,7 +60,6 @@ it.each([
   ["timeout", "ui_deadline"],
   ["timeout", "preview_busy"],
   ["cancelled", "task_stopping"],
-  ["cancelled", "ui_busy"],
   ["cdp_failed", "ui_lookup_failed"],
 ] as const)("preserves %s / %s in the socket response", async (code, reason) => {
   const f = fixture();

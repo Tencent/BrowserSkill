@@ -1165,10 +1165,12 @@ describe("bounded debugger cleanup", () => {
       const failed = expect(release).rejects.toThrow("cleanup timed out");
       await vi.advanceTimersByTimeAsync(1000);
       await failed;
-      await cdp.acquireBackgroundExecution("same", 5);
+      const next = cdp.acquireBackgroundExecution("same", 5);
+      await vi.advanceTimersByTimeAsync(0);
       const attachment = cdp.getAttachmentId(5);
       finish();
       await rejected;
+      await next;
       expect(cdp.getAttachmentId(5)).toBe(attachment);
       expect(api.sendCommand).not.toHaveBeenCalledWith(
         { tabId: 5 },

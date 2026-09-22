@@ -544,8 +544,18 @@ export class ChromiumCdp {
     this.tabOwners.set(tabId, owners);
   }
 
+  /** Identity of the latest acquisition, including repeated use on one attachment. */
+  getSessionClaimId(sessionId: string, tabId: number): object | undefined {
+    return this.claimAttempts.get(tabId)?.get(sessionId);
+  }
+
   /** Release one session's claim, preserving attachments still used by another. */
-  async releaseSessionTab(sessionId: string, tabId: number): Promise<void> {
+  async releaseSessionTab(
+    sessionId: string,
+    tabId: number,
+    guard?: { ifClaim: object },
+  ): Promise<void> {
+    if (guard && this.getSessionClaimId(sessionId, tabId) !== guard.ifClaim) return;
     this.claimAttempts.get(tabId)?.delete(sessionId);
     this.backgroundExecution.release(sessionId, tabId);
     const owners = this.tabOwners.get(tabId);
