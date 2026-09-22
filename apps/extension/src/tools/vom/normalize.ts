@@ -15,7 +15,7 @@ import {
 } from "../geometry/frame-context";
 import {
   createCaptureCheckpoint,
-  isAbortError as isCaptureAbort,
+  isCaptureTerminalError as isCaptureAbort,
   throwIfAborted as throwCaptureAborted,
 } from "./capture-abort";
 import {

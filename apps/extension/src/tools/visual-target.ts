@@ -10,7 +10,7 @@ import {
 import { type CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
-import { isAbortError, throwIfAborted } from "./vom/capture-abort";
+import { isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
 import { resolveVerifiedNode } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
 import { VISUAL_STYLES } from "./vom/snapshot";
@@ -439,7 +439,7 @@ export async function verifyCapturedTarget(
       : stale("visual attachment changed");
   } catch (error) {
     throwIfAborted(signal);
-    if (isAbortError(error)) throw error;
+    if (isCaptureTerminalError(error)) throw error;
     return stale("visual identity unavailable after capture");
   }
 }

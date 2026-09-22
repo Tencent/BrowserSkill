@@ -9,7 +9,7 @@ import {
   type VisualTargetState,
   verifyCapturedTarget,
 } from "./visual-target";
-import { isAbortError, throwIfAborted } from "./vom/capture-abort";
+import { isAbortError, isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
 import type { VisualCandidate } from "./vom/visual-discovery";
 
 function stale(message: string): RpcError {
@@ -81,7 +81,7 @@ export async function captureVisualScreenshot(
         after = await resolveVisualRegionNow(cdp, candidate, signal, true);
       } catch (error) {
         throwIfAborted(signal);
-        if (isAbortError(error)) throw error;
+        if (isCaptureTerminalError(error)) throw error;
         after = stale("post-capture mapping unavailable");
       }
       if ("code" in after) {

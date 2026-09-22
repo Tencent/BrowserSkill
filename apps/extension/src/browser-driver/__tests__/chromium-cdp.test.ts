@@ -30,6 +30,40 @@ function fakeApi() {
 }
 
 describe("ChromiumCdp", () => {
+  it("configures frame auto-attach once per debugger session and reapplies after detach", async () => {
+    const { api, onDetach } = fakeApi();
+    vi.mocked(api.sendCommand).mockResolvedValue({ frameTree: { frame: { id: "main" } } });
+    const cdp = new ChromiumCdp(api);
+    const calls = () =>
+      vi.mocked(api.sendCommand).mock.calls.filter((c) => c[1] === "Target.setAutoAttach");
+    await cdp.ensureAttached(4);
+    await Promise.all([cdp.getFrameGraph(4), cdp.getFrameGraph(4)]);
+    await cdp.getFrameGraph(4);
+    expect(calls()).toHaveLength(1);
+    onDetach.fire({ tabId: 4 }, "canceled_by_user");
+    await cdp.getFrameGraph(4);
+    expect(calls()).toHaveLength(2);
+    await cdp.detachAll();
+    await cdp.getFrameGraph(4);
+    expect(calls()).toHaveLength(3);
+    cdp.dispose();
+  });
+
+  it("retries frame discovery after a failed configuration", async () => {
+    const { api } = fakeApi();
+    let attempts = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Target.setAutoAttach" && ++attempts === 1) throw new Error("transient");
+      return { frameTree: { frame: { id: "main" } } };
+    });
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(4);
+    await cdp.getFrameGraph(4);
+    await cdp.getFrameGraph(4);
+    expect(attempts).toBe(2);
+    cdp.dispose();
+  });
+
   it("changes attachment identity only across real debugger attachments", async () => {
     const { api, onEvent, onDetach } = fakeApi();
     const cdp = new ChromiumCdp(api);
@@ -430,6 +464,7 @@ describe("ChromiumCdp", () => {
     expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
       accept: true,
     });
+    await vi.waitFor(() => expect(cdp.dialogsSince(3, cursor)).toHaveLength(1));
     const dialogs = cdp.dialogsSince(3, cursor);
     expect(dialogs).toHaveLength(1);
     expect(dialogs[0]).toMatchObject({
@@ -479,7 +514,7 @@ describe("ChromiumCdp", () => {
       url: "https://example.com/",
     });
     await Promise.resolve();
-    expect(cdp.dialogsSince(11, 0)).toHaveLength(1);
+    await vi.waitFor(() => expect(cdp.dialogsSince(11, 0)).toHaveLength(1));
     await cdp.detach(11);
     expect(cdp.dialogsSince(11, 0)).toHaveLength(0);
   });

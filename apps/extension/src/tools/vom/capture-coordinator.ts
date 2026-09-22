@@ -8,7 +8,7 @@ import { cssViewport, GeometryContext } from "../geometry/frame-context";
 import { type CdpRunner, cdpRunnerForTarget } from "../shared";
 import { collectOverlayExcludedBackendIds } from "./capture";
 import {
-  isAbortError as isCaptureAbort,
+  isCaptureTerminalError as isCaptureAbort,
   throwIfAborted as throwCaptureAborted,
 } from "./capture-abort";
 import { verifyDocumentIdentity } from "./document-identity";
