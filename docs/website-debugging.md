@@ -431,7 +431,9 @@ controlled headers (including Cookie, Origin and Content-Length) are supplied by
 the browser. Other captured headers are merged with explicit overrides; replace
 redacted values or remove them with `null`. Reusing retained data requires
 `integrity.url: "complete"`, complete request metadata and
-`request_body.replay_safe: true`. The body flag means the complete stored body is
+`request_body.replay_safe: true`. `integrity.metadata` describes the request;
+`integrity.response_headers` separately reports response-header truncation and
+does not restrict replay. The body flag means the complete stored body is
 byte-for-byte unchanged as text; `available` alone only promises displayable evidence.
 Missing, truncated, transformed or unverified bodies require an explicit complete
 replacement. A truncated or transformed URL requires a complete same-origin `url`

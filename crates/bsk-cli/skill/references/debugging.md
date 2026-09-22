@@ -136,8 +136,10 @@ The file contains `{"key":"unique-attempt","body":"{\"name\":\"Bob\"}"}`;
 optional URL/method/headers/body override the source. Same-origin only, using current
 page cookies; redirects and binary/multipart replay are unsupported.
 
-Implicit reuse requires `integrity.url: "complete"`, complete metadata and
+Implicit reuse requires `integrity.url: "complete"`, complete request metadata and
 `request_body.replay_safe: true`. `available` means displayable, not replay-safe.
+`integrity.metadata` covers the request; `integrity.response_headers` is independent
+and does not restrict replay.
 Supply complete replacements for changed, truncated, missing or unverified URL/body,
 including older records without these markers. Replace/remove redacted headers;
 never send placeholders. Replacing the URL does not repair incomplete metadata.

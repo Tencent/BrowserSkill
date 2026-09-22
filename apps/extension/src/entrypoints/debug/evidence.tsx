@@ -51,10 +51,12 @@ export function RequestList({
   requests,
   onSelect,
   delayedIds = [],
+  newestFirst = false,
 }: {
   requests: DebugRequest[];
   onSelect: (request: DebugRequest) => void;
   delayedIds?: string[];
+  newestFirst?: boolean;
 }) {
   const { t } = useTranslation("extension");
   const [showNoise, setShowNoise] = useState(false);
@@ -62,13 +64,19 @@ export function RequestList({
   const primary = requests.filter((request) => requestKind(request) === "business");
   const noise = requests.length - primary.length;
   const visible = showNoise ? requests : primary;
+  const ordered = newestFirst
+    ? [...visible].sort((a, b) => b.started_at - a.started_at || b.sequence - a.sequence)
+    : visible;
   if (!requests.length) return <Quiet>{t("debug.noRequests")}</Quiet>;
   return (
     <div className="divide-y divide-border/60">
+      {newestFirst && (
+        <p className="px-5 py-3 text-[11px] text-muted-foreground">{t("debug.newestFirst")}</p>
+      )}
       {!primary.length && !showNoise && (
         <p className="px-5 py-4 text-xs text-muted-foreground">{t("debug.noPrimaryRequests")}</p>
       )}
-      {visible.slice(0, visibleCount).map((request) => (
+      {ordered.slice(0, visibleCount).map((request) => (
         <button
           key={request.id}
           type="button"

@@ -71,7 +71,7 @@ export function RuleEditor({
   const { t } = useTranslation("extension");
   const [effect, setEffect] = useState<Effect>(initial);
   const [name, setName] = useState("");
-  const [url, setUrl] = useState(request?.url ?? "");
+  const [url, setUrl] = useState(request?.integrity?.url === "complete" ? request.url : "");
   const [method, setMethod] = useState(request?.method ?? "");
   const [times, setTimes] = useState(1);
   const [status, setStatus] = useState(503);
@@ -91,6 +91,7 @@ export function RuleEditor({
     setError("");
     try {
       if (unsupported) throw new Error(t("debug.ruleResourceUnsupported"));
+      if (!url.trim()) throw new Error(t("debug.urlIncomplete"));
       let value: DebugRuleSpec["effect"] = { type: "block" };
       if (effect === "mock")
         value = {
@@ -174,12 +175,16 @@ export function RuleEditor({
         <label className={labelClass}>
           {t("debug.matchUrl")}
           <input
+            aria-label={t("debug.matchUrl")}
             className={`${inputClass} font-mono`}
             required
             placeholder="http://localhost:3000/api/*"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
           />
+          {request && request.integrity?.url !== "complete" && (
+            <span className="mt-2 block leading-relaxed">{t("debug.urlIncomplete")}</span>
+          )}
         </label>
         <label className={labelClass}>
           {t("debug.httpMethod")}
@@ -310,7 +315,7 @@ export function RuleEditor({
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
           {t("debug.cancel")}
         </Button>
-        <Button type="submit" size="sm" disabled={busy || unsupported}>
+        <Button type="submit" size="sm" disabled={busy || unsupported || !url.trim()}>
           {t(busy ? "debug.working" : "debug.applyRule")}
         </Button>
       </div>
@@ -327,12 +332,14 @@ export function RulesPanel({
   run,
   pulse,
   active,
+  visible = true,
   onChange,
 }: {
   session: string;
   run: string;
   pulse: number;
   active: boolean;
+  visible?: boolean;
   onChange: () => void;
 }) {
   const { t } = useTranslation("extension");
@@ -342,6 +349,7 @@ export function RulesPanel({
   const [busy, setBusy] = useState(false);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     void recordingRequest({ session_id: session, run_id: run, action: "rules" }).then(
       (value) => {
@@ -354,7 +362,7 @@ export function RulesPanel({
     return () => {
       cancelled = true;
     };
-  }, [session, run, pulse, revision]);
+  }, [session, run, pulse, revision, visible]);
   function changed() {
     setRevision((value) => value + 1);
     onChange();

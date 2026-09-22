@@ -7,7 +7,6 @@ import {
   BODY_CHARS,
   redactBody,
   redactHeaderEvidence,
-  redactHeaders,
   redactRequestUrl,
   redactText,
   redactUrl,
@@ -89,6 +88,16 @@ function incompleteMetadata(entry: DebugRequest): void {
   if (entry.integrity) entry.integrity.metadata = "truncated";
 }
 
+function setResponseHeaders(
+  entry: DebugRequest,
+  evidence: ReturnType<typeof redactHeaderEvidence>,
+): void {
+  entry.response_headers = evidence.headers;
+  if (entry.integrity)
+    entry.integrity.response_headers = evidence.truncated ? "truncated" : "complete";
+  entry.truncated ||= evidence.truncated;
+}
+
 export class DebugNetworkStore {
   readonly entries = new Map<string, RequestRecord>();
   // Recent traffic must not erase the CDP identity of a slow request or body job.
@@ -101,6 +110,7 @@ export class DebugNetworkStore {
       value: ControlAnnotation;
       requestBody?: ReturnType<typeof redactBody>;
       responseBody?: ReturnType<typeof redactBody>;
+      responseHeaders?: ReturnType<typeof redactHeaderEvidence>;
       headersTruncated: boolean;
       urlState?: ReturnType<typeof redactRequestUrl>["state"];
     }
@@ -345,9 +355,10 @@ export class DebugNetworkStore {
         const evidence = headersQueue.shift()!;
         this.pendingHeaders -= 1;
         if (!this.tracked(record.entry.id)) continue;
-        record.entry[side === "request" ? "request_headers" : "response_headers"] =
-          evidence.headers;
-        if (evidence.truncated) incompleteMetadata(record.entry);
+        if (side === "request") {
+          record.entry.request_headers = evidence.headers;
+          if (evidence.truncated) incompleteMetadata(record.entry);
+        } else setResponseHeaders(record.entry, evidence);
         record.entry.sequence = this.changed();
         this.retain?.(record.entry);
       }
@@ -358,7 +369,7 @@ export class DebugNetworkStore {
     const entry = record.entry;
     entry.status = response.status;
     entry.mime_type = response.mimeType;
-    entry.response_headers ??= redactHeaders(response.headers);
+    if (!entry.response_headers) setResponseHeaders(entry, redactHeaderEvidence(response.headers));
     entry.from_cache = response.fromDiskCache === true || entry.from_cache;
     entry.from_service_worker = response.fromServiceWorker === true;
     if (response.timing)
@@ -520,6 +531,7 @@ export class DebugNetworkStore {
     const key = this.key(source, rawId);
     let requestBody: ReturnType<typeof redactBody> | undefined;
     let responseBody: ReturnType<typeof redactBody> | undefined;
+    let responseHeaders: ReturnType<typeof redactHeaderEvidence> | undefined;
     let urlState: ReturnType<typeof redactRequestUrl>["state"] | undefined;
     const headers = redactHeaderEvidence(annotation.effective?.headers);
     // Pending annotations must obey the same redaction boundary as live records.
@@ -542,12 +554,13 @@ export class DebugNetworkStore {
     }
     if (annotation.mock) {
       const value = annotation.mock;
+      responseHeaders = redactHeaderEvidence(value.headers);
       responseBody = redactBody(value.body, value.headers?.["content-type"] ?? "");
       annotation = {
         ...annotation,
         mock: {
           ...value,
-          headers: redactHeaders(value.headers),
+          headers: responseHeaders.headers,
           body: responseBody.text,
         },
       };
@@ -556,6 +569,7 @@ export class DebugNetworkStore {
       value: annotation,
       requestBody,
       responseBody,
+      responseHeaders,
       headersTruncated: headers.truncated,
       urlState,
     });
@@ -575,7 +589,9 @@ export class DebugNetworkStore {
       record.entry.url = effective.url;
       record.entry.integrity!.url = retained.urlState!;
       record.entry.truncated =
-        record.entry.integrity!.metadata === "truncated" || retained.urlState === "truncated";
+        record.entry.integrity!.metadata === "truncated" ||
+        record.entry.integrity!.response_headers === "truncated" ||
+        retained.urlState === "truncated";
       record.entry.method = effective.method;
       record.entry.request_headers = effective.headers;
       if (effective.postData !== undefined)
@@ -589,7 +605,7 @@ export class DebugNetworkStore {
     }
     if (mock) {
       record.entry.status = mock.status;
-      record.entry.response_headers = redactHeaders(mock.headers);
+      setResponseHeaders(record.entry, retained.responseHeaders!);
       record.entry.mime_type = mock.headers?.["content-type"] ?? "text/plain";
       this.saveBody(
         record,

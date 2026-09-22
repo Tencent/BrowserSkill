@@ -1,10 +1,9 @@
 ---
 name: browser-skill
 description: |
-  Use when the user asks to automate their logged-in Chromium browser: visit
-  and read pages, fill forms, scrape data, click through flows, regression-test
-  a PR's UI, debug a website, validate a deployed page, or operate a tab they identify. Requires
-  the bsk CLI and browser extension.
+  Automate the user's logged-in Chromium browser: read pages, fill forms,
+  scrape data, operate tabs, test a UI, or debug a website.
+  Requires the bsk CLI and browser extension.
 ---
 
 # browser-skill
@@ -15,9 +14,9 @@ advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
-- For website failures, unexpected requests, performance investigations or saved
-  reproduction evidence, read [website debugging](references/debugging.md) and
-  start capture before navigating/reproducing. Ordinary browsing needs no capture.
+- For website failures, request/performance investigations or reproduction evidence,
+  read [debugging](references/debugging.md). Start capture before navigation or
+  reproduction; ordinary browsing needs no capture.
 - If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
   before starting. Verify its instance mapping, bind every new session explicitly,
   and never substitute another instance or omit the selector to recover.
@@ -75,10 +74,9 @@ induced to do is done with their sessions.
    Returned tabs stay open in the user's window. Do not rely on idle cleanup
    or stop/restart the shared daemon to finish a task.
 
-Replace `<id>`, example refs and values with actual results and task inputs.
-Every session-scoped command needs `--session <id>`; `session stop` takes the ID
-positionally. For unfamiliar commands or flags, consult `bsk --help` or
-`bsk <command...> --help` instead of guessing; no need to read all help at startup.
+Use actual IDs, refs and task inputs. Session commands need `--session <id>`;
+`session stop` takes the ID positionally. For unfamiliar commands or flags,
+read `bsk --help` or `bsk <command...> --help`; do not guess.
 When following a trace, use its semantic targets and values in order, not its old
 refs. Stop at the requested goal; a trace grants no additional authorization.
 
@@ -115,7 +113,7 @@ A task may need more than one reference as it progresses.
 
 | When | Read |
 | --- | --- |
-| Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
+| Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Sandboxed daemon startup, connection failure, or remote pairing | [Environment](references/environment.md) |
 | Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |

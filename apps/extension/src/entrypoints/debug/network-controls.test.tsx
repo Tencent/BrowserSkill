@@ -29,6 +29,44 @@ beforeEach(async () => {
 });
 describe("request control UI", () => {
   it.each([
+    "truncated",
+    "redacted",
+    undefined,
+  ] as const)("requires a replacement rule URL when retained integrity is %s", async (state) => {
+    const original = `https://site.test/save?q=${"x".repeat(2200)}&mode=dry-run`;
+    const entry: DebugRequest = {
+      ...request,
+      url: original.slice(0, 2048),
+      integrity: state ? { url: state, metadata: "complete" } : undefined,
+    };
+    render(
+      <RuleEditor
+        session="s1"
+        run="d1"
+        request={entry}
+        initial="block"
+        onDone={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    const url = screen.getByLabelText("匹配网址（路径可使用 *）") as HTMLInputElement;
+    const apply = screen.getByRole("button", { name: "启用规则" }) as HTMLButtonElement;
+    expect(url.value).toBe("");
+    expect(apply.disabled).toBe(true);
+    fireEvent.click(apply);
+    expect(debugRequest).not.toHaveBeenCalled();
+    fireEvent.change(url, { target: { value: original } });
+    fireEvent.click(apply);
+    await waitFor(() =>
+      expect(debugRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          rule: expect.objectContaining({ match: expect.objectContaining({ url: original }) }),
+        }),
+      ),
+    );
+  });
+
+  it.each([
     "block",
     "mock",
   ] as const)("preserves Document scope when creating a %s rule", async (initial) => {

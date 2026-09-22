@@ -34,6 +34,11 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
       req.on("end", () => {
         hits.push({ url: req.url!, body, header: req.headers["x-test"] as string | undefined });
         res.setHeader("Content-Type", "application/json");
+        if (req.url === "/response-headers")
+          res.setHeader(
+            "Content-Security-Policy",
+            `default-src 'self'; report-uri /${"x".repeat(3000)}`,
+          );
         // Echo JSON tokens verbatim so the fixture itself does not round 64-bit IDs.
         res.end(`{"source":"server","body":${body || "null"}}`);
       });
@@ -69,6 +74,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
           });
           const listeners = new Set<Listener>();
           const children = new Set<string>();
+          const childPatterns = new Map<string, string[]>();
           onEvent = (event) => {
             if (
               event.sessionId !== sessionId &&
@@ -92,8 +98,17 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
             detach: async () => {
               await send("Target.detachFromTarget", { sessionId });
             },
-            sendCommand: (target, method, params) =>
-              send(method, params, target.sessionId ?? sessionId),
+            sendCommand: async (target, method, params) => {
+              const result = await send(method, params, target.sessionId ?? sessionId);
+              if (target.sessionId && method === "Fetch.enable")
+                childPatterns.set(
+                  target.sessionId,
+                  (params as { patterns: { urlPattern: string }[] }).patterns.map(
+                    (pattern) => pattern.urlPattern,
+                  ),
+                );
+              return result;
+            },
             onEvent: {
               addListener: (fn: Listener) => listeners.add(fn),
               removeListener: (fn: Listener) => listeners.delete(fn),
@@ -147,6 +162,24 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
               expect(await evaluate("document.title")).toBe("Network controls"),
             );
             const largeBody = JSON.stringify({ data: "x".repeat(65537) });
+            await fetch("/response-headers");
+            await vi.waitFor(async () =>
+              expect(
+                (await read("requests")).requests?.find((item) =>
+                  item.url.endsWith("/response-headers"),
+                )?.integrity?.response_headers,
+              ).toBe("truncated"),
+            );
+            const responseLimited = (await read("requests")).requests!.find((item) =>
+              item.url.endsWith("/response-headers"),
+            )!;
+            await debug.read({
+              session_id: "network-controls",
+              action: "replay",
+              id: responseLimited.id,
+              replay: { key: "response-headers" },
+            });
+            expect(hits.filter((hit) => hit.url === "/response-headers")).toHaveLength(2);
             await add({
               match: { url: `${url}/large`, method: "POST" },
               effect: { type: "modify", headers: { "x-test": "large-header-only" } },
@@ -315,6 +348,8 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
               match: { url: frameUrl },
               effect: { type: "mock", status: 200, body: '{"source":"iframe-mock"}' },
             });
+            // The target can execute JS before its asynchronous capture setup completes.
+            await vi.waitFor(() => expect(childPatterns.get(childSession)).toContain(frameUrl));
             expect(
               await evaluate(`fetch(${JSON.stringify(frameUrl)}).then(r=>r.json())`, childSession),
             ).toMatchObject({ source: "iframe-mock" });

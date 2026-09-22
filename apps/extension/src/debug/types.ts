@@ -134,7 +134,9 @@ export interface DebugRequest {
   /** Absent on older evidence, whose URL/body fidelity cannot be established. */
   integrity?: {
     url: "complete" | "redacted" | "truncated";
+    /** Request metadata needed for replay; excludes response headers. */
     metadata: "complete" | "truncated";
+    response_headers?: "complete" | "truncated";
   };
   resource_type?: string;
   frame_id?: string;

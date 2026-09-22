@@ -118,7 +118,10 @@ pub struct DebugBody {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct DebugRequestIntegrity {
     pub url: String,
+    /// Request metadata needed for replay; excludes response headers.
     pub metadata: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_headers: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -639,7 +642,7 @@ mod fidelity_tests {
         let mut value = json!({
             "id": "d:n1", "run_id": "d", "sequence": 1, "started_at": 1.0,
             "method": "POST", "url": "https://site.test/save", "state": "complete",
-            "integrity": { "url": "truncated", "metadata": "complete" },
+            "integrity": { "url": "truncated", "metadata": "complete", "response_headers": "truncated" },
             "request_body": {
                 "state": "available", "replay_safe": true,
                 "text": "{\"orderId\":9007199254740993}"
@@ -648,6 +651,20 @@ mod fidelity_tests {
         });
         let request: DebugRequest = from_value(value.clone()).unwrap();
         assert_eq!(to_value(request).unwrap(), value);
+        value["integrity"]
+            .as_object_mut()
+            .unwrap()
+            .remove("response_headers");
+        let legacy_headers: DebugRequest = from_value(value.clone()).unwrap();
+        assert!(
+            legacy_headers
+                .integrity
+                .as_ref()
+                .unwrap()
+                .response_headers
+                .is_none()
+        );
+        assert_eq!(to_value(legacy_headers).unwrap(), value);
         value.as_object_mut().unwrap().remove("integrity");
         value["request_body"]
             .as_object_mut()

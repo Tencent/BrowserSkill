@@ -10,6 +10,7 @@ import {
 } from "@/debug/client";
 import type { DebugOperation, DebugRequest, DebugRun } from "@/debug/types";
 import { DebugApp } from "./App";
+import { RequestList } from "./evidence";
 import { useRequests } from "./use-requests";
 
 vi.mock("@/debug/client", () => ({
@@ -148,6 +149,76 @@ afterEach(() => {
 });
 
 describe("website evidence workspace", () => {
+  it("keeps a rule draft through the first operation and manual panel changes", async () => {
+    let actions: DebugOperation[] = [];
+    const read = vi.mocked(recordingRequest).getMockImplementation()!;
+    vi.mocked(recordingRequest).mockImplementation(async (params) =>
+      params.action === "operations" ? { session_id: "s1", operations: actions } : read(params),
+    );
+    vi.mocked(debugHistory).mockResolvedValue({ runs: [{ ...run, operations: 0, next_since: 0 }] });
+    render(<DebugApp />);
+    await screen.findByText("暂无已记录的操作。");
+    fireEvent.click(screen.getByRole("button", { name: /请求规则/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "添加规则" }));
+    fireEvent.change(screen.getByLabelText("规则名称"), { target: { value: "Keep my draft" } });
+    fireEvent.change(screen.getByLabelText("匹配网址（路径可使用 *）"), {
+      target: { value: "https://site.test/api/*" },
+    });
+    actions = [operation];
+    vi.mocked(debugHistory).mockResolvedValue({ runs: [{ ...run, next_since: 3 }] });
+    fireEvent(document, new Event("visibilitychange"));
+    await screen.findByRole("button", { name: /点击 · #save/ });
+    expect((screen.getByRole("textbox", { name: "规则名称" }) as HTMLInputElement).value).toBe(
+      "Keep my draft",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Console/ }));
+    await screen.findByText("Startup failure");
+    const ruleReads = vi
+      .mocked(recordingRequest)
+      .mock.calls.filter(([p]) => p.action === "rules").length;
+    const operationReads = vi
+      .mocked(recordingRequest)
+      .mock.calls.filter(([p]) => p.action === "operations").length;
+    vi.mocked(debugHistory).mockResolvedValue({ runs: [{ ...run, next_since: 4 }] });
+    fireEvent(document, new Event("visibilitychange"));
+    await waitFor(() =>
+      expect(
+        vi.mocked(recordingRequest).mock.calls.filter(([p]) => p.action === "operations"),
+      ).toHaveLength(operationReads + 1),
+    );
+    expect(
+      vi.mocked(recordingRequest).mock.calls.filter(([p]) => p.action === "rules"),
+    ).toHaveLength(ruleReads);
+    fireEvent.click(screen.getByRole("button", { name: /请求规则/ }));
+    expect((screen.getByRole("textbox", { name: "规则名称" }) as HTMLInputElement).value).toBe(
+      "Keep my draft",
+    );
+    expect((screen.getByLabelText("匹配网址（路径可使用 *）") as HTMLInputElement).value).toBe(
+      "https://site.test/api/*",
+    );
+  });
+
+  it("does not override a panel chosen before the initial operation read completes", async () => {
+    const read = vi.mocked(recordingRequest).getMockImplementation()!;
+    let finish!: (value: { session_id: string; operations: DebugOperation[] }) => void;
+    vi.mocked(recordingRequest).mockImplementation((params) =>
+      params.action === "operations"
+        ? new Promise((resolve) => {
+            finish = resolve;
+          })
+        : read(params),
+    );
+    render(<DebugApp />);
+    fireEvent.click(await screen.findByRole("button", { name: /请求规则/ }));
+    await screen.findByRole("button", { name: "添加规则" });
+    finish({ session_id: "s1", operations: [operation] });
+    await screen.findByRole("button", { name: /点击 · #save/ });
+    expect(screen.getByRole("button", { name: "添加规则" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /请求规则/ }).getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
   it("drills into request projections, paginates bodies and returns to the timeline", async () => {
     render(<DebugApp />);
     fireEvent.click(await screen.findByText("/api/save"));
@@ -223,6 +294,24 @@ describe("website evidence workspace", () => {
 });
 
 describe("incremental request list", () => {
+  it("shows the newest request immediately without changing operation-list order", () => {
+    const entries = Array.from({ length: 150 }, (_, i) => ({
+      ...request,
+      id: `d:n${i}`,
+      started_at: i,
+      url: `https://site.test/request-${i}`,
+    }));
+    const { rerender } = render(<RequestList requests={entries} onSelect={() => {}} newestFirst />);
+    expect(screen.getByText("/request-149")).toBeTruthy();
+    expect(screen.queryByText("/request-0")).toBeNull();
+    const next = { ...request, id: "d:new", started_at: 151, url: "https://site.test/newest" };
+    rerender(<RequestList requests={[...entries, next]} onSelect={() => {}} newestFirst />);
+    expect(screen.getByText("/newest")).toBeTruthy();
+    rerender(<RequestList requests={entries} onSelect={() => {}} />);
+    expect(screen.getByText("/request-0")).toBeTruthy();
+    expect(screen.queryByText("/request-149")).toBeNull();
+  });
+
   it("merges updates, resyncs on retention, and pauses when its panel is hidden", async () => {
     let current = { ...run, next_since: 101 };
     let retained = Array.from({ length: 101 }, (_, i) => ({

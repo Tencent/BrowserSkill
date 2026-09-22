@@ -97,6 +97,7 @@ export function DebugApp() {
     history.replaceState(null, "", `${location.pathname}${query.size ? `?${query}` : ""}`);
   }
   function openRequest(request: DebugRequest, part: "request" | "response" = "response") {
+    initialOperation.current = runId ?? "";
     setControlEditor(undefined);
     setRequestPart(part);
     setSelectedRequest(request);
@@ -163,9 +164,9 @@ export function DebugApp() {
       ]);
       if (cancelled) return;
       setOperations((actions.operations ?? []).sort((a, b) => a.started_at - b.started_at));
-      if (initialOperation.current !== runId && actions.operations?.length) {
+      if (initialOperation.current !== runId) {
         initialOperation.current = runId;
-        setOperationId(actions.operations.at(-1)!.id);
+        if (actions.operations?.length) setOperationId(actions.operations.at(-1)!.id);
       }
       setMessages(consoleResult.console ?? []);
       setPages(pageResult.pages ?? []);
@@ -569,6 +570,7 @@ export function DebugApp() {
                     type="button"
                     key={value}
                     onClick={() => {
+                      initialOperation.current = runId ?? "";
                       setMode(value);
                       setOperationId("");
                       setSelectedRequest(undefined);
@@ -598,6 +600,7 @@ export function DebugApp() {
                         type="button"
                         aria-pressed={operationId === item.id}
                         onClick={() => {
+                          initialOperation.current = runId ?? "";
                           setOperationId(item.id);
                           setDetail(undefined);
                           setSelectedRequest(undefined);
@@ -726,16 +729,7 @@ export function DebugApp() {
                   ) : (
                     <Quiet>{t("debug.loading")}</Quiet>
                   )
-                ) : mode === "rules" ? (
-                  <RulesPanel
-                    key={run.id}
-                    session={sessionId}
-                    run={run.id}
-                    pulse={pulse}
-                    active={!!task && run.state === "capturing"}
-                    onChange={() => setRevision((value) => value + 1)}
-                  />
-                ) : mode === "performance" ? (
+                ) : mode === "rules" ? null : mode === "performance" ? (
                   <PerformancePanel key={run.id} session={sessionId} run={run.id} pulse={pulse} />
                 ) : mode === "analysis" ? (
                   <AnalysisPanel
@@ -762,7 +756,7 @@ export function DebugApp() {
                   />
                 ) : mode === "requests" ? (
                   <Panel title={t("debug.requests")}>
-                    <RequestList requests={requests} onSelect={openRequest} />
+                    <RequestList requests={requests} onSelect={openRequest} newestFirst />
                   </Panel>
                 ) : mode === "console" ? (
                   <Panel title={t("debug.console")}>
@@ -788,6 +782,18 @@ export function DebugApp() {
                     )}
                   </Panel>
                 )}
+                {/* Keep this run's draft mounted across navigation; hidden panels do not poll. */}
+                <div hidden={!!selectedRequest || !!operationId || mode !== "rules"}>
+                  <RulesPanel
+                    key={run.id}
+                    session={sessionId}
+                    run={run.id}
+                    pulse={pulse}
+                    visible={!selectedRequest && !operationId && mode === "rules"}
+                    active={!!task && run.state === "capturing"}
+                    onChange={() => setRevision((value) => value + 1)}
+                  />
+                </div>
               </div>
             </div>
           </>

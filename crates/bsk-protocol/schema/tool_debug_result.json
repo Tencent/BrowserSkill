@@ -1541,7 +1541,14 @@
       ],
       "properties": {
         "metadata": {
+          "description": "Request metadata needed for replay; excludes response headers.",
           "type": "string"
+        },
+        "response_headers": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
           "type": "string"

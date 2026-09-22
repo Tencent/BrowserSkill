@@ -107,8 +107,10 @@ are unsupported. Reuse the **same key** after an uncertain result to avoid sendi
 again; a new key deliberately creates a new attempt. Inspect the linked request
 for outcome; replay does not invoke the original page handler or guarantee UI updates.
 
-Reusing retained values requires `integrity.url: "complete"`, complete metadata
+Reusing retained values requires `integrity.url: "complete"`, complete request metadata
 and `request_body.replay_safe: true`. Body `available` only means displayable.
+`integrity.metadata` covers the request; `integrity.response_headers` is independent
+and does not restrict replay.
 Changed, truncated or unverified URL/body require explicit complete replacements;
 old records without these markers do too. Never copy a truncated evidence draft as
 its replacement. Replacing URL/body cannot fix incomplete metadata. Replace known

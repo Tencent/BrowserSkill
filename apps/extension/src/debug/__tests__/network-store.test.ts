@@ -61,6 +61,37 @@ const settle = async () => {
 
 describe("debug network evidence", () => {
   it.each([
+    "response",
+    "extra-first",
+    "extra-last",
+    "mock",
+  ])("keeps response header loss separate from replay integrity: %s", (path) => {
+    const f = fixture();
+    const headers = { "content-security-policy": "x".repeat(3000) };
+    if (path === "extra-first") f.event("responseReceivedExtraInfo", { headers });
+    if (path === "mock")
+      f.store.annotate({ tabId: 7 }, "raw", { mock: { status: 200, headers, body: "{}" } });
+    f.request({
+      request: { url: "https://site.test/save", method: "GET", headers: { mode: "dry-run" } },
+    });
+    f.response({
+      response: { status: 200, headers: path === "response" ? headers : {} },
+      hasExtraInfo: path.startsWith("extra"),
+    });
+    if (path === "extra-last") f.event("responseReceivedExtraInfo", { headers });
+    const entry = f.store.list()[0];
+    expect(entry).toMatchObject({
+      truncated: true,
+      integrity: { metadata: "complete", response_headers: "truncated" },
+    });
+    expect(replayRequest(entry, { key: "read" }, "https://site.test")).toMatchObject({
+      url: entry.url,
+      method: "GET",
+      headers: { mode: "dry-run" },
+    });
+  });
+
+  it.each([
     "request",
     "extra-first",
     "extra-last",
