@@ -8,6 +8,7 @@
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
 import { DEBUG_PARAMETERS } from "./debug-tool";
 import {
+  BROWSER_PARAM,
   SESSION_PARAM,
   SESSION_STOP_PARAMS,
   TAB_ID_PARAM,
@@ -105,8 +106,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_session",
     description:
       "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
-      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/browser " +
-      "are optional. For stop, specify session or requestId (not both), or omit both to retry an " +
+      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus are " +
+      "optional. When a specific profile is required, always set browser to its verified instance " +
+      "ID or unique label, even with one connected browser; stop if the target is unknown or " +
+      "unavailable instead of omitting or changing browser. For stop, specify session or requestId " +
+      "(not both), or omit both to retry an " +
       "unacknowledged stop before selecting the current owned session. If several stops await " +
       "acknowledgement, specify a target. Once accepted, cleanup continues if the call is aborted.",
     actions: {
@@ -120,7 +124,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
       noFocus: { type: "boolean", description: "Start the Agent Window in the background." },
-      browser: { type: "string", description: "Browser instance id for start." },
+      browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
     },
   },

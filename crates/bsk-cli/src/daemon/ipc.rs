@@ -62,9 +62,12 @@ pub type RpcHandler = Arc<
 >;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
-// The upload transaction owns its operation deadline and may need a bounded
-// cleanup before it can return a useful structured error. Keep only that
-// transport alive slightly longer so it does not replace the result.
+// Some tools own their operation deadline and answer exactly at it: the file
+// transfers need a bounded cleanup before they can return a useful structured
+// error, request-help settles its own wait, and the navigation waits report
+// `reached: "timeout"` with the URL the page actually reached. Keep those
+// transports alive slightly longer so the transport deadline cannot replace a
+// result the extension has already produced.
 const EXTENSION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound on `wait_for_browser_ms` accepted over IPC.
 const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
@@ -849,7 +852,14 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
     timeout.map(|timeout| {
         if matches!(
             method,
-            Method::ToolUpload | Method::ToolDownload | Method::ToolRequestHelp
+            Method::ToolUpload
+                | Method::ToolDownload
+                | Method::ToolRequestHelp
+                | Method::ToolNavigate
+                | Method::ToolNavigateBack
+                | Method::ToolNavigateForward
+                | Method::ToolReload
+                | Method::ToolWaitForNavigation
         ) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
@@ -1883,9 +1893,30 @@ mod tests {
             Method::ToolUpload,
             Method::ToolDownload,
             Method::ToolRequestHelp,
+            Method::ToolNavigate,
+            Method::ToolNavigateBack,
+            Method::ToolNavigateForward,
+            Method::ToolReload,
+            Method::ToolWaitForNavigation,
         ] {
             let dispatch_timeout = tool_dispatch_transport_timeout(&method, &params).unwrap();
             assert_eq!(dispatch_timeout, Duration::from_secs(62));
+        }
+    }
+
+    #[test]
+    fn default_navigation_deadline_allows_extension_timeout_response() {
+        for method in [
+            Method::ToolNavigate,
+            Method::ToolNavigateBack,
+            Method::ToolNavigateForward,
+            Method::ToolReload,
+            Method::ToolWaitForNavigation,
+        ] {
+            assert_eq!(
+                tool_dispatch_transport_timeout(&method, &serde_json::json!({})).unwrap(),
+                DEFAULT_TOOL_TIMEOUT + EXTENSION_RESPONSE_GRACE,
+            );
         }
     }
 

@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +8,12 @@ import { describe, expect, it, vi } from "vitest";
 import { registerBrowserTools } from "../src/browser-tools";
 import { ObservationService } from "../src/observation";
 import { KeyedExecutor } from "../src/queue";
-import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
+import {
+  type BskRunner,
+  type BskRunOptions,
+  type BskRunResult,
+  createBskRunner,
+} from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 import type { PluginConfig } from "../src/tools";
 
@@ -385,6 +392,70 @@ describe("session.start", () => {
     );
     expect(calls.some((c) => c.args[1] === "request" && c.args.includes("--cancel"))).toBe(true);
     expect(registry.current()).toBeUndefined();
+  });
+
+  it("returns the session when bsk exits but something still holds its stdio pipes", async () => {
+    // Issue #180: `bsk session start` printed its JSON and exited, but the daemon
+    // it auto-spawned kept the stdio pipes open, so the child's `close` never
+    // fired and the tool call hung past its own timeout. Drive the real runner
+    // with a child that emits `exit` and never `close`.
+    const pipe = () => Object.assign(new EventEmitter(), { destroy: () => {} });
+    const makeChild = () =>
+      Object.assign(new EventEmitter(), {
+        stdout: pipe(),
+        stderr: pipe(),
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: () => false,
+        unref: () => {},
+      });
+    const child = makeChild();
+    let spawned!: () => void;
+    const spawnedPromise = new Promise<void>((resolve) => {
+      spawned = resolve;
+    });
+    const runner = createBskRunner("bsk", (_command, args) => {
+      // Main now prepares and claims the start request around session start.
+      // Those commands close normally; only the start child keeps its pipes open.
+      if (args[0] === "session" && args[1] === "request") {
+        const request = makeChild();
+        queueMicrotask(() => {
+          request.stdout.emit(
+            "data",
+            JSON.stringify({ state: args.includes("--prepare") ? "prepared" : "active" }),
+          );
+          request.exitCode = 0;
+          request.emit("close", 0);
+        });
+        return request as unknown as ChildProcess;
+      }
+      expect(args.slice(0, 2)).toEqual(["session", "start"]);
+      spawned();
+      return child as unknown as ChildProcess;
+    });
+    const { ctx, tools } = makeCtx();
+    const registry = new SessionRegistry(5);
+    registerBrowserTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      config: CONFIG,
+      observation: disabledObservation({ ctx, runner, registry }),
+      queue: new KeyedExecutor(),
+    });
+    const pending = startSession(tools);
+    await spawnedPromise;
+    child.stdout.emit("data", JSON.stringify(START_REPLY("s1")));
+    child.exitCode = 0;
+    child.emit("exit", 0, null); // process gone; pipes still held, so no `close`
+    const value = await Promise.race([
+      pending,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("browser_session start never returned")), 2_000),
+      ),
+    ]);
+    expect(value.sessionId).toBe("s1");
+    expect(registry.current()).toBe("s1");
   });
 });
 

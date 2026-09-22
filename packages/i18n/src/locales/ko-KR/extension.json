@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "페어링이 완료되었습니다. 연결 스위치가 꺼져 있습니다. 연결하려면 스위치를 켜세요.",
     "remoteFormatError": "페어링 링크가 불완전하거나 올바르지 않습니다. 서버에서 제공한 전체 링크를 복사하세요.",
     "remotePermissionsInfo": "원격 연결 권한 안내",
-    "remotePermissionsHint": "서버는 전용 작업 창을 제어할 수 있습니다. 기존 탭을 빌릴 때의 확인 여부는 아래 자동화 설정을 따릅니다."
+    "remotePermissionsHint": "서버는 전용 작업 창을 제어할 수 있습니다. 기존 탭을 빌릴 때의 확인 여부는 아래 자동화 설정을 따릅니다.",
+    "profile": {
+      "hint": "사용하려는 브라우저 프로필이 맞는지 확인한 뒤 에이전트에게 지침을 보내세요.",
+      "copyButton": "프로필 지침 복사",
+      "copyFailed": "지침을 복사하지 못했습니다. 다시 시도해 주세요.",
+      "promptTemplate": "이 작업에는 이 브라우저 프로필의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness에서는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요."
+    }
   },
   "controlOverlay": {
     "status": "에이전트가 제어 중",

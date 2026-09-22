@@ -60,11 +60,15 @@ pub(super) struct PendingWrite {
 
 impl PendingWrite {
     pub(super) fn prepare(dest: &Path, content: &str) -> Result<Self> {
+        Self::prepare_bytes(dest, content.as_bytes())
+    }
+
+    pub(super) fn prepare_bytes(dest: &Path, content: &[u8]) -> Result<Self> {
         let mut file = tempfile::Builder::new()
             .prefix(".bsk-tmp-")
             .tempfile_in(dest.parent().context("skill destination has no parent")?)
             .with_context(|| format!("prepare {}", dest.display()))?;
-        file.write_all(content.as_bytes())
+        file.write_all(content)
             .with_context(|| format!("write temporary file for {}", dest.display()))?;
         Ok(Self {
             file,

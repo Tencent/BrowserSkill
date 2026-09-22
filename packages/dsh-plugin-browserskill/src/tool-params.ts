@@ -1,5 +1,13 @@
 /** Shared model-facing parameter schemas for browser tools. */
 
+export const BROWSER_PARAM = {
+  type: "string",
+  description:
+    "Target browser instance ID or verified unique label for start. Always set this when a " +
+    "specific profile is required, even if only one browser is connected. Confirm the mapping " +
+    "with the user if unknown; never omit or substitute the selector to recover from an unavailable target.",
+} as const;
+
 export const SESSION_PARAM = {
   type: "string",
   description:

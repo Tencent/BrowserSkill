@@ -13,6 +13,7 @@ import { DebugPanel } from "./debug-panel";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { InteractionSettings } from "./interaction-settings";
 import { LongScreenshot } from "./long-screenshot";
+import { ProfileInstructions } from "./profile-instructions";
 import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
@@ -236,6 +237,7 @@ export function App() {
               connectionEnabled={snapshot.connectionEnabled}
               disconnected={isDisconnected && !snapshot.lastError}
             />
+            <ProfileInstructions instanceId={snapshot.instanceId} connected={connectionLive} />
           </section>
 
           <section
