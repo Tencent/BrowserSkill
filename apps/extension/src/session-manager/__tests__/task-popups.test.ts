@@ -121,3 +121,144 @@ describe("action-scoped popup attribution", () => {
     expect(f.openListeners.size).toBe(0);
   });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+it("stops listening immediately when an unfinished action is cancelled", async () => {
+  const f = await fixture();
+  const action = deferred<void>();
+  const controller = new AbortController();
+  const work = withTaskPopups(
+    f.manager,
+    { session_id: "one" },
+    () => action.promise,
+    undefined,
+    controller.signal,
+  );
+  await vi.waitFor(() => expect(f.targetListeners.size).toBe(1));
+  controller.abort();
+  expect(f.targetListeners.size).toBe(0);
+  expect(f.openListeners.size).toBe(0);
+  f.open(10, 20, 200);
+  action.resolve();
+  await work;
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+  expect(f.move).not.toHaveBeenCalled();
+});
+it("does not grant ownership or move after cancellation during target lookup", async () => {
+  const f = await fixture();
+  const gate = deferred<chrome.tabs.Tab>();
+  const original = chrome.tabs.get;
+  const get = vi.fn(async (id: number) => (id === 20 ? gate.promise : original(id)));
+  chrome.tabs.get = get as typeof chrome.tabs.get;
+  const controller = new AbortController();
+  const action = deferred<void>();
+  const work = withTaskPopups(
+    f.manager,
+    { session_id: "one" },
+    () => action.promise,
+    undefined,
+    controller.signal,
+  );
+  await vi.waitFor(() => expect(f.targetListeners.size).toBe(1));
+  f.open(10, 20, 200);
+  await vi.waitFor(() => expect(get).toHaveBeenCalledWith(20));
+  controller.abort();
+  gate.resolve({ id: 20, windowId: 200 } as chrome.tabs.Tab);
+  action.resolve();
+  await work;
+  expect(f.move).not.toHaveBeenCalled();
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+});
+it.each([false, true])("rejects a moved source for remote=%s", async (remote) => {
+  const f = await fixture({ remote });
+  await withTaskPopups(f.manager, { session_id: "one", tab_id: 10 }, async () => {
+    f.tabs.get(10)!.windowId = 500;
+    f.open(10, 20, 500);
+  });
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+  expect(f.move).not.toHaveBeenCalled();
+});
+it("waits for a parent migration before validating a nested popup", async () => {
+  const f = await fixture();
+  const gate = deferred<void>();
+  f.move.mockImplementation(async (id, props) => {
+    if (id === 20) await gate.promise;
+    return Object.assign(f.tabs.get(id)!, props);
+  });
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async () => {
+    f.open(10, 20, 200);
+    f.open(20, 21, 300);
+  });
+  await vi.waitFor(() => expect(f.move).toHaveBeenCalledWith(20, expect.anything()));
+  expect(f.task.agentCreatedTabs.has(21)).toBe(false);
+  gate.resolve();
+  await work;
+  expect(f.task.agentCreatedTabs.has(21)).toBe(true);
+  expect(f.tabs.get(21)!.windowId).toBe(10);
+});
+it("does not authorize descendants of a target in another task window", async () => {
+  const f = await fixture();
+  await withTaskPopups(f.manager, { session_id: "one" }, async () => {
+    f.open(10, 20, 11);
+    f.open(20, 21, 200);
+  });
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+  expect(f.task.agentCreatedTabs.has(21)).toBe(false);
+  expect(f.move).not.toHaveBeenCalled();
+});
+it("cancels the event tail without discarding earlier legitimate claims", async () => {
+  vi.useFakeTimers();
+  const f = await fixture();
+  const controller = new AbortController();
+  const work = withTaskPopups(
+    f.manager,
+    { session_id: "one" },
+    async () => f.open(10, 20),
+    undefined,
+    controller.signal,
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.task.agentCreatedTabs.has(20)).toBe(true);
+  controller.abort();
+  await work;
+  expect(f.task.agentCreatedTabs.has(20)).toBe(true);
+  expect(f.targetListeners.size).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it.each([
+  "source closed",
+  "source revoked",
+  "session ended",
+  "target claimed",
+  "target reserved",
+])("revalidates when %s during an asynchronous target lookup", async (change) => {
+  const f = await fixture();
+  const gate = deferred<chrome.tabs.Tab>();
+  const action = deferred<void>();
+  const original = chrome.tabs.get;
+  const get = vi.fn(async (id: number) => (id === 20 ? gate.promise : original(id)));
+  chrome.tabs.get = get as typeof chrome.tabs.get;
+  const work = withTaskPopups(f.manager, { session_id: "one" }, () => action.promise);
+  await vi.waitFor(() => expect(f.targetListeners.size).toBe(1));
+  f.open(10, 20, 200);
+  await vi.waitFor(() => expect(get).toHaveBeenCalledWith(20));
+  if (change === "source closed") f.tabs.delete(10);
+  if (change === "source revoked") f.task.agentCreatedTabs.delete(10);
+  if (change === "session ended") await f.manager.stop("one", { dropOnly: true });
+  if (change === "target claimed") f.other.agentCreatedTabs.add(20);
+  if (change === "target reserved") f.manager.tryReserveBorrow(20, "two");
+  gate.resolve({ id: 20, windowId: 200 } as chrome.tabs.Tab);
+  action.resolve();
+  await work;
+  expect(f.task.agentCreatedTabs.has(20)).toBe(false);
+  expect(f.move).not.toHaveBeenCalled();
+  expect(f.targetListeners.size).toBe(0);
+  expect(f.openListeners.size).toBe(0);
+});

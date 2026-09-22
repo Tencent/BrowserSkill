@@ -157,6 +157,18 @@ export interface DispatcherDeps {
   helpNotificationCopy?: () => { title: string; body: string };
 }
 
+/** Tools whose page input can make the page open another tab or window. */
+const OPENS_TABS = new Set([
+  "tool.click",
+  "tool.press",
+  "tool.evaluate",
+  "tool.navigate",
+  "tool.navigate_back",
+  "tool.navigate_forward",
+  "tool.fill",
+  "tool.select",
+]);
+
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
  * appropriate tool implementation.
@@ -173,18 +185,6 @@ export interface DispatcherDeps {
  * completed compensation; only the separate cancel acknowledgement
  * takes the fast path.
  */
-/** Tools whose page input can make the page open another tab or window. */
-const OPENS_TABS = new Set([
-  "tool.click",
-  "tool.press",
-  "tool.evaluate",
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.fill",
-  "tool.select",
-]);
-
 export class ToolDispatcher {
   private readonly debug?: DebugManager;
   private readonly transport: Transport;

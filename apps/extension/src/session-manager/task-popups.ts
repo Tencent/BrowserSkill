@@ -1,120 +1,156 @@
-import { isAgentControlledTab, type SessionContext, type SessionManager } from "./manager";
+import { isAgentControlledTab, type SessionManager } from "./manager";
 
-/**
- * Chrome can deliver `onCreatedNavigationTarget` just after it acknowledges the
- * input that caused it, so an action waits this long before it stops listening
- * — but only when a tab actually appeared while it ran.
- */
 const TARGET_EVENT_TAIL_MS = 100;
 
-/**
- * Attributes tabs that an agent action opened from a page it already controls.
- *
- * Only Chrome's own navigation-target events count, and only while the action
- * runs: window membership and `openerTabId` are page-influenced metadata and
- * never authorize a tab on their own. A target that arrives late, or that
- * Chrome reports without a source, keeps the ordinary consent-based borrow
- * flow. A popup that opened its own window is moved into the Agent Window,
- * which is what makes it reachable for a local session as well.
- */
+/** Track browser-reported source relationships during an uncancelled action.
+ * These relationships do not prove that a particular input caused a popup.
+ * Late or unattributed targets continue through the ordinary borrow flow. */
 export async function withTaskPopups<T>(
   manager: SessionManager,
   params: { session_id?: string; tab_id?: number },
   run: () => Promise<T>,
   onClaimed?: (tabId: number, windowId: number) => void,
+  signal?: AbortSignal,
 ): Promise<T> {
   const task = params.session_id ? manager.get(params.session_id) : null;
   const targets = globalThis.chrome?.webNavigation?.onCreatedNavigationTarget;
   const opened = globalThis.chrome?.tabs?.onCreated;
-  if (!task || !targets || !opened) return run();
-  const source = await actionSource(manager, task, params.tab_id);
-  if (source === undefined) return run();
+  if (!task || !targets || !opened || signal?.aborted) return run();
+  const live = () =>
+    !signal?.aborted &&
+    manager.get(task.sessionId) === task &&
+    !manager.isWindowCloseExpected(task);
+  const source =
+    params.tab_id ??
+    (
+      await chrome.tabs.query({
+        windowId: task.agentWindowId,
+        active: true,
+      })
+    )[0]?.id;
+  const invalid = new Set<number>();
+  const moving = new Set<number>();
+  const validSource = async (id: number): Promise<boolean> => {
+    if (!live() || invalid.has(id) || (task.remote && !isAgentControlledTab(task, id)))
+      return false;
+    try {
+      const tab = await chrome.tabs.get(id);
+      return (
+        live() &&
+        !invalid.has(id) &&
+        tab.windowId === task.agentWindowId &&
+        (!task.remote || isAgentControlledTab(task, id))
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (source === undefined || !(await validSource(source))) return run();
 
-  const sources = new Set([source]);
-  const pending = new Set<Promise<void>>();
+  // Candidates are not authorization. A child waits for its parent's validation
+  // and migration before it can use that parent as a controlled source.
+  const candidates = new Map<number, Promise<boolean>>([[source, Promise.resolve(true)]]);
   let sawNewTab = false;
-  const live = () => manager.get(task.sessionId) === task && !manager.isWindowCloseExpected(task);
   const probe = () => {
     sawNewTab = true;
   };
+  const removed = (id: number) => {
+    invalid.add(id);
+  };
+  const detached = (id: number) => {
+    if (!moving.has(id)) invalid.add(id);
+  };
+  const targetAvailable = (id: number) =>
+    !invalid.has(id) &&
+    !manager.findBorrowingSession(id, task.sessionId) &&
+    !manager.list().some((owner) => isAgentControlledTab(owner, id));
   const created = ({ sourceTabId, tabId }: { sourceTabId: number; tabId: number }) => {
-    if (
-      !live() ||
-      !sources.has(sourceTabId) ||
-      !controlsTab(task, sourceTabId) ||
-      manager.list().some((other) => other !== task && isAgentControlledTab(other, tabId))
-    )
-      return;
-    // Record the attribution synchronously so a nested popup opened from this
-    // tab, and the cleanup below, both see it.
-    task.agentCreatedTabs.add(tabId);
-    sources.add(tabId);
-    const work = (async () => {
-      try {
+    const parent = candidates.get(sourceTabId);
+    if (!live() || !parent || candidates.has(tabId)) return;
+    const work = Promise.resolve()
+      .then(async () => {
+        if (!(await parent) || !(await validSource(sourceTabId))) return false;
         let tab = await chrome.tabs.get(tabId);
-        if (!live() || !isAgentControlledTab(task, tabId)) return;
+        // Recheck the source after the target lookup, before granting ownership.
+        if (!(await validSource(sourceTabId)) || !targetAvailable(tabId)) return false;
         const other = manager.findByWindowId(tab.windowId);
-        if (other && other !== task) {
-          task.agentCreatedTabs.delete(tabId);
-          sources.delete(tabId);
-          return;
-        }
+        if (other && other !== task) return false;
+        task.agentCreatedTabs.add(tabId);
+        // From this point ownership is legitimate even if migration fails or the
+        // action is cancelled. Preserve it so normal session cleanup can run.
         if (tab.windowId !== task.agentWindowId) {
-          await chrome.tabs.move(tabId, { windowId: task.agentWindowId, index: -1 });
+          if (!live() || invalid.has(tabId)) return false;
+          moving.add(tabId);
+          try {
+            await chrome.tabs.move(tabId, { windowId: task.agentWindowId, index: -1 });
+          } finally {
+            moving.delete(tabId);
+          }
           tab = await chrome.tabs.get(tabId);
         }
-        if (!live() || !isAgentControlledTab(task, tabId)) return;
+        if (
+          !live() ||
+          invalid.has(tabId) ||
+          !isAgentControlledTab(task, tabId) ||
+          tab.windowId !== task.agentWindowId
+        )
+          return false;
         onClaimed?.(tabId, tab.windowId);
-      } catch (error) {
-        // Keep a live tab's attribution when the move failed, so session.stop
-        // still cleans it up; Chrome's removal event forgets closed tabs.
+        return true;
+      })
+      .catch((error) => {
         console.warn("[bsk] task popup setup failed", error);
-      }
-    })();
-    pending.add(work);
-    void work.then(() => pending.delete(work));
+        return false;
+      });
+    candidates.set(tabId, work);
   };
-
+  let finishTail: (() => void) | undefined;
+  const stopListening = () => {
+    targets.removeListener(created);
+    opened.removeListener(probe);
+    finishTail?.();
+  };
   targets.addListener(created);
   opened.addListener(probe);
+  chrome.tabs.onRemoved?.addListener(removed);
+  chrome.tabs.onDetached?.addListener(detached);
+  signal?.addEventListener("abort", stopListening, { once: true });
   try {
+    if (!live()) stopListening();
     return await run();
   } finally {
     opened.removeListener(probe);
-    if (sawNewTab) {
-      await new Promise((resolve) => setTimeout(resolve, TARGET_EVENT_TAIL_MS));
+    if (sawNewTab && live()) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, TARGET_EVENT_TAIL_MS);
+        finishTail = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
     }
-    targets.removeListener(created);
-    await Promise.all(pending);
+    stopListening();
+    // Cancellation ends observation immediately, even if a Chrome lookup never
+    // returns. Late work remains guarded and its rejection is always consumed.
+    await settleOrAbort(Promise.all(candidates.values()), signal);
+    signal?.removeEventListener("abort", stopListening);
+    chrome.tabs.onRemoved?.removeListener(removed);
+    chrome.tabs.onDetached?.removeListener(detached);
   }
 }
 
-/**
- * The tab the action targets, when this session may drive it. A remote session
- * needs the explicit per-tab claim; a local one controls the Agent Window.
- */
-async function actionSource(
-  manager: SessionManager,
-  task: SessionContext,
-  tabId: number | undefined,
-): Promise<number | undefined> {
-  if (tabId === undefined) {
-    const [active] = await chrome.tabs.query({ windowId: task.agentWindowId, active: true });
-    return active?.id !== undefined && controlsTab(task, active.id) ? active.id : undefined;
-  }
-  if (!controlsTab(task, tabId)) return undefined;
-  if (task.remote) return tabId;
+async function settleOrAbort(work: Promise<unknown>, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return;
+  let abort = () => {};
   try {
-    const tab = await chrome.tabs.get(tabId);
-    return tab.windowId === task.agentWindowId && manager.get(task.sessionId) === task
-      ? tabId
-      : undefined;
-  } catch {
-    return undefined;
+    await Promise.race([
+      work,
+      new Promise<void>((resolve) => {
+        abort = resolve;
+        signal?.addEventListener("abort", abort, { once: true });
+      }),
+    ]);
+  } finally {
+    signal?.removeEventListener("abort", abort);
   }
-}
-
-/** Remote sessions authorize tab by tab; local ones by Agent Window. */
-function controlsTab(task: SessionContext, tabId: number): boolean {
-  return task.remote ? isAgentControlledTab(task, tabId) : true;
 }

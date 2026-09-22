@@ -163,7 +163,7 @@ Pair only with a server you trust to operate your browser. A paired server can c
 
 Remote content reads, screenshots, recording and page operations require a tab explicitly created or borrowed by the task. Listing tab titles and URLs remains available to select a tab to borrow. A user tab moved or opened inside an Agent Window does not by itself become authorized. Borrowing uses the existing browser-controlled confirmation preference; remote request flags cannot change that preference. After a borrowed tab is returned, remote content access ends. Returning a tab during remote recording cancels that recording before releasing the tab.
 
-This also applies to tabs or windows opened by a page through `target="_blank"`, `window.open`, or an OAuth flow. An opener relationship does not grant control, and neither does sharing the Agent Window. A tab is attributed to a task only when Chrome itself reports it as the navigation target of an action the task ran on a page it already controls, including `rel="noopener"` targets and popups that open their own window; such a popup window is moved into the Agent Window. A target that arrives after the action, or that Chrome reports without a source, keeps the ordinary borrow flow. If such a tab is already inside the Agent Window, it cannot be borrowed in place: the browser user must first move it to a regular browser window, then the Agent can use the ordinary borrow flow. Tabs explicitly created through `bsk tab create` are controlled immediately.
+This also applies to tabs or windows opened by a page through `target="_blank"`, `window.open`, or an OAuth flow. An opener relationship does not grant control, and neither does sharing the Agent Window. During an uncancelled click, key press, evaluation, navigation, fill or select operation, the extension observes Chrome navigation-target events from a source tab still controlled by the task in its Agent Window. Valid targets, including `rel="noopener"` targets and popups that open a separate window, are attributed and moved into the Agent Window. If a target was observed, a fixed 100 ms tail also accepts related events. This source-and-time relationship is not proof that a particular input caused a popup. Events outside that lifetime, or without a validated source, keep the ordinary borrow flow. If such a tab is already inside the Agent Window, it cannot be borrowed in place: the browser user must first move it to a regular browser window, then the Agent can use the ordinary borrow flow. Tabs explicitly created through `bsk tab create` are controlled immediately.
 
 Disconnecting cancels task work, returns borrowed tabs and closes task-created tabs. User-created tabs survive cleanup. Failed returns preserve the window and must be resolved before reconnecting. Reconnection starts new tasks; commands and sessions are never replayed. Failed remote authentication does not select a local connection automatically.
 
@@ -186,3 +186,19 @@ BSK_REMOTE_CHROME=/absolute/path/to/chrome-for-testing \
 ```
 
 The remote server integration tests cover credential exchange, rotation retries, stable device routing, replacement connections, revocation, connection capacity, file-lock contention and native TLS. Unit tests additionally cover rate-limit saturation, unavailable extension storage, local recovery, renewal retry frequency and popup authorization states. TLS fixtures contain a test-only private key and must never be used for deployment.
+
+### Popup attribution lifetime
+
+Popup attribution observes Chrome source-tab relationships during an uncancelled
+operation and, when a tab was created during it, for at most 100 ms afterward.
+Chrome does not provide a per-input causal identifier: a source page script can
+also open a target during that interval. Late or unattributed targets require
+explicit borrowing; an unowned target inside the Agent Window must first be
+moved to a regular window under the current borrow contract.
+
+Candidates do not grant access. The source must still be in the Agent Window
+(and explicitly owned for remote sessions), and the target must not belong to
+or be reserved by another task. Nested targets wait for their parent's validation
+and migration. Cancellation removes listeners immediately and prevents new claims
+and not-yet-issued moves. Already-issued Chrome moves cannot be recalled; tabs
+legitimately claimed before cancellation remain tracked for session cleanup.
