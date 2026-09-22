@@ -55,6 +55,14 @@
     "copy": "Kopieren",
     "copied": "Kopiert",
     "copyInstanceId": "Instanz-ID kopieren",
+    "browserLabel": {
+      "title": "Browsername",
+      "placeholder": "z. B. Arbeitsprofil",
+      "save": "Speichern",
+      "hint": "Verwende einen eindeutigen Namen, um deinem Agenten diesen Browser anzugeben. Beim Speichern verbindet sich BrowserSkill kurz neu.",
+      "busyHint": "Warte, bis die laufenden Browser-Aufgaben beendet sind, bevor du diesen Namen änderst.",
+      "instanceIdError": "Wähle einen Namen, der nicht wie eine achtstellige hexadezimale Instanz-ID aussieht."
+    },
     "record": {
       "sectionTitle": "Aktionsaufzeichnung",
       "cardDesc": "Zeichnen Sie Ihre Aktionen als Referenz für den Agent auf",

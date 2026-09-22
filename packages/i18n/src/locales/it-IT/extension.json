@@ -55,6 +55,14 @@
     "copy": "Copia",
     "copied": "Copiato",
     "copyInstanceId": "Copia ID istanza",
+    "browserLabel": {
+      "title": "Nome del browser",
+      "placeholder": "es. Profilo di lavoro",
+      "save": "Salva",
+      "hint": "Usa un nome univoco per indicare questo browser al tuo agente. Il salvataggio riconnette brevemente BrowserSkill.",
+      "busyHint": "Attendi che le attività del browser in corso terminino prima di modificare questo nome.",
+      "instanceIdError": "Scegli un nome diverso da un ID istanza esadecimale di 8 caratteri."
+    },
     "record": {
       "sectionTitle": "Registrazione azioni",
       "cardDesc": "Registra le tue azioni come riferimento per l'agente",

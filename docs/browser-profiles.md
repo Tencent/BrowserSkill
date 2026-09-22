@@ -25,6 +25,17 @@ profile display name or directory name. An existing, verified unique BrowserSkil
 label also works; labels are not populated from Chrome profile names automatically.
 The instruction only copies text: it does not start a session or change settings.
 
+For a reusable human-readable selector, set **Browser name** in the extension popup,
+then confirm it appears in `bsk browsers`. Keep names unique among connected browsers;
+label matching is exact and duplicate labels are rejected as ambiguous. Saving a name
+briefly reconnects BrowserSkill so the daemon sees it immediately. Renaming is disabled
+while that browser has active tasks, so a display-name edit cannot interrupt them. You
+can then start a session with, for example:
+
+```sh
+bsk session start --browser "Work profile" --json
+```
+
 If the target is offline, reconnect BrowserSkill in that profile and retry the
 same selector. Do not remove `--browser` to get past the error: that could select
 another profile. A missing selector is rejected when multiple browsers are online,

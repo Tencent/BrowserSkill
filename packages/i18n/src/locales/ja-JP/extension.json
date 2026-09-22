@@ -55,6 +55,14 @@
     "copy": "コピー",
     "copied": "コピーしました",
     "copyInstanceId": "インスタンス ID をコピー",
+    "browserLabel": {
+      "title": "ブラウザ名",
+      "placeholder": "例：仕事用プロファイル",
+      "save": "保存",
+      "hint": "エージェントにブラウザを指定するため、一意の名前を付けてください。保存すると BrowserSkill が一時的に再接続します。",
+      "busyHint": "実行中のブラウザタスクが終了してから名前を変更してください。",
+      "instanceIdError": "8 桁の16進数のインスタンス ID 形式以外の名前を指定してください。"
+    },
     "record": {
       "sectionTitle": "操作の記録",
       "cardDesc": "エージェントが参照できるよう、あなたの操作を記録します",

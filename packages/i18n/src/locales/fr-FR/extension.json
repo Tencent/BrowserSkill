@@ -55,6 +55,14 @@
     "copy": "Copier",
     "copied": "Copié",
     "copyInstanceId": "Copier l'ID d'instance",
+    "browserLabel": {
+      "title": "Nom du navigateur",
+      "placeholder": "ex. : Profil professionnel",
+      "save": "Enregistrer",
+      "hint": "Utilisez un nom unique pour indiquer ce navigateur à votre agent. L'enregistrement reconnecte brièvement BrowserSkill.",
+      "busyHint": "Attendez la fin des tâches actives du navigateur avant de modifier ce nom.",
+      "instanceIdError": "Choisissez un nom différent d'un ID d'instance hexadécimal de 8 caractères."
+    },
     "record": {
       "sectionTitle": "Enregistrement d'actions",
       "cardDesc": "Enregistrez vos actions pour référence de l'Agent",

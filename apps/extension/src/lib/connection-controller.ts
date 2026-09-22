@@ -185,8 +185,13 @@ export class ConnectionController {
   }
 
   async refreshLabel(): Promise<void> {
-    this.label = await getLabel();
+    const nextLabel = await getLabel();
+    if (nextLabel === this.label) return;
+    this.label = nextLabel;
     this.fire();
+    // The label is part of the opening handshake, so reconnect to make the
+    // daemon's browser registry reflect the saved name immediately.
+    if (this.ready && this.connectionEnabled) await this.teardown(false);
   }
 
   private startHandshake(browser: { name: string; version: string }): void {

@@ -55,6 +55,14 @@
     "copy": "複製",
     "copied": "已複製",
     "copyInstanceId": "複製執行個體 ID",
+    "browserLabel": {
+      "title": "瀏覽器名稱",
+      "placeholder": "例如：工作帳號",
+      "save": "儲存",
+      "hint": "請使用唯一名稱，方便向 Agent 指定瀏覽器。儲存時 BrowserSkill 會短暫重新連線。",
+      "busyHint": "目前瀏覽器有任務執行中，任務結束後即可修改名稱。",
+      "instanceIdError": "名稱不能使用 8 位十六進位執行個體 ID 格式。"
+    },
     "record": {
       "sectionTitle": "操作錄製",
       "cardDesc": "錄製你的操作，供 Agent 參考",

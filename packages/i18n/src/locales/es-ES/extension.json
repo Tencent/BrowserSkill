@@ -55,6 +55,14 @@
     "copy": "Copiar",
     "copied": "Copiado",
     "copyInstanceId": "Copiar ID de instancia",
+    "browserLabel": {
+      "title": "Nombre del navegador",
+      "placeholder": "p. ej., Perfil de trabajo",
+      "save": "Guardar",
+      "hint": "Usa un nombre único para indicar este navegador a tu agente. Al guardar, BrowserSkill se reconecta brevemente.",
+      "busyHint": "Espera a que terminen las tareas activas del navegador antes de cambiar este nombre.",
+      "instanceIdError": "Elige un nombre que no tenga el formato de un ID de instancia hexadecimal de 8 caracteres."
+    },
     "record": {
       "sectionTitle": "Grabación de acciones",
       "cardDesc": "Graba tus acciones como referencia para el agente",

@@ -263,6 +263,9 @@ Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Age
 For a specific Chrome profile, use **Copy profile instructions** in that profile's extension
 popup and send them to your agent. This pins each new session to its instance with `--browser`,
 even when only one browser is online. See [browser profile selection](docs/browser-profiles.md).
+For recurring use, set a unique **Browser name** in the same popup and select it with
+`--browser "Work profile"`. Saving briefly reconnects BrowserSkill so the daemon can use
+the new name immediately; renaming is disabled while that browser has active tasks.
 For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
 `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
 deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
