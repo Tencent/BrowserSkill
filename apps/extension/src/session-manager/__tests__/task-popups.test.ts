@@ -1,6 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { OverlayController, shouldShowAgentControlOverlay } from "@/content/overlay-controller";
 import { handleSessionStop } from "@/tools/session";
 import { handleTabBorrow, type TabManagementDeps } from "@/tools/tabs";
+import { createDisconnectCleanup } from "../disconnect-cleanup";
 import { isAgentControlledTab, SessionManager } from "../manager";
 import { withTaskPopups } from "../task-popups";
 
@@ -119,24 +121,106 @@ it.each([
   expect(f.targets.listeners.size + f.removed.listeners.size + f.detached.listeners.size).toBe(0);
 });
 
-it("preserves observed tabs and their window during actual session stop", async () => {
-  const f = await fixture();
-  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
-    input(10);
-    f.open(10, 20);
-  });
+it.each([
+  [false, false],
+  [true, false],
+  [false, true],
+  [true, true],
+])("releases observed overlays after session cleanup, remote=%s disconnect=%s", async (remote, disconnect) => {
+  const f = await fixture(remote);
+  const overlay = new OverlayController();
+  const work = withTaskPopups(
+    f.manager,
+    { session_id: "one" },
+    async (input) => {
+      input(10);
+      f.open(10, 20);
+    },
+    () => overlay.activateAgentSession("one"),
+  );
   await vi.advanceTimersByTimeAsync(100);
   await work;
+  expect(shouldShowAgentControlOverlay(overlay.snapshot())).toBe(true);
+  // Closing the home tab can activate the popup and push control again.
+  const remove = f.api.remove.getMockImplementation()!;
+  f.api.remove.mockImplementation(async (id) => {
+    await remove(id);
+    if (id === 10) overlay.activateAgentSession("one");
+  });
+  const reset = vi.mocked(f.deps.agentOverlayReset!.resetAgentOverlays);
+  reset.mockImplementation(async (_tabId, sessionId) => {
+    expect(f.manager.get(sessionId)).toBeNull();
+    overlay.resetAgentOverlays(sessionId);
+  });
+  const deps = { tabManagement: f.deps, tabsQuery: f.api };
+  if (disconnect) {
+    const cleanup = createDisconnectCleanup({ manager: f.manager, sessionStopDeps: deps });
+    expect((await cleanup()).failures).toEqual([]);
+  } else {
+    expect(await handleSessionStop(f.manager, { session_id: "one" }, deps)).toMatchObject({
+      window_released: true,
+    });
+  }
+  expect(reset).toHaveBeenCalledExactlyOnceWith(20, "one");
+  expect(shouldShowAgentControlOverlay(overlay.snapshot())).toBe(false);
+  expect(f.api.remove).toHaveBeenCalledWith(10);
+  expect(f.api.remove).not.toHaveBeenCalledWith(20);
+  expect(f.removeWindow).not.toHaveBeenCalledWith(10);
+  expect(f.tabs.has(20)).toBe(true);
+});
+
+it.each([
+  false,
+  true,
+])("overlay message failure does not prevent stop, queryFails=%s", async (queryFails) => {
+  const f = await fixture();
+  f.task.observedTabs = new Set([20]);
+  f.tabs.set(20, { id: 20, windowId: 10 } as chrome.tabs.Tab);
+  if (queryFails) f.api.query.mockRejectedValueOnce(new Error("temporary query failure"));
+  // Exercise production fallback wiring, without the injected reset API.
+  const sendMessage = vi.fn().mockRejectedValue(new Error("Receiving end does not exist"));
+  Object.assign(f.api, { sendMessage });
   const result = await handleSessionStop(
     f.manager,
     { session_id: "one" },
-    { tabManagement: f.deps, tabsQuery: f.api },
+    {
+      tabManagement: { ...f.deps, agentOverlayReset: undefined },
+      tabsQuery: f.api,
+    },
   );
   expect(result).toMatchObject({ window_released: true });
-  expect(f.api.remove).toHaveBeenCalledWith(10);
-  expect(f.api.remove).not.toHaveBeenCalledWith(20);
-  expect(f.removeWindow).not.toHaveBeenCalled();
+  expect(f.manager.get("one")).toBeNull();
   expect(f.tabs.has(20)).toBe(true);
+  expect(sendMessage).toHaveBeenCalledWith(20, {
+    type: "bh-agent-overlay-reset",
+    sessionId: "one",
+  });
+});
+
+it("does not wait for an unresponsive overlay receiver after releasing the session", async () => {
+  const f = await fixture();
+  f.task.observedTabs = new Set([20]);
+  f.tabs.set(20, { id: 20, windowId: 10 } as chrome.tabs.Tab);
+  const response = deferred<void>();
+  vi.mocked(f.deps.agentOverlayReset!.resetAgentOverlays).mockReturnValue(response.promise);
+  let completed = false;
+  const stop = handleSessionStop(
+    f.manager,
+    { session_id: "one" },
+    {
+      tabManagement: f.deps,
+      tabsQuery: f.api,
+    },
+  ).then((result) => {
+    completed = true;
+    return result;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  const completedBeforeReply = completed;
+  response.resolve();
+  expect(await stop).toMatchObject({ window_released: true });
+  expect(completedBeforeReply).toBe(true);
+  expect(f.manager.get("one")).toBeNull();
 });
 
 it("does not monitor action preparation or long work without native input", async () => {
@@ -399,4 +483,5 @@ it("preserves observed tabs and their window when the final tab query fails", as
   expect(f.api.remove).not.toHaveBeenCalledWith(20);
   expect(f.tabs.has(20)).toBe(true);
   expect(f.manager.get("one")).toBeNull();
+  expect(f.deps.agentOverlayReset!.resetAgentOverlays).toHaveBeenCalledWith(20, "one");
 });
