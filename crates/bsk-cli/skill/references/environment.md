@@ -1,6 +1,20 @@
 # Before starting a session
 
+## CLI availability
+
+If `bsk` is not found, check `PATH` and existing installations before installing it.
+The official installers default to `~/.local/bin` (`bsk.exe` on Windows); check
+`BSK_INSTALL_DIR` for a custom location. Reuse an existing installation by fixing
+`PATH` or using the executable's absolute path. If the CLI is missing, follow the
+[installation guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md)
+on the Agent's machine. After installation or a path fix, verify the executable
+with `bsk --version` (or its absolute path with `--version`).
+
+## Remote connection
+
 For remote setup or pairing, follow the [remote guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/remote-extension-connection.md).
+
+## Local daemon startup
 
 Local commands normally auto-start the daemon. If the host terminates background
 children after each shell call, including on Windows, complete these steps first:
@@ -29,3 +43,13 @@ Use the same `BSK_HOME` and `BSK_AUTO_START=0` on EVERY sandboxed command;
 environment settings may not persist between shell calls. Keep browser commands
 sandboxed. For other startup failures, retry once, then use `bsk doctor`.
 A local process identity warning permits browser commands when IPC works.
+
+## Extension connection
+
+If the intended extension is still disconnected after the applicable setup above,
+run `bsk doctor` on the Agent's machine using the same daemon environment and
+follow its failure hints. A disconnected extension does not prove it is missing.
+If installation or browser-side connection steps are needed, direct the user to
+the [extension setup guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md#4-connect-the-browser-extension).
+After setup or repair, rerun `bsk doctor` with the same environment and address
+any remaining `fail` checks before starting a session.

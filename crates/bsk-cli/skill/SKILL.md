@@ -20,10 +20,11 @@ advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 - If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
   before starting. Verify its instance mapping, bind every new session explicitly,
   and never substitute another instance or omit the selector to recover.
-- Commands normally auto-start the daemon. If the host cleans up background children,
-  read [environment setup](references/environment.md) before any session command.
-  Also read it for remote pairing or startup failures. Never restart a shared daemon
-  or delete runtime files to recover.
+- Installing this skill does not install the `bsk` CLI or browser extension.
+  For a missing CLI, startup or connection failure, or remote pairing, read
+  [environment setup](references/environment.md). Commands normally auto-start the
+  daemon; if the host cleans up background children, read that guide before any
+  session command. Never restart a shared daemon or delete runtime files to recover.
 - Borrow confirmation and human help follow the extension's Automation settings.
   Never change settings or switch browser backends to bypass them.
 
@@ -115,7 +116,7 @@ A task may need more than one reference as it progresses.
 | --- | --- |
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Sandboxed daemon startup, connection failure, or remote pairing | [Environment](references/environment.md) |
+| Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
 | Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Upload or download | [Files](references/files.md) |
