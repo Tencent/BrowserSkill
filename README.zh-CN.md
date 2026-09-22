@@ -131,25 +131,37 @@ bsk install-skill
 即使未检测到该 harness，也可显式选择。单独使用 `--yes` 会安装到所有检测到的 harness，
 一个也未检测到时会报错。
 
-安装自定义指令可运行 `bsk install-skill --harness cursor --source ./SKILL.md`。
-显式指定 `--source` 的安装始终视为自定义，即使内容与内置 skill 相同。
+安装器会复制完整技能包：`SKILL.md` 和 `references/`。入口保留核心流程与安全规则，
+Agent 只在任务需要时读取对应参考文件。
+
+安装自定义技能包可运行 `bsk install-skill --harness cursor --source ./my-skill`，
+目录中必须包含 `SKILL.md`；原来的单文件 `--source ./SKILL.md` 方式仍可使用。
+显式指定的来源路径可以是符号链接；目录包内部和安装目标的资源路径仍拒绝符号链接。
+显式指定 `--source` 始终视为自定义，即使内容与内置技能包相同。
 已有安装默认跳过，添加 `--force` 才会覆盖。
 
-daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只有文件内容仍与
-上次安装或同步时的内容一致，才继续自动更新。检测到本地编辑时会保留文件并暂停更新。
-没有内容基线的历史安装，只有与当前内置 skill 字节级一致时才自动纳入管理；此时只补齐
-来源标记，不重写 `SKILL.md`。明确的自定义安装即使内容相同，也不会被自动纳入管理。
+daemon 启动、`session start` 和 `doctor` 会检查已安装的技能包：所有受管理文件仍与
+记录的校验值一致，才会自动更新。修改或删除 `SKILL.md`、任一 reference 都会暂停整个
+技能包的更新。用户额外添加的文件会保留；新增资源遇到同名且内容不同的文件时，也会
+暂停更新。已废弃且未被修改的受管理资源会删除。更新中断后，使用同一版本技能包且未
+发现本地修改时，会继续完成更新。
 
-对于内容不同的历史文件、本地编辑或无法识别的来源标记，`doctor` 会显示 `WARN`，
-说明暂停原因及恢复方法。这类警告不会让健康检查失败（`--json` 中为 `status: "warn"`、
-`ok: true`）。其他安装或同步正在进行时，本次同步会推迟到后续再试。
+带有效校验值的旧单文件安装会自动迁移；更早没有校验值的安装，内容与已知官方历史版本
+（LF 或 CRLF 行尾）或当前入口完全一致时也会迁移。显式自定义安装始终保持自定义。无法识别的历史内容、
+本地修改、无效标记或其他版本未完成的更新，会让 `doctor` 显示 `WARN` 并给出恢复方法，
+但不会使健康检查失败（`--json` 中为 `status: "warn"`、`ok: true`）。其他安装或同步正在
+进行时，本次同步会推迟到后续再试。
 
-如需将当前指令保留为明确的自定义安装，运行
-`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`，将
-`<existing-SKILL.md>` 替换为现有文件路径。如需恢复内置 skill 并重新启用自动更新，运行
-`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖现有指令。
+如需将当前技能包保留为明确的自定义安装，运行
+`bsk install-skill --harness cursor --source <existing-skill-directory> --force`。
+如需恢复内置技能包并重新启用自动更新，运行
+`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖内置技能包
+提供的文件，包括 references。采用上一版校验值机制的 CLI 无法识别新的包标记，因此会保留这些安装，不会覆盖。
 
-其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。DeepSeek Harness 走独立插件，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
+其他支持 Shell 的 Agent harness 可手动将整个
+[`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) 目录复制到对应 skills 目录，命名为
+`browser-skill/`，保留 `references/`。通用版只维护这一套源文件。
+DeepSeek Harness 使用插件内独立的技能包，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
 
 #### 4. 验证连接
 
@@ -307,7 +319,7 @@ Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；
 - `crates/bsk-cli` — `bsk` CLI 与本地 daemon
 - `crates/bsk-protocol` — 共享协议类型与 JSON Schema
 - `apps/extension` — 浏览器扩展
-- `packages/ui` 和 [`packages/i18n`](packages/i18n/README.md) — 扩展 UI 共享支持，包含英文、简体中文和韩语本地化
+- `packages/ui` 和 [`packages/i18n`](packages/i18n/README.md) — 扩展 UI 共享支持，包含英文、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语本地化
 - `packages/dsh-plugin-browserskill` — DeepSeek Harness 插件（`@wxg-prc-cpg/browser-skill-dsh-plugin`）
 - [`evals/browser`](evals/browser/README.zh-CN.md) — 确定性本地页面与 Agent 无关的浏览器能力测试台
 

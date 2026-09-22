@@ -280,6 +280,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolScreenshotRead
                 | Method::ToolScreenshotRelease
                 | Method::ToolConsole
+                | Method::ToolDebug
                 | Method::ToolNetwork
                 | Method::ToolSnapshot
                 | Method::ToolObserve
@@ -371,7 +372,9 @@ async fn handle_tool_dispatch(
     // page state before asking the user, or from cleanly tearing down the
     // session. Classification lives on `Method::effect()` so adding a new
     // tool variant requires an explicit classification call.
-    if method.requires_interrupt_gate() && state.session_interrupts.try_consume(&session_id) {
+    if method.requires_interrupt_gate_with_params(&params)
+        && state.session_interrupts.try_consume(&session_id)
+    {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::UserAborted,
             message: "tool dispatch rejected: pending user interrupt. The user explicitly requested to stop. Ask the user how to proceed before issuing further actions.".into(),
@@ -392,6 +395,43 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    if method == Method::ToolDebug
+        && matches!(
+            params.get("action").and_then(Value::as_str),
+            Some("activity" | "wait")
+        )
+    {
+        let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
+            Ok(value) => value,
+            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+        };
+        if p.wait_ms.is_some_and(|ms| ms > 60000)
+            || p.command_id.as_ref().is_some_and(|id| id.len() > 200)
+        {
+            return ResponseBody::Err(invalid_params(
+                "wait_ms must be 0..60000; command_id up to 200 characters",
+            ));
+        }
+        let activity = if p.action == bsk_protocol::tools::DebugAction::Activity {
+            state.tool_queues.activity(&session_id)
+        } else {
+            state
+                .tool_queues
+                .wait_idle(
+                    &session_id,
+                    p.command_id.as_deref(),
+                    p.wait_ms.unwrap_or(10000),
+                    inflight_guard.entry().cancel_token(),
+                )
+                .await
+        };
+        return match activity {
+            Ok(activity) => ResponseBody::Ok(
+                serde_json::json!({"session_id": session_id.0, "activity":activity}),
+            ),
+            Err(error) => ResponseBody::Err(error.into_rpc()),
+        };
+    }
     let audit_id = params.get("_audit_id").cloned();
     let mut params = params;
     if method == Method::ToolTabBorrow {
@@ -531,7 +571,17 @@ async fn handle_tool_dispatch(
                     .transfers
                     .release(TransferIdParams { transfer_id: id });
             }
-            ResponseBody::Err(err.into_rpc())
+            let busy = matches!(err, DispatchError::SessionBusy);
+            let mut error = err.into_rpc();
+            if busy {
+                error.data = Some(serde_json::json!({
+                    "reason": crate::rpc_reason::SESSION_BUSY,
+                    "dispatched": false,
+                    "activity": state.tool_queues.activity(&session_id).ok(),
+                    "wait": { "action": "wait", "session_id": session_id.0, "wait_ms": 10000 },
+                }));
+            }
+            ResponseBody::Err(error)
         }
     }
 }

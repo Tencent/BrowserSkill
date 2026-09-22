@@ -1,3 +1,5 @@
+import type { DebugManager, DebugTicket } from "@/debug/manager";
+import type { DebugParams } from "@/debug/types";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
@@ -45,6 +47,7 @@ import { isRequestFrame } from "@/transport/types";
 import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
+import { handleDebug } from "./debug";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
@@ -130,6 +133,7 @@ interface HoverLatchScope {
 }
 
 export interface DispatcherDeps {
+  debug?: DebugManager;
   transport: Transport;
   sessions: SessionManager;
   cdp?: DispatcherCdpRunner;
@@ -169,6 +173,7 @@ export interface DispatcherDeps {
  * takes the fast path.
  */
 export class ToolDispatcher {
+  private readonly debug?: DebugManager;
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
   private screenshotExports: ScreenshotExports;
@@ -194,6 +199,7 @@ export class ToolDispatcher {
   readonly inflightAbortControllers = new Map<string, AbortController>();
 
   constructor(deps: DispatcherDeps) {
+    this.debug = deps.debug;
     this.transport = deps.transport;
     this.sessions = deps.sessions;
     this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
@@ -238,6 +244,7 @@ export class ToolDispatcher {
   }
 
   stop(): void {
+    this.debug?.dispose();
     this.subscription?.dispose();
     this.subscription = null;
     // Trip every outstanding controller so dependent waits unblock
@@ -292,6 +299,7 @@ export class ToolDispatcher {
     this.inflightAbortControllers.set(req.id, ac);
     let body: ResponseFrame;
     let startedSession: string | null = null;
+    let debugTicket: DebugTicket | undefined;
     try {
       if (startsSession && this.idleOperationInProgress) {
         throw new Error("Browser settings are updating; retry session start.");
@@ -305,7 +313,15 @@ export class ToolDispatcher {
       } catch {
         /* The daemon still has the original operation metadata. */
       }
+      try {
+        debugTicket = await this.debug?.before(req, ac.signal);
+      } catch {
+        /* Evidence must not block the operation. */
+      }
+      throwIfDispatchAborted(ac.signal);
       const result = await this.invoke(req, ac.signal);
+      this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
+      debugTicket = undefined;
       if (isRpcError(result)) {
         body = { id: req.id, error: classifyCdpError(result) };
       } else {
@@ -331,6 +347,7 @@ export class ToolDispatcher {
       }
     } finally {
       if (startsSession) this.pendingSessionStarts -= 1;
+      this.debug?.after(debugTicket, "operation failed");
       this.inflightAbortControllers.delete(req.id);
     }
     let sent = true;
@@ -365,7 +382,10 @@ export class ToolDispatcher {
         console.warn("[bsk dispatcher] session rollback after send failure failed", rollbackErr);
       }
     }
-    if (mutatesSessions) this.onSessionsChanged?.();
+    if (mutatesSessions) {
+      this.debug?.sync();
+      this.onSessionsChanged?.();
+    }
   }
 
   private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
@@ -391,12 +411,26 @@ export class ToolDispatcher {
     );
     if (preparationError) return preparationError;
     switch (req.method) {
+      case "tool.debug":
+        if (!this.debug)
+          return {
+            code: "unsupported",
+            message: "Website debugging requires a compatible extension",
+          };
+        return handleDebug(
+          this.sessions,
+          req.params as DebugParams,
+          this.debug,
+          chromeTabsApi,
+          signal,
+        );
       case "tool.session_start":
         return handleSessionStart(this.sessions, req.params as SessionStartParams, {
           signal,
           preferences: this.interactionPreferences,
         });
       case "tool.session_stop": {
+        this.debug?.releaseSession((req.params as SessionStopParams).session_id);
         await this.screenshotExports.releaseSession((req.params as SessionStopParams).session_id);
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
@@ -445,6 +479,7 @@ export class ToolDispatcher {
           signal,
           cdp: this.cdp,
           beforeReturn: async (sessionId, tabId) => {
+            this.debug?.stopTab(tabId);
             if (this.sessions.get(sessionId)?.remote) clearRecordingForSession(sessionId);
             await this.releaseHoverLatch(sessionId, tabId);
           },
@@ -941,6 +976,12 @@ function recordingRuntimeUnavailable(): RpcError {
 }
 
 function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
+  if (req.method === "tool.debug") {
+    const params = req.params as DebugParams | undefined;
+    return params && ["rule_add", "rule_enable", "replay"].includes(params.action)
+      ? params.session_id
+      : null;
+  }
   switch (req.method) {
     case "tool.tab_create":
     case "tool.tab_close":

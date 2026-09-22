@@ -1,4 +1,4 @@
-//! `bsk install-skill` — install browser-skill SKILL.md into agent harnesses.
+//! `bsk install-skill` — install the complete browser-skill package into agent harnesses.
 
 use std::io::{self, IsTerminal};
 use std::path::PathBuf;
@@ -34,7 +34,7 @@ pub struct InstallSkillArgs {
     #[arg(long, short = 'y')]
     pub yes: bool,
 
-    /// Path to a `SKILL.md` to install instead of the bundled skill.
+    /// Path to a skill directory (with SKILL.md and resources), or a single SKILL.md.
     #[arg(long, value_name = "PATH")]
     pub source: Option<PathBuf>,
 

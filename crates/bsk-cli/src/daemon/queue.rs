@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bsk_protocol::tools::DebugActivity;
 use bsk_protocol::{ErrorCode, Frame, Method, RequestFrame, ResponseBody, RpcError, RpcId};
 use rand::Rng;
 use serde_json::Value;
@@ -172,6 +173,7 @@ impl DispatchError {
 #[derive(Debug, Default)]
 struct QueueState {
     busy: bool,
+    active: Option<DebugActivity>,
 }
 
 fn session_busy_rpc() -> RpcError {
@@ -185,6 +187,7 @@ fn session_busy_rpc() -> RpcError {
 fn clear_busy(state: &Mutex<QueueState>) {
     let mut guard = state.lock().expect("queue state poisoned");
     guard.busy = false;
+    guard.active = None;
 }
 
 #[derive(Debug)]
@@ -319,6 +322,17 @@ impl ToolQueueRegistry {
                 return Err(DispatchError::SessionBusy);
             }
             queue_state.busy = true;
+            queue_state.active = Some(DebugActivity {
+                state: "running".into(),
+                command_id: inflight.as_ref().map(|entry| entry.cli_rpc_id.clone()),
+                method: serde_json::to_value(&method)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned)),
+                started_at: Some(epoch_ms()),
+                elapsed_ms: Some(0),
+                wait_complete: None,
+                wait_timed_out: None,
+            });
             (entry.sender.clone(), Arc::clone(&entry.state))
         };
         self.sessions.touch(sid);
@@ -341,6 +355,53 @@ impl ToolQueueRegistry {
         // on a later sweep rather than interrupting the tool.
         self.sessions.touch(sid);
         outcome
+    }
+
+    pub fn activity(&self, sid: &SessionId) -> Result<DebugActivity, DispatchError> {
+        let queues = self.queues.lock().expect("tool queue registry poisoned");
+        let entry = queues.get(sid).ok_or(DispatchError::SessionNotFound)?;
+        let state = entry.state.lock().expect("queue state poisoned");
+        let mut activity = state.active.clone().unwrap_or(DebugActivity {
+            state: if state.busy { "running" } else { "idle" }.into(),
+            command_id: None,
+            method: None,
+            started_at: None,
+            elapsed_ms: None,
+            wait_complete: None,
+            wait_timed_out: None,
+        });
+        if !entry.accepting {
+            activity.state = "stopping".into();
+        }
+        activity.elapsed_ms = activity
+            .started_at
+            .map(|start| epoch_ms().saturating_sub(start));
+        Ok(activity)
+    }
+
+    pub async fn wait_idle(
+        &self,
+        sid: &SessionId,
+        command_id: Option<&str>,
+        milliseconds: u32,
+        cancel: AbortToken,
+    ) -> Result<DebugActivity, DispatchError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(milliseconds.into());
+        loop {
+            let mut activity = self.activity(sid)?;
+            let settled = activity.state == "idle"
+                || command_id.is_some_and(|id| activity.command_id.as_deref() != Some(id));
+            let expired = tokio::time::Instant::now() >= deadline;
+            if settled || expired {
+                activity.wait_complete = Some(settled);
+                activity.wait_timed_out = Some(!settled);
+                return Ok(activity);
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => return Err(DispatchError::Rpc(RpcError { code: ErrorCode::Cancelled, message: "execution wait cancelled; original command unchanged".into(), data: None })),
+                _ = tokio::time::sleep_until((tokio::time::Instant::now() + Duration::from_millis(100)).min(deadline)) => {},
+            }
+        }
     }
 
     /// Forward a tool RPC to the extension without taking the
@@ -1407,4 +1468,11 @@ mod dispatch_unlocked_tests {
         // No session row → forward_one returns NotFound as Rpc.
         assert!(matches!(unlocked, Err(DispatchError::Rpc(_))));
     }
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }

@@ -398,23 +398,46 @@ fn command_exists(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// Serializes every test in this module that reads or writes
-    /// `HERMES_HOME` or `KIMI_CODE_HOME`. libtest runs tests on parallel
-    /// threads, where one thread's `set_var` races another's `getenv`.
-    /// Tests elsewhere in the crate reach these variables only by iterating
-    /// `HarnessId::ALL` and never assert on the resolved home.
-    fn harness_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        &LOCK
+    /// Run environment-sensitive assertions in their own process. Each child
+    /// receives controlled paths; parallel tests never mutate the host environment
+    /// or accidentally inspect/create a real Windows Hermes installation.
+    fn in_harness_environment(
+        test: &str,
+        configure: impl FnOnce(&mut std::process::Command, &Path),
+    ) -> bool {
+        if std::env::var("BSK_HARNESS_TEST_CASE").as_deref() == Ok(test) {
+            return true;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                &format!("skill_install::harness::tests::{test}"),
+                "--nocapture",
+            ])
+            .env("BSK_HARNESS_TEST_CASE", test)
+            .env("BSK_HARNESS_TEST_HOME", root.path())
+            .env_remove("HERMES_HOME")
+            .env_remove("KIMI_CODE_HOME")
+            .env_remove("LOCALAPPDATA");
+        configure(&mut command, root.path());
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{test}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
     }
 
-    /// Takes [`harness_env_lock`], ignoring poisoning left by an unrelated
-    /// test failure: the guarded state is the process environment, which each
-    /// writer restores before returning.
-    fn lock_harness_env() -> std::sync::MutexGuard<'static, ()> {
-        harness_env_lock()
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+    fn hermes_default_home(home: &Path) -> PathBuf {
+        if cfg!(windows) {
+            home.join("AppData/Local/hermes")
+        } else {
+            home.join(".hermes")
+        }
     }
 
     #[test]
@@ -451,8 +474,9 @@ mod tests {
 
     #[test]
     fn skills_dirs_match_harness_spec() {
-        // Resolves Hermes and Kimi Code through their environment overrides.
-        let _env = lock_harness_env();
+        if !in_harness_environment("skills_dirs_match_harness_spec", |_, _| {}) {
+            return;
+        }
         let home = Path::new("/home/user");
         assert_eq!(
             HarnessId::Codex.skills_dir_for_home(home),
@@ -484,7 +508,7 @@ mod tests {
         );
         assert_eq!(
             HarnessId::Hermes.skills_dir_for_home(home),
-            PathBuf::from("/home/user/.hermes/skills")
+            hermes_default_home(home).join("skills")
         );
         assert_eq!(
             HarnessId::KimiCode.skills_dir_for_home(home),
@@ -494,7 +518,9 @@ mod tests {
 
     #[test]
     fn detects_kimi_code_from_home_layout() {
-        let _env = lock_harness_env();
+        if !in_harness_environment("detects_kimi_code_from_home_layout", |_, _| {}) {
+            return;
+        }
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path();
         std::fs::create_dir_all(home.join(".kimi-code")).unwrap();
@@ -507,28 +533,19 @@ mod tests {
 
     #[test]
     fn kimi_code_skills_dir_honors_kimi_code_home_env() {
-        let _env = lock_harness_env();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let custom = tmp.path().join("custom-kimi-code");
-        std::fs::create_dir_all(&custom).unwrap();
-        let previous = std::env::var("KIMI_CODE_HOME").ok();
-        // SAFETY: holds `harness_env_lock`, which every test in this module
-        // that reads or writes KIMI_CODE_HOME also takes, so no sibling test
-        // calls `getenv` on it while this override is installed.
-        unsafe {
-            std::env::set_var("KIMI_CODE_HOME", &custom);
+        if !in_harness_environment(
+            "kimi_code_skills_dir_honors_kimi_code_home_env",
+            |command, home| {
+                command.env("KIMI_CODE_HOME", home.join("custom-kimi-code"));
+            },
+        ) {
+            return;
         }
-        let home = Path::new("/home/user");
+        let home = PathBuf::from(std::env::var_os("BSK_HARNESS_TEST_HOME").unwrap());
         assert_eq!(
-            HarnessId::KimiCode.skills_dir_for_home(home),
-            custom.join("skills")
+            HarnessId::KimiCode.skills_dir_for_home(&home),
+            home.join("custom-kimi-code/skills")
         );
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("KIMI_CODE_HOME", value),
-                None => std::env::remove_var("KIMI_CODE_HOME"),
-            }
-        }
     }
 
     #[test]
@@ -556,39 +573,67 @@ mod tests {
 
     #[test]
     fn detects_hermes_from_home_layout() {
-        // Resolves the Hermes home through HERMES_HOME.
-        let _env = lock_harness_env();
+        if !in_harness_environment("detects_hermes_from_home_layout", |_, _| {}) {
+            return;
+        }
         let tmp = tempfile::TempDir::new().unwrap();
         let home = tmp.path();
-        std::fs::create_dir_all(home.join(".hermes")).unwrap();
+        let hermes_home = hermes_default_home(home);
+        std::fs::create_dir_all(&hermes_home).unwrap();
         let report = HarnessId::Hermes.report_for_home(home);
         assert!(report.detected);
-        assert_eq!(report.skills_dir, home.join(".hermes").join("skills"));
+        assert_eq!(report.skills_dir, hermes_home.join("skills"));
+        let label = if cfg!(windows) {
+            "%LOCALAPPDATA%\\hermes"
+        } else {
+            "~/.hermes"
+        };
+        assert!(report.detection_detail.unwrap().contains(label));
     }
 
     #[test]
     fn hermes_skills_dir_honors_hermes_home_env() {
-        let _env = lock_harness_env();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let custom = tmp.path().join("custom-hermes");
+        if !in_harness_environment(
+            "hermes_skills_dir_honors_hermes_home_env",
+            |command, home| {
+                command.env("HERMES_HOME", home.join("custom-hermes"));
+                command.env("LOCALAPPDATA", home.join("local-data"));
+            },
+        ) {
+            return;
+        }
+        let home = PathBuf::from(std::env::var_os("BSK_HARNESS_TEST_HOME").unwrap());
+        let custom = home.join("custom-hermes");
         std::fs::create_dir_all(&custom).unwrap();
-        let previous = std::env::var("HERMES_HOME").ok();
-        // SAFETY: holds `harness_env_lock`, which every test in this module
-        // that reads or writes HERMES_HOME also takes, so no sibling test
-        // calls `getenv` on it while this override is installed.
-        unsafe {
-            std::env::set_var("HERMES_HOME", &custom);
+        let report = HarnessId::Hermes.report_for_home(&home);
+        assert_eq!(report.skills_dir, custom.join("skills"));
+        assert!(report.detected);
+        assert!(report.detection_detail.unwrap().contains("$HERMES_HOME"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn hermes_windows_uses_local_app_data_when_override_is_blank() {
+        if !in_harness_environment(
+            "hermes_windows_uses_local_app_data_when_override_is_blank",
+            |command, home| {
+                command.env("HERMES_HOME", "  ");
+                command.env("LOCALAPPDATA", home.join("local-data"));
+            },
+        ) {
+            return;
         }
-        let home = Path::new("/home/user");
-        assert_eq!(
-            HarnessId::Hermes.skills_dir_for_home(home),
-            custom.join("skills")
+        let home = PathBuf::from(std::env::var_os("BSK_HARNESS_TEST_HOME").unwrap());
+        let hermes_home = home.join("local-data/hermes");
+        std::fs::create_dir_all(&hermes_home).unwrap();
+        let report = HarnessId::Hermes.report_for_home(&home);
+        assert_eq!(report.skills_dir, hermes_home.join("skills"));
+        assert!(report.detected);
+        assert!(
+            report
+                .detection_detail
+                .unwrap()
+                .contains("%LOCALAPPDATA%\\hermes")
         );
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("HERMES_HOME", value),
-                None => std::env::remove_var("HERMES_HOME"),
-            }
-        }
     }
 }

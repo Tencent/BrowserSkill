@@ -67,6 +67,36 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
+  it("adds only a current-task section and keeps existing home controls accessible", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connected" },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    const create = vi.fn();
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({
+          ok: true,
+          data: {
+            tasks: [{ session_id: "s1", created_at: 1000, tab_id: 7, title: "Save fails" }],
+          },
+        }),
+        getURL: (file: string) => `chrome-extension://own/${file}`,
+      },
+      tabs: { create },
+    });
+    render(<App />);
+    expect(await screen.findByText("当前任务")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "BrowserSkill 连接" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "借用标签页前确认" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "允许请求人工协助" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "快捷功能" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Save fails/ }));
+    expect(create).toHaveBeenCalledWith({ url: "chrome-extension://own/debug.html?session=s1" });
+  });
+
   it("shows status label without helper subtitle", () => {
     render(<App />);
 

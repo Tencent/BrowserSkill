@@ -16,12 +16,18 @@ Keep these identifiers aligned so dsh can load both halves of the plugin.
 Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
 official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
 resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
-tool. Its single source is the DSH-specific `skill/SKILL.md`, which documents only structured
-`browser_*` calls and their plugin semantics. The repository-root CLI skill is intentionally not
+tool. Its source is the DSH-specific `skill/` directory: a compact `SKILL.md` plus
+conditional details in `references/`. Both document only structured `browser_*` calls
+and their plugin semantics. The crate-local CLI skill is intentionally not
 concatenated: its command examples belong to a different execution interface and would bypass
 the plugin's ownership, live observation UI, cancellation, and cleanup path if followed directly.
 The build rejects internal CLI-name leakage, command-line code blocks, unknown browser tools, and
-missing supported browser tools before embedding the Markdown. Registration and every pre-step
+missing supported browser tools across the entire package, and checks local links and the
+entry point budget before embedding only `SKILL.md`. The npm package includes `skill/`
+and registration supplies its module-relative `resourceBase`; the harness renders this
+base directory when loading the skill, so references resolve independently of `cwd`.
+`node scripts/check-dsh-package.mjs` from the repository root verifies the built npm
+archive and resource resolution from an unrelated working directory. Registration and every pre-step
 catalog snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
 seam degrade silently.
 
