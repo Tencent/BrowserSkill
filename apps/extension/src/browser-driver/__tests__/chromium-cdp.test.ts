@@ -241,7 +241,7 @@ describe("ChromiumCdp", () => {
     vi.useFakeTimers();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "debug").mockImplementation(() => {});
-    const { api } = fakeApi();
+    const { api, onEvent } = fakeApi();
     let finish!: (value: unknown) => void;
     vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
       if (method === "DOMSnapshot.captureSnapshot")
@@ -259,11 +259,15 @@ describe("ChromiumCdp", () => {
       await vi.advanceTimersByTimeAsync(20_000);
       await first;
       await expect(cdp.send(4, "Accessibility.getFullAXTree")).rejects.toThrow(
-        "still running in the renderer",
+        "still pending in Chrome",
       );
       await expect(cdp.send(4, "Runtime.evaluate", { expression: "1" })).rejects.toThrow(
-        "still running",
+        "still pending in Chrome",
       );
+      // Navigation is allowed, but its event must not release a pending read.
+      await cdp.send(4, "Page.navigate", { url: "https://example.test/next" });
+      onEvent.fire({ tabId: 4 }, "Page.frameNavigated", { frame: { id: "main" } });
+      await expect(cdp.send(4, "Page.getLayoutMetrics")).rejects.toThrow("still pending in Chrome");
       await expect(cdp.send(5, "Accessibility.getFullAXTree")).resolves.toEqual({});
       expect(reads()).toHaveLength(1);
       finish({ documents: [] });

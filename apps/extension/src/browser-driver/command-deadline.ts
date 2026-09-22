@@ -22,10 +22,11 @@ const READ_COMMANDS = new Set([...RENDERER_READS, "Target.setAutoAttach"]);
 export const READ_TIMEOUT_MS = 10_000;
 export const CAPTURE_READ_TIMEOUT_MS = 20_000;
 const SLOW_COMMAND_MS = 2_000;
-/** `data.reason` reported to gateways for a renderer that stopped answering. */
+/** Compatibility reason for bounded CDP reads, including browser-side attach
+ * and reads refused behind a pending command. `phase` distinguishes these. */
 export const RENDERER_READ_TIMEOUT: RpcErrorReason = "renderer_read_timeout";
 const RECOVERY =
-  "Do not repeat the same read on this tab; switch tab, navigate elsewhere, or finish the turn and report the unresponsive page.";
+  "Do not retry reads on this tab while the earlier command is pending. Navigation alone does not clear the read gate; it reopens when the command settles or its debugger session detaches. Use another tab or report the unavailable read.";
 
 export function isRendererRead(method: string): boolean {
   return RENDERER_READS.has(method);
@@ -50,10 +51,11 @@ const GUARDED_READS = new Set([
 
 export class CdpReadTimeoutError extends Error {
   constructor(
-    method: string,
+    readonly method: string,
     readonly tabId: number | undefined,
     timeout: number,
     readonly sessionId?: string,
+    readonly phase: "deadline" | "blocked" = "deadline",
   ) {
     super(
       `Browser read ${method} timed out after ${timeout}ms (tab ${tabId}); the ${isRendererRead(method) ? "renderer" : "browser"} is not answering. ${RECOVERY}`,
@@ -68,16 +70,31 @@ export class CdpReadTimeoutError extends Error {
     tabId: number | undefined,
     sessionId?: string,
   ): CdpReadTimeoutError {
-    const error = new CdpReadTimeoutError(method, tabId, 0, sessionId);
-    error.message = `Browser read ${method} refused: an earlier read on tab ${tabId} is still running in the renderer. ${RECOVERY}`;
+    const error = new CdpReadTimeoutError(method, tabId, 0, sessionId, "blocked");
+    error.message = `Browser read ${method} refused: an earlier read on tab ${tabId} is still pending in Chrome. ${RECOVERY}`;
     return error;
   }
 }
 
-/** RPC error details for a timed-out renderer read; empty for other errors. */
+/** Retain the existing reason while distinguishing deadlines from refused reads. */
 export function readTimeoutDetails(error: unknown): { data?: RpcErrorData } {
   return error instanceof Error && error.name === "CdpReadTimeoutError"
-    ? { data: { reason: RENDERER_READ_TIMEOUT } }
+    ? {
+        data: {
+          reason: RENDERER_READ_TIMEOUT,
+          ...(error instanceof CdpReadTimeoutError
+            ? {
+                phase: error.phase,
+                method: error.method,
+                ...(error.phase === "deadline"
+                  ? {
+                      process: error.method === "Target.setAutoAttach" ? "browser" : "renderer",
+                    }
+                  : {}),
+              }
+            : {}),
+        },
+      }
     : {};
 }
 

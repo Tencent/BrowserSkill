@@ -103,9 +103,16 @@ it("handles a late rejection of a timed-out read without an unhandled rejection"
 it("reports a renderer read timeout with a gateway-readable reason", () => {
   expect(
     readTimeoutDetails(new CdpReadTimeoutError("DOMSnapshot.captureSnapshot", 4, READ_TIMEOUT_MS)),
-  ).toEqual({ data: { reason: RENDERER_READ_TIMEOUT } });
+  ).toEqual({
+    data: {
+      reason: RENDERER_READ_TIMEOUT,
+      phase: "deadline",
+      method: "DOMSnapshot.captureSnapshot",
+      process: "renderer",
+    },
+  });
   expect(readTimeoutDetails(CdpReadTimeoutError.stillPending("Page.getLayoutMetrics", 4))).toEqual({
-    data: { reason: RENDERER_READ_TIMEOUT },
+    data: { reason: RENDERER_READ_TIMEOUT, phase: "blocked", method: "Page.getLayoutMetrics" },
   });
   expect(readTimeoutDetails(new Error("boom"))).toEqual({});
 });
@@ -242,4 +249,22 @@ it("isolates child gates and fences late completions across attachment replaceme
   expect(send).toHaveBeenCalledTimes(2);
   gate.reset(4, "child");
   await gate.run(child, "Page.getLayoutMetrics", send);
+});
+
+it("distinguishes browser deadlines from refused reads and describes actual recovery", () => {
+  const timeout = new CdpReadTimeoutError("Target.setAutoAttach", 4, READ_TIMEOUT_MS);
+  expect(readTimeoutDetails(timeout)).toEqual({
+    data: {
+      reason: RENDERER_READ_TIMEOUT,
+      phase: "deadline",
+      method: "Target.setAutoAttach",
+      process: "browser",
+    },
+  });
+  expect(timeout.message).toContain("the browser is not answering");
+  const blocked = CdpReadTimeoutError.stillPending("Runtime.evaluate", 4);
+  expect(blocked.message).toContain("pending in Chrome");
+  expect(blocked.message).not.toContain("running in the renderer");
+  expect(blocked.message).toContain("Navigation alone does not clear the read gate");
+  expect(blocked.message).toContain("command settles or its debugger session detaches");
 });

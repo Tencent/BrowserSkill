@@ -69,6 +69,57 @@ export async function normalizeDocument(
     }
     const node = decoded.nodes[i];
     const bounds = node.layout?.bounds ?? [];
+    const visibility = node.layout?.styles.visibility || "visible";
+    const opacity = node.layout?.styles.opacity || "1";
+    nodes.push({
+      ...node,
+      ...(context.frameId ? { frameId: context.frameId } : {}),
+      ownerFrameBackendNodeId: context.ownerFrameBackendNodeId,
+      localRect: null,
+      rect: null,
+      rendered:
+        bounds.length >= 4 &&
+        bounds.slice(0, 4).every(Number.isFinite) &&
+        bounds[2] > 0 &&
+        bounds[3] > 0 &&
+        visibility !== "hidden" &&
+        visibility !== "collapse" &&
+        (Number.parseFloat(opacity) || 0) > 0,
+    });
+  }
+  const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
+  const document: NormalizedDocument = {
+    nodes: nodes.filter(
+      (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),
+    ),
+    index,
+    documentElementBackendNodeId: nodes.find(
+      (node) =>
+        node.nodeType === 1 &&
+        node.parentBackendNodeId !== null &&
+        index.nodes.get(node.parentBackendNodeId)?.nodeType === 9,
+    )?.backendNodeId,
+  };
+  if (context.coordinates) await projectDocument(document, context, signal, profile);
+  return document;
+}
+
+/** Project the already decoded nodes in place, preserving form enrichment and
+ * index references. This phase needs no further snapshot or identity reads. */
+async function projectDocument(
+  document: NormalizedDocument,
+  context: FrameContext,
+  signal?: AbortSignal,
+  profile: SnapshotProfile = BASIC_SNAPSHOT,
+): Promise<void> {
+  const checkpoint = createCaptureCheckpoint(signal);
+  let i = 0;
+  for (const node of document.index.nodes.values()) {
+    if (i++ % 256 === 0) {
+      const pending = checkpoint();
+      if (pending) await pending;
+    }
+    const bounds = node.layout?.bounds ?? [];
     const input = snapshotViewportRect(
       bounds,
       { target: context.target, frameId: context.frameId },
@@ -86,85 +137,52 @@ export async function normalizeDocument(
             context.targetProjection,
           )
         : null;
-    const visibility = node.layout?.styles.visibility || "visible";
-    const opacity = node.layout?.styles.opacity || "1";
-    nodes.push({
-      ...node,
-      ...(context.frameId ? { frameId: context.frameId } : {}),
-      ownerFrameBackendNodeId: context.ownerFrameBackendNodeId,
-      localRect: local ? { x: local.x, y: local.y, w: local.width, h: local.height } : null,
-      rect: rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null,
-      rendered:
-        bounds.length >= 4 &&
-        bounds.slice(0, 4).every(Number.isFinite) &&
-        bounds[2] > 0 &&
-        bounds[3] > 0 &&
-        visibility !== "hidden" &&
-        visibility !== "collapse" &&
-        (Number.parseFloat(opacity) || 0) > 0,
-    });
+    node.localRect = local ? { x: local.x, y: local.y, w: local.width, h: local.height } : null;
+    node.rect = rect ? { x: rect.x, y: rect.y, w: rect.width, h: rect.height } : null;
   }
-  const index = await buildDocumentIndex(nodes, signal, profile.includeVisualFacts);
-  return {
-    nodes: nodes.filter(
-      (node) => !node.tag.startsWith("#") && !index.excludedBackendNodeIds.has(node.backendNodeId),
-    ),
-    index,
-    ...(profile.includeVisualFacts &&
+  if (
+    profile.includeVisualFacts &&
     context.coordinates &&
     context.projection?.status === "available" &&
     context.targetProjection !== null
-      ? {
-          geometry: {
-            projections: [
-              context.projection.projection.geometry,
-              ...(context.targetProjection ? [context.targetProjection] : []),
-            ],
-            coordinates: context.coordinates,
-            pageScale: context.pageScale,
-          },
-        }
-      : {}),
-    documentElementBackendNodeId: nodes.find(
-      (node) =>
-        node.nodeType === 1 &&
-        node.parentBackendNodeId !== null &&
-        index.nodes.get(node.parentBackendNodeId)?.nodeType === 9,
-    )?.backendNodeId,
-  };
+  ) {
+    document.geometry = {
+      projections: [
+        context.projection.projection.geometry,
+        ...(context.targetProjection ? [context.targetProjection] : []),
+      ],
+      coordinates: context.coordinates,
+      pageScale: context.pageScale,
+    };
+  } else delete document.geometry;
 }
 
 export interface NormalizedFrameDocument extends NormalizedDocument {
   frame: CdpFrame;
 }
 
-/** One target's snapshot. Source ownership is checked before interpreting any
- * coordinates. Snapshot and live quad coordinates are deliberately not conflated. */
-export async function normalizeSnapshot(
+export interface PreparedFrameDocument extends NormalizedFrameDocument {
+  snapshot: SnapshotDocument;
+}
+
+/** Decode captured data without live reads. Identity can then be verified
+ * before optional geometry is allowed to time out and close the read gate. */
+export async function prepareSnapshot(
   snapshot: SnapshotReply,
   target: CdpTarget,
   frames: readonly CdpFrame[],
-  geometry: GeometryContext,
   issues: CaptureIssue[],
   signal?: AbortSignal,
-  rootFrameId?: string,
   profile: SnapshotProfile = BASIC_SNAPSHOT,
-): Promise<NormalizedFrameDocument[]> {
+): Promise<PreparedFrameDocument[]> {
   const strings = snapshot.strings ?? [];
-  const raw = snapshot.documents ?? [];
-  const ownerIds = new Set<number>();
-  for (const document of raw) {
-    for (const index of document.nodes?.contentDocumentIndex?.index ?? []) {
-      const id = document.nodes?.backendNodeId?.[index];
-      if (id !== undefined) ownerIds.add(id);
-    }
-  }
-  geometry.registerSnapshotOwners(target, ownerIds);
   const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));
-  const sources = new Map<string, SnapshotDocument>();
-  for (const doc of raw) {
+  const seen = new Set<string>();
+  const documents: PreparedFrameDocument[] = [];
+  for (const doc of snapshot.documents ?? []) {
     const id = snapshotFrameId(doc, strings);
-    if (!id || !frameById.has(id) || sources.has(id)) {
+    const frame = id ? frameById.get(id) : undefined;
+    if (!id || !frame || seen.has(id)) {
       issues.push({
         target,
         frameId: id,
@@ -173,8 +191,47 @@ export async function normalizeSnapshot(
       });
       continue;
     }
-    sources.set(id, doc);
+    seen.add(id);
+    const normalized = await normalizeDocument(
+      doc,
+      strings,
+      {
+        frameId: id,
+        target,
+        ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
+        projection: null,
+        coordinates: null,
+      },
+      signal,
+      profile,
+    );
+    documents.push({ ...normalized, frame, snapshot: doc });
   }
+  return documents;
+}
+
+/** Apply optional geometry after collection and document verification. */
+export async function projectSnapshot(
+  documents: readonly PreparedFrameDocument[],
+  target: CdpTarget,
+  frames: readonly CdpFrame[],
+  geometry: GeometryContext,
+  issues: CaptureIssue[],
+  signal?: AbortSignal,
+  rootFrameId?: string,
+  profile: SnapshotProfile = BASIC_SNAPSHOT,
+): Promise<void> {
+  const ownerIds = new Set<number>();
+  for (const { snapshot } of documents) {
+    for (const index of snapshot.nodes?.contentDocumentIndex?.index ?? []) {
+      const id = snapshot.nodes?.backendNodeId?.[index];
+      if (id !== undefined) ownerIds.add(id);
+    }
+  }
+  geometry.registerSnapshotOwners(target, ownerIds);
+  const frameById = new Map(frames.map((frame) => [frame.frameId, frame]));
+  const sources = new Map(documents.map((doc) => [doc.frame.frameId, doc.snapshot]));
+  const prepared = new Map(documents.map((doc) => [doc.frame.frameId, doc]));
   let metrics: LayoutMetrics = {};
   try {
     metrics = await geometry.layoutMetrics(target);
@@ -201,7 +258,6 @@ export async function normalizeSnapshot(
     }
   }
   const projections = new Map<string, FrameProjectionState | null>();
-  const result: NormalizedFrameDocument[] = [];
   let targetProjection: GeometryProjection | null = null;
   const targetRoot = rootFrameId ? frameById.get(rootFrameId) : undefined;
   if (target.sessionId && targetRoot) {
@@ -333,9 +389,8 @@ export async function normalizeSnapshot(
     // Join active reads and their cleanup before returning cancellation.
     if (failure) throw failure;
     throwCaptureAborted(signal);
-    const normalized = await normalizeDocument(
-      doc,
-      strings,
+    await projectDocument(
+      prepared.get(frame.frameId)!,
       {
         frameId: frame.frameId,
         ownerFrameBackendNodeId: frame.ownerBackendNodeId ?? null,
@@ -350,7 +405,5 @@ export async function normalizeSnapshot(
       signal,
       profile,
     );
-    result.push({ ...normalized, frame });
   }
-  return result;
 }

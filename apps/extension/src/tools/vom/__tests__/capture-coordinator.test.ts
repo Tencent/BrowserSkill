@@ -1,8 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
-import { CAPTURE_READ_TIMEOUT_MS, CdpReadTimeoutError } from "@/browser-driver/command-deadline";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  CAPTURE_READ_TIMEOUT_MS,
+  CdpReadGate,
+  CdpReadTimeoutError,
+  READ_TIMEOUT_MS,
+} from "@/browser-driver/command-deadline";
 import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
 import { cdpTargetKey } from "@/browser-driver/frame-graph";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
+import { RefStore } from "@/session-manager/ref-store";
 import { captureVomObservation } from "../../observation";
 import type { CdpRunner } from "../../shared";
 import { captureObservationFacts, semanticCapture } from "../capture-coordinator";
@@ -10,11 +16,13 @@ import { buildSemanticGraph, buildSemanticVomScene } from "../semantic-graph";
 import { REQUESTED_STYLES, type SnapshotReply, VISUAL_STYLES } from "../snapshot";
 import { deduplicateVisualCandidates } from "../visual-dedup";
 import { discoverVisualCandidates } from "../visual-discovery";
+import { publishObservationPage } from "../visual-observation";
 
 function fixture(
   options: {
     frames?: CdpFrame[];
     canvas?: boolean;
+    form?: boolean;
     after?: Record<string, { element?: number; missing?: boolean; unreadable?: boolean }>;
     fail?: string;
     missingIdentity?: boolean;
@@ -79,6 +87,33 @@ function fixture(
                 },
               };
       }
+      if (options.form && method === "Runtime.evaluate" && !args.contextId) {
+        result = {
+          result: {
+            deepSerializedValue: {
+              type: "array",
+              value: frames
+                .filter((frame) => cdpTargetKey(frame.target) === cdpTargetKey(target))
+                .map((frame) => ({
+                  type: "array",
+                  value: [
+                    { type: "node", value: { backendNodeId: elements.get(frame.frameId)! + 1 } },
+                    {
+                      type: "string",
+                      value: JSON.stringify({
+                        value: `typed:${frame.frameId}`,
+                        defaultValue: "",
+                        placeholder: "",
+                        state: "filled",
+                        sensitive: false,
+                      }),
+                    },
+                  ],
+                })),
+            },
+          },
+        };
+      }
       if (method === "Page.getLayoutMetrics")
         result = {
           visualViewport: { clientWidth: 1000 },
@@ -93,7 +128,7 @@ function fixture(
           strings: [
             "#document",
             "html",
-            options.canvas ? "canvas" : "button",
+            options.canvas ? "canvas" : options.form ? "input" : "button",
             OVERLAY_HOST_MARKER_ATTR,
             "",
             "visible",
@@ -201,6 +236,152 @@ function fixture(
   };
   return { cdp, logs, elements };
 }
+
+function pendingLayoutFixture(options: Parameters<typeof fixture>[0] = {}) {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "debug").mockImplementation(() => {});
+  const f = fixture(options);
+  const gate = new CdpReadGate();
+  const original = f.cdp.sendToTarget!;
+  const attempted: string[] = [];
+  let entered!: () => void;
+  const layoutStarted = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let finish!: (value: object) => void;
+  const pending = new Promise<object>((resolve) => {
+    finish = resolve;
+  });
+  f.cdp.sendToTarget = (target, method, params) => {
+    attempted.push(method);
+    return gate.run(target, method, () => {
+      if (method === "Page.getLayoutMetrics" && !target.sessionId) {
+        entered();
+        return pending as never;
+      }
+      return original(target, method, params);
+    });
+  };
+  f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+  return { ...f, gate, attempted, layoutStarted, finish };
+}
+
+describe("optional root layout deadlines", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    false,
+    true,
+  ])("retains verified DOM, AX and form data without further reads (visual=%s)", async (includeVisualFacts) => {
+    const f = pendingLayoutFixture({ form: true });
+    const work = captureObservationFacts(f.cdp, 4, undefined, undefined, { includeVisualFacts });
+    await f.layoutStarted;
+    const before = f.attempted.length;
+    expect(f.logs.filter((c) => c.method === "Accessibility.getFullAXTree")).toHaveLength(4);
+    expect(f.logs.filter((c) => c.method === "Page.createIsolatedWorld")).toHaveLength(4);
+    expect(
+      f.logs.filter((c) => c.method === "Runtime.evaluate" && !c.params.contextId),
+    ).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    const facts = await work;
+    expect(facts.viewport).toEqual({ width: 0, height: 0 });
+    expect(facts.documents.map((doc) => doc.frame.frameId)).toEqual([
+      "main",
+      "same",
+      "nested",
+      "remote",
+    ]);
+    expect(
+      facts.documents.every((doc) => doc.identity && doc.domNodes.length && doc.axNodes.length),
+    ).toBe(true);
+    expect(
+      facts.documents.every(
+        (doc) =>
+          !doc.geometry &&
+          doc.domNodes.every((node) => node.rect === null && node.localRect === null),
+      ),
+    ).toBe(true);
+    for (const doc of facts.documents)
+      expect(
+        doc.domNodes.find((node) => node.backendNodeId === f.elements.get(doc.frame.frameId)! + 1)
+          ?.formValue,
+      ).toBe(`typed:${doc.frame.frameId}`);
+    expect(facts.issues.filter((issue) => issue.stage === "geometry")).toHaveLength(4);
+    expect(f.attempted).toHaveLength(before);
+    const rawCount = f.logs.length;
+    await expect(f.cdp.send(4, "DOMSnapshot.captureSnapshot", {})).rejects.toThrow(
+      "still pending in Chrome",
+    );
+    expect(f.logs).toHaveLength(rawCount);
+    f.finish({ cssLayoutViewport: { clientWidth: 999, clientHeight: 888 } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(facts.viewport).toEqual({ width: 0, height: 0 });
+    await expect(f.cdp.send(4, "DOMSnapshot.enable", {})).resolves.toEqual({});
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("returns the observation and skips active hover probes (visual=%s)", async (includeVisualFacts) => {
+    const f = pendingLayoutFixture();
+    const work = captureVomObservation(f.cdp, 4, "https://example.test", {
+      conditionalSurfaceProbe: true,
+      includeVisualFacts,
+    });
+    await f.layoutStarted;
+    const before = f.attempted.length;
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    const result = await work;
+    const published = result.visualOutput
+      ? await publishObservationPage(new RefStore(), f.cdp, 4, { output: result.visualOutput })
+      : result;
+    if (!("text" in published)) throw new Error(published.message);
+    expect(published.text).toContain("geometry incomplete");
+    expect(published.text).toContain("main");
+    expect(result.frames.map((frame) => frame.frameId)).toContain("main");
+    expect(result.hoverProbe?.performed).toBe(false);
+    expect(f.attempted).toHaveLength(before);
+  });
+
+  it.each([
+    "abort",
+    "reattach",
+  ])("does not degrade %s while optional layout is pending", async (change) => {
+    const f = pendingLayoutFixture();
+    const controller = new AbortController();
+    const work = captureObservationFacts(f.cdp, 4, controller.signal);
+    const rejected = expect(work).rejects.toThrow(
+      change === "abort" ? "aborted" : "document identity",
+    );
+    await f.layoutStarted;
+    if (change === "abort") controller.abort();
+    else f.cdp.getAttachmentId = () => "replacement";
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    await rejected;
+  });
+
+  it("still rejects a document replaced during successful optional layout", async () => {
+    const after: NonNullable<Parameters<typeof fixture>[0]>["after"] = {};
+    const f = pendingLayoutFixture({ after });
+    const work = captureObservationFacts(f.cdp, 4);
+    const rejected = expect(work).rejects.toThrow("document identity");
+    await f.layoutStarted;
+    after.main = { element: 999 };
+    f.finish({});
+    await rejected;
+  });
+
+  it("rejects unverified root identity before starting optional layout", async () => {
+    const f = pendingLayoutFixture({ after: { main: { unreadable: true } } });
+    await expect(captureObservationFacts(f.cdp, 4)).rejects.toThrow("document identity");
+    expect(f.attempted).not.toContain("Page.getLayoutMetrics");
+  });
+});
 
 describe("captureObservationFacts", () => {
   it("isolates an ancestor session timeout encountered while projecting a nested OOPIF", async () => {
@@ -325,7 +506,7 @@ describe("captureObservationFacts", () => {
     expect(logs.filter((call) => call.method === "Accessibility.getFullAXTree")).toHaveLength(4);
     expect(facts.documents.every((doc) => doc.identity)).toBe(true);
     expect(logs.filter((call) => call.method === "DOM.describeNode")).toHaveLength(0);
-    expect(logs.filter((call) => call.method === "Page.createIsolatedWorld")).toHaveLength(4);
+    expect(logs.filter((call) => call.method === "Page.createIsolatedWorld")).toHaveLength(8);
     const main = facts.documents.find((doc) => doc.frame.frameId === "main")!;
     const remote = facts.documents.find((doc) => doc.frame.frameId === "remote")!;
     expect(main.index.nodes.get(2)).not.toBe(remote.index.nodes.get(2));
@@ -380,7 +561,7 @@ describe("captureObservationFacts", () => {
     const facts = await captureObservationFacts(cdp, 4);
     expect(facts.documents.map((doc) => doc.frame.frameId)).toEqual(["main", "same", "nested"]);
     expect(facts.documents.every((doc) => doc.identity)).toBe(true);
-    expect(logs.filter((call) => call.method === "Page.createIsolatedWorld")).toHaveLength(3);
+    expect(logs.filter((call) => call.method === "Page.createIsolatedWorld")).toHaveLength(6);
     expect(logs.findIndex((call) => call.method === "Page.createIsolatedWorld")).toBeGreaterThan(
       logs.findIndex((call) => call.method === "Accessibility.getFullAXTree"),
     );
@@ -477,13 +658,13 @@ describe("captureObservationFacts", () => {
     expect(facts.documents.every((doc) => doc.identity)).toBe(true);
     expect(peak).toBe(Math.min(count, 4));
     expect(active).toBe(0);
-    expect(released).toBe(count);
+    expect(released).toBe(count * 2);
     for (const method of [
       "Page.createIsolatedWorld",
       "Runtime.evaluate",
       "Runtime.releaseObjectGroup",
     ])
-      expect(logs.filter((call) => call.method === method)).toHaveLength(count);
+      expect(logs.filter((call) => call.method === method)).toHaveLength(count * 2);
     expect(logs.filter((call) => call.method === "DOMSnapshot.captureSnapshot")).toHaveLength(1);
     expect(logs.filter((call) => call.method === "Page.getFrameTree")).toHaveLength(0);
   });
@@ -1343,7 +1524,9 @@ describe("sibling frame measurement scheduling", () => {
       {
         status: "blocked",
         source: { target: { tabId: 4 }, frameId: "frame-7" },
-        cause: captured.issues.find((issue) => issue.frameId === "frame-1")?.projectionIssue,
+        cause: captured.issues.find(
+          (issue) => issue.frameId === "frame-1" && issue.stage === "geometry",
+        )?.projectionIssue,
       },
     ]);
     expect(fixture.measured()).not.toContain(200);
