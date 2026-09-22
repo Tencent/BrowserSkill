@@ -3,6 +3,7 @@ import { MIN_COMPATIBLE_PROTOCOL } from "../../transport/handshake";
 import type { ConnectionStateHandler, FrameHandler, Transport } from "../../transport/transport";
 import type { ConnectionState, HandshakeResult, ProtocolFrame } from "../../transport/types";
 import { __testing__, ConnectionController } from "../connection-controller";
+import { getLabel } from "../instance-id";
 
 vi.mock("../instance-id", () => ({
   getOrCreateInstanceId: vi.fn(async () => "a1b2c3d4"),
@@ -223,6 +224,40 @@ describe("ConnectionController connectionEnabled", () => {
 
     expect(transport.connect).toHaveBeenCalled();
     expect(controller.snapshot().connectionEnabled).toBe(true);
+  });
+
+  it("reconnects after a saved label changes so the daemon receives it", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    const onDisconnected = vi.fn(async () => {});
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true, {
+      onDisconnected,
+    });
+    const first = transport.send.mock.calls[0]?.[0] as { id: string };
+    transport.emitMessage({ id: first.id, result: handshake("1.3", "1.3") });
+    await vi.waitFor(() => expect(controller.snapshot().state).toBe("connected"));
+
+    vi.mocked(getLabel).mockResolvedValueOnce("Work profile");
+    await controller.refreshLabel();
+    await vi.waitFor(() => expect(transport.connect).toHaveBeenCalledTimes(2));
+
+    const second = transport.send.mock.calls[1]?.[0] as {
+      params: { label: string };
+    };
+    expect(second.params.label).toBe("Work profile");
+    expect(controller.snapshot().label).toBe("Work profile");
+    expect(onDisconnected).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reconnect when the saved label is unchanged", async () => {
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+
+    await controller.refreshLabel();
+
+    expect(transport.connect).toHaveBeenCalledTimes(1);
+    expect(transport.disconnect).not.toHaveBeenCalled();
   });
 
   it("ignores transport state changes while disabled", async () => {

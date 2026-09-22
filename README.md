@@ -148,32 +148,44 @@ For non-interactive installation, specify the intended harness, for example
 the harness is not detected. `--yes` alone installs into every detected harness
 and fails when none are detected.
 
-To install your own instructions, use `bsk install-skill --harness cursor --source ./SKILL.md`.
+The installer copies the complete skill package: `SKILL.md` plus `references/`.
+The entry point contains the core workflow and safety rules; agents read detailed
+references only when the task needs them.
+
+To install your own package, use `bsk install-skill --harness cursor --source ./my-skill`.
+The directory must contain `SKILL.md`; a single `--source ./SKILL.md` is also supported.
+The explicitly selected source may be a symbolic link; links inside directory packages
+and installed resource paths are rejected.
 An explicit `--source` stays custom even if its contents match the bundled skill.
 Existing installations are skipped unless you add `--force`.
 
 Daemon startup, `session start`, and `doctor` automatically update managed skills
-only when their contents still match the last installed version. Local edits are
-preserved and automatic updates pause. An older installation without a content
-baseline is enrolled automatically only if it exactly matches the current bundled
-skill; this writes the source marker without rewriting `SKILL.md`. Explicit custom
-installations stay custom even when their contents match.
+only when every managed file still matches its recorded checksum. Editing or deleting
+`SKILL.md` or a reference pauses the whole update. Unrelated user files are preserved;
+a conflicting new resource is never overwritten automatically. Unchanged retired
+resources are removed. Interrupted updates resume when the same bundle is available
+and no local changes are detected.
 
-For differing historical files, local edits, or an unrecognized source marker,
-`doctor` shows `WARN` with the reason and recovery options. These warnings do not
-make the health check fail (`--json` reports `status: "warn"` and `ok: true`).
-A concurrent install or sync is reported as deferred and retried on a later pass.
+Old single-file installations with a valid checksum migrate automatically. Older
+installations without a checksum migrate when their bytes match a known official
+historical skill (LF or CRLF) or the current entry point. Explicit custom installations stay custom.
+Unrecognized historical content, local edits, invalid metadata, or an unfinished update
+from another version produce a `doctor` warning with recovery options. Warnings do not
+fail the health check (`--json` reports `status: "warn"` and `ok: true`). Concurrent
+installations defer synchronization until a later pass.
 
-To keep your current instructions as an explicit customization, run
-`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`, replacing
-`<existing-SKILL.md>` with the path to your existing file. To restore the bundled
-skill and resume automatic updates, run `bsk install-skill --harness cursor --force`
-without `--source`. This second command overwrites the existing instructions.
+To keep your current package as an explicit customization, run
+`bsk install-skill --harness cursor --source <existing-skill-directory> --force`.
+To restore the bundled package and resume automatic updates, run
+`bsk install-skill --harness cursor --force` without `--source`. This overwrites
+files supplied by the bundled package, including references. Binaries using the previous checksum-based updater do not recognize the new bundle
+marker and leave these installations untouched.
 
-Other shell-capable agent harnesses are supported too. Copy
-[`skill/SKILL.md`](skill/SKILL.md) into your harness's skills directory as
-`browser-skill/SKILL.md` to install the skill manually. DeepSeek Harness uses a
-dedicated plugin instead — see [DeepSeek Harness plugin](#deepseek-harness-plugin).
+Other shell-capable agent harnesses are supported too. Copy the **entire**
+[`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) directory to your harness's skills
+directory as `browser-skill/`, preserving `references/`. This is the only authored
+CLI skill source. DeepSeek Harness uses its own packaged skill — see
+[DeepSeek Harness plugin](#deepseek-harness-plugin).
 
 #### 4. Verify the connection
 
@@ -248,6 +260,12 @@ and finished help requests are not reopened. Allowing help makes `request-help` 
 not require every browser action to ask for permission. Task authorization and host approvals still apply.
 
 Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Agent Window.
+For a specific Chrome profile, use **Copy profile instructions** in that profile's extension
+popup and send them to your agent. This pins each new session to its instance with `--browser`,
+even when only one browser is online. See [browser profile selection](docs/browser-profiles.md).
+For recurring use, set a unique **Browser name** in the same popup and select it with
+`--browser "Work profile"`. Saving briefly reconnects BrowserSkill so the daemon can use
+the new name immediately; renaming is disabled while that browser has active tasks.
 For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
 `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
 deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
@@ -349,6 +367,12 @@ through the [plugin](#deepseek-harness-plugin): the agent calls injected
 
 ## For Developers
 
+[Website debugging](docs/website-debugging.md) connects request details, console
+and page context to agent actions, with bounded browser-local history and JSON export.
+Records remain available after tasks end; users and agents can analyze them later.
+Start capture before reproducing; the extension home keeps its existing controls
+and adds a current-task card linking to the evidence workspace.
+
 The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol
 and plugin entry points, visible bounds and interruption behavior.
 
@@ -357,7 +381,7 @@ The repository is a Cargo + pnpm workspace:
 - `crates/bsk-cli` — `bsk` CLI and local daemon
 - `crates/bsk-protocol` — shared wire types and JSON schemas
 - `apps/extension` — browser extension
-- `packages/ui` and [`packages/i18n`](packages/i18n/README.md) — shared extension UI support, including English, Simplified Chinese and Korean localization
+- `packages/ui` and [`packages/i18n`](packages/i18n/README.md) — shared extension UI support, including English, Simplified Chinese, Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German and Brazilian Portuguese localization
 - `packages/dsh-plugin-browserskill` — DeepSeek Harness plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`)
 - [`evals/browser`](evals/browser/README.md) — deterministic local pages and agent-neutral browser capability evaluation
 

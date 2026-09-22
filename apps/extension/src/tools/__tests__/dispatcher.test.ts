@@ -383,7 +383,7 @@ describe("ToolDispatcher", () => {
       }
       if (method === "Runtime.evaluate") {
         const expression = (params as { expression?: string }).expression ?? "";
-        if (expression.includes("overlayDetails")) {
+        if (expression.includes("hitIndex")) {
           return { result: { value: { hitIndex: 0 } } } as T;
         }
         if (expression.includes("overlayHostPresent")) {

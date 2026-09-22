@@ -313,6 +313,24 @@ describe("page capture cleanup", () => {
     }
     expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: true });
   });
+  it("waits for ARIA loading markers regardless of attribute case", async () => {
+    const loader = document.createElement("div");
+    loader.setAttribute("role", "PROGRESSBAR");
+    loader.setAttribute("aria-busy", "TRUE");
+    document.body.append(loader);
+    vi.spyOn(loader, "getBoundingClientRect").mockReturnValue({
+      top: 500,
+      bottom: 530,
+      width: 100,
+      height: 30,
+    } as DOMRect);
+    await send({ action: "begin", label: "Capture", cancelLabel: "Cancel" });
+    const moving = send({ action: "move", y: 1800, capture: true, final: true });
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(await moving).toMatchObject({ bottomReady: false, loading: true });
+    expect(await send({ action: "inspect" })).toMatchObject({ bottomReady: false, loading: true });
+  });
+
   it("does not treat article text, code examples or numeric progress widgets as loading", async () => {
     document.body.innerHTML +=
       '<p>Loading files in JavaScript</p><pre><code>Loading...</code></pre><div role="progressbar" aria-valuenow="100"></div>';
