@@ -31,6 +31,9 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
+      - name: Check Cargo skill package contents
+        run: node scripts/check-crate-skill.mjs
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -60,6 +63,21 @@ jobs:
 
       - name: Run Windows process liveness tests
         run: cargo test -p bsk --lib --locked daemon::lockfile::tests
+
+      - name: Run Windows skill bundle installation and migration tests
+        run: cargo test -p bsk --lib --test skill_install_legacy --locked skill_install
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Validate Windows skill metadata, resources and Cargo package
+        run: |
+          node --test scripts/check-skill-bundles.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-skill-bundles.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-crate-skill.mjs
 
       - name: Run Windows update tests
         run: cargo test -p bsk --lib --locked cli::update::tests
@@ -119,6 +137,9 @@ jobs:
       - name: Run lint checks
         run: pnpm lint
 
+      - name: Build and verify the DSH npm skill package
+        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build && node scripts/check-dsh-package.mjs
+
       - name: Compile extension TypeScript
         run: pnpm --filter @browser-skill/extension compile
 
@@ -133,6 +154,34 @@ jobs:
 
       - name: Build extension
         run: pnpm ext:build
+
+  windows-dsh-package:
+    name: Windows DSH npm package
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the DSH plugin
+        run: pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+
+      - name: Verify the npm archive and runtime resource paths
+        env:
+          TEMP: ${{ runner.temp }}/bsk package & cache
+          TMP: ${{ runner.temp }}/bsk package & cache
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
+          node scripts/check-dsh-package.mjs
 
   browser-input:
     name: Browser input readiness regression
@@ -154,10 +203,11 @@ jobs:
       - name: Prepare extension types
         run: pnpm --filter @browser-skill/extension exec wxt prepare
 
-      - name: Run browser input readiness regression
+      - name: Run browser input and debugging regressions
+        working-directory: apps/extension
         env:
           BSK_CLICK_CHROME: google-chrome
-        run: pnpm --filter @browser-skill/extension exec vitest run src/tools/__tests__/click.browser.test.ts
+        run: pnpm exec vitest run src/tools/__tests__/click.browser.test.ts src/debug/__tests__/*.browser.test.ts
 
   node-scripts:
     name: Node script tests
@@ -169,6 +219,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+
+      - name: Validate skill references and entry point budgets
+        run: node scripts/check-skill-bundles.mjs
 
       - name: Run script tests
         run: node --test scripts/*.test.mjs

@@ -1,0 +1,21 @@
+@import "@browser-skill/ui/styles";
+@source "../../";
+@source "../../../../../packages/ui/src";
+
+html,
+body,
+#root {
+  min-height: 100%;
+  height: auto;
+}
+
+.debug-workspace {
+  --debug-accent: #ae5e33;
+  --debug-tint: #f6eee6;
+}
+@media (prefers-color-scheme: dark) {
+  .debug-workspace {
+    --debug-accent: #e9a57e;
+    --debug-tint: #32291f;
+  }
+}

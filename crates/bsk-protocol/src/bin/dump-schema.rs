@@ -116,6 +116,8 @@ fn main() {
     dump!(ConsoleResult, "tool_console_result");
     dump!(ConsoleEntry, "tool_console_entry");
     dump!(ConsoleStackFrame, "tool_console_stack_frame");
+    dump!(DebugParams, "tool_debug_params");
+    dump!(DebugResult, "tool_debug_result");
     dump!(NetworkParams, "tool_network_params");
     dump!(NetworkResult, "tool_network_result");
     dump!(NetworkEntry, "tool_network_entry");

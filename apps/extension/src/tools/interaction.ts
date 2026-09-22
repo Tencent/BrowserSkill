@@ -1701,7 +1701,7 @@ export async function handleSelect(
           ok: true,
           multiple,
           selected_values: selected.map((o) => o.value),
-          selected_labels: selected.map((o) => o.text),
+          selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
         };
       }`,
       arguments: [{ value: params.values }],

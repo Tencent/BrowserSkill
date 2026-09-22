@@ -1,3 +1,4 @@
+import { registerDebugTool } from "./debug-tool";
 import type { PhaseOneRuntime, ToolRegistrar } from "./phase-one-runtime";
 import { registerPhaseOneInteractionTools } from "./phase-one-tools-interaction";
 import { registerPhaseOneNavigationTools } from "./phase-one-tools-navigation";
@@ -15,4 +16,5 @@ export function registerPhaseOneTools(
   registerPhaseOneTabTools(deps, register, runtime);
   registerPhaseOneNavigationTools(deps, register, runtime);
   registerPhaseOneSupportTools(deps, register, runtime);
+  registerDebugTool(deps, register, runtime);
 }
