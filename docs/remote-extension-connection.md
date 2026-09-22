@@ -166,7 +166,25 @@ A gateway that renders its own view of a running task can send two extra request
 - `ui.task_preview` returns `image_base64`, `format: "jpeg"`, `tab_id`, `title` and `captured_at`. The encoded frame is at most 640 pixels wide. Captures are coalesced per task, at most one runs per tab, and a poll that arrives while Chrome still holds one is refused rather than queued behind it. Authorization, the document revision and the debugger identity are re-checked before a frame is returned. These frames keep the extension's control and help overlays visible, so a periodic preview does not make them flicker in the user's browser; tool screenshots continue to suppress them for unobstructed page content.
 - `ui.task_focus` activates the task's own tab and raises its window, returning `{ "focused": true }`.
 
-Both are restricted to a tab the task owns; window membership alone never qualifies, and an unowned tab inside the Agent Window is neither captured nor focused. Errors use the native envelope, `{ "id": "…", "error": { "code": "…", "message": "…" } }`. The channel exists only on remote sockets: an extension connected to a local daemon does not serve these methods. `session.stop` drains an in-flight preview before it detaches the debugger and closes the task's tabs.
+Both are restricted to an existing remote task's owned tab in its Agent Window. Window membership alone never qualifies. The target's ownership and actual window are checked before acquiring control and again before delivering a frame or continuing focus. These checks also reject a tab moved by the browser user; Chrome calls cannot be made atomic with external user actions.
+
+The channel exists only on authenticated remote sockets. Requests require nonempty string `id` and `session_id` values, matching the native RPC ID contract. A missing, null, empty or numeric request ID is consumed without a reply or browser work. An invalid session ID receives `invalid_params`. Success uses `{ "id": "…", "result": … }`; failure uses `{ "id": "…", "error": { "code": "…", "message": "…", "data": { "reason": "…" } } }`, with `data` optional for underlying failures.
+
+| Failure | Code | Reason |
+| --- | --- | --- |
+| Task or authorized target unavailable | `not_found` | `task_unavailable` / `target_unavailable` |
+| Whole preview or focus request exceeds 3 seconds | `timeout` | `ui_deadline` |
+| Previous screenshot still running on this attachment | `timeout` | `preview_busy` |
+| Task stopping or selected tab returning | `cancelled` | `task_stopping` |
+| Teardown cannot yet finish an issued focus mutation | `cancelled` | `ui_busy` |
+| Document or debugger identity changed | `cancelled` | `stale_frame` |
+| Chrome lookup, CDP or image-processing failure | `cdp_failed` | `ui_lookup_failed` for lookup failures; otherwise optional |
+
+The 3-second budget includes tab lookup, acquisition, screenshot and image processing. It ends the caller's wait and invalidates subsequent UI work; it does not cancel a Chrome command already issued. The per-tab screenshot fence remains until that command settles or its debugger attachment changes. A successful acquisition retains the session's background-execution claim, shared with tools, until return/stop or loss of authority. A stale image or UI deadline alone does not release that shared claim.
+
+Return and stop reject new UI work and invalidate pending requests. They do not drain potentially unbounded image or screenshot promises. Already-issued focus mutations get up to one second to settle before teardown proceeds; otherwise cleanup returns `cancelled` / `ui_busy` and may be retried. CDP release bounds its waits for pending attachment and focus-override work, revokes stale attachment attempts, and fences late raw attach callbacks through rollback. These individual cleanup bounds are not a three-second guarantee for the entire session stop (which also returns tabs and closes windows).
+
+For capability probing, send `ui.task_preview` on the remote extension socket with a valid string ID and a known session ID. Either a result or one of the UI errors above confirms support. Extensions without the channel pass this request to the native dispatcher, which returns `unknown_method`; disable UI polling on that response. Unsupported `ui.*` methods use the same native fallback. A socket connected to a local daemon does not install this channel.
 
 A gateway can bridge this protocol to a local `bsk` daemon on its server, keeping that daemon's loopback/IPC boundary private. A gateway that terminates device authentication owns that authentication lifecycle and routing isolation. Merely forwarding its credentials to the built-in server will not authorize them: the built-in server accepts its own issued grants.
 

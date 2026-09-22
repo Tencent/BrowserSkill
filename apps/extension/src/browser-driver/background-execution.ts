@@ -29,22 +29,27 @@ export class BackgroundExecution {
   forget(tabId: number): void {
     this.owners.delete(tabId);
     this.applied.delete(tabId);
+    this.pending.delete(tabId);
   }
 
   invalidate(tabId: number): void {
     this.applied.delete(tabId);
+    this.pending.delete(tabId);
   }
 
   clear(): void {
     this.owners.clear();
     this.applied.clear();
+    this.pending.clear();
   }
 
   async synchronize(tabId: number): Promise<void> {
     // Join the preceding toggle, but retry a failed toggle on a subsequent call.
     const previous = this.pending.get(tabId);
+    const initialAttachment = this.attachment(tabId);
     const next = (async () => {
       await previous?.catch(() => {});
+      if (this.attachment(tabId) !== initialAttachment) return;
       for (;;) {
         const attachment = this.attachment(tabId);
         if (!attachment) return;

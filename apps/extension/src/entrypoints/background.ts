@@ -30,7 +30,7 @@ import {
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
-import { captureTaskPreview, taskTarget } from "@/lib/task-preview";
+import { captureTaskPreview, focusTask } from "@/lib/task-preview";
 import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
@@ -73,15 +73,7 @@ export default defineBackground(() => {
       // here instead of reaching the tool dispatcher. Remote gateways only.
       if (remoteEndpoint)
         attachUiChannel(socket, {
-          focus: async (sessionId) => {
-            const tabId = await taskTarget(sessions, sessionId);
-            const task = sessions.get(sessionId);
-            const tab = await chrome.tabs.get(tabId);
-            if (!task || !isAgentControlledTab(task, tabId)) throw new Error("Task unavailable");
-            await chrome.tabs.update(tabId, { active: true });
-            await chrome.windows.update(tab.windowId, { focused: true });
-            return { focused: true };
-          },
+          focus: (sessionId) => focusTask(sessions, sessionId),
           preview: (sessionId) => captureTaskPreview(sessions, cdp, sessionId),
         });
       return socket;

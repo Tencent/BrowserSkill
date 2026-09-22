@@ -21,6 +21,7 @@ function fixture() {
   const cdp = {
     getAttachmentId: vi.fn(() => "attachment"),
     acquireBackgroundExecution: vi.fn(async () => {}),
+    releaseSessionTab: vi.fn(async () => {}),
     send: vi.fn(async () => ({ data: btoa("jpeg") })),
   } as unknown as ChromiumCdp;
   const draw = vi.fn();
@@ -83,12 +84,17 @@ describe("task preview", () => {
     });
     expect(f.sizes).toEqual([640, 360]);
     expect(f.close).toHaveBeenCalled();
-    expect(f.cdp.send).toHaveBeenCalledExactlyOnceWith(5, "Page.captureScreenshot", {
-      format: "jpeg",
-      quality: 50,
-      fromSurface: true,
-      captureBeyondViewport: false,
-    });
+    expect(f.cdp.send).toHaveBeenCalledExactlyOnceWith(
+      5,
+      "Page.captureScreenshot",
+      {
+        format: "jpeg",
+        quality: 50,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it("refuses a further poll while Chrome still holds a capture, and recovers after it", async () => {
@@ -121,12 +127,11 @@ describe("task preview", () => {
     vi.useFakeTimers();
     const f = fixture();
     vi.mocked(f.cdp.send).mockReturnValueOnce(new Promise(() => {}) as never);
-    const stuck = expect(captureTaskPreview(f.manager, f.cdp, "stop")).rejects.toThrow("timed out");
+    const stuck = expect(captureTaskPreview(f.manager, f.cdp, "stop")).rejects.toThrow("stopping");
     const stop = vi.fn(async () => "stopped");
     const released = withTaskPreviewStop(f.manager, "stop", stop);
     await expect(captureTaskPreview(f.manager, f.cdp, "stop")).rejects.toThrow("stopping");
-    expect(stop).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.advanceTimersByTimeAsync(0);
     await stuck;
     await expect(released).resolves.toBe("stopped");
     expect(stop).toHaveBeenCalledOnce();
@@ -167,7 +172,12 @@ describe("task preview", () => {
     await expect(captureTaskPreview(f.manager, f.cdp, "user-active")).resolves.toMatchObject({
       tab_id: 5,
     });
-    expect(f.cdp.send).toHaveBeenCalledWith(5, "Page.captureScreenshot", expect.anything());
+    expect(f.cdp.send).toHaveBeenCalledWith(
+      5,
+      "Page.captureScreenshot",
+      expect.anything(),
+      expect.any(AbortSignal),
+    );
   });
 
   it("discards the frame when authorization ends during the capture", async () => {

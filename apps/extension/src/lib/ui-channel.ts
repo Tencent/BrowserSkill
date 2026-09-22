@@ -1,3 +1,4 @@
+import { uiError } from "@/session-manager/ui-activity";
 /**
  * Optional UI request channel for authenticated remote gateways.
  *
@@ -51,7 +52,7 @@ export function attachUiChannel(socket: WebSocket, handlers: UiChannelHandlers):
       .then(() => methods[request.method as string]!(sessionId))
       .then(
         (result) => send({ result }),
-        () => send({ error: { code: "not_found", message: "Browser task unavailable" } }),
+        (error) => send({ error: uiError(error) }),
       );
   });
 }

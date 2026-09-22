@@ -1,9 +1,9 @@
-import { withTaskPreviewStop } from "@/lib/task-preview";
 import {
   DEFAULT_INTERACTION_PREFERENCES,
   type InteractionPreferenceStore,
   interactionPolicy,
 } from "@/lib/interaction-preferences";
+import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";

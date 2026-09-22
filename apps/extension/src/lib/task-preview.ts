@@ -1,97 +1,101 @@
 import type { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import type { SessionContext } from "@/session-manager/manager";
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  checkedUiTab,
+  runTaskUi,
+  type UiOperation,
+  UiTaskError,
+  withUiTeardown,
+} from "@/session-manager/ui-activity";
 
-/** Longest a poll waits for Chrome before the caller is told to try again. */
-const CAPTURE_DEADLINE_MS = 3_000;
-/** Widest encoded preview frame, in image pixels. */
 const PREVIEW_WIDTH = 640;
-
-interface PreviewState {
-  pending?: Promise<unknown>;
-  stopping: number;
-}
-const previews = new WeakMap<object, PreviewState>();
-function previewState(task: object): PreviewState {
-  let state = previews.get(task);
-  if (!state) {
-    state = { stopping: 0 };
-    previews.set(task, state);
-  }
-  return state;
-}
-
-/**
- * One UI frame of the task's own tab, captured outside the tool queue so a
- * preview still answers while the session is navigating or waiting for human
- * help. Concurrent polls share the frame that is already in flight.
- */
+const previews = new WeakMap<object, Promise<unknown>>();
 export function captureTaskPreview(
   manager: SessionManager,
   cdp: ChromiumCdp,
   sessionId: string,
 ): Promise<unknown> {
   const task = manager.get(sessionId);
-  if (!task?.remote) return Promise.reject(new Error("Task unavailable"));
-  const state = previewState(task);
-  if (state.stopping) return Promise.reject(new Error("Task is stopping"));
-  if (state.pending) return state.pending;
-  const work = capture(manager, cdp, sessionId).finally(() => {
-    if (state.pending === work) state.pending = undefined;
+  if (!task?.remote)
+    return Promise.reject(new UiTaskError("not_found", "Task unavailable", "task_unavailable"));
+  const pending = previews.get(task);
+  if (pending) return pending;
+  const work = runTaskUi(manager, sessionId, async (op, task) => {
+    try {
+      return await capture(manager, cdp, sessionId, op, task);
+    } catch (error) {
+      if (
+        error instanceof UiTaskError &&
+        error.reason === "target_unavailable" &&
+        op.tabId !== undefined &&
+        manager.get(sessionId) === task
+      ) {
+        // Recheck actual authority before removing a claim shared with tools.
+        // A transient lookup error or a restored target must not clear it.
+        const tab = await chrome.tabs.get(op.tabId).catch(() => undefined);
+        op.check();
+        if (!isAgentControlledTab(task, op.tabId) || (tab && tab.windowId !== task.agentWindowId))
+          await cdp.releaseSessionTab(sessionId, op.tabId);
+      }
+      throw error;
+    }
+  }).finally(() => {
+    if (previews.get(task) === work) previews.delete(task);
   });
-  state.pending = work;
+  previews.set(task, work);
   return work;
 }
 
-/**
- * Drains an in-flight preview before `session.stop` detaches the debugger and
- * closes the task's tabs, and refuses new ones for the duration. Session state
- * is untouched: a stop that fails can be retried and previews resume.
- */
 export async function withTaskPreviewStop<T>(
   manager: SessionManager,
   sessionId: string | undefined,
   stop: () => Promise<T>,
-): Promise<T> {
+) {
   const task = sessionId ? manager.get(sessionId) : undefined;
-  if (!task?.remote) return stop();
-  const state = previewState(task);
-  state.stopping++;
-  try {
-    await state.pending?.catch(() => {});
-    return await stop();
-  } finally {
-    state.stopping--;
-  }
+  return task?.remote ? withUiTeardown(task, undefined, stop) : stop();
 }
 
-async function capture(manager: SessionManager, cdp: ChromiumCdp, sessionId: string) {
-  const task = manager.get(sessionId);
-  if (!task?.remote) throw new Error("Task unavailable");
+export function focusTask(manager: SessionManager, sessionId: string) {
+  return runTaskUi(manager, sessionId, async (op, task) => {
+    const tabId = await taskTarget(manager, sessionId);
+    await checkedUiTab(task, op, tabId);
+    await op.mutate(tabId, () => chrome.tabs.update(tabId, { active: true }));
+    await checkedUiTab(task, op, tabId);
+    await op.mutate(tabId, () => chrome.windows.update(task.agentWindowId, { focused: true }));
+    await checkedUiTab(task, op, tabId);
+    return { focused: true };
+  });
+}
+
+async function capture(
+  manager: SessionManager,
+  cdp: ChromiumCdp,
+  sessionId: string,
+  op: UiOperation,
+  task: SessionContext,
+) {
   const tabId = await taskTarget(manager, sessionId);
-  if (!isAgentControlledTab(task, tabId)) throw new Error("Task tab unavailable");
-  const tab = await chrome.tabs.get(tabId);
-  // The preview does not pass through the dispatcher, so it acquires the same
-  // explicit background-execution claim the tools use before reading a page
-  // that is not in the foreground. `session.stop` drains this capture before
-  // releasing the claim and closing the tab.
+  await checkedUiTab(task, op, tabId);
+  // This is a session-lifetime claim, shared with tools. A stale image must
+  // never release the session's claim; return/stop own that responsibility.
   await cdp.acquireBackgroundExecution(sessionId, tabId);
+  await checkedUiTab(task, op, tabId);
   const attachment = cdp.getAttachmentId(tabId);
   const revision = task.refStore.documentRevision(tabId);
-  if (manager.get(sessionId) !== task || !isAgentControlledTab(task, tabId))
-    throw new Error("Task ended during capture");
-  // UI frames keep the extension's own control and help overlays: hiding and
-  // restoring them on every poll would make them flicker in the user's browser.
-  // Tool screenshots suppress the overlays separately, for unobstructed content.
-  // Only the viewport is captured; the bitmap is scaled below without a layout read.
-  const shot = await captureViewport(cdp, tabId);
-  const stillOurs = () =>
-    manager.get(sessionId) === task &&
-    isAgentControlledTab(task, tabId) &&
-    cdp.getAttachmentId(tabId) === attachment &&
-    task.refStore.documentRevision(tabId) === revision;
-  if (!stillOurs()) throw new Error("Task ended during capture");
-  const data = await downscale(shot.data);
-  if (!stillOurs()) throw new Error("Task ended during capture");
+  const checkFrame = async () => {
+    const tab = await checkedUiTab(task, op, tabId);
+    if (
+      cdp.getAttachmentId(tabId) !== attachment ||
+      task.refStore.documentRevision(tabId) !== revision
+    )
+      throw new UiTaskError("cancelled", "Task ended during capture", "stale_frame");
+    return tab;
+  };
+  const shot = await captureViewport(cdp, tabId, op.signal);
+  await checkFrame();
+  const data = await downscale(shot.data, op);
+  const tab = await checkFrame();
   return {
     image_base64: data,
     format: "jpeg",
@@ -101,49 +105,46 @@ async function capture(manager: SessionManager, cdp: ChromiumCdp, sessionId: str
   };
 }
 
-const capturesInFlight = new WeakMap<object, Map<number, Promise<unknown>>>();
-
-/**
- * At most one capture per tab, and a bounded wait for the caller.
- *
- * A local deadline cannot cancel a CDP command, so the fence is released only
- * when Chrome actually answers (or the debugger detaches). A poll that arrives
- * while a capture is stuck is refused instead of queueing another one behind it.
- */
-async function captureViewport(cdp: ChromiumCdp, tabId: number): Promise<{ data: string }> {
+const capturesInFlight = new WeakMap<
+  object,
+  Map<number, { attachment: string | undefined; shot: Promise<{ data: string }> }>
+>();
+async function captureViewport(
+  cdp: ChromiumCdp,
+  tabId: number,
+  signal: AbortSignal,
+): Promise<{ data: string }> {
   let inFlight = capturesInFlight.get(cdp);
   if (!inFlight) {
     inFlight = new Map();
     capturesInFlight.set(cdp, inFlight);
   }
-  if (inFlight.has(tabId)) {
-    throw new Error(`Previous preview capture is still running in Chrome (tab ${tabId})`);
-  }
-  const shot = cdp.send<{ data: string }>(tabId, "Page.captureScreenshot", {
-    format: "jpeg",
-    quality: 50,
-    fromSurface: true,
-    captureBeyondViewport: false,
-  });
-  inFlight.set(tabId, shot);
+  const attachment = cdp.getAttachmentId(tabId);
+  const previous = inFlight.get(tabId);
+  if (previous && previous.attachment === attachment)
+    throw new UiTaskError(
+      "timeout",
+      `Previous preview capture is still running in Chrome (tab ${tabId})`,
+      "preview_busy",
+    );
+  const shot = cdp.send<{ data: string }>(
+    tabId,
+    "Page.captureScreenshot",
+    {
+      format: "jpeg",
+      quality: 50,
+      fromSurface: true,
+      captureBeyondViewport: false,
+    },
+    signal,
+  );
+  const entry = { attachment, shot };
+  inFlight.set(tabId, entry);
   const release = () => {
-    if (inFlight.get(tabId) === shot) inFlight.delete(tabId);
+    if (inFlight.get(tabId) === entry) inFlight.delete(tabId);
   };
   void shot.then(release, release);
-  let deadline: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      shot,
-      new Promise<never>((_, reject) => {
-        deadline = setTimeout(
-          () => reject(new Error(`Preview capture timed out after ${CAPTURE_DEADLINE_MS}ms`)),
-          CAPTURE_DEADLINE_MS,
-        );
-      }),
-    ]);
-  } finally {
-    clearTimeout(deadline);
-  }
+  return shot;
 }
 
 /**
@@ -151,11 +152,12 @@ async function captureViewport(cdp: ChromiumCdp, tabId: number): Promise<{ data:
  * produces a bitmap several times wider than the preview needs. Bound the
  * encoded image itself rather than leaving that to the gateway.
  */
-async function downscale(jpegBase64: string): Promise<string> {
+async function downscale(jpegBase64: string, op: UiOperation): Promise<string> {
   const bitmap = await createImageBitmap(
     new Blob([Uint8Array.from(atob(jpegBase64), (c) => c.charCodeAt(0))], { type: "image/jpeg" }),
   );
   try {
+    op.check();
     if (bitmap.width <= PREVIEW_WIDTH) return jpegBase64;
     const canvas = new OffscreenCanvas(
       PREVIEW_WIDTH,
@@ -165,6 +167,7 @@ async function downscale(jpegBase64: string): Promise<string> {
     if (!context) throw new Error("Preview canvas unavailable");
     context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     const jpeg = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.5 });
+    op.check();
     return btoa(
       Array.from(new Uint8Array(await jpeg.arrayBuffer()), (b) => String.fromCharCode(b)).join(""),
     );
@@ -180,13 +183,15 @@ async function downscale(jpegBase64: string): Promise<string> {
  */
 export async function taskTarget(manager: SessionManager, sessionId: string): Promise<number> {
   const task = manager.get(sessionId);
-  if (!task?.remote) throw new Error("Task unavailable");
+  if (!task?.remote) throw new UiTaskError("not_found", "Task unavailable", "task_unavailable");
   const tabs = await chrome.tabs.query({ windowId: task.agentWindowId });
-  if (manager.get(sessionId) !== task) throw new Error("Task unavailable");
+  if (manager.get(sessionId) !== task)
+    throw new UiTaskError("not_found", "Task unavailable", "task_unavailable");
   const owned = tabs.filter(
     (tab) => typeof tab.id === "number" && isAgentControlledTab(task, tab.id),
   );
   const tabId = (owned.find((tab) => tab.active) ?? owned[0])?.id;
-  if (tabId === undefined) throw new Error("Task tab unavailable");
+  if (tabId === undefined)
+    throw new UiTaskError("not_found", "Task tab unavailable", "target_unavailable");
   return tabId;
 }
