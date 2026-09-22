@@ -25,7 +25,7 @@ it does not discover a source repository or repair code.
    `bsk debug operation <operation-id> --session <id>` for an operation's requests,
    console, page changes and field-value chain. Manual capture covers the main frame.
 3. Inspect returned evidence IDs with the commands below. Separate observations
-from hypotheses and state what is missing. Do not infer business success from
+   from hypotheses and state what is missing. Do not infer business success from
    HTTP 200 or causation from a shared time window. Delayed links are tentative;
    do not match differently named fields merely because their values are equal.
 4. Stop and save before normal session cleanup:
