@@ -19,6 +19,8 @@ export async function withTaskPopups<T>(
   if (!task || !targets || signal?.aborted) return run(() => {});
   let active = true;
   let listening = false;
+  let observationEnded = Promise.resolve();
+  let finishObservation = () => {};
   let timer: ReturnType<typeof setTimeout> | undefined;
   const invalid = new Set<number>();
   const candidates = new Map<number, Promise<boolean>>();
@@ -80,6 +82,7 @@ export async function withTaskPopups<T>(
     listening = false;
     clearTimeout(timer);
     targets.removeListener(created);
+    finishObservation();
   };
   const invalidate = (id: number) => {
     invalid.add(id);
@@ -94,7 +97,12 @@ export async function withTaskPopups<T>(
     if (!live()) return;
     if (params.tab_id !== undefined && tabId !== params.tab_id) return;
     candidates.set(tabId, Promise.resolve(true));
-    if (!listening) targets.addListener(created);
+    if (!listening) {
+      observationEnded = new Promise<void>((resolve) => {
+        finishObservation = resolve;
+      });
+      targets.addListener(created);
+    }
     listening = true;
     clearTimeout(timer);
     timer = setTimeout(stopListening, INPUT_WINDOW_MS);
@@ -105,7 +113,9 @@ export async function withTaskPopups<T>(
   try {
     return await run(inputSent);
   } finally {
-    // No global tabs.onCreated tail: unrelated activity cannot extend observation.
+    // Chrome may deliver navigation-target events after the input response.
+    // Finish the interval armed by the last input; only input can extend it.
+    await observationEnded;
     stopListening();
     await settleOrExpire(Promise.all(candidates.values()), signal);
     active = false;

@@ -105,11 +105,13 @@ it.each([
   true,
 ])("controls same-window and nested targets without destructive ownership, remote=%s", async (remote) => {
   const f = await fixture(remote);
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     f.open(10, 20);
     f.open(20, 21);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.task.observedTabs).toEqual(new Set([20, 21]));
   expect(f.task.agentCreatedTabs).toEqual(new Set([10]));
   expect(isAgentControlledTab(f.task, 20)).toBe(true);
@@ -119,10 +121,12 @@ it.each([
 
 it("preserves observed tabs and their window during actual session stop", async () => {
   const f = await fixture();
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     f.open(10, 20);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   const result = await handleSessionStop(
     f.manager,
     { session_id: "one" },
@@ -137,24 +141,28 @@ it("preserves observed tabs and their window during actual session stop", async 
 
 it("does not monitor action preparation or long work without native input", async () => {
   const f = await fixture();
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     f.open(10, 20);
     await vi.advanceTimersByTimeAsync(30000);
     f.open(10, 21);
     input(10);
     f.open(10, 22);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.task.observedTabs).toEqual(new Set([22]));
 });
 
 it("does not extend the input window or add a tail for unrelated tab creation", async () => {
   const f = await fixture();
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     f.open(11, 30, 500);
     await vi.advanceTimersByTimeAsync(101);
     f.open(10, 20);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.task.observedTabs?.size ?? 0).toBe(0);
   expect(f.opened.listeners.size).toBe(0);
   expect(vi.getTimerCount()).toBe(0);
@@ -163,11 +171,13 @@ it("does not extend the input window or add a tail for unrelated tab creation", 
 it("leaves cross-window popups unclaimed, borrowable and safe from the original task's stop", async () => {
   const f = await fixture();
   f.api.move.mockRejectedValueOnce(new Error("Window busy"));
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     f.open(10, 20, 500);
     f.open(20, 21);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.api.move).not.toHaveBeenCalled();
   expect(isAgentControlledTab(f.task, 20)).toBe(false);
   expect(isAgentControlledTab(f.task, 21)).toBe(false);
@@ -188,11 +198,13 @@ it("leaves cross-window popups unclaimed, borrowable and safe from the original 
 
 it("requires a main-frame source event and rejects another task's source", async () => {
   const f = await fixture();
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     f.open(10, 20, 10, 4);
     f.open(11, 21);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.task.observedTabs?.size ?? 0).toBe(0);
 });
 
@@ -203,13 +215,15 @@ it.each([
   "moved",
 ])("invalidates a source that is %s during tracking", async (kind) => {
   const f = await fixture();
-  await withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
     input(10);
     if (kind === "removed" || kind === "detached") for (const fn of f[kind].listeners) fn(10);
     if (kind === "revoked") f.task.agentCreatedTabs.delete(10);
     if (kind === "moved") f.tabs.get(10)!.windowId = 500;
     f.open(10, 20);
   });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
   expect(f.task.observedTabs?.size ?? 0).toBe(0);
 });
 
@@ -223,7 +237,7 @@ it("bounds candidate queries and prevents late claims after the RPC result", asy
     f.open(10, 20);
     return 42;
   });
-  await vi.advanceTimersByTimeAsync(500);
+  await vi.advanceTimersByTimeAsync(600);
   expect(await work).toBe(42);
   gate.resolve({ id: 20, windowId: 10 } as chrome.tabs.Tab);
   await vi.advanceTimersByTimeAsync(0);
@@ -281,6 +295,7 @@ it.each([
   if (change === "reservation") f.manager.tryReserveBorrow(20, "two");
   if (change === "target detached") for (const fn of f.detached.listeners) fn(20);
   gate.resolve({ id: 20, windowId: 10 } as chrome.tabs.Tab);
+  await vi.advanceTimersByTimeAsync(100);
   await work;
   expect(f.task.observedTabs?.has(20) ?? false).toBe(false);
 });
@@ -301,4 +316,87 @@ it("rejects duplicate borrowing of created and observed targets across sessions"
   expect(f.api.move).not.toHaveBeenCalled();
   expect(f.manager.releaseObservedTab(20)).toEqual(["one"]);
   expect(isAgentControlledTab(f.task, 20)).toBe(false);
+});
+
+it("observes late events until 100ms after the last input without extending for events", async () => {
+  const f = await fixture();
+  let actionReturned = false;
+  let settled = false;
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+    input(10);
+    await vi.advanceTimersByTimeAsync(40);
+    input(10);
+    actionReturned = true;
+    return 42;
+  }).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(actionReturned).toBe(true);
+  await vi.advanceTimersByTimeAsync(50);
+  f.open(10, 20);
+  f.open(11, 30, 500);
+  await vi.advanceTimersByTimeAsync(49);
+  expect(settled).toBe(false);
+  expect(f.task.observedTabs).toEqual(new Set([20]));
+  await vi.advanceTimersByTimeAsync(1);
+  expect(await work).toBe(42);
+  f.open(10, 21);
+  expect(isAgentControlledTab(f.task, 21)).toBe(false);
+  expect(f.targets.listeners.size + f.removed.listeners.size + f.detached.listeners.size).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("does not add a tail when no input was sent", async () => {
+  const f = await fixture();
+  expect(await withTaskPopups(f.manager, { session_id: "one" }, async () => 42)).toBe(42);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("cancels the remaining input interval after the action returns", async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  const work = withTaskPopups(
+    f.manager,
+    { session_id: "one" },
+    async (input) => {
+      input(10);
+      return 42;
+    },
+    undefined,
+    controller.signal,
+  );
+  await vi.advanceTimersByTimeAsync(50);
+  controller.abort();
+  expect(await work).toBe(42);
+  f.open(10, 20);
+  expect(isAgentControlledTab(f.task, 20)).toBe(false);
+  expect(f.targets.listeners.size + f.removed.listeners.size + f.detached.listeners.size).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+it("preserves observed tabs and their window when the final tab query fails", async () => {
+  const f = await fixture();
+  const work = withTaskPopups(f.manager, { session_id: "one" }, async (input) => {
+    input(10);
+    f.open(10, 20);
+  });
+  await vi.advanceTimersByTimeAsync(100);
+  await work;
+  f.api.query.mockRejectedValueOnce(new Error("temporary Chrome query failure"));
+  const result = await handleSessionStop(
+    f.manager,
+    { session_id: "one" },
+    {
+      tabManagement: f.deps,
+      tabsQuery: f.api,
+    },
+  );
+  expect(result).toMatchObject({ window_released: true });
+  expect(f.removeWindow).not.toHaveBeenCalled();
+  expect(f.api.remove).toHaveBeenCalledWith(10);
+  expect(f.api.remove).not.toHaveBeenCalledWith(20);
+  expect(f.tabs.has(20)).toBe(true);
+  expect(f.manager.get("one")).toBeNull();
 });

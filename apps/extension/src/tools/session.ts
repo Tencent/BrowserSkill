@@ -362,8 +362,8 @@ export async function handleSessionStop(
         }
         shouldRelease = userTabs.length > 0;
       } catch {
-        // Query failed (e.g. window already gone) — conservatively close it.
-        shouldRelease = false;
+        // A failed query does not prove the window is gone. Preserve the
+        // release decision when observed tabs are known to require protection.
       }
     }
 
