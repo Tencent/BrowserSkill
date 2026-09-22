@@ -21,6 +21,12 @@ export type ErrorCode =
 
 /** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
+  | "ui_lookup_failed"
+  | "task_unavailable"
+  | "target_unavailable"
+  | "task_stopping"
+  | "ui_deadline"
+  | "preview_busy"
   | "agent_window_scope"
   | "element_not_visible"
   | "input_not_ready"

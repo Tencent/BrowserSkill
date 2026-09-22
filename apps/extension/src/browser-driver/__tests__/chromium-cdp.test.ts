@@ -1098,3 +1098,90 @@ it("detaches on failed policy release even when a passive reader remains", async
   );
   cdp.dispose();
 });
+
+describe("bounded debugger cleanup", () => {
+  it("fences a late attach through rollback, including Chrome's detach event", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api, onDetach } = fakeApi();
+      let finishAttach!: () => void;
+      let finishDetach!: () => void;
+      vi.mocked(api.attach).mockImplementationOnce(
+        () =>
+          new Promise<void>((r) => {
+            finishAttach = r;
+          }),
+      );
+      vi.mocked(api.detach).mockImplementationOnce(async () => {
+        onDetach.fire({ tabId: 5 }, "canceled_by_user");
+        await new Promise<void>((r) => {
+          finishDetach = r;
+        });
+      });
+      const cdp = new ChromiumCdp(api);
+      const first = cdp.acquireBackgroundExecution("old", 5);
+      const rejected = expect(first).rejects.toThrow("released");
+      const releasing = cdp.releaseSessionTab("old", 5);
+      await vi.advanceTimersByTimeAsync(1000);
+      await releasing;
+      finishAttach();
+      await vi.advanceTimersByTimeAsync(0);
+      const next = cdp.acquireBackgroundExecution("new", 5);
+      const retry = expect(next).rejects.toThrow("released");
+      expect(api.attach).toHaveBeenCalledTimes(1);
+      finishDetach();
+      await rejected;
+      await retry;
+      await cdp.acquireBackgroundExecution("new", 5);
+      expect(cdp.isAttached(5)).toBe(true);
+      expect(api.attach).toHaveBeenCalledTimes(2);
+      expect(api.detach).toHaveBeenCalledTimes(1);
+      cdp.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("allows a fresh attachment after a stuck old focus command, preserving its claim", async () => {
+    vi.useFakeTimers();
+    try {
+      const { api } = fakeApi();
+      let finish!: () => void;
+      let firstToggle = true;
+      vi.mocked(api.sendCommand).mockImplementation(async (_, method) => {
+        if (method === "Emulation.setFocusEmulationEnabled" && firstToggle) {
+          firstToggle = false;
+          await new Promise<void>((r) => {
+            finish = r;
+          });
+        }
+        return {};
+      });
+      const cdp = new ChromiumCdp(api);
+      const old = cdp.acquireBackgroundExecution("same", 5);
+      const rejected = expect(old).rejects.toThrow("attachment changed");
+      await vi.advanceTimersByTimeAsync(0);
+      const release = cdp.releaseSessionTab("same", 5);
+      const failed = expect(release).rejects.toThrow("cleanup timed out");
+      await vi.advanceTimersByTimeAsync(1000);
+      await failed;
+      const next = cdp.acquireBackgroundExecution("same", 5);
+      await vi.advanceTimersByTimeAsync(0);
+      const attachment = cdp.getAttachmentId(5);
+      finish();
+      await rejected;
+      await next;
+      expect(cdp.getAttachmentId(5)).toBe(attachment);
+      expect(api.sendCommand).not.toHaveBeenCalledWith(
+        { tabId: 5 },
+        "Emulation.setFocusEmulationEnabled",
+        { enabled: false },
+      );
+      await cdp.releaseSessionTab("same", 5);
+      expect(cdp.isAttached(5)).toBe(false);
+      cdp.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

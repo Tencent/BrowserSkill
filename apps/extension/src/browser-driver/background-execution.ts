@@ -41,10 +41,14 @@ export class BackgroundExecution {
   }
 
   async synchronize(tabId: number): Promise<void> {
+    // Keep raw commands serialized across detach/reattach as well. Invalidating
+    // applied state does not cancel an issued Chrome command.
     // Join the preceding toggle, but retry a failed toggle on a subsequent call.
     const previous = this.pending.get(tabId);
+    const initialAttachment = this.attachment(tabId);
     const next = (async () => {
       await previous?.catch(() => {});
+      if (this.attachment(tabId) !== initialAttachment) return;
       for (;;) {
         const attachment = this.attachment(tabId);
         if (!attachment) return;

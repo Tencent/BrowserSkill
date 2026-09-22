@@ -3,6 +3,7 @@ import {
   type InteractionPreferenceStore,
   interactionPolicy,
 } from "@/lib/interaction-preferences";
+import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
@@ -196,6 +197,14 @@ export async function handleSessionStop(
   manager: SessionManager,
   params: SessionStopParams,
   deps: SessionStopDeps = {},
+): Promise<SessionStopResult | RpcError> {
+  return withTaskPreviewStop(manager, params?.session_id, () => stopSession(manager, params, deps));
+}
+
+async function stopSession(
+  manager: SessionManager,
+  params: SessionStopParams,
+  deps: SessionStopDeps,
 ): Promise<SessionStopResult | RpcError> {
   if (!params?.session_id) {
     return {

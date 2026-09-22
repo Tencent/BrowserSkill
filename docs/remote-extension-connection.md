@@ -155,6 +155,36 @@ The extension uses the same protocol whether it connects to `bsk` or a compatibl
 5. Renewal uses the same POST endpoint and the current token, with `action: "renew"` and a new `next_token`. Keep the same `device_id`. Invalidate the old credential for new connections. An exact retry of the same old/new pair returns the original successful response; the old credential must not rotate to a different replacement. Revocation invalidates retries too. An already connected socket can remain open during renewal while its device grant is valid.
 6. After upgrade, support the existing native handshake and RPC frames. Bind all RPC routing, responses, events and session state to the authenticated device. Do not trust its self-reported browser ID as authorization to another device's tasks. Close active sockets on expiration or revocation and cancel their pending work.
 
+### Optional UI channel
+
+A gateway that renders its own view of a running task can send two extra request frames on the authenticated socket. The extension answers them outside the tool queue, so they still work while the session is navigating or waiting for `request_help`, and neither one ever starts a session:
+
+```json
+{"id":"ui-1","method":"ui.task_preview","params":{"session_id":"server-owned-session"}}
+```
+
+- `ui.task_preview` returns `image_base64`, `format: "jpeg"`, `tab_id`, `title` and `captured_at`. The encoded frame is at most 640 pixels wide. Captures are coalesced per task, at most one runs per tab, and a poll that arrives while Chrome still holds one is refused rather than queued behind it. Authorization, the document revision and the debugger identity are re-checked before a frame is returned. These frames keep the extension's control and help overlays visible, so a periodic preview does not make them flicker in the user's browser; tool screenshots continue to suppress them for unobstructed page content.
+- `ui.task_focus` activates the task's own tab and raises its window, returning `{ "focused": true }`.
+
+Both are restricted to an existing remote task's owned tab in its Agent Window. Window membership alone never qualifies. The target's ownership and actual window are checked before acquiring control and again before delivering a frame or continuing focus. These checks also reject a tab moved by the browser user; Chrome calls cannot be made atomic with external user actions.
+
+The channel exists only on authenticated remote sockets. Requests require nonempty string `id` and `session_id` values, matching the native RPC ID contract. A missing, null, empty or numeric request ID is consumed without a reply or browser work. An invalid session ID receives `invalid_params`. Success uses `{ "id": "…", "result": … }`; failure uses `{ "id": "…", "error": { "code": "…", "message": "…", "data": { "reason": "…" } } }`, with `data` optional for underlying failures.
+
+| Failure | Code | Reason |
+| --- | --- | --- |
+| Task or authorized target unavailable | `not_found` | `task_unavailable` / `target_unavailable` |
+| Whole preview or focus request exceeds 3 seconds | `timeout` | `ui_deadline` |
+| Previous screenshot still running on this attachment | `timeout` | `preview_busy` |
+| Task stopping or selected tab returning | `cancelled` | `task_stopping` |
+| Document or debugger identity changed | `cancelled` | `stale_frame` |
+| Chrome lookup, CDP or image-processing failure | `cdp_failed` | `ui_lookup_failed` for lookup failures; otherwise optional |
+
+The 3-second budget includes tab lookup, acquisition, screenshot and image processing. It ends the caller's wait and invalidates subsequent UI work; it does not cancel a Chrome command already issued. The per-tab screenshot fence remains until that command settles or its debugger attachment changes. A successful acquisition retains the session's background-execution claim, shared with tools, until return/stop or loss of authority. A stale image or UI deadline alone does not release that shared claim.
+
+Return and stop reject new UI work and invalidate pending requests. They do not drain potentially unbounded image or screenshot promises. Already-issued focus mutations get a one-second grace period, after which teardown proceeds even if Chrome has not replied. A mutation receives this grace only once, including nested tab returns. No follow-up focus steps may run after invalidation, although an already-issued native call cannot be recalled. UI work therefore cannot veto disconnect cleanup or require another wake event to reconnect. CDP release bounds its waits for pending attachment and focus-override work, revokes stale attachment attempts, and fences late raw attach callbacks through rollback. Raw focus-override commands remain serialized per tab across attachment generations; new acquisition waits for an old command to settle, while cleanup can finish its bounded wait. Loss-of-authority cleanup also runs after a UI deadline, with an acquisition-identity guard to preserve newer tool claims. These individual cleanup bounds are not a three-second guarantee for the entire session stop (which also returns tabs and closes windows).
+
+For capability probing, send `ui.task_preview` on the remote extension socket with a valid string ID and a known session ID. Either a result or one of the UI errors above confirms support. Extensions without the channel pass this request to the native dispatcher, which returns `unknown_method`; disable UI polling on that response. Unsupported `ui.*` methods use the same native fallback. A socket connected to a local daemon does not install this channel.
+
 A gateway can bridge this protocol to a local `bsk` daemon on its server, keeping that daemon's loopback/IPC boundary private. A gateway that terminates device authentication owns that authentication lifecycle and routing isolation. Merely forwarding its credentials to the built-in server will not authorize them: the built-in server accepts its own issued grants.
 
 ## Browser permissions and task lifetime
@@ -167,7 +197,7 @@ This also applies to tabs or windows opened by a page through `target="_blank"`,
 
 Disconnecting cancels task work, returns borrowed tabs and closes task-created tabs. User-created tabs survive cleanup. Failed returns preserve the window and must be resolved before reconnecting. Reconnection starts new tasks; commands and sessions are never replayed. Failed remote authentication does not select a local connection automatically.
 
-Remote upload and download are unsupported in this version and return the `unsupported` error. Existing local file transfer behavior is unchanged. Screenshots and other existing RPC content results remain supported. There is no gateway preview or focus side protocol, background task tab group, or alternative window model.
+Remote upload and download are unsupported in this version and return the `unsupported` error. Existing local file transfer behavior is unchanged. Screenshots and other existing RPC content results remain supported. There is no background task tab group or alternative window model.
 
 Device credentials live in extension-origin IndexedDB; ordinary extension settings contain only the selected connection mode and a non-secret revision. Fresh local profiles and explicitly selected local mode do not read that credential database. If remote storage fails, the popup reports the error and the extension does not fall back automatically. Explicitly selecting the local connection can recover startup even when the credential database is unavailable. Legacy remote settings still migrate before ordinary settings access is restored. The standalone server persists hashed credentials with private file permissions and atomic writes. Treat the whole browser profile and `BSK_HOME` as trusted local data. Protect TLS private keys separately.
 

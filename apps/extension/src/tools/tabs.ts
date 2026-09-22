@@ -1,3 +1,4 @@
+import { withUiTeardown } from "@/session-manager/ui-activity";
 // Tab-tool handlers. M6 wired `tool.tab_list`; M8 adds the rest of
 // the tab namespace: `tab_create`, `tab_close`, `tab_select`,
 // `tab_borrow`, `tab_return`. The dispatcher routes each method to a
@@ -1117,6 +1118,14 @@ async function releaseReturnedTabState(
  * entry vs leaving it for retry.
  */
 export async function returnBorrowedTab(
+  ctx: SessionContext,
+  tabId: number,
+  deps: TabManagementDeps,
+): Promise<ReturnOutcome | RpcError> {
+  return withUiTeardown(ctx, tabId, () => returnBorrowedTabCore(ctx, tabId, deps));
+}
+
+async function returnBorrowedTabCore(
   ctx: SessionContext,
   tabId: number,
   deps: TabManagementDeps,

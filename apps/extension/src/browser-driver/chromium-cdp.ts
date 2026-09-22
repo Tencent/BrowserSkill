@@ -165,6 +165,8 @@ async function settleBeforeDeadline(promises: Promise<void>[], deadline: number)
 export class ChromiumCdp {
   private readonly api: CdpDebuggerApi;
   private readonly attachedTabs = new Set<number>();
+  private readonly claimAttempts = new Map<number, Map<string, object>>();
+  private readonly attachmentVersions = new Map<number, number>();
   private readonly attachmentIds = new Map<number, string>();
   private readonly attachInFlight = new Map<number, Promise<void>>();
   private readonly detachInFlight = new Map<number, Promise<void>>();
@@ -220,6 +222,10 @@ export class ChromiumCdp {
 
   /** Only explicit automation control may retain the focus/visibility override. */
   async acquireBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
+    const attempts = this.claimAttempts.get(tabId) ?? new Map<string, object>();
+    const attempt = {};
+    attempts.set(sessionId, attempt);
+    this.claimAttempts.set(tabId, attempts);
     const retained = this.backgroundExecution.has(sessionId, tabId);
     this.trackSessionTab(sessionId, tabId);
     this.backgroundExecution.retain(sessionId, tabId);
@@ -229,9 +235,10 @@ export class ChromiumCdp {
         throw new Error("Background execution was released during setup");
       }
     } catch (error) {
-      if (!retained) {
+      if (!retained && this.claimAttempts.get(tabId)?.get(sessionId) === attempt) {
+        this.claimAttempts.get(tabId)?.delete(sessionId);
         this.backgroundExecution.release(sessionId, tabId);
-        await this.backgroundExecution.synchronize(tabId).catch(() => {});
+        await cleanupWait(this.backgroundExecution.synchronize(tabId)).catch(() => {});
       }
       throw error;
     }
@@ -248,17 +255,27 @@ export class ChromiumCdp {
       await existing;
       return;
     }
+    const version = this.attachmentVersions.get(tabId) ?? 0;
+    const check = () => {
+      if ((this.attachmentVersions.get(tabId) ?? 0) !== version)
+        throw new Error("Debugger attachment was released during setup");
+    };
     const attach = (async () => {
       await this.api.attach({ tabId }, CDP_PROTOCOL_VERSION);
       try {
+        check();
         await this.enablePageDomain(tabId);
+        check();
         await this.enableConsoleDomains(tabId);
+        check();
         await this.enableNetworkDomainBestEffort(tabId);
+        check();
         this.attachedTabs.add(tabId);
         this.attachmentIds.set(tabId, crypto.randomUUID());
         await this.enableFrameDiscovery({ tabId }).catch((err) => {
           console.debug("[bsk cdp] frame discovery unavailable", { tabId, err });
         });
+        check();
       } catch (err) {
         // A CDP domain enable failed after the raw attach succeeded
         // (e.g. `Page.enable` rejects because the tab just navigated to
@@ -269,6 +286,11 @@ export class ChromiumCdp {
         // unusable until the extension is reloaded. Detach directly
         // (`this.detach()` is a no-op here because `attachedTabs` lacks
         // the id) so the next attempt starts from a clean slate.
+        if ((this.attachmentVersions.get(tabId) ?? 0) !== version) {
+          this.attachedTabs.delete(tabId);
+          this.attachmentIds.delete(tabId);
+          this.backgroundExecution.invalidate(tabId);
+        }
         await this.api.detach({ tabId }).catch((detachErr) => {
           console.debug("[bsk cdp] rollback detach failed", { tabId, detachErr });
         });
@@ -282,7 +304,7 @@ export class ChromiumCdp {
         throw normalizeError(err);
       })
       .finally(() => {
-        this.attachInFlight.delete(tabId);
+        if (this.attachInFlight.get(tabId) === attach) this.attachInFlight.delete(tabId);
       });
     this.attachInFlight.set(tabId, attach);
     await attach;
@@ -292,8 +314,15 @@ export class ChromiumCdp {
    * Send a CDP command and decode the result as `T`. Throws on any
    * `chrome.runtime.lastError`.
    */
-  async send<T = unknown>(tabId: number, method: string, params?: object): Promise<T> {
+  async send<T = unknown>(
+    tabId: number,
+    method: string,
+    params?: object,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    signal?.throwIfAborted();
     await this.ensureAttached(tabId);
+    signal?.throwIfAborted();
     try {
       const result = await this.api.sendCommand({ tabId }, method, params ?? {});
       return result as T;
@@ -471,12 +500,14 @@ export class ChromiumCdp {
 
   /** Detach if attached; never throws. */
   async detach(tabId: number): Promise<void> {
+    this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
     const existing = this.detachInFlight.get(tabId);
     if (existing) {
-      await existing;
+      await cleanupWait(existing);
       return;
     }
-    this.attachInFlight.delete(tabId);
+    // Leave pending raw attachments fenced until they settle. Their version
+    // check rolls them back before another acquisition may attach to this tab.
     if (!this.attachedTabs.has(tabId)) return;
     this.attachedTabs.delete(tabId);
     this.attachmentIds.delete(tabId);
@@ -498,7 +529,7 @@ export class ChromiumCdp {
       this.detachInFlight.delete(tabId);
     });
     this.detachInFlight.set(tabId, detach);
-    await detach;
+    await cleanupWait(detach);
   }
 
   /** True iff `ensureAttached(tabId)` has succeeded since the last detach. */
@@ -513,17 +544,33 @@ export class ChromiumCdp {
     this.tabOwners.set(tabId, owners);
   }
 
+  /** Identity of the latest acquisition, including repeated use on one attachment. */
+  getSessionClaimId(sessionId: string, tabId: number): object | undefined {
+    return this.claimAttempts.get(tabId)?.get(sessionId);
+  }
+
   /** Release one session's claim, preserving attachments still used by another. */
-  async releaseSessionTab(sessionId: string, tabId: number): Promise<void> {
+  async releaseSessionTab(
+    sessionId: string,
+    tabId: number,
+    guard?: { ifClaim: object },
+  ): Promise<void> {
+    if (guard && this.getSessionClaimId(sessionId, tabId) !== guard.ifClaim) return;
+    this.claimAttempts.get(tabId)?.delete(sessionId);
     this.backgroundExecution.release(sessionId, tabId);
     const owners = this.tabOwners.get(tabId);
     owners?.delete(sessionId);
     if (owners?.size === 0) this.tabOwners.delete(tabId);
     // Remove the old claim before yielding: a new acquisition must survive this
     // cleanup, including when it uses the same session id.
-    await this.attachInFlight.get(tabId)?.catch(() => {});
+    const attaching = this.attachInFlight.get(tabId);
+    if (attaching && !(await cleanupWait(attaching.catch(() => {})))) {
+      if (!this.tabOwners.has(tabId)) await this.detach(tabId);
+      return;
+    }
     try {
-      await this.backgroundExecution.synchronize(tabId);
+      if (!(await cleanupWait(this.backgroundExecution.synchronize(tabId))))
+        throw new Error("Background execution cleanup timed out");
     } catch (error) {
       // A failed disable must not leave a returned user page emulated just
       // because a passive reader still owns the debugger. Readers can reattach.
@@ -557,7 +604,9 @@ export class ChromiumCdp {
   /** Best-effort detach of every cached tab. Used on session.stop. */
   async detachAll(): Promise<void> {
     const tabs = Array.from(this.attachedTabs);
-    this.attachInFlight.clear();
+    for (const tabId of this.attachInFlight.keys())
+      this.attachmentVersions.set(tabId, (this.attachmentVersions.get(tabId) ?? 0) + 1);
+    this.claimAttempts.clear();
     this.tabOwners.clear();
     this.backgroundExecution.clear();
     this.attachedTabs.clear();
@@ -924,9 +973,13 @@ export class ChromiumCdp {
         this.options.onDocumentChanged?.(source.tabId);
         this.attachedTabs.delete(source.tabId);
         this.attachmentIds.delete(source.tabId);
-        this.attachInFlight.delete(source.tabId);
+        this.attachmentVersions.set(
+          source.tabId,
+          (this.attachmentVersions.get(source.tabId) ?? 0) + 1,
+        );
         this.backgroundExecution.invalidate(source.tabId);
         if (_reason === "target_closed") {
+          this.claimAttempts.delete(source.tabId);
           this.tabOwners.delete(source.tabId);
           this.backgroundExecution.forget(source.tabId);
         }
@@ -1290,4 +1343,20 @@ function normalizeError(err: unknown): Error {
     return new Error(String((err as { message: unknown }).message));
   }
   return new Error("unknown chrome.debugger error");
+}
+
+/** Caller-side cleanup budget; the underlying promise remains fenced and its
+ * late completion is still observed. A deadline is not native cancellation. */
+async function cleanupWait(work: Promise<unknown>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 1000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
