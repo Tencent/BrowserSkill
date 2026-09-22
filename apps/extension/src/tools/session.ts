@@ -10,7 +10,7 @@ import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
-import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
+import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -334,7 +334,7 @@ async function stopSession(
     }
 
     // Step 5: decide whether to release (keep) the window or close it.
-    let shouldRelease = false;
+    let shouldRelease = (ctx.observedTabs?.size ?? 0) > 0;
     if (queryApi) {
       try {
         const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
@@ -371,14 +371,24 @@ async function stopSession(
         }
         shouldRelease = userTabs.length > 0;
       } catch {
-        // Query failed (e.g. window already gone) — conservatively close it.
-        shouldRelease = false;
+        // A failed query does not prove the window is gone. Preserve the
+        // release decision when observed tabs are known to require protection.
       }
     }
 
     if (shouldRelease) {
       // Keep the window + its user tabs; only drop the session binding.
+      const observedTabIds = Array.from(ctx.observedTabs ?? []);
       await manager.stop(params.session_id, { dropOnly: true });
+      // Closing an agent tab may have reactivated an observed tab. Reset only
+      // after dropping the session so subsequent overlay refreshes stay hidden.
+      const overlayReset = deps.tabManagement?.agentOverlayReset ?? chromeAgentOverlayResetApi;
+      for (const tabId of observedTabIds) {
+        // Match tab_return: content-script replies must not delay session cleanup.
+        void overlayReset.resetAgentOverlays(tabId, ctx.sessionId).catch(() => {
+          // Restricted pages and unloaded content scripts cannot receive messages.
+        });
+      }
       result.window_released = true;
     } else {
       // Window is empty (or we couldn't verify state) — close it.

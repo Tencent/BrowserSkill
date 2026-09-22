@@ -4,6 +4,7 @@ import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
 import { ScreenshotExports } from "@/long-screenshot/exports";
 import type { SessionManager } from "@/session-manager/manager";
+import { withTaskPopups } from "@/session-manager/task-popups";
 import type { Transport } from "@/transport/transport";
 import type {
   BlurParams,
@@ -155,6 +156,9 @@ export interface DispatcherDeps {
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
 }
+
+/** Tools whose page input can make the page open another tab or window. */
+const OPENS_TABS = new Set(["tool.click", "tool.press"]);
 
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
@@ -319,7 +323,15 @@ export class ToolDispatcher {
         /* Evidence must not block the operation. */
       }
       throwIfDispatchAborted(ac.signal);
-      const result = await this.invoke(req, ac.signal);
+      const result = OPENS_TABS.has(req.method)
+        ? await withTaskPopups(
+            this.sessions,
+            (req.params ?? {}) as { session_id?: string; tab_id?: number },
+            (inputSent) => this.invoke(req, ac.signal, inputSent),
+            this.onAgentTabClaimed,
+            ac.signal,
+          )
+        : await this.invoke(req, ac.signal);
       this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
       debugTicket = undefined;
       if (isRpcError(result)) {
@@ -388,7 +400,11 @@ export class ToolDispatcher {
     }
   }
 
-  private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
+  private async invoke(
+    req: RequestFrame,
+    signal: AbortSignal,
+    onInputSent?: (tabId: number) => void,
+  ): Promise<unknown | RpcError> {
     const sessionId = (req.params as { session_id?: string } | undefined)?.session_id;
     // Also enforce this for gateways backed by a local-mode daemon, where the
     // standalone server's early IPC rejection does not apply.
@@ -649,6 +665,7 @@ export class ToolDispatcher {
                     tabsApi: chromeTabsApi,
                     signal,
                     bypassOverlay,
+                    onInputSent,
                   }
                 : undefined,
             ),
@@ -737,7 +754,7 @@ export class ToolDispatcher {
             handlePress(
               this.sessions,
               req.params as PressParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, onInputSent } : undefined,
             ),
           signal,
         );

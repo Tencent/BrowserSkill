@@ -53,6 +53,8 @@ import {
 import { resolveSnapshotRef } from "./snapshot-ref";
 
 export interface InteractionDeps {
+  /** Arm short popup observation immediately before native input dispatch. */
+  onInputSent?: (tabId: number) => void;
   cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
   /** Abort hook (full chain wired in M10.2). */
@@ -610,6 +612,7 @@ async function dispatchClickAtPoint(
         if (error) return failure(error);
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      deps.onInputSent?.(tabId);
       markSent?.();
       attempted = true;
       releaseNeeded = true;
@@ -620,6 +623,7 @@ async function dispatchClickAtPoint(
         clickCount: count,
         modifiers,
       });
+      deps.onInputSent?.(tabId);
       await release();
       releaseNeeded = false;
     }
@@ -1537,6 +1541,7 @@ export async function handlePress(
     try {
       let cancelled = false;
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      deps.onInputSent?.(target.tabId);
       input.markSent();
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "rawKeyDown",
@@ -1569,6 +1574,7 @@ export async function handlePress(
           cancelled = true;
         }
       }
+      deps.onInputSent?.(target.tabId);
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key: descriptor.key,

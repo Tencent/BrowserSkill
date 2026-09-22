@@ -14,12 +14,18 @@ export interface SessionContext {
    * Tabs opened through Chrome UI never enter this set.
    */
   agentCreatedTabs: Set<number>;
+  /** Observed same-window popups: controllable, but preserved by session stop. */
+  observedTabs?: Set<number>;
   createdAtMs: number;
 }
 
 /** Whether this session has explicitly claimed control of `tabId`. */
 export function isAgentControlledTab(ctx: SessionContext, tabId: number): boolean {
-  return ctx.agentCreatedTabs.has(tabId) || ctx.borrowedTabs.has(tabId);
+  return (
+    ctx.agentCreatedTabs.has(tabId) ||
+    ctx.borrowedTabs.has(tabId) ||
+    (ctx.observedTabs?.has(tabId) ?? false)
+  );
 }
 
 export interface BorrowedTab {
@@ -152,8 +158,26 @@ export class SessionManager {
     this.invalidateTabRefs(tabId);
     for (const ctx of this.sessions.values()) {
       ctx.agentCreatedTabs.delete(tabId);
+      ctx.observedTabs?.delete(tabId);
       if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
     }
+  }
+
+  /** All kinds of committed control, not just borrowed tabs. */
+  findControllingSession(tabId: number): string | null {
+    return this.list().find((ctx) => isAgentControlledTab(ctx, tabId))?.sessionId ?? null;
+  }
+
+  /** Observation does not follow a page moved out by the browser user. */
+  releaseObservedTab(tabId: number): string[] {
+    const released: string[] = [];
+    for (const ctx of this.sessions.values()) {
+      if (ctx.observedTabs?.delete(tabId)) {
+        ctx.refStore.invalidateTab(tabId);
+        released.push(ctx.sessionId);
+      }
+    }
+    return released;
   }
 
   /**
@@ -183,7 +207,9 @@ export class SessionManager {
    */
   tryReserveBorrow(tabId: number, sessionId: string): BorrowReservation | { borrowedBy: string } {
     const borrowedBy =
-      this.borrowReservations.get(tabId) ?? this.findBorrowingSession(tabId, sessionId);
+      this.borrowReservations.get(tabId) ??
+      this.findControllingSession(tabId) ??
+      this.findBorrowingSession(tabId, sessionId);
     if (borrowedBy) return { borrowedBy };
     this.borrowReservations.set(tabId, sessionId);
     let closed = false;

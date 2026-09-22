@@ -166,7 +166,7 @@ export default defineBackground(() => {
   /**
    * Authoritative overlay state for a specific tab. Agent Window tabs are
    * free by default; only tabs explicitly claimed through session startup,
-   * `tab_create`, or `tab_borrow` receive the control overlay.
+   * `tab_create`, `tab_borrow`, or popup observation receive the control overlay.
    */
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
@@ -252,7 +252,15 @@ export default defineBackground(() => {
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
-  chrome.tabs.onDetached.addListener((tabId) => debug.releaseTab(tabId));
+  chrome.tabs.onDetached.addListener((tabId) => {
+    debug.releaseTab(tabId);
+    const releasedSessionIds = sessions.releaseObservedTab(tabId);
+    if (releasedSessionIds.length > 0) void pushOverlayStateForTab(tabId);
+    for (const sessionId of releasedSessionIds)
+      void cdp
+        .releaseSessionTab(sessionId, tabId)
+        .catch((error) => console.debug("[bsk] observed tab release failed", error));
+  });
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
