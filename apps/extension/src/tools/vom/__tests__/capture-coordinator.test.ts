@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CAPTURE_READ_TIMEOUT_MS, CdpReadTimeoutError } from "@/browser-driver/command-deadline";
 import type { CdpFrame, CdpTarget } from "@/browser-driver/frame-graph";
 import { cdpTargetKey } from "@/browser-driver/frame-graph";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
@@ -202,6 +203,91 @@ function fixture(
 }
 
 describe("captureObservationFacts", () => {
+  it("isolates an ancestor session timeout encountered while projecting a nested OOPIF", async () => {
+    const f = fixture({
+      frames: [
+        { frameId: "main", target: { tabId: 4 } },
+        {
+          frameId: "outer",
+          parentFrameId: "main",
+          ownerBackendNodeId: 4,
+          target: { tabId: 4, sessionId: "outer" },
+        },
+        {
+          frameId: "inner",
+          parentFrameId: "outer",
+          ownerBackendNodeId: 2,
+          target: { tabId: 4, sessionId: "inner" },
+        },
+      ],
+    });
+    const original = f.cdp.sendToTarget!;
+    f.cdp.sendToTarget = async (target, method, params) => {
+      if (target.sessionId === "outer" && method === "DOM.getBoxModel")
+        throw new CdpReadTimeoutError(method, 4, CAPTURE_READ_TIMEOUT_MS, "outer");
+      return original(target, method, params);
+    };
+    f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+    const facts = await captureObservationFacts(f.cdp, 4);
+    expect(facts.documents.map((document) => document.frame.frameId)).toEqual(["main"]);
+    expect(facts.issues).toContainEqual(
+      expect.objectContaining({
+        target: { tabId: 4, sessionId: "outer" },
+        reason: "capture-unavailable",
+      }),
+    );
+  });
+  it.each([
+    "DOMSnapshot.captureSnapshot",
+    "Accessibility.getFullAXTree",
+  ])("keeps healthy documents after a child %s timeout without fallback reads", async (method) => {
+    const f = fixture();
+    const original = f.cdp.sendToTarget!;
+    const attempted: string[] = [];
+    f.cdp.sendToTarget = async (target, name, params) => {
+      if (target.sessionId === "remote") {
+        attempted.push(name);
+        if (name === method)
+          throw new CdpReadTimeoutError(name, 4, CAPTURE_READ_TIMEOUT_MS, "remote");
+      }
+      return original(target, name, params);
+    };
+    f.cdp.send = (tabId, name, params) => f.cdp.sendToTarget!({ tabId }, name, params);
+    const facts = await captureObservationFacts(f.cdp, 4);
+    expect(facts.documents.map((document) => document.frame.frameId)).toEqual([
+      "main",
+      "same",
+      "nested",
+    ]);
+    expect(facts.issues).toContainEqual(
+      expect.objectContaining({
+        target: { tabId: 4, sessionId: "remote" },
+        reason: "capture-unavailable",
+      }),
+    );
+    expect(attempted.at(-1)).toBe(method);
+    expect(attempted).not.toContain("DOM.getDocument");
+  });
+
+  it("reports omitted frame-tree subtrees without recapturing them", async () => {
+    const f = fixture();
+    const graph = await f.cdp.getFrameGraph!(4);
+    const remote = graph.frames.find((frame) => frame.frameId === "remote")!;
+    f.cdp.getFrameGraph = async () => ({
+      ...graph,
+      frames: graph.frames.filter((frame) => frame !== remote),
+      unavailableFrames: [remote],
+    });
+    const facts = await captureObservationFacts(f.cdp, 4);
+    expect(facts.documents.some((document) => document.frame.frameId === "remote")).toBe(false);
+    expect(facts.issues).toContainEqual({
+      target: remote.target,
+      frameId: "remote",
+      stage: "dom",
+      reason: "capture-unavailable",
+    });
+    expect(f.logs.some((call) => call.target.sessionId === "remote")).toBe(false);
+  });
   it("normalizes snapshot-owned root scroll instead of mixing in stale CSS scroll", async () => {
     const { cdp } = fixture({ frames: [{ frameId: "main", target: { tabId: 4 } }] });
     const original = cdp.sendToTarget!;

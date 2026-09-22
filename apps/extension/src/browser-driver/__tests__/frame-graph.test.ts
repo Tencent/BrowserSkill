@@ -1,7 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { buildFrameGraph, type CdpFrameTreeNode, type CdpFrameTreeSource } from "../frame-graph";
+import {
+  buildFrameGraph,
+  type CdpFrameTreeNode,
+  type CdpFrameTreeSource,
+  omitFrameSubtrees,
+} from "../frame-graph";
 
 describe("buildFrameGraph", () => {
+  it("omits an unavailable OOPIF and its independently attached descendants without losing healthy siblings", () => {
+    const root = { tabId: 4 };
+    const child = { tabId: 4, sessionId: "child-session" };
+    const graph = buildFrameGraph([
+      {
+        target: root,
+        tree: {
+          frame: { id: "main" },
+          childFrames: [
+            {
+              frame: { id: "child", parentId: "main" },
+              childFrames: [{ frame: { id: "nested", parentId: "child" } }],
+            },
+            { frame: { id: "healthy", parentId: "main" } },
+          ],
+        },
+      },
+      { target: { tabId: 4, sessionId: "nested-session" }, tree: { frame: { id: "nested" } } },
+    ])!;
+    const partial = omitFrameSubtrees(graph, new Map([["child", child]]));
+    expect(partial.frames.map((frame) => frame.frameId)).toEqual(["main", "healthy"]);
+    expect(partial.unavailableFrames).toEqual([
+      { frameId: "child", parentFrameId: "main", target: child },
+      {
+        frameId: "nested",
+        parentFrameId: "child",
+        target: { tabId: 4, sessionId: "nested-session" },
+      },
+    ]);
+  });
   it("keeps sibling frames distinct and routes nested OOPIFs to their child sessions", () => {
     const graph = buildFrameGraph([
       {

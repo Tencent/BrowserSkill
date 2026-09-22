@@ -77,19 +77,27 @@ export async function captureVisualScreenshot(
       )
         return stale("visual attachment changed");
       let after: VisualTargetState | RpcError;
+      let identityVerified = false;
       try {
-        after = await resolveVisualRegionNow(cdp, candidate, signal, true);
+        after = await resolveVisualRegionNow(cdp, candidate, signal, true, () => {
+          identityVerified = true;
+        });
       } catch (error) {
         throwIfAborted(signal);
-        if (isCaptureTerminalError(error)) throw error;
+        if (isAbortError(error) || (isCaptureTerminalError(error) && !identityVerified))
+          throw error;
         after = stale("post-capture mapping unavailable");
       }
-      if ("code" in after) {
+      if ("code" in after && !identityVerified) {
         // Preserve PR7 viewing behavior when geometry became unsupported, but never
         // return an image whose identity could not be confirmed.
         const identityError = await verifyCapturedTarget(cdp, candidate, signal);
         if (identityError) return identityError;
       }
+      if (
+        cdp.getAttachmentId?.(candidate.document.target.tabId) !== candidate.document.attachmentId
+      )
+        return stale("visual attachment changed");
       const mapping = !("code" in after) && sameVisualMapping(region, after) ? region : undefined;
       const dims = shot.data ? parsePngDimensions(shot.data) : null;
       if (!dims)

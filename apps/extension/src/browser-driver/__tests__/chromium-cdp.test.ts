@@ -1,5 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SessionManager } from "@/session-manager/manager";
 import { RefStore } from "@/session-manager/ref-store";
+import { handleWaitForNavigation } from "@/tools/waits";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "../chromium-cdp";
 
 function fakeChromeEvent<TArgs extends unknown[]>() {
@@ -29,7 +31,75 @@ function fakeApi() {
   return { api, onEvent, onDetach };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
 describe("ChromiumCdp", () => {
+  it("isolates a known child tree timeout and keeps it gated until recovery", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onEvent } = fakeApi();
+    let finish!: (value: object) => void;
+    let childReads = 0;
+    vi.mocked(api.sendCommand).mockImplementation(async (target, method) => {
+      if (method === "Page.getFrameTree") {
+        if (target.sessionId === "child-session") {
+          childReads++;
+          if (childReads === 1)
+            return new Promise((resolve) => {
+              finish = resolve;
+            });
+          return { frameTree: { frame: { id: "child" } } };
+        }
+        return {
+          frameTree: {
+            frame: { id: "main" },
+            childFrames: [
+              { frame: { id: "child", parentId: "main" } },
+              { frame: { id: "healthy", parentId: "main" } },
+            ],
+          },
+        };
+      }
+      if (method === "DOM.getFrameOwner") return { backendNodeId: 100 };
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", {
+        sessionId: "child-session",
+        targetInfo: { type: "iframe", targetId: "child" },
+      });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const capture = cdp.getFrameGraph(4);
+        await vi.advanceTimersByTimeAsync(11_000);
+        const graph = await capture;
+        expect(graph.frames.map((frame) => frame.frameId)).toEqual(["main", "healthy"]);
+        expect(graph.unavailableFrames).toEqual([
+          {
+            frameId: "child",
+            parentFrameId: "main",
+            target: { tabId: 4, sessionId: "child-session" },
+          },
+        ]);
+        expect(childReads).toBe(1);
+      }
+      finish({ frameTree: { frame: { id: "child" } } });
+      await vi.advanceTimersByTimeAsync(0);
+      const recovered = cdp.getFrameGraph(4);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(
+        (await recovered).frames.find((frame) => frame.frameId === "child")?.target.sessionId,
+      ).toBe("child-session");
+      expect(childReads).toBe(2);
+    } finally {
+      cdp.dispose();
+    }
+  });
   it("configures frame auto-attach once per debugger session and reapplies after detach", async () => {
     const { api, onDetach } = fakeApi();
     vi.mocked(api.sendCommand).mockResolvedValue({ frameTree: { frame: { id: "main" } } });
@@ -64,17 +134,21 @@ describe("ChromiumCdp", () => {
     cdp.dispose();
   });
 
-  it("keeps a child frame session whose auto-attach configuration timed out", async () => {
+  it("retains a timed-out child configuration until its late reply, without resending it", async () => {
     vi.useFakeTimers();
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "debug").mockImplementation(() => {});
     const { api, onEvent } = fakeApi();
     let childConfigurations = 0;
+    let finish!: (value: object) => void;
     vi.mocked(api.sendCommand).mockImplementation(
       async (target: chrome.debugger.Debuggee & { sessionId?: string }, method: string) => {
         if (method === "Target.setAutoAttach" && target.sessionId === "child") {
           childConfigurations += 1;
-          if (childConfigurations === 1) return new Promise(() => {});
+          if (childConfigurations === 1)
+            return new Promise((resolve) => {
+              finish = resolve;
+            });
           return {};
         }
         if (method === "DOM.getFrameOwner") return { backendNodeId: 200 };
@@ -92,16 +166,25 @@ describe("ChromiumCdp", () => {
     const cdp = new ChromiumCdp(api);
     try {
       await cdp.ensureAttached(4);
-      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "child" });
+      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", {
+        sessionId: "child",
+        targetInfo: { type: "iframe", targetId: "child" },
+      });
       await vi.advanceTimersByTimeAsync(10_000);
       expect(childConfigurations).toBe(1);
       const graph = cdp.getFrameGraph(4);
       await vi.advanceTimersByTimeAsync(2_000);
-      expect((await graph).frames.find((frame) => frame.frameId === "child")?.target).toEqual({
+      expect((await graph).unavailableFrames?.map((frame) => frame.frameId)).toEqual(["child"]);
+      expect(childConfigurations).toBe(1);
+      finish({});
+      await vi.advanceTimersByTimeAsync(0);
+      const recovered = cdp.getFrameGraph(4);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect((await recovered).frames.find((frame) => frame.frameId === "child")?.target).toEqual({
         tabId: 4,
         sessionId: "child",
       });
-      expect(childConfigurations).toBe(2);
+      expect(childConfigurations).toBe(1);
     } finally {
       cdp.dispose();
       vi.useRealTimers();
@@ -141,9 +224,13 @@ describe("ChromiumCdp", () => {
       }
       const graph = cdp.getFrameGraph(4);
       const rejected = expect(graph).rejects.toThrow(`${stuckMethod} timed out`);
-      // A stuck root configuration is first waited for by the attach path.
+      // Root initialization must not resend the configuration after its deadline.
       await vi.advanceTimersByTimeAsync(22_000);
       await rejected;
+      if (stuckMethod === "Target.setAutoAttach")
+        expect(
+          vi.mocked(api.sendCommand).mock.calls.filter((call) => call[1] === stuckMethod),
+        ).toHaveLength(1);
     } finally {
       cdp.dispose();
       vi.useRealTimers();
@@ -169,12 +256,14 @@ describe("ChromiumCdp", () => {
     try {
       await cdp.ensureAttached(4);
       const first = expect(cdp.send(4, "DOMSnapshot.captureSnapshot")).rejects.toThrow("timed out");
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       await first;
       await expect(cdp.send(4, "Accessibility.getFullAXTree")).rejects.toThrow(
         "still running in the renderer",
       );
-      await expect(cdp.send(4, "Runtime.evaluate", { expression: "1" })).resolves.toEqual({});
+      await expect(cdp.send(4, "Runtime.evaluate", { expression: "1" })).rejects.toThrow(
+        "still running",
+      );
       await expect(cdp.send(5, "Accessibility.getFullAXTree")).resolves.toEqual({});
       expect(reads()).toHaveLength(1);
       finish({ documents: [] });
@@ -198,7 +287,7 @@ describe("ChromiumCdp", () => {
     try {
       await cdp.ensureAttached(4);
       const first = expect(cdp.send(4, "DOMSnapshot.captureSnapshot")).rejects.toThrow("timed out");
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(20_000);
       await first;
       onDetach.fire({ tabId: 4 }, "canceled_by_user");
       await expect(cdp.send(4, "Accessibility.getFullAXTree")).resolves.toEqual({});
@@ -1363,4 +1452,39 @@ describe("bounded debugger cleanup", () => {
       vi.useRealTimers();
     }
   });
+});
+
+it("preserves a navigation wait budget when its frame-tree read takes more than ten seconds", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "debug").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const sm = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 4,
+    },
+  });
+  await sm.start("aa11");
+  const { api } = fakeApi();
+  vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+    if (method === "Page.getFrameTree") {
+      await new Promise((r) => setTimeout(r, 12_000));
+      return { frameTree: { frame: { id: "main" } } };
+    }
+    if (method === "Runtime.evaluate") return { result: { value: "complete" } };
+    return {};
+  });
+  const cdp = new ChromiumCdp(api);
+  const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
+  const tabsApi = { get: async () => tab, query: async () => [tab] };
+  const pending = handleWaitForNavigation(
+    sm,
+    { session_id: "aa11", wait_until: "load", timeout_ms: 30_000 },
+    { cdp, tabsApi },
+  );
+  await vi.advanceTimersByTimeAsync(12_001);
+  const result = await pending;
+  cdp.dispose();
+  expect(result).toMatchObject({ reached: "load" });
 });

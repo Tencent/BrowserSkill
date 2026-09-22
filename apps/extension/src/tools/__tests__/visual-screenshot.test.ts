@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CdpReadGate, READ_TIMEOUT_MS } from "@/browser-driver/command-deadline";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import { SessionManager } from "@/session-manager/manager";
 import { handleClick } from "../interaction";
@@ -176,6 +177,49 @@ function fixture(child = false, oopif = false) {
 }
 
 describe("visual screenshot", () => {
+  it.each([
+    "Page.getLayoutMetrics",
+    "DOM.getFrameOwner",
+  ])("only degrades a post-capture %s timeout when identity is already verified", async (method) => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const f = fixture(true, true);
+    const gate = new CdpReadGate();
+    const original = f.send.getMockImplementation()!;
+    let captured = false;
+    f.control.onShot = () => {
+      captured = true;
+    };
+    const dispatched: string[] = [];
+    f.send.mockImplementation((target, name, params) =>
+      gate.run(target, name, () => {
+        dispatched.push(name);
+        if (captured && name === method) return new Promise<never>(() => {});
+        return original(target, name, params);
+      }),
+    );
+    try {
+      const capture = captureVisualScreenshot(f.cdp, f.candidate);
+      await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS + 1);
+      const result = await capture;
+      if (method === "Page.getLayoutMetrics") {
+        expect(result).toMatchObject({
+          image_base64: expect.any(String),
+          capture_unavailable: expect.any(String),
+        });
+        expect(result).not.toHaveProperty("mapping");
+      } else {
+        expect(result).toMatchObject({ code: "cdp_failed" });
+        expect(result).not.toHaveProperty("image_base64");
+      }
+      expect(dispatched.at(-1)).toBe(method);
+      expect(dispatched.filter((name) => name === "Page.captureScreenshot")).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
   it.each([
     [false, false],
     [true, false],

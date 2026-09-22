@@ -2,6 +2,8 @@ import { afterEach, expect, it, vi } from "vitest";
 import { isAbortError, isCaptureTerminalError } from "@/tools/vom/capture-abort";
 import { captureObservationFacts } from "@/tools/vom/capture-coordinator";
 import {
+  CAPTURE_READ_TIMEOUT_MS,
+  CdpReadGate,
   CdpReadTimeoutError,
   READ_TIMEOUT_MS,
   RENDERER_READ_TIMEOUT,
@@ -25,9 +27,9 @@ it("times out stuck snapshots with the actual method and stops fallback reads", 
   );
   const work = captureObservationFacts({ send: send as never }, 4);
   const checked = expect(work).rejects.toThrow(
-    "DOMSnapshot.captureSnapshot timed out after 10000ms (tab 4)",
+    "DOMSnapshot.captureSnapshot timed out after 20000ms (tab 4)",
   );
-  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
   await checked;
   expect(send.mock.calls.map((call) => call[1])).toEqual([
     "DOMSnapshot.enable",
@@ -61,7 +63,7 @@ it("ignores the late reply of a timed-out read", async () => {
       }),
   );
   const checked = expect(work).rejects.toBeInstanceOf(CdpReadTimeoutError);
-  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
   await checked;
   finish({ nodes: [] });
   await Promise.resolve();
@@ -85,7 +87,7 @@ it("handles a late rejection of a timed-out read without an unhandled rejection"
         }),
     );
     const checked = expect(work).rejects.toBeInstanceOf(CdpReadTimeoutError);
-    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
     await checked;
     fail(new Error("Detached while handling command"));
     await vi.advanceTimersByTimeAsync(0);
@@ -137,7 +139,7 @@ it("distinguishes caller timeout from a late Chrome completion", async () => {
       }),
   );
   const checked = expect(work).rejects.toBeInstanceOf(CdpReadTimeoutError);
-  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
   await checked;
   expect(warning).toHaveBeenCalledWith(
     "[bsk cdp] read timed out",
@@ -151,7 +153,11 @@ it("distinguishes caller timeout from a late Chrome completion", async () => {
   await vi.advanceTimersByTimeAsync(0);
   expect(warning).toHaveBeenCalledWith(
     "[bsk cdp] slow command settled",
-    expect.objectContaining({ elapsedMs: READ_TIMEOUT_MS + 5000, outcome: "returned", late: true }),
+    expect.objectContaining({
+      elapsedMs: CAPTURE_READ_TIMEOUT_MS + 5000,
+      outcome: "returned",
+      late: true,
+    }),
   );
 });
 
@@ -163,4 +169,77 @@ it("is terminal for capture fallback but is not a caller abort", () => {
   abort.name = "AbortError";
   expect(isCaptureTerminalError(abort)).toBe(true);
   expect(isAbortError(abort)).toBe(true);
+});
+
+it.each([
+  "returned",
+  "failed",
+])("gates new reads until the original command actually %s", async (outcome) => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "debug").mockImplementation(() => {});
+  const gate = new CdpReadGate();
+  let finish!: (value: object) => void;
+  let fail!: (error: Error) => void;
+  const work = gate.run(
+    { tabId: 4 },
+    "Page.getLayoutMetrics",
+    () =>
+      new Promise((resolve, reject) => {
+        finish = resolve;
+        fail = reject;
+      }),
+  );
+  const rejected = expect(work).rejects.toBeInstanceOf(CdpReadTimeoutError);
+  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await rejected;
+  const send = vi.fn(async () => ({}));
+  for (const method of ["DOMSnapshot.captureSnapshot", "Runtime.evaluate", "Page.getFrameTree"])
+    await expect(gate.run({ tabId: 4, sessionId: "child" }, method, send)).rejects.toBeInstanceOf(
+      CdpReadTimeoutError,
+    );
+  expect(send).not.toHaveBeenCalled();
+  await gate.run({ tabId: 5 }, "Page.getLayoutMetrics", send);
+  await gate.run({ tabId: 4 }, "Runtime.releaseObjectGroup", send);
+  if (outcome === "returned") finish({});
+  else fail(new Error("renderer closed"));
+  await vi.advanceTimersByTimeAsync(0);
+  await gate.run({ tabId: 4 }, "Page.getLayoutMetrics", send);
+  expect(send).toHaveBeenCalledTimes(3);
+});
+
+it("isolates child gates and fences late completions across attachment replacement", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "debug").mockImplementation(() => {});
+  const gate = new CdpReadGate();
+  const child = { tabId: 4, sessionId: "child" };
+  let oldFinish!: (value: object) => void;
+  const old = gate.run(
+    child,
+    "Page.getLayoutMetrics",
+    () =>
+      new Promise((resolve) => {
+        oldFinish = resolve;
+      }),
+  );
+  const oldRejected = expect(old).rejects.toBeInstanceOf(CdpReadTimeoutError);
+  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await oldRejected;
+  const send = vi.fn(async () => ({}));
+  await gate.run({ tabId: 4 }, "Page.getLayoutMetrics", send);
+  await gate.run({ tabId: 4, sessionId: "sibling" }, "Page.getLayoutMetrics", send);
+  gate.reset(4);
+  const next = gate.run(child, "Page.getLayoutMetrics", () => new Promise<never>(() => {}));
+  const nextRejected = expect(next).rejects.toBeInstanceOf(CdpReadTimeoutError);
+  await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+  await nextRejected;
+  oldFinish({});
+  await vi.advanceTimersByTimeAsync(0);
+  await expect(gate.run(child, "Page.getLayoutMetrics", send)).rejects.toBeInstanceOf(
+    CdpReadTimeoutError,
+  );
+  expect(send).toHaveBeenCalledTimes(2);
+  gate.reset(4, "child");
+  await gate.run(child, "Page.getLayoutMetrics", send);
 });
