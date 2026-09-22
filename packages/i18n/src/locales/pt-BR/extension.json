@@ -20,7 +20,7 @@
       "disconnected": "Em espera",
       "connecting": "Iniciando",
       "connected": "Pronto",
-      "version_skew": "Atualização disponível",
+      "version_skew": "Atualizável",
       "disabled": "Desativado"
     },
     "connectionToggleTitle": "Conexão do BrowserSkill",
@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Pareamento concluído com sucesso. O interruptor de conexão está desativado; ative-o para conectar.",
     "remoteFormatError": "O link de pareamento está incompleto ou inválido. Copie o link completo fornecido pelo servidor.",
     "remotePermissionsInfo": "Sobre as permissões de conexão remota",
-    "remotePermissionsHint": "O servidor pode controlar janelas de tarefas dedicadas. A confirmação para tomar guias existentes emprestadas segue as configurações de automação abaixo."
+    "remotePermissionsHint": "O servidor pode controlar janelas de tarefas dedicadas. A confirmação para tomar guias existentes emprestadas segue as configurações de automação abaixo.",
+    "profile": {
+      "hint": "Confira se este é o perfil do navegador que deseja usar e envie as instruções ao seu agente.",
+      "copyButton": "Copiar instruções do perfil",
+      "copyFailed": "Não foi possível copiar as instruções. Tente novamente.",
+      "promptTemplate": "Para esta tarefa, use o BrowserSkill neste perfil do navegador. Inicie cada nova sessão desta tarefa com a interface apropriada:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNo DeepSeek Harness, chame a ferramenta sem executar o comando CLI separadamente.\nSe esta instância não estiver conectada, pare e peça que eu reconecte este perfil. Não omita --browser / browser nem mude para outra instância."
+    }
   },
   "controlOverlay": {
     "status": "O agente está no controle",

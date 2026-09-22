@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Associazione riuscita. L'interruttore di connessione è disattivato; attivalo per connetterti.",
     "remoteFormatError": "Il link di associazione è incompleto o non valido. Copia il link completo fornito dal server.",
     "remotePermissionsInfo": "Informazioni sui permessi di connessione remota",
-    "remotePermissionsHint": "Il server può controllare finestre di attività dedicate. La conferma per prendere in prestito schede esistenti segue le impostazioni di automazione riportate di seguito."
+    "remotePermissionsHint": "Il server può controllare finestre di attività dedicate. La conferma per prendere in prestito schede esistenti segue le impostazioni di automazione riportate di seguito.",
+    "profile": {
+      "hint": "Verifica che sia il profilo del browser desiderato, poi invia le istruzioni al tuo agente.",
+      "copyButton": "Copia istruzioni del profilo",
+      "copyFailed": "Impossibile copiare le istruzioni. Riprova.",
+      "promptTemplate": "Per questa attività, usa BrowserSkill in questo profilo del browser. Avvia ogni nuova sessione di questa attività con l'interfaccia appropriata:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, chiama lo strumento senza eseguire separatamente il comando CLI.\nSe questa istanza non è connessa, fermati e chiedimi di riconnettere questo profilo. Non omettere --browser / browser e non passare a un'altra istanza."
+    }
   },
   "controlOverlay": {
     "status": "L'agente sta controllando",

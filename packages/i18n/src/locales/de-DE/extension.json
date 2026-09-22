@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Kopplung erfolgreich. Der Verbindungsschalter ist aus; aktivieren Sie ihn, um sich zu verbinden.",
     "remoteFormatError": "Der Kopplungslink ist unvollständig oder ungültig. Kopieren Sie den vollständigen vom Server bereitgestellten Link.",
     "remotePermissionsInfo": "Über Berechtigungen für Remote-Verbindungen",
-    "remotePermissionsHint": "Der Server kann dedizierte Aufgabenfenster steuern. Ob beim Ausleihen bestehender Tabs eine Bestätigung erforderlich ist, richtet sich nach den Automatisierungseinstellungen unten."
+    "remotePermissionsHint": "Der Server kann dedizierte Aufgabenfenster steuern. Ob beim Ausleihen bestehender Tabs eine Bestätigung erforderlich ist, richtet sich nach den Automatisierungseinstellungen unten.",
+    "profile": {
+      "hint": "Prüfen Sie, ob dies das gewünschte Browserprofil ist, und senden Sie die Anweisungen an Ihren Agenten.",
+      "copyButton": "Profilanweisungen kopieren",
+      "copyFailed": "Die Anweisungen konnten nicht kopiert werden. Bitte versuchen Sie es erneut.",
+      "promptTemplate": "Nutze für diese Aufgabe BrowserSkill in diesem Browserprofil. Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz."
+    }
   },
   "controlOverlay": {
     "status": "Agent steuert",
@@ -135,8 +141,8 @@
   "helpRequest": {
     "title": "Agent benötigt Ihre Hilfe",
     "compactStatus": "Der Agent wartet weiterhin darauf, dass Sie diesen Schritt abschließen",
-    "noteLabel": "Optionale Notiz an den Agent",
-    "notePlaceholder": "Notiz für den Agent hinzufügen (optional)",
+    "noteLabel": "Optionale Nachricht an den Agenten",
+    "notePlaceholder": "Nachricht an den Agenten (optional)",
     "continue": "Erledigt, Kontrolle zurückgeben",
     "cancel": "Anfrage abbrechen",
     "collapse": "Einklappen",

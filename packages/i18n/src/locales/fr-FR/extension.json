@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Couplage réussi. Le commutateur de connexion est désactivé ; activez-le pour vous connecter.",
     "remoteFormatError": "Le lien de couplage est incomplet ou invalide. Copiez le lien complet fourni par le serveur.",
     "remotePermissionsInfo": "À propos des autorisations de connexion distante",
-    "remotePermissionsHint": "Le serveur peut contrôler des fenêtres de tâche dédiées. La confirmation pour emprunter des onglets existants suit les paramètres d'automatisation ci-dessous."
+    "remotePermissionsHint": "Le serveur peut contrôler des fenêtres de tâche dédiées. La confirmation pour emprunter des onglets existants suit les paramètres d'automatisation ci-dessous.",
+    "profile": {
+      "hint": "Vérifiez que c'est le bon profil de navigateur, puis envoyez les instructions à votre agent.",
+      "copyButton": "Copier les instructions du profil",
+      "copyFailed": "Impossible de copier les instructions. Réessayez.",
+      "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans ce profil de navigateur. Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance."
+    }
   },
   "controlOverlay": {
     "status": "L'Agent contrôle",

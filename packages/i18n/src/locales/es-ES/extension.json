@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Emparejamiento correcto. El interruptor de conexión está desactivado; actívalo para conectarte.",
     "remoteFormatError": "El enlace de emparejamiento está incompleto o no es válido. Copia el enlace completo proporcionado por el servidor.",
     "remotePermissionsInfo": "Acerca de los permisos de conexión remota",
-    "remotePermissionsHint": "El servidor puede controlar ventanas de tareas dedicadas. La confirmación para tomar prestadas pestañas existentes sigue los ajustes de automatización que aparecen a continuación."
+    "remotePermissionsHint": "El servidor puede controlar ventanas de tareas dedicadas. La confirmación para tomar prestadas pestañas existentes sigue los ajustes de automatización que aparecen a continuación.",
+    "profile": {
+      "hint": "Comprueba que este sea el perfil del navegador que quieres usar y envía las instrucciones a tu agente.",
+      "copyButton": "Copiar instrucciones del perfil",
+      "copyFailed": "No se pudieron copiar las instrucciones. Inténtalo de nuevo.",
+      "promptTemplate": "Para esta tarea, usa BrowserSkill en este perfil del navegador. Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia."
+    }
   },
   "controlOverlay": {
     "status": "El agente está controlando",

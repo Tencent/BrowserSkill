@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "配對成功，連線開關目前已關閉，請開啟後再連線。",
     "remoteFormatError": "配對連結不完整或格式不正確，請重新複製伺服器提供的完整連結。",
     "remotePermissionsInfo": "遠端連線權限說明",
-    "remotePermissionsHint": "伺服器可操作專用的工作視窗。借用既有分頁時是否需要確認，取決於下方的「自動化設定」。"
+    "remotePermissionsHint": "伺服器可操作專用的工作視窗。借用既有分頁時是否需要確認，取決於下方的「自動化設定」。",
+    "profile": {
+      "hint": "確認這是你要使用的瀏覽器設定檔，再將指令傳給 Agent。",
+      "copyButton": "複製設定檔指令",
+      "copyFailed": "無法複製指令，請再試一次。",
+      "promptTemplate": "本次工作請使用此瀏覽器設定檔中的 BrowserSkill。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n使用 DeepSeek Harness 時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。"
+    }
   },
   "controlOverlay": {
     "status": "Agent 正在控制",
