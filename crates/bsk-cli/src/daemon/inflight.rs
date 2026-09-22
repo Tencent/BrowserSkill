@@ -171,13 +171,15 @@ pub enum PromoteOutcome {
 /// One entry in the inflight-tool table.
 #[derive(Debug)]
 pub struct ToolInflightEntry {
+    pub cli_rpc_id: RpcId,
     cancel: AbortToken,
     inner: Mutex<InflightInner>,
 }
 
 impl ToolInflightEntry {
-    fn new(session_id: SessionId) -> Arc<Self> {
+    fn new(session_id: SessionId, cli_rpc_id: RpcId) -> Arc<Self> {
         Arc::new(Self {
+            cli_rpc_id,
             cancel: AbortToken::new(),
             inner: Mutex::new(InflightInner::new(session_id)),
         })
@@ -355,7 +357,7 @@ impl ToolInflightRegistry {
         cli_rpc_id: RpcId,
         session_id: SessionId,
     ) -> Result<InflightGuard, InflightRegisterError> {
-        let entry = ToolInflightEntry::new(session_id);
+        let entry = ToolInflightEntry::new(session_id, cli_rpc_id.clone());
         {
             let mut guard = self.inner.lock().expect("tool inflight poisoned");
             if guard.contains_key(&cli_rpc_id) {

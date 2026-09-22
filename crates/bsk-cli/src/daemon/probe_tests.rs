@@ -52,6 +52,8 @@ impl Server {
                     }
                     Err(err) => panic!("accept: {err}"),
                 };
+                // Accepted sockets inherit O_NONBLOCK on macOS; this fixture uses blocking I/O.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(1)))
                     .unwrap();

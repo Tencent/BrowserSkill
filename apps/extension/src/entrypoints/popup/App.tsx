@@ -8,6 +8,8 @@ import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
 import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
+import { CurrentTasks } from "./current-tasks";
+import { DebugPanel } from "./debug-panel";
 import { POPUP_FEATURES, type PopupView } from "./features";
 import { InteractionSettings } from "./interaction-settings";
 import { LongScreenshot } from "./long-screenshot";
@@ -122,13 +124,15 @@ export function App() {
   const headerTitle =
     view === "features"
       ? t("popup.launcher.title")
-      : view === "record"
-        ? t("popup.record.sectionTitle")
-        : view === "long-screenshot"
-          ? t("longScreenshot.title")
-          : view === "audit"
-            ? t("audit.title")
-            : t("popup.brandName");
+      : view === "debug"
+        ? t("debug.title")
+        : view === "record"
+          ? t("popup.record.sectionTitle")
+          : view === "long-screenshot"
+            ? t("longScreenshot.title")
+            : view === "audit"
+              ? t("audit.title")
+              : t("popup.brandName");
 
   return (
     <main
@@ -263,6 +267,8 @@ export function App() {
 
           <InteractionSettings />
 
+          <CurrentTasks enabled={connectionLive} />
+
           {snapshot.lastError && (
             <div
               className="rounded-lg border border-destructive/25 bg-destructive/10 px-3 py-2 text-xs leading-snug text-destructive"
@@ -343,6 +349,7 @@ export function App() {
 
       {view === "long-screenshot" && <LongScreenshot />}
       {view === "audit" && <AuditPanel />}
+      {view === "debug" && <DebugPanel connected={connectionLive} />}
 
       {view === "record" && (
         <section className="space-y-2.5" data-slot="popup-record-body">

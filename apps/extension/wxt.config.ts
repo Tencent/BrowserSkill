@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,16 @@ import { defineConfig } from "wxt";
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(resolve(here, "package.json"), "utf8")) as { version: string };
 const EXTENSION_VERSION = pkg.version;
+let EXTENSION_BUILD = "unknown";
+try {
+  EXTENSION_BUILD = execFileSync("git", ["describe", "--always", "--dirty"], {
+    cwd: here,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+  }).trim();
+} catch {
+  /* Source archives need not contain Git metadata. */
+}
 const LOGO_PATH = resolve(here, "assets/logo.png");
 
 const resolvePackageSource = (pkg: string) => resolve(here, `../../packages/${pkg}/src/index.ts`);
@@ -72,6 +83,7 @@ export default defineConfig({
       },
     ],
     define: {
+      __BSK_EXT_BUILD__: JSON.stringify(EXTENSION_BUILD),
       __BSK_EXT_VERSION__: JSON.stringify(EXTENSION_VERSION),
       __BSK_DAEMON_WS_URL__: JSON.stringify(
         process.env.BSK_DAEMON_WS_URL ?? "ws://127.0.0.1:52800",

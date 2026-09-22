@@ -69,7 +69,9 @@ describe("profile instructions", () => {
     expect(await screen.findByRole("status")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
   });
-  it.each(["zh-CN", "ko-KR"])("preserves the exact command in %s instructions", async (locale) => {
+  it.each(
+    Object.keys(i18n.options.resources ?? {}),
+  )("preserves the exact commands in %s instructions", async (locale) => {
     await i18n.changeLanguage(locale);
     render(<ProfileInstructions instanceId="a1234567" connected />);
     fireEvent.click(screen.getByRole("button"));
@@ -79,6 +81,10 @@ describe("profile instructions", () => {
     expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0]).toContain(
       'browser_session({ action: "start", browser: "a1234567" })',
     );
+    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0]).toContain(
+      "--browser / browser",
+    );
+    expect(vi.mocked(navigator.clipboard.writeText).mock.calls[0]?.[0]).not.toMatch(/{{.*?}}/);
     expect(await screen.findByRole("status")).toBeTruthy();
   });
 });

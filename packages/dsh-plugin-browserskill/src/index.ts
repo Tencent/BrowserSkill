@@ -38,7 +38,9 @@ export const Config = Schema.object({
   ),
   defaultTimeoutMs: Schema.number()
     .default(120_000)
-    .description("Default per-command timeout in milliseconds."),
+    .description(
+      "Default command execution timeout in milliseconds. Collecting output after exit may take up to 2 additional seconds.",
+    ),
   maxSessions: Schema.number()
     .default(5)
     .description("Maximum number of concurrent browser sessions started through this plugin."),
