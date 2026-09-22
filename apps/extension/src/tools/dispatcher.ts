@@ -183,6 +183,8 @@ export class ToolDispatcher {
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
+  private pendingSessionStarts = 0;
+  private idleOperationInProgress = false;
   /**
    * Per-rpc-id `AbortController` registry. Populated inside
    * [`dispatch`] before we await the tool handler and torn down in
@@ -210,6 +212,29 @@ export class ToolDispatcher {
     this.subscription = this.transport.onMessage((msg) => {
       void this.dispatch(msg);
     });
+  }
+
+  /**
+   * Reserve an idle browser for a connection change. Count start requests from
+   * receipt, before any asynchronous preparation or window creation. Reject new
+   * starts during the change so an old connection's request cannot create a
+   * session after reconnecting.
+   */
+  async runWhenIdle(operation: () => Promise<void>): Promise<boolean> {
+    if (
+      this.idleOperationInProgress ||
+      this.pendingSessionStarts > 0 ||
+      this.sessions.list().length > 0
+    ) {
+      return false;
+    }
+    this.idleOperationInProgress = true;
+    try {
+      await operation();
+      return true;
+    } finally {
+      this.idleOperationInProgress = false;
+    }
   }
 
   stop(): void {
@@ -260,13 +285,17 @@ export class ToolDispatcher {
       return;
     }
 
-    const mutatesSessions =
-      req.method === "tool.session_start" || req.method === "tool.session_stop";
+    const startsSession = req.method === "tool.session_start";
+    const mutatesSessions = startsSession || req.method === "tool.session_stop";
+    if (startsSession) this.pendingSessionStarts += 1;
     const ac = new AbortController();
     this.inflightAbortControllers.set(req.id, ac);
     let body: ResponseFrame;
     let startedSession: string | null = null;
     try {
+      if (startsSession && this.idleOperationInProgress) {
+        throw new Error("Browser settings are updating; retry session start.");
+      }
       const sessionId = sessionIdForBrowserControlMethod(req);
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
       // Best-effort context must never prevent the requested operation.
@@ -301,6 +330,7 @@ export class ToolDispatcher {
         };
       }
     } finally {
+      if (startsSession) this.pendingSessionStarts -= 1;
       this.inflightAbortControllers.delete(req.id);
     }
     let sent = true;

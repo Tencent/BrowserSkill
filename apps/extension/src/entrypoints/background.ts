@@ -485,12 +485,12 @@ export default defineBackground(() => {
         if (msg.kind === "set_label") {
           // A reconnect is required for the daemon to receive the new label.
           // Never turn a display-name edit into an implicit session teardown.
-          if (sessions.list().length > 0) {
-            postSnapshot();
-            return;
-          }
-          void setLabel(msg.value)
-            .then(() => controller.refreshLabel())
+          void dispatcher
+            .runWhenIdle(async () => {
+              await setLabel(msg.value);
+              await controller.refreshLabel();
+            })
+            .then(() => postSnapshot())
             .catch((err) => console.error("[browser-skill] label update failed", err));
         } else if (msg.kind === "set_connection_enabled") {
           void controller.setConnectionEnabled(msg.value);
