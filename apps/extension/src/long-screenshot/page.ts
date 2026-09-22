@@ -7,6 +7,10 @@ import {
   ScreenshotError,
 } from "./types";
 
+function ariaToken(element: Element, name: string): string {
+  return (element.getAttribute(name) ?? "").trim().toLowerCase();
+}
+
 export function createPageCapture(onCancel: (id: string, reason: CaptureCancelReason) => void) {
   let task: ReturnType<typeof prepare> | undefined;
 
@@ -70,8 +74,11 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
     const loadingText =
       /^(?:加载中|正在加载|载入中|loading(?:\s+(?:more|content|items|results))?)[\s.。…!！]*$/i;
     const trackLoading = (element: Element) => {
+      const role = ariaToken(element, "role");
       if (
-        element.matches('[aria-busy="true"], [role="progressbar"], [role="status"]') ||
+        ariaToken(element, "aria-busy") === "true" ||
+        role === "progressbar" ||
+        role === "status" ||
         (element.childElementCount === 0 &&
           !element.closest("pre, code") &&
           loadingText.test(element.textContent?.trim() ?? ""))
@@ -144,7 +151,7 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
       seen.add(element);
       trackLoading(element);
       if (
-        element.getAttribute("role") === "contentinfo" ||
+        ariaToken(element, "role") === "contentinfo" ||
         (element.tagName === "FOOTER" && !element.closest("article, aside, section"))
       )
         footers.add(element);
@@ -280,8 +287,8 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
         const style = getComputedStyle(element);
         if (style.visibility === "hidden" || style.display === "none") continue;
         if (
-          element.getAttribute("aria-busy") === "true" ||
-          (element.getAttribute("role") === "progressbar" &&
+          ariaToken(element, "aria-busy") === "true" ||
+          (ariaToken(element, "role") === "progressbar" &&
             !element.hasAttribute("aria-valuenow")) ||
           (!element.closest("pre, code") && loadingText.test(element.textContent?.trim() ?? ""))
         ) {
