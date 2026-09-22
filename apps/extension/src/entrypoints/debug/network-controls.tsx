@@ -17,6 +17,10 @@ const codeClass = `${inputClass} resize-y font-mono leading-relaxed`;
 const labelClass = "block min-w-0 text-[11px] text-muted-foreground";
 const methods = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
 type Effect = DebugRuleSpec["effect"]["type"];
+export function requestRuleType(request?: DebugRequest): DebugRuleSpec["match"]["resource_type"] {
+  const type = request?.resource_type;
+  return type === "Fetch" || type === "XHR" || type === "Document" ? type : undefined;
+}
 function objectJson(text: string): Record<string, never> {
   const value = JSON.parse(text || "{}");
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -80,10 +84,13 @@ export function RuleEditor({
   const [newMethod, setNewMethod] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const resourceType = requestRuleType(request);
+  const unsupported = !!request && !resourceType;
   async function submit() {
     setBusy(true);
     setError("");
     try {
+      if (unsupported) throw new Error(t("debug.ruleResourceUnsupported"));
       let value: DebugRuleSpec["effect"] = { type: "block" };
       if (effect === "mock")
         value = {
@@ -105,7 +112,16 @@ export function RuleEditor({
         session_id: session,
         run_id: run,
         action: "rule_add",
-        rule: { name, match: { url, ...(method ? { method } : {}) }, effect: value, times },
+        rule: {
+          name,
+          match: {
+            url,
+            ...(method ? { method } : {}),
+            ...(resourceType ? { resource_type: resourceType } : {}),
+          },
+          effect: value,
+          times,
+        },
       });
       onDone();
     } catch (reason) {
@@ -129,6 +145,7 @@ export function RuleEditor({
         </h3>
         <span className="text-[10px] text-muted-foreground">
           {t(times === 1 ? "debug.once" : "debug.untilStop")}
+          {resourceType && ` · ${resourceType}`}
         </span>
       </div>
       <div className="flex flex-wrap gap-2">
@@ -293,13 +310,13 @@ export function RuleEditor({
         <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
           {t("debug.cancel")}
         </Button>
-        <Button type="submit" size="sm" disabled={busy}>
+        <Button type="submit" size="sm" disabled={busy || unsupported}>
           {t(busy ? "debug.working" : "debug.applyRule")}
         </Button>
       </div>
-      {error && (
+      {(error || unsupported) && (
         <p role="alert" className="break-words text-xs text-destructive">
-          {error}
+          {error || t("debug.ruleResourceUnsupported")}
         </p>
       )}
     </form>

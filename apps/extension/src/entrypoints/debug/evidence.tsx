@@ -20,7 +20,7 @@ import type {
 
 export const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour12: false });
 
-import { RequestBadges } from "./network-controls";
+import { RequestBadges, requestRuleType } from "./network-controls";
 
 export function requestPath(url: string): string {
   try {
@@ -415,10 +415,21 @@ export function RequestDetail({
               {t((data ?? request).pinned ? "debug.unpinEvidence" : "debug.pinEvidence")}
             </Button>
             {(["replay", "modify", "mock", "block"] as const).map((action) => (
-              <Button key={action} size="sm" variant="outline" onClick={() => onControl(action)}>
+              <Button
+                key={action}
+                size="sm"
+                variant="outline"
+                disabled={action !== "replay" && !requestRuleType(data ?? request)}
+                onClick={() => onControl(action)}
+              >
                 {t(`debug.${action}`)}
               </Button>
             ))}
+            {!requestRuleType(data ?? request) && (
+              <p className="w-full text-[11px] text-muted-foreground">
+                {t("debug.ruleResourceUnsupported")}
+              </p>
+            )}
           </div>
         )}
       </div>

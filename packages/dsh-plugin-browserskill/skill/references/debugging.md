@@ -47,6 +47,8 @@ Operation links are time associations, not proof of causation. Distinguish origi
 submitted, response and later page values only where recorded; do not invent missing
 steps. HTTP 200 is not business success. Console source labels distinguish website,
 extension, browser and unknown errors.
+`payload_partial` means a field scan was incomplete; inspect the body directly
+rather than assuming a unique field match.
 
 Check `run.coverage`, `run.storage`, body states/reasons and `output.omitted`.
 Late start, unsupported capture, pending work, truncation, eviction and storage

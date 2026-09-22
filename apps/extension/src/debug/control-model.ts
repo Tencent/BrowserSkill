@@ -262,7 +262,8 @@ export function editRequest(request: LiveRequest, edit: DebugRequestEdit): LiveR
       value.set(key, jsonEditValue(item));
     postData = `{${[...value].map(([key, raw]) => `${JSON.stringify(key)}:${raw}`).join(",")}}`;
   }
-  requireValue(postData === undefined || postData.length <= BODY_CHARS, "request body too large");
+  if (edit.body !== undefined || edit.json !== undefined)
+    requireValue(postData === undefined || postData.length <= BODY_CHARS, "request body too large");
   requireValue(
     !/multipart\/|octet-stream/i.test(headers["content-type"] ?? "") ||
       (edit.body === undefined && edit.json === undefined),

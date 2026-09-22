@@ -240,7 +240,8 @@ The field-chain view shows recorded original, operation-time, submitted, respons
 and later page values. It joins only exact, unambiguous field names in complete
 JSON/form bodies; different names, arrays, duplicate nested names, missing and
 truncated bodies remain unlinked. Body field summaries are bounded to 12 requests,
-96 scalar fields and 256 characters per value. Full retained bodies remain available
+96 scalar fields and 256 characters per value. Incomplete payload scans report
+`payload_partial` and do not claim unique field matches. Full retained bodies remain available
 through request details. Text differences require both recorded page states.
 
 Cards display pending/interrupted work, truncated/unavailable bodies, missing

@@ -6,6 +6,7 @@ import { jsonPointer } from "./json-source";
 import {
   BODY_CHARS,
   redactBody,
+  redactHeaderEvidence,
   redactHeaders,
   redactRequestUrl,
   redactText,
@@ -63,8 +64,8 @@ interface RequestRecord {
 }
 interface Chain {
   hops: RequestRecord[];
-  requestHeaders: Record<string, string>[];
-  responseHeaders: Record<string, string>[];
+  requestHeaders: ReturnType<typeof redactHeaderEvidence>[];
+  responseHeaders: ReturnType<typeof redactHeaderEvidence>[];
   requestIndex: number;
   responseIndex: number;
   partial?: boolean;
@@ -81,15 +82,6 @@ interface ControlAnnotation {
     postData?: string;
   };
   mock?: { status: number; headers?: Record<string, string>; body: string };
-}
-
-function headersLimited(headers?: Record<string, string>): boolean {
-  const values = Object.entries(headers ?? {});
-  return (
-    values.length > 80 ||
-    values.some(([key, value]) => key.length > 128 || value.length > 2048) ||
-    values.reduce((total, [key, value]) => total + key.length + value.length, 0) > 4096
-  );
 }
 
 function incompleteMetadata(entry: DebugRequest): void {
@@ -191,9 +183,9 @@ export class DebugNetworkStore {
         previous.entry.response_body = { state: "unavailable", reason: "redirect" };
         this.retain?.(previous.entry);
       }
-      const headers = redactHeaders(event.request.headers);
+      const { headers, truncated: headersTruncated } = redactHeaderEvidence(event.request.headers);
       const url = redactRequestUrl(event.request.url);
-      const metadataTruncated = chain.partial === true || headersLimited(event.request.headers);
+      const metadataTruncated = chain.partial === true || headersTruncated;
       const id = `${this.runId}:n${++this.serial}`;
       const entry: DebugRequest = {
         id,
@@ -276,11 +268,7 @@ export class DebugNetworkStore {
           ? chain.requestHeaders
           : chain.responseHeaders;
       if (queue.length < 8 && this.pendingHeaders < 64) {
-        if (headersLimited(event.headers)) {
-          const latest = chain.hops.at(-1);
-          if (latest) incompleteMetadata(latest.entry);
-        }
-        queue.push(redactHeaders(event.headers));
+        queue.push(redactHeaderEvidence(event.headers));
         this.pendingHeaders += 1;
       } else {
         chain.partial = true;
@@ -354,10 +342,12 @@ export class DebugNetworkStore {
         }
         if (!headersQueue.length) break;
         chain[indexKey] += 1;
-        const headers = headersQueue.shift();
+        const evidence = headersQueue.shift()!;
         this.pendingHeaders -= 1;
         if (!this.tracked(record.entry.id)) continue;
-        record.entry[side === "request" ? "request_headers" : "response_headers"] = headers;
+        record.entry[side === "request" ? "request_headers" : "response_headers"] =
+          evidence.headers;
+        if (evidence.truncated) incompleteMetadata(record.entry);
         record.entry.sequence = this.changed();
         this.retain?.(record.entry);
       }
@@ -531,7 +521,7 @@ export class DebugNetworkStore {
     let requestBody: ReturnType<typeof redactBody> | undefined;
     let responseBody: ReturnType<typeof redactBody> | undefined;
     let urlState: ReturnType<typeof redactRequestUrl>["state"] | undefined;
-    const headersTruncated = headersLimited(annotation.effective?.headers);
+    const headers = redactHeaderEvidence(annotation.effective?.headers);
     // Pending annotations must obey the same redaction boundary as live records.
     // Preserve the original completeness flags when formatting expands a JSON body.
     if (annotation.effective) {
@@ -545,7 +535,7 @@ export class DebugNetworkStore {
         effective: {
           ...value,
           url: url.text,
-          headers: redactHeaders(value.headers),
+          headers: headers.headers,
           ...(value.postData === undefined ? {} : { postData: requestBody!.text }),
         },
       };
@@ -566,7 +556,7 @@ export class DebugNetworkStore {
       value: annotation,
       requestBody,
       responseBody,
-      headersTruncated,
+      headersTruncated: headers.truncated,
       urlState,
     });
     while (this.annotations.size > 64)
@@ -587,7 +577,7 @@ export class DebugNetworkStore {
       record.entry.truncated =
         record.entry.integrity!.metadata === "truncated" || retained.urlState === "truncated";
       record.entry.method = effective.method;
-      record.entry.request_headers = redactHeaders(effective.headers);
+      record.entry.request_headers = effective.headers;
       if (effective.postData !== undefined)
         this.saveBody(
           record,

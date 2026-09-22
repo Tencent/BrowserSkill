@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { replayRequest } from "../control-model";
 import { bodySlice, DebugNetworkStore, MAX_REQUESTS, requestProjection } from "../network-store";
 import { BODY_CHARS, redactBody, redactHeaders, redactText, redactUrl } from "../redact";
 
@@ -59,6 +60,43 @@ const settle = async () => {
 };
 
 describe("debug network evidence", () => {
+  it.each([
+    "request",
+    "extra-first",
+    "extra-last",
+    "annotation",
+  ])("retains actual header loss and rejects replay (%s)", (path) => {
+    const f = fixture();
+    const headers = {
+      "x-a": "a".repeat(2040),
+      "x-b": "b".repeat(2031),
+      Cookie: "x",
+      mode: "dry-run",
+    };
+    expect(
+      Object.entries(headers).reduce((n, [key, value]) => n + key.length + value.length, 0),
+    ).toBe(4095);
+    if (path === "extra-first") f.event("requestWillBeSentExtraInfo", { headers });
+    if (path === "annotation")
+      f.store.annotate({ tabId: 7 }, "raw", {
+        effective: { url: "https://site.test/save", method: "GET", headers },
+      });
+    f.request({
+      request: {
+        url: "https://site.test/save",
+        method: "GET",
+        headers: path === "request" ? headers : {},
+      },
+    });
+    if (path === "extra-last") f.event("requestWillBeSentExtraInfo", { headers });
+    f.response({ hasExtraInfo: path.startsWith("extra") });
+    const entry = f.store.list()[0];
+    expect(entry).toMatchObject({ truncated: true, integrity: { metadata: "truncated" } });
+    expect(() => replayRequest(entry, { key: "try" }, "https://site.test")).toThrow(
+      "source request is incomplete",
+    );
+  });
+
   it("retains URL integrity in request metadata, including annotations arriving before events", () => {
     const f = fixture();
     const url = `https://site.test/save?q=${"x".repeat(2200)}&mode=dry-run`;

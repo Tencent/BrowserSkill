@@ -64,6 +64,30 @@ const mock: DebugRuleSpec = {
 };
 afterEach(() => vi.useRealTimers());
 describe("local request control lifecycle", () => {
+  it("continues a large request unchanged when only adding a header", async () => {
+    const f = fixture();
+    await f.controls.target({ tabId: 7 });
+    await f.controls.add({
+      match: mock.match,
+      effect: { type: "modify", headers: { "x-debug": "1" } },
+    });
+    f.event("large", "x".repeat(65537));
+    await vi.waitFor(() => expect(f.controls.list()[0].state).toBe("exhausted"));
+    await vi.waitFor(() =>
+      expect(f.sendAttached).toHaveBeenCalledWith({ tabId: 7 }, "Fetch.continueRequest", {
+        requestId: "fetch-large",
+        headers: [
+          { name: "content-type", value: "application/json" },
+          { name: "x-debug", value: "1" },
+        ],
+      }),
+    );
+    expect(f.sendAttached.mock.calls.some(([, method]) => method === "Fetch.failRequest")).toBe(
+      false,
+    );
+    await f.controls.stop();
+  });
+
   it("has no Fetch subscription until a rule exists and attaches rules to child targets", async () => {
     const f = fixture();
     await f.controls.target({ tabId: 7 });

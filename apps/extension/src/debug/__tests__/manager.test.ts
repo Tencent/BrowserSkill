@@ -5,6 +5,7 @@ import { handleDebug, validateDebugParams } from "@/tools/debug";
 import type { DebugArchive } from "../archive";
 import { mergeRequest } from "../journal";
 import { DEBUG_START_TIMEOUT_MS, DebugManager } from "../manager";
+import { readRecording } from "../recording";
 import type { DebugParams, DebugRecording, DebugRequest, DebugRun } from "../types";
 
 async function fixture(archive?: DebugArchive) {
@@ -87,6 +88,35 @@ afterEach(() => {
 });
 
 describe("task-scoped debug lifecycle", () => {
+  it("reserves global capacity before concurrent startups yield", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    const owners = [f.context];
+    for (let i = 1; i < 5; i++) owners.push(await f.sessions.start(`s${i + 1}`));
+    owners.forEach((owner, i) => owner.agentCreatedTabs.add(7 + i));
+    f.tabs.get.mockImplementation(
+      async (id) => ({ id, windowId: 100 + id - 7, url: "about:blank" }) as chrome.tabs.Tab,
+    );
+    const results = await Promise.allSettled(
+      owners.map((_, i) => f.manager.start(`s${i + 1}`, 7 + i)),
+    );
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(4);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(f.cdp.ensureNetworkCapture).toHaveBeenCalledTimes(4);
+    await f.manager.read({ session_id: "s1", action: "stop" });
+    expect((await f.manager.start("s5", 11)).state).toBe("capturing");
+  });
+
+  it("allows only one startup per task even when different tabs are selected", async () => {
+    const f = await fixture();
+    active.push(f.manager);
+    f.context.agentCreatedTabs.add(8);
+    const results = await Promise.allSettled([f.manager.start("s1", 7), f.manager.start("s1", 8)]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+    expect(f.cdp.ensureNetworkCapture).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels a hung Network.enable promptly, stops events, and ignores late completion", async () => {
     const f = await fixture();
     active.push(f.manager);
@@ -495,6 +525,67 @@ class MemoryArchive implements DebugArchive {
 }
 
 describe("persistent debugging records", () => {
+  it.each([
+    "write-failed",
+    "arrived-during-read",
+  ])("merges memory when a readable index is stale: %s", async (mode) => {
+    const archive = new MemoryArchive();
+    const saved = new Map<string, DebugRequest>();
+    let fail = false;
+    let inject: (() => void) | undefined;
+    const get = async (id: string) => {
+      const record = await archive.get(id);
+      return (
+        record && {
+          ...record,
+          run: { ...record.run, requests: saved.size },
+          requests: structuredClone([...saved.values()]),
+        }
+      );
+    };
+    const f = await fixture({
+      list: () => archive.list(),
+      put: (record) => archive.put(record),
+      delete: (id) => archive.delete(id),
+      get,
+      retain: async (_run, entries) => {
+        if (fail) throw new Error("write failed");
+        for (const entry of entries) saved.set(entry.id, structuredClone(entry));
+      },
+      query: async (id, params) => {
+        const record = await get(id);
+        inject?.();
+        inject = undefined;
+        return record && readRecording(record, params);
+      },
+    });
+    active.push(f.manager);
+    const run = await f.manager.start("s1", 7);
+    f.request("saved");
+    const first = await f.manager.read({ session_id: "s1", action: "requests" });
+    expect(first.requests).toHaveLength(1);
+    if (mode === "write-failed") {
+      fail = true;
+      f.request("new");
+    } else inject = () => f.request("new");
+    const list = await f.manager.read({
+      session_id: "s1",
+      action: "requests",
+      since: first.next_since,
+      limit: 1,
+    });
+    expect(list.requests?.map((entry) => entry.url)).toEqual(["https://site.test/new"]);
+    const exported = await f.manager.read({ session_id: "s1", action: "export" });
+    expect(exported.recording?.requests).toHaveLength(2);
+    const history = await f.manager.readHistory({
+      session_id: "",
+      action: "requests",
+      run_id: run.id,
+    });
+    expect(history.requests).toHaveLength(2);
+    if (fail) expect(history.run?.coverage).toContain("evidence_write_failed");
+  });
+
   it("uses the archive's complete request reader after a metadata-only history read", async () => {
     const archive = new MemoryArchive();
     const f = await fixture(archive);

@@ -146,6 +146,22 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser network controls", 
             await vi.waitFor(async () =>
               expect(await evaluate("document.title")).toBe("Network controls"),
             );
+            const largeBody = JSON.stringify({ data: "x".repeat(65537) });
+            await add({
+              match: { url: `${url}/large`, method: "POST" },
+              effect: { type: "modify", headers: { "x-test": "large-header-only" } },
+            });
+            expect(
+              await evaluate(`fetch(${JSON.stringify(`${url}/large`)}, {
+              method: "POST", headers: {"content-type":"application/json"},
+              body: ${JSON.stringify(largeBody)}
+            }).then(r => r.status)`),
+            ).toBe(200);
+            expect(hits.find((hit) => hit.url === "/large")).toEqual({
+              url: "/large",
+              body: largeBody,
+              header: "large-header-only",
+            });
             await add({
               name: "Correct nickname field",
               match: { url: `${url}/save`, method: "POST" },

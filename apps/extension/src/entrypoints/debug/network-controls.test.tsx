@@ -14,6 +14,7 @@ const request: DebugRequest = {
   started_at: 0,
   url: "https://site.test/save",
   method: "POST",
+  resource_type: "Fetch",
   integrity: { url: "complete", metadata: "complete" },
   state: "complete",
   request_headers: { cookie: "[redacted]", "content-type": "application/json" },
@@ -27,6 +28,53 @@ beforeEach(async () => {
   vi.mocked(recordingRequest).mockResolvedValue({ session_id: "s1", request, rules: [] });
 });
 describe("request control UI", () => {
+  it.each([
+    "block",
+    "mock",
+  ] as const)("preserves Document scope when creating a %s rule", async (initial) => {
+    render(
+      <RuleEditor
+        session="s1"
+        run="d1"
+        request={{ ...request, resource_type: "Document" }}
+        initial={initial}
+        onDone={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "启用规则" }));
+    await waitFor(() =>
+      expect(debugRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          rule: expect.objectContaining({
+            match: { url: request.url, method: "POST", resource_type: "Document" },
+            effect: expect.objectContaining({ type: initial }),
+          }),
+        }),
+      ),
+    );
+  });
+
+  it.each([
+    "Image",
+    undefined,
+  ])("prevents rules for unsupported or unknown resource types: %s", (resource_type) => {
+    render(
+      <RuleEditor
+        session="s1"
+        run="d1"
+        request={{ ...request, resource_type }}
+        onDone={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "启用规则" }) as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("资源类型不支持或未知");
+    fireEvent.click(button);
+    expect(debugRequest).not.toHaveBeenCalled();
+  });
+
   it("does not turn a truncated URL or legacy body draft into an implicit replacement", async () => {
     const entry: DebugRequest = {
       ...request,
@@ -102,7 +150,7 @@ describe("request control UI", () => {
         session_id: "s1",
         run_id: "d1",
         rule: expect.objectContaining({
-          match: { url: request.url, method: "POST" },
+          match: { url: request.url, method: "POST", resource_type: "Fetch" },
           effect: expect.objectContaining({ type: "mock", status: 503, body: '{"name":"Mock"}' }),
           times: 1,
         }),

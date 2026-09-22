@@ -57,19 +57,38 @@ export function redactUrl(value: string): string {
   return redactRequestUrl(value).text;
 }
 
-export function redactHeaders(value: unknown): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (!value || typeof value !== "object") return result;
+export function redactHeaderEvidence(value: unknown): {
+  headers: Record<string, string>;
+  truncated: boolean;
+} {
+  const headers: Record<string, string> = {};
+  let truncated = false;
+  if (!value || typeof value !== "object") return { headers, truncated };
+  const entries = Object.entries(value);
+  truncated = entries.length > 80;
   let remaining = 4 * 1024;
-  for (const [key, raw] of Object.entries(value).slice(0, 80)) {
-    if (remaining <= 0) break;
+  for (const [key, raw] of entries.slice(0, 80)) {
     const name = key.slice(0, 128).toLowerCase();
-    const text = SECRET.test(name) ? MASK : redactText(String(raw), Math.min(2048, remaining));
+    const secret = SECRET.test(name);
+    const original = String(raw);
+    const redacted = secret ? MASK : redactText(original, 2048);
+    const limit = Math.max(0, Math.min(2048, remaining - name.length));
+    truncated ||= key.length > 128 || (!secret && original.length > 2048);
+    if (name.length > remaining || (secret && redacted.length > limit)) {
+      truncated = true;
+      break;
+    }
+    const text = redacted.slice(0, limit);
+    truncated ||= text.length < redacted.length || Object.hasOwn(headers, name);
     // Define avoids the legacy __proto__ setter for untrusted header names.
-    Object.defineProperty(result, name, { value: text, enumerable: true, configurable: true });
+    Object.defineProperty(headers, name, { value: text, enumerable: true, configurable: true });
     remaining -= name.length + text.length;
   }
-  return result;
+  return { headers, truncated };
+}
+
+export function redactHeaders(value: unknown): Record<string, string> {
+  return redactHeaderEvidence(value).headers;
 }
 
 function redactJson(text: string, bounds: { truncated: boolean }): string {

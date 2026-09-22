@@ -128,7 +128,9 @@ export class DebugManager {
   // a reused short session ID from inheriting another task's saved evidence.
   private readonly ownedRuns = new WeakMap<SessionContext, Map<string, number>>();
   private subscription?: { dispose(): void };
-  private readonly starting = new Set<string>();
+  private readonly starting = new Set<SessionContext>();
+  // Starts awaiting cleanup still occupy a slot before their RunState is registered.
+  private reservedStarts = 0;
 
   constructor(
     private readonly sessions: SessionManager,
@@ -172,14 +174,15 @@ export class DebugManager {
     this.sync();
     if (!this.owned(sessionId, tabId)) throw new Error("tab is not owned by this task");
     const owner = this.sessions.get(sessionId)!;
-    const key = `${sessionId}:${tabId}`;
-    if (this.starting.has(key)) throw new Error("debug capture is already starting");
+    if (this.starting.has(owner)) throw new Error("debug capture is already starting");
     const existing = this.active(sessionId, tabId);
     if (existing) return this.summary(existing);
     if (!this.cdp.onEvent) throw new Error("debug event capture is unavailable");
     if (this.active(sessionId))
       throw new Error("stop the task's current capture before selecting another tab");
-    this.starting.add(key);
+    this.starting.add(owner);
+    this.reservedStarts += 1;
+    let reserved = true;
     const startup = new AbortController();
     let rollback = (_reason: string) => {};
     const cancel = (reason: string) => {
@@ -195,7 +198,7 @@ export class DebugManager {
     const wait = <T>(promise: Promise<T>) =>
       deadline(promise, DEBUG_START_TIMEOUT_MS, startup.signal);
     try {
-      while (this.runs.size >= MAX_RUNS) {
+      while (this.runs.size + this.reservedStarts > MAX_RUNS) {
         const stopped = [...this.runs.values()].find(({ run }) => run.state === "stopped");
         if (!stopped) throw new Error("debug capture limit reached; stop another capture first");
         await wait(Promise.resolve(stopped.controlCleanup));
@@ -300,6 +303,8 @@ export class DebugManager {
         this.now,
       );
       rollback = (reason) => this.stopState(state, reason);
+      this.reservedStarts -= 1;
+      reserved = false;
       this.runs.set(id, state);
       let ownedRuns = this.ownedRuns.get(state.owner);
       if (!ownedRuns) this.ownedRuns.set(state.owner, (ownedRuns = new Map()));
@@ -377,7 +382,8 @@ export class DebugManager {
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener("abort", abort);
-      this.starting.delete(key);
+      if (reserved) this.reservedStarts -= 1;
+      this.starting.delete(owner);
     }
   }
 
@@ -1170,12 +1176,22 @@ export class DebugManager {
     const runId = params.run_id!;
     if (params.action === "requests" && (!live || live.journal)) {
       await live?.journal?.flush();
+      const sequence = live?.run.next_since;
       const indexed = await this.archive?.query?.(runId, params).catch((error) => {
         if (!live) throw error;
         this.coverage(live, "evidence_read_failed");
         return undefined;
       });
-      if (indexed) {
+      // A readable index can still be stale after a failed write or a CDP event
+      // arriving during this read. Merge retained and in-memory evidence below.
+      if (
+        indexed &&
+        (!live ||
+          (live.run.next_since === sequence &&
+            !live.run.coverage.some(
+              (reason) => reason === "evidence_write_failed" || reason === "evidence_write_backlog",
+            )))
+      ) {
         if (live) live.run.storage = indexed.run?.storage;
         return live
           ? {
@@ -1331,7 +1347,7 @@ export class DebugManager {
       };
     }
     if (params.action.startsWith("rule_") || params.action === "replay") {
-      if (this.starting.has(`${state.run.session_id}:${state.run.tab_id}`))
+      if (this.starting.has(state.owner))
         throw new Error("capture is still starting; wait until it is ready");
       if (state.run.state !== "capturing" || !state.controls)
         throw new Error("network controls require an active capture");

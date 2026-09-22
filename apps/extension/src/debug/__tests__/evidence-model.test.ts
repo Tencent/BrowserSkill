@@ -86,6 +86,63 @@ const fixture = (): DebugRecording => ({
 });
 
 describe("operation evidence", () => {
+  it.each([
+    JSON.stringify({
+      displayName: "Bob",
+      ...Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`f${i}`, i])),
+      nested: { displayName: "Other" },
+    }),
+    JSON.stringify({
+      displayName: "Bob",
+      nested: { a: { b: { c: { d: { displayName: "Other" } } } } },
+    }),
+    JSON.stringify({ displayName: "Bob", rows: [{ displayName: "Other" }] }),
+    `displayName=Bob&${Array.from({ length: 31 }, (_, i) => `f${i}=x`).join("&")}&displayName=Other`,
+  ])("does not claim unique field matches after a partial payload scan: %s", (text) => {
+    const record = fixture();
+    record.requests = [
+      {
+        ...request,
+        request_headers: { "content-type": "application/x-www-form-urlencoded" },
+        request_body: { state: "available", text },
+        response_body: { state: "available", text: text.startsWith("{") ? text : "{}" },
+      },
+    ];
+    const evidence = operationEvidence(record, save);
+    expect(evidence.gaps).toContain("payload_partial");
+    expect(evidence.fields[0].submitted).toEqual([
+      { state: "payload_partial", source: request.id },
+    ]);
+    if (text.startsWith("{"))
+      expect(evidence.fields[0].response).toEqual([
+        { state: "payload_partial", source: request.id },
+      ]);
+    expect(evidence.payloads).toContainEqual(
+      expect.objectContaining({ part: "request", value: "Bob" }),
+    );
+  });
+
+  it("accepts a unique match when the scan ends exactly at its field limit", () => {
+    const record = fixture();
+    record.requests = [
+      {
+        ...request,
+        request_body: {
+          state: "available",
+          text: JSON.stringify({
+            displayName: "Bob",
+            ...Object.fromEntries(Array.from({ length: 31 }, (_, i) => [`f${i}`, i])),
+          }),
+        },
+      },
+    ];
+    const evidence = operationEvidence(record, save);
+    expect(evidence.gaps).not.toContain("payload_partial");
+    expect(evidence.fields[0].submitted).toEqual([
+      expect.objectContaining({ state: "available", value: "Bob" }),
+    ]);
+  });
+
   it("uses one window for request and console links, including running and delayed evidence", () => {
     const record = fixture();
     record.requests.push(

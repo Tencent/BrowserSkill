@@ -104,15 +104,28 @@ interface Leaf {
   value: string;
   truncated: boolean;
 }
-function payload(request: DebugRequest, part: "request" | "response"): Leaf[] {
+function payload(
+  request: DebugRequest,
+  part: "request" | "response",
+): { leaves: Leaf[]; complete: boolean } {
   const body = part === "request" ? request.request_body : request.response_body;
-  if (body.state !== "available" || !body.text || body.text.length > 65536) return [];
+  if (body.state !== "available" || !body.text || body.text.length > 65536)
+    return { leaves: [], complete: body.state === "empty" };
   const result: Leaf[] = [];
+  let complete = true;
   const text = body.text;
   const visit = (data: JsonSource, path: string, name: string, depth: number) => {
-    if (depth > 5 || result.length >= 32) return;
+    if (depth > 5 || result.length >= 32) {
+      complete = false;
+      return;
+    }
     if (data.children) {
-      if (data.kind === "array") return; // Array indices and repeated names are not field identities.
+      if (data.kind === "array") {
+        // Array indices and repeated names are not field identities.
+        if (data.children.length) complete = false;
+        return;
+      }
+      if (data.children.length > 32) complete = false;
       for (const { key, value } of data.children.slice(0, 32))
         visit(value, `${path}/${key.replaceAll("~", "~0").replaceAll("/", "~1")}`, key, depth + 1);
     } else {
@@ -134,12 +147,15 @@ function payload(request: DebugRequest, part: "request" | "response"): Leaf[] {
       /x-www-form-urlencoded/.test(request.request_headers?.["content-type"] ?? "")
     ) {
       for (const [name, raw] of new URLSearchParams(body.text)) {
-        if (result.length === 32) break;
+        if (result.length === 32) {
+          complete = false;
+          break;
+        }
         result.push({ name, path: name, value: raw.slice(0, 256), truncated: raw.length > 256 });
       }
-    }
+    } else complete = false;
   }
-  return result;
+  return { leaves: result, complete };
 }
 
 /** Conservative, deterministic projections of retained facts; no semantic/causal inference. */
@@ -248,9 +264,18 @@ export function operationEvidence(
       (["request", "response"] as const).map((part) => ({
         request,
         part,
-        leaves: payload(request, part),
+        ...payload(request, part),
       })),
     );
+  if (
+    leaves.some(
+      (item) =>
+        !item.complete &&
+        (item.part === "request" ? item.request.request_body : item.request.response_body).state ===
+          "available",
+    )
+  )
+    gaps.add("payload_partial");
   const payloads: DebugEvidence["payloads"] = leaves
     .flatMap(({ request, part, leaves }) =>
       leaves.map((leaf) => ({
@@ -277,6 +302,7 @@ export function operationEvidence(
               part === "request" ? item.request.request_body : item.request.response_body;
             if (!["available", "empty"].includes(body.state))
               return [{ state: `body_${body.state}`, source: item.request.id }];
+            if (!item.complete) return [{ state: "payload_partial", source: item.request.id }];
             return matches.length === 1
               ? [
                   {
