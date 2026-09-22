@@ -2,9 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   isOverlayAgentOverlayResetMessage,
   OVERLAY_AGENT_OVERLAY_RESET,
+  OVERLAY_AGENT_STATE,
   OVERLAY_MSG_INTERRUPT,
+  type OverlayAgentStateMessage,
   type OverlayInterruptRequest,
   type OverlayInterruptResponse,
+  shouldApplyOverlayAgentState,
 } from "@/lib/overlay-bridge";
 
 describe("OVERLAY_MSG_INTERRUPT", () => {
@@ -43,5 +46,27 @@ describe("isOverlayAgentOverlayResetMessage", () => {
         type: OVERLAY_AGENT_OVERLAY_RESET,
       }),
     ).toBe(false);
+  });
+});
+
+function state(
+  generation: number,
+  mode: OverlayAgentStateMessage["mode"] = "control",
+): OverlayAgentStateMessage {
+  return { type: OVERLAY_AGENT_STATE, sessionId: "sess-1", mode, generation };
+}
+
+describe("shouldApplyOverlayAgentState", () => {
+  it("applies the first overlay state", () => {
+    expect(shouldApplyOverlayAgentState(null, state(1))).toBe(true);
+  });
+
+  it("applies an equal or newer generation", () => {
+    expect(shouldApplyOverlayAgentState(state(4, "control"), state(4, "paused"))).toBe(true);
+    expect(shouldApplyOverlayAgentState(state(4, "control"), state(5, "hidden"))).toBe(true);
+  });
+
+  it("drops a stale control state after a newer hide", () => {
+    expect(shouldApplyOverlayAgentState(state(6, "hidden"), state(5, "control"))).toBe(false);
   });
 });

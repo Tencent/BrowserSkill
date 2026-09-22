@@ -108,6 +108,18 @@ export function isOverlayAgentOverlayResetMessage(
   return candidate.type === OVERLAY_AGENT_OVERLAY_RESET && typeof candidate.sessionId === "string";
 }
 
+/**
+ * Drop overlay state that arrived late. Generation is monotonic in the
+ * background worker; a stale `control` frame after a newer `hidden` /
+ * `paused` frame would pin the full-viewport blocker on the page.
+ */
+export function shouldApplyOverlayAgentState(
+  current: OverlayAgentStateMessage | null,
+  incoming: OverlayAgentStateMessage,
+): boolean {
+  return current === null || incoming.generation >= current.generation;
+}
+
 export function isOverlayAgentStateMessage(message: unknown): message is OverlayAgentStateMessage {
   if (!message || typeof message !== "object") return false;
   const candidate = message as {
