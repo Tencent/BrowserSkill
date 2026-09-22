@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
+import * as recording from "../record";
 import { handleSessionStop } from "../session";
 import type { ChromeTabsApi } from "../shared";
 import { type AgentOverlayResetApi, type ChromeWindowsApi, type TabMutationApi } from "../tabs";
@@ -26,7 +27,7 @@ function fakeAgentWindow(ids: number[]) {
   const create = vi.fn(async () => {
     const id = ids[i++];
     if (id === undefined) throw new Error("ran out of fake ids");
-    return id;
+    return { windowId: id, initialTabIds: [] };
   });
   const remove = vi.fn(async () => {});
   const ensureActiveTab = vi.fn(async () => 0);
@@ -86,6 +87,44 @@ function makeApis(
 }
 
 describe("handleSessionStop with auto-return", () => {
+  it.each([
+    false,
+    true,
+  ])("preserves recording cleanup order across a failed return (remote=%s)", async (remote) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]), remote: () => remote });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
+    const state: FakeState = {
+      tabs: new Map([[7, { id: 7, windowId: 100 } as chrome.tabs.Tab]]),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    const failures = new Set([7]);
+    const { tabs, windows } = makeApis(state, { moveThrowsFor: failures });
+    const clear = vi.spyOn(recording, "clearRecordingForSession").mockImplementation(() => {});
+    try {
+      const result = await handleSessionStop(
+        sm,
+        { session_id: "aa11" },
+        { tabManagement: { tabs, windows } },
+      );
+      expect(result).toHaveProperty("return_failures");
+      expect(sm.has("aa11")).toBe(true);
+      expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+      failures.clear();
+      clear.mockClear();
+      const move = tabs.move;
+      tabs.move = vi.fn(async (id, options) => {
+        expect(clear).toHaveBeenCalledTimes(remote ? 1 : 0);
+        return move(id, options);
+      });
+      await handleSessionStop(sm, { session_id: "aa11" }, { tabManagement: { tabs, windows } });
+      expect(clear).toHaveBeenCalledTimes(1);
+      expect(sm.has("aa11")).toBe(false);
+    } finally {
+      clear.mockRestore();
+    }
+  });
   it("leaves the session untouched when cancellation arrived before teardown", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });

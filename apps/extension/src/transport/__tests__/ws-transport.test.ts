@@ -103,6 +103,37 @@ describe("WSTransport", () => {
     expect(transitions).toEqual(["connecting", "connected"]);
   });
 
+  it("rejects a blocked socket attempt and allows a later retry", async () => {
+    const factory = vi.fn((url: string) => new FakeSocket(url) as unknown as WebSocket);
+    factory.mockImplementationOnce(() => {
+      throw new Error("Connection settings are unavailable");
+    });
+    const t = new WSTransport({ url: "wss://example.com/bsk", webSocketFactory: factory });
+    await expect(t.connect()).rejects.toThrow("Connection settings are unavailable");
+    expect(t.state).toBe("disconnected");
+    expect(FakeSocket.instances).toHaveLength(0);
+    const retry = t.connect();
+    lastSocket().open();
+    await retry;
+    expect(t.state).toBe("connected");
+    await t.disconnect();
+  });
+
+  it("rejects an existing connect promise if the next physical attempt is blocked", async () => {
+    const factory = vi.fn((url: string) => new FakeSocket(url) as unknown as WebSocket);
+    const t = new WSTransport({ url: "wss://example.com/bsk", webSocketFactory: factory });
+    const pending = t.connect();
+    const rejected = expect(pending).rejects.toThrow("Connection settings are unavailable");
+    lastSocket().serverClose();
+    factory.mockImplementationOnce(() => {
+      throw new Error("Connection settings are unavailable");
+    });
+    expect(t.connect()).toBe(pending);
+    await rejected;
+    expect(t.state).toBe("disconnected");
+    await t.disconnect();
+  });
+
   it("serialises outbound frames as JSON when the socket is open", async () => {
     const t = new WSTransport({
       url: "ws://127.0.0.1:52800",
@@ -269,5 +300,20 @@ describe("WSTransport", () => {
     disp.dispose();
     lastSocket().receive({ id: "2", result: 2 });
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("setUrl returns false for the same URL and uses the new URL on the next connect", async () => {
+    const t = new WSTransport({
+      url: "ws://127.0.0.1:52800",
+      webSocketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    expect(t.setUrl("ws://127.0.0.1:52800")).toBe(false);
+    expect(t.setUrl("ws://127.0.0.1:53200")).toBe(true);
+
+    const p = t.connect();
+    expect(lastSocket().url).toBe("ws://127.0.0.1:53200");
+    lastSocket().open();
+    await p;
+    expect(t.state).toBe("connected");
   });
 });

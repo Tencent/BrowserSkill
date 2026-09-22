@@ -7,6 +7,7 @@ interface Control {
   id: number;
   value: string;
   type?: string;
+  checked?: boolean;
 }
 
 function snapshot(groups: Control[][]) {
@@ -32,6 +33,7 @@ function snapshot(groups: Control[][]) {
           str("snapshot placeholder"),
         ]),
       ],
+      inputChecked: { index: controls.flatMap((c, i) => (c.checked ? [i + 2] : [])) },
       inputValue: {
         index: controls.map((_, i) => i + 2),
         value: controls.map((c) => str(c.value)),
@@ -100,6 +102,37 @@ async function decodeControls(snap: ReturnType<typeof snapshot>) {
 }
 
 describe("form state identity", () => {
+  it("keeps native checked state separate from values before and after form enrichment", async () => {
+    const { cdp, nodes } = await fakeCdp(
+      [
+        [
+          { id: 10, type: "checkbox", value: "on", checked: false },
+          { id: 11, type: "checkbox", value: "subscribe", checked: true },
+          { id: 12, type: "radio", value: "choice", checked: true },
+          { id: 13, type: "text", value: "on" },
+        ],
+      ],
+      () =>
+        reply([
+          [10, state("on")],
+          [11, state("subscribe")],
+          [12, state("choice")],
+          [13, state("on")],
+        ]),
+    );
+    const read = () =>
+      nodes[0].filter((n) => n.tag === "input").map((n) => [n.formValue, n.checked]);
+    const expected = [
+      ["on", false],
+      ["subscribe", true],
+      ["choice", true],
+      ["on", undefined],
+    ];
+    expect(read()).toEqual(expected);
+    await enrichFormControlStates(cdp, 7, nodes);
+    expect(read()).toEqual(expected);
+  });
+
   it("matches reordered controls by identity and preserves controls missing from the batch", async () => {
     // The snapshot includes a shadow input. The runtime query skips it,
     // encounters a new input, and sees the remaining inputs in a new order.

@@ -106,7 +106,16 @@ pub fn write_to_path(info: &DaemonInfo, final_path: &Path) -> Result<()> {
 /// callers can distinguish "no daemon running" from "I/O error".
 pub fn read() -> Result<Option<DaemonInfo>> {
     let p = paths::info_path()?;
-    read_from_path(&p)
+    read_from_path(&p).map_err(|err| {
+        if err
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+        {
+            err.context(paths::BSK_HOME_HINT)
+        } else {
+            err
+        }
+    })
 }
 
 pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
@@ -122,8 +131,8 @@ pub fn read_from_path(path: &Path) -> Result<Option<DaemonInfo>> {
 }
 
 /// Read `daemon.json` and only return it if the recorded pid is alive
-/// on the local machine. Stale files (daemon crashed without cleanup)
-/// surface as `Ok(None)` so callers can fall through to "auto-spawn".
+/// in the caller's PID namespace. This legacy helper does not establish
+/// daemon availability or identity; production discovery uses IPC probing.
 pub fn read_valid() -> Result<Option<DaemonInfo>> {
     Ok(read()?.filter(|info| lockfile::pid_alive(info.pid)))
 }

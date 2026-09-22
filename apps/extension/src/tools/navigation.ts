@@ -16,7 +16,11 @@
 // `NavigateBackResult` / `NavigateForwardResult` / `ReloadResult`.
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type {
   NavigateBackParams,
   NavigateForwardParams,
@@ -35,13 +39,16 @@ import {
 } from "./browser-navigation";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpError, isCdpExtensionAccessDenied } from "./errors";
+import { NavigationDocument } from "./navigation-document";
 import {
   type CdpRunner,
   type ChromeTabsApi,
+  cdpBlockedUrlReason,
   chromeTabsApi,
   enforceAgentWindow,
   isRpcError,
   lookupSession,
+  type ResolvedTargetTab,
   resolveTargetTab,
 } from "./shared";
 
@@ -49,6 +56,8 @@ export interface NavigationDeps {
   cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
   browserNavigation?: BrowserNavigationApi;
+  /** Agent requests opt in; recording also reuses navigation without changing execution policy. */
+  backgroundExecution?: boolean;
   /** Optional AbortSignal — M7 abort hook (M10.2 will wire the full chain). */
   signal?: AbortSignal;
   /** Override default timeout when the caller omits `timeout_ms`. */
@@ -167,12 +176,13 @@ export function shouldTrustReadyStateProbe(
   return true;
 }
 
-let defaultDeps: { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } | null = null;
-function getDefaultDeps(): { cdp: ChromiumCdp; tabsApi: ChromeTabsApi } {
+let defaultDeps: NavigationDeps | null = null;
+function getDefaultDeps(): NavigationDeps {
   if (!defaultDeps) {
     defaultDeps = {
       cdp: new ChromiumCdp(),
       tabsApi: chromeTabsApi,
+      backgroundExecution: true,
     };
   }
   return defaultDeps;
@@ -200,6 +210,7 @@ interface LifecycleWait {
 export interface LifecycleWaitGuard {
   loaderId?: string | (() => string | null | undefined);
   beforeLoaderId?: string | null;
+  followNavigations?: boolean;
 }
 
 function currentLoaderId(guard: LifecycleWaitGuard | undefined): string {
@@ -237,12 +248,18 @@ function startLifecycleWait(
     let settled = false;
     let sawRelevantLifecycle = false;
     let lastLifecycle: string | undefined;
+    const document = new NavigationDocument();
+    document.retire(guard?.beforeLoaderId ?? undefined);
+    const pendingRequests = new Set<string>();
+    let navigationRevision = 0;
     let pendingLifecycle: { name: string; frameId?: string; loaderId?: string } | null = null;
     let listenerSub: { dispose(): void } | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let abortHandler: (() => void) | null = null;
 
-    const currentFrameId = () => (typeof frameId === "function" ? (frameId() ?? "") : frameId);
+    let observedMainFrameId = "";
+    const currentFrameId = () =>
+      (typeof frameId === "function" ? frameId() : frameId) || observedMainFrameId;
 
     const noteRelevantLifecycle = (name: string) => {
       sawRelevantLifecycle = true;
@@ -260,7 +277,9 @@ function startLifecycleWait(
       eventFrameId?: string,
       eventLoaderId?: string,
     ): boolean => {
-      if (!eventLoaderIsRelevant(eventLoaderId, guard)) return false;
+      if (guard?.followNavigations && (document.id || document.pending)) {
+        if (document.pending || eventLoaderId !== document.id) return false;
+      } else if (!eventLoaderIsRelevant(eventLoaderId, guard)) return false;
       if (!lifecycleEventMatchesFrame(eventFrameId)) return false;
       noteRelevantLifecycle(name);
       return true;
@@ -307,7 +326,9 @@ function startLifecycleWait(
 
     tryProbe = async (mode: LifecycleProbeMode, beforeReadyState: string | null = null) => {
       if (settled) return;
+      const version = document.version;
       const readyState = await probeMainFrameReadyState(cdp, expectedTabId);
+      if (guard?.followNavigations && (!document.isCurrent(version) || document.pending)) return;
       if (readyState === null) return;
       if (
         shouldTrustReadyStateProbe(readyState, targetName, {
@@ -318,6 +339,25 @@ function startLifecycleWait(
       ) {
         finish({ reached: "match", lastLifecycle: targetName });
       }
+    };
+
+    // Request intent is not a commit. Reconcile buffered current-document
+    // events after cancellation, without accepting a probe from an older turn.
+    const reconcilePending = async () => {
+      if (settled || !document.pending || pendingRequests.size) return;
+      const version = document.version;
+      const revision = navigationRevision;
+      const frame = await readMainFrameInfo(cdp, expectedTabId);
+      if (
+        settled ||
+        !document.isCurrent(version) ||
+        revision !== navigationRevision ||
+        pendingRequests.size
+      )
+        return;
+      if (frame.frameId !== currentFrameId() || frame.loaderId !== document.id) return;
+      document.cancelPending();
+      maybeFinishPending();
     };
 
     if (signal?.aborted) {
@@ -331,6 +371,72 @@ function startLifecycleWait(
           if (settled) return;
           if (source.tabId !== expectedTabId) return;
 
+          if (guard?.followNavigations) {
+            if (method === "Page.frameRequestedNavigation") {
+              const p = params as { frameId?: string; disposition?: string };
+              if (
+                currentFrameId() &&
+                p.frameId === currentFrameId() &&
+                (!p.disposition || p.disposition === "currentTab")
+              ) {
+                document.begin();
+                navigationRevision += 1;
+              }
+              return;
+            }
+            if (method === "Network.requestWillBeSent") {
+              const p = params as {
+                requestId?: string;
+                frameId?: string;
+                loaderId?: string;
+                type?: string;
+              };
+              if (
+                p.type === "Document" &&
+                p.frameId === currentFrameId() &&
+                p.requestId &&
+                document.id &&
+                p.loaderId !== document.id &&
+                !document.isRetired(p.loaderId)
+              ) {
+                document.begin();
+                navigationRevision += 1;
+                pendingRequests.add(p.requestId);
+              }
+              return;
+            }
+            if (method === "Network.loadingFailed" || method === "Network.loadingFinished") {
+              const p = params as { requestId?: string };
+              if (p.requestId && pendingRequests.delete(p.requestId)) {
+                navigationRevision += 1;
+                void reconcilePending();
+              }
+              return;
+            }
+            if (
+              method === "Page.frameStoppedLoading" ||
+              method === "Page.navigatedWithinDocument"
+            ) {
+              const p = params as { frameId?: string };
+              if (p.frameId === currentFrameId()) void reconcilePending();
+              return;
+            }
+            if (method === "Page.frameNavigated") {
+              const p = params as { frame?: { id?: string; parentId?: string; loaderId?: string } };
+              if (
+                !p.frame?.parentId &&
+                lifecycleEventMatchesFrame(p.frame?.id) &&
+                document.commit(p.frame?.loaderId)
+              ) {
+                observedMainFrameId = p.frame?.id ?? "";
+                navigationRevision += 1;
+                pendingRequests.clear();
+                pendingLifecycle = null;
+                sawRelevantLifecycle = false;
+                lastLifecycle = undefined;
+              }
+            }
+          }
           if (targetName === "commit" && method === "Page.frameNavigated") {
             const p = params as { frame?: { id?: string; parentId?: string; loaderId?: string } };
             const expectedFrameId = currentFrameId();
@@ -347,6 +453,20 @@ function startLifecycleWait(
           if (method !== "Page.lifecycleEvent") return;
           const p = params as { name?: string; frameId?: string; loaderId?: string };
           if (!p?.name) return;
+          if (
+            guard?.followNavigations &&
+            document.pending &&
+            p.loaderId === document.id &&
+            lifecycleEventMatchesFrame(p.frameId)
+          ) {
+            // Keep evidence that this document met the wait condition until the
+            // pending navigation is cancelled or a successor commits and clears it.
+            if (!pendingLifecycle || !lifecycleMeetsOrExceeds(pendingLifecycle.name, targetName)) {
+              pendingLifecycle = { name: p.name, frameId: p.frameId, loaderId: p.loaderId };
+            }
+            void reconcilePending();
+            return;
+          }
           if (currentFrameId().length === 0) {
             // A static empty `frameId` means the caller does not know
             // which frame to filter on (M9.2 `wait_for_navigation`
@@ -362,7 +482,9 @@ function startLifecycleWait(
               }
               return;
             }
-            if (!eventLoaderIsRelevant(p.loaderId, guard)) return;
+            if (guard?.followNavigations && (document.id || document.pending)) {
+              if (document.pending || p.loaderId !== document.id) return;
+            } else if (!eventLoaderIsRelevant(p.loaderId, guard)) return;
             if (!lifecycleEventMatchesFrame(p.frameId)) return;
             pendingLifecycle = { name: p.name, frameId: p.frameId, loaderId: p.loaderId };
             return;
@@ -486,64 +608,154 @@ async function readTabUrl(api: ChromeTabsApi, tabId: number): Promise<string | u
   }
 }
 
+/** Navigation may leave an inaccessible document, so it owns CDP preparation. */
+async function acquireNavigationExecution(
+  manager: SessionManager,
+  ctx: SessionContext,
+  tabId: number,
+  deps: NavigationDeps,
+  signal = deps.signal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (
+    !deps.backgroundExecution ||
+    !deps.cdp.acquireBackgroundExecution ||
+    !isAgentControlledTab(ctx, tabId)
+  )
+    return;
+  if (manager.get(ctx.sessionId) !== ctx) throw new DOMException("Session ended", "AbortError");
+  await deps.cdp.acquireBackgroundExecution?.(ctx.sessionId, tabId);
+  if (manager.get(ctx.sessionId) !== ctx || !isAgentControlledTab(ctx, tabId)) {
+    await deps.cdp.releaseSessionTab?.(ctx.sessionId, tabId);
+    throw new DOMException("Target control ended during navigation setup", "AbortError");
+  }
+  signal?.throwIfAborted();
+}
+
+async function prepareNavigation(
+  manager: SessionManager,
+  ctx: SessionContext,
+  target: ResolvedTargetTab,
+  deps: NavigationDeps,
+): Promise<"browser" | "cdp"> {
+  deps.signal?.throwIfAborted();
+  deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+  if (cdpBlockedUrlReason(target.url) || cdpBlockedUrlReason(target.pendingUrl)) return "browser";
+  try {
+    await acquireNavigationExecution(manager, ctx, target.tabId, deps);
+    await ensureCdpReady(deps.cdp, target.tabId);
+    // Successor request termination is part of navigation waiting, even if
+    // optional network capture was unavailable during debugger attachment.
+    await deps.cdp.send(target.tabId, "Network.enable", {});
+    return "cdp";
+  } catch (error) {
+    // Only preflight access denial permits fallback. Never replay a sent action.
+    if (!isCdpExtensionAccessDenied(error)) throw error;
+    return "browser";
+  }
+}
+
+function navigationError(error: unknown): RpcError {
+  return error instanceof Error && error.name === "AbortError"
+    ? { code: "cancelled", message: "Navigation cancelled" }
+    : cdpError(error);
+}
+
 /** Recover only a failed preflight; never replay an already-dispatched navigation. */
 async function recoverBrowserNavigation(
   deps: NavigationDeps,
-  tabId: number,
+  manager: SessionManager,
+  ctx: SessionContext,
+  target: ResolvedTargetTab,
   action: (api: BrowserNavigationApi) => Promise<unknown>,
   waitUntil: WaitUntil,
   timeoutMs: number,
+  requestedUrl?: string,
 ): Promise<ReloadResult | RpcError> {
+  const tabId = target.tabId;
+  const controlled = isAgentControlledTab(ctx, tabId);
   const abort = linkedAbortSignal(deps.signal);
   const deadline = Date.now() + timeoutMs;
   const api = deps.browserNavigation ?? chromeBrowserNavigationApi;
+  const checkControl = async (signal: AbortSignal) => {
+    signal.throwIfAborted();
+    const tab = await deps.tabsApi.get(tabId);
+    signal.throwIfAborted();
+    if (
+      manager.get(ctx.sessionId) !== ctx ||
+      tab.windowId !== target.windowId ||
+      (controlled && !isAgentControlledTab(ctx, tabId))
+    )
+      throw new DOMException("Target control ended during navigation recovery", "AbortError");
+    return tab;
+  };
   try {
-    let outcome = await navigateWithBrowserApi(
+    const outcome = await navigateWithBrowserApi(
       api,
       tabId,
       () => action(api),
-      waitUntil === "networkidle" ? "commit" : waitUntil,
+      waitUntil,
       timeoutMs,
       abort.signal,
+      async (event, signal) => {
+        // Chrome metadata may advance before its corresponding event arrives.
+        // An obsolete handoff waits for that event; it is not a navigation error.
+        const isCurrent = async () => {
+          await checkControl(signal);
+          const frame = await api.getFrame(tabId);
+          signal.throwIfAborted();
+          return !!event.documentId && frame?.documentId === event.documentId;
+        };
+        try {
+          if (!(await isCurrent())) return false;
+          const tab = await checkControl(signal);
+          if (cdpBlockedUrlReason(event.url ?? tab.url))
+            throw new Error("Navigation remains on a restricted page");
+          await acquireNavigationExecution(manager, ctx, tabId, deps, signal);
+          if (!(await isCurrent())) return false;
+          await deps.cdp.send(tabId, "Page.enable", {});
+          if (!(await isCurrent())) return false;
+          if (waitUntil === "networkidle") {
+            const frame = await readMainFrameInfo(deps.cdp, tabId);
+            if (!(await isCurrent())) return false;
+            if (!frame.frameId) throw new Error("No main frame after navigation");
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) return false;
+            const waiting = linkedAbortSignal(signal);
+            const wait = startLifecycleWait(
+              deps.cdp,
+              tabId,
+              frame.frameId,
+              "networkIdle",
+              remaining,
+              waiting.signal,
+              { loaderId: frame.loaderId ?? undefined },
+            );
+            try {
+              await deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
+              if ((await wait.promise).reached !== "match") return false;
+            } finally {
+              waiting.abort();
+              waiting.cleanup();
+            }
+          }
+          return await isCurrent();
+        } catch (error) {
+          // Do not hide ownership loss or failures of the current document.
+          if (signal.aborted) throw error;
+          if (!(await isCurrent())) return false;
+          throw error;
+        }
+      },
+      requestedUrl,
     );
     if (outcome.reached === "failed") return outcome.error;
-    if (outcome.reached === "cancelled" || abort.signal.aborted) {
+    if (outcome.reached === "cancelled" || abort.signal.aborted)
       return { code: "cancelled", message: "navigation recovery aborted" };
-    }
-    if (outcome.reached === "match") {
-      // A completed reload is not a recovery if the restricted frame remains.
-      await deps.cdp.send(tabId, "Page.enable", {});
-      if (abort.signal.aborted)
-        return { code: "cancelled", message: "navigation recovery aborted" };
-      if (waitUntil === "networkidle") {
-        // webNavigation cannot prove network idle. Subscribe on the new
-        // document before enabling CDP lifecycle events after its commit.
-        const frame = await readMainFrameInfo(deps.cdp, tabId);
-        if (!frame.frameId) return cdpError("no main frame after navigation");
-        const remaining = deadline - Date.now();
-        if (remaining <= 0) {
-          outcome = { reached: "timeout", lastLifecycle: "commit" };
-        } else {
-          const wait = startLifecycleWait(
-            deps.cdp,
-            tabId,
-            frame.frameId,
-            "networkIdle",
-            remaining,
-            abort.signal,
-            { loaderId: frame.loaderId ?? undefined },
-          );
-          await deps.cdp.send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
-          outcome = await wait.promise;
-        }
-      }
-    }
-    if (outcome.reached === "cancelled" || abort.signal.aborted) {
-      return { code: "cancelled", message: "navigation recovery aborted" };
-    }
+    const tab = await checkControl(abort.signal);
     return {
       tab_id: tabId,
-      final_url: await readTabUrl(deps.tabsApi, tabId),
+      final_url: outcome.url ?? tab.url,
       reached: outcome.reached === "match" ? waitUntil : "timeout",
       ...(outcome.reached === "timeout"
         ? {
@@ -554,7 +766,7 @@ async function recoverBrowserNavigation(
   } catch (error) {
     return abort.signal.aborted
       ? { code: "cancelled", message: "navigation recovery aborted" }
-      : cdpError(error);
+      : navigationError(error);
   } finally {
     abort.abort();
     abort.cleanup();
@@ -586,17 +798,16 @@ export async function handleNavigate(
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
 
   try {
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    try {
-      await ensureCdpReady(deps.cdp, target.tabId);
-    } catch (error) {
-      if (!isCdpExtensionAccessDenied(error)) throw error;
+    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
       const recovered = await recoverBrowserNavigation(
         deps,
-        target.tabId,
+        manager,
+        ctx,
+        target,
         (api) => api.update(target.tabId, { url: params.url }),
         waitUntil,
         timeoutMs,
+        params.url,
       );
       if (isRpcError(recovered)) return recovered;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, { ...recovered, url: params.url });
@@ -617,6 +828,7 @@ export async function handleNavigate(
       {
         loaderId: () => loaderId,
         beforeLoaderId: beforeFrame.loaderId,
+        followNavigations: true,
       },
     );
     const waitPromise = wait.promise;
@@ -669,7 +881,7 @@ export async function handleNavigate(
       }`,
     });
   } catch (err) {
-    return cdpError(err);
+    return navigationError(err);
   }
 }
 
@@ -703,8 +915,22 @@ async function handleHistory(
   const timeoutMs = params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
 
   try {
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await ensureCdpReady(deps.cdp, target.tabId);
+    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
+      const recovered = await recoverBrowserNavigation(
+        deps,
+        manager,
+        ctx,
+        target,
+        (api) => (direction === "back" ? api.goBack(target.tabId) : api.goForward(target.tabId)),
+        waitUntil,
+        timeoutMs,
+      );
+      if (isRpcError(recovered)) return recovered;
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        ...recovered,
+        previous_url: target.url,
+      });
+    }
     const history = await deps.cdp.send<{ currentIndex: number; entries: HistoryEntry[] }>(
       target.tabId,
       "Page.getNavigationHistory",
@@ -736,7 +962,7 @@ async function handleHistory(
       expected,
       timeoutMs,
       waitAbort.signal,
-      { beforeLoaderId: beforeFrame.loaderId },
+      { beforeLoaderId: beforeFrame.loaderId, followNavigations: true },
     );
     const waitPromise = wait.promise;
     try {
@@ -772,10 +998,7 @@ async function handleHistory(
       }`,
     });
   } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
+    return navigationError(err);
   }
 }
 
@@ -818,15 +1041,13 @@ export async function handleReload(
   const ignoreCache = params.hard === true;
 
   try {
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    try {
-      await ensureCdpReady(deps.cdp, target.tabId);
-    } catch (error) {
-      if (!isCdpExtensionAccessDenied(error)) throw error;
+    if ((await prepareNavigation(manager, ctx, target, deps)) === "browser") {
       const previousUrl = await readTabUrl(deps.tabsApi, target.tabId);
       const recovered = await recoverBrowserNavigation(
         deps,
-        target.tabId,
+        manager,
+        ctx,
+        target,
         (api) => api.reload(target.tabId, { bypassCache: ignoreCache }),
         waitUntil,
         timeoutMs,
@@ -849,7 +1070,7 @@ export async function handleReload(
       expected,
       timeoutMs,
       waitAbort.signal,
-      { beforeLoaderId: beforeFrame.loaderId },
+      { beforeLoaderId: beforeFrame.loaderId, followNavigations: true },
     );
     const waitPromise = wait.promise;
     try {
@@ -885,7 +1106,7 @@ export async function handleReload(
       }`,
     });
   } catch (err) {
-    return cdpError(err);
+    return navigationError(err);
   }
 }
 

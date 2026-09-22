@@ -68,6 +68,13 @@
     }
   },
   "definitions": {
+    "BorrowConfirmationPolicy": {
+      "type": "string",
+      "enum": [
+        "always",
+        "never"
+      ]
+    },
     "BrowserStatusEntry": {
       "description": "Snapshot of a single connected extension (extension client view).",
       "type": "object",
@@ -119,6 +126,28 @@
         }
       }
     },
+    "InteractionPolicy": {
+      "type": "object",
+      "required": [
+        "borrow_confirmation",
+        "request_help"
+      ],
+      "properties": {
+        "borrow_confirmation": {
+          "$ref": "#/definitions/BorrowConfirmationPolicy"
+        },
+        "request_help": {
+          "$ref": "#/definitions/RequestHelpPolicy"
+        }
+      }
+    },
+    "RequestHelpPolicy": {
+      "type": "string",
+      "enum": [
+        "enabled",
+        "disabled"
+      ]
+    },
     "SessionStatusEntry": {
       "description": "Snapshot of a single live session.",
       "type": "object",
@@ -142,6 +171,16 @@
           "description": "Unix epoch milliseconds.",
           "type": "integer",
           "format": "int64"
+        },
+        "interaction": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InteractionPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "session_id": {
           "type": "string"

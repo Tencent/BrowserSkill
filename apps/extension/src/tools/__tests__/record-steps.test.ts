@@ -135,6 +135,7 @@ function makeFakeCdp(
   let busyUntil = 0;
   const handlers: Record<string, (params: unknown, tabId: number) => unknown> = {
     "Page.enable": () => ({}),
+    "Network.enable": () => ({}),
     "Page.setLifecycleEventsEnabled": () => ({}),
     "Page.getFrameTree": () => ({
       frameTree: { frame: { id: "frame-1", loaderId: "loader-before" } },
@@ -412,6 +413,39 @@ describe("recorded user steps reach the exported trace", () => {
     expect(trace.steps).toHaveLength(1);
     const [step] = trace.steps;
     expect(step?.op).toBe("navigate");
+    expect(step?.state).toBeTruthy();
+    expect(step?.result.state).toBeTruthy();
+  });
+
+  it("records a reload of the page the recording is on", async () => {
+    // Issue #139: a reload commits to the URL the tab is already on, so it used to
+    // be dropped as the duplicate half of a navigation and the trace had no step
+    // for it, even though replaying the flow may depend on the refresh.
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const tabsApi = makeTabsApi();
+    const sendToTab = vi.fn(async () => ({ ok: true }));
+
+    await handleRecordStart(manager, RECORD_START_V3, { tabsApi, sendToTab, cdp: makeFakeCdp() });
+
+    const details = { tabId: TAB_ID, frameId: 0, url: START_URL };
+    chromeApi.webNavigationOnCommitted.emit({
+      ...details,
+      transitionType: "reload",
+      transitionQualifiers: [],
+    } as unknown as chrome.webNavigation.WebNavigationTransitionCallbackDetails);
+    chromeApi.webNavigationOnCompleted.emit(
+      details as unknown as chrome.webNavigation.WebNavigationFramedCallbackDetails,
+    );
+    // Let findRecordingForTab's tab lookup and the settle capture resolve.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, { tabsApi, sendToTab });
+    const trace = (stopped as RecordStopResult).trace as TraceV3;
+
+    expect(trace.steps).toHaveLength(1);
+    const [step] = trace.steps;
+    expect(step).toMatchObject({ op: "navigate", to: START_URL, cause: "reload" });
     expect(step?.state).toBeTruthy();
     expect(step?.result.state).toBeTruthy();
   });
@@ -1212,6 +1246,69 @@ describe("recorded user steps reach the exported trace", () => {
       { tabsApi: makeTabsApi(), sendToTab: vi.fn(), cdp: makeFakeCdp() },
     );
     expect(result).toMatchObject({ code: "invalid_params" });
+  });
+
+  it("does not record an unclaimed user tab inside a remote Agent Window", async () => {
+    const chromeApi = installChrome();
+    const manager = fakeManager();
+    const context = { ...manager.get("abcd")!, remote: true, agentCreatedTabs: new Set([TAB_ID]) };
+    manager.get = (id) => (id === "abcd" ? context : null);
+    const privateUrl = "https://private.example/secret";
+    const tabsApi = makeMultiTabsApi([
+      {
+        id: TAB_ID,
+        windowId: AGENT_WINDOW_ID,
+        active: true,
+        status: "complete",
+        url: START_URL,
+      } as chrome.tabs.Tab,
+      {
+        id: 5,
+        windowId: AGENT_WINDOW_ID,
+        active: false,
+        status: "complete",
+        url: privateUrl,
+      } as chrome.tabs.Tab,
+    ]);
+    const cdp = makeFakeCdp(undefined, {
+      treesByTab: { [TAB_ID]: axTree("Allowed"), 5: axTree("Private secret") },
+    });
+    const send = vi.spyOn(cdp, "send");
+    let requestId = "";
+    const sendToTab = vi.fn(async (_tabId: number, message: unknown) => {
+      const typed = message as { type?: string; requestId?: string };
+      if (typed.type === RECORD_START && typed.requestId) requestId = typed.requestId;
+      return { ok: true };
+    });
+    const deps = { tabsApi, sendToTab, cdp };
+    const started = await handleRecordStart(manager, RECORD_START_V3, deps);
+    expect(started).toMatchObject({ recording: true });
+    attachRecordStepListener(deps);
+    tabsApi.activate(5);
+    chromeApi.tabsOnActivated.emit({ tabId: 5, windowId: AGENT_WINDOW_ID });
+    runtimeOnMessageEmit(
+      chromeApi,
+      requestId,
+      {
+        op: "click",
+        page_url: privateUrl,
+        target: { role: "button", name: "Secret", tag: "button" },
+      },
+      5,
+    );
+    chromeApi.webNavigationOnCompleted.emit({
+      tabId: 5,
+      frameId: 0,
+      url: privateUrl,
+    } as chrome.webNavigation.WebNavigationFramedCallbackDetails);
+    await settleWait();
+    tabsApi.activate(TAB_ID);
+    const stopped = await handleRecordStop(manager, { session_id: "abcd" }, deps);
+    const trace = asTraceV3((stopped as RecordStopResult).trace);
+    expect(JSON.stringify(trace)).not.toContain(privateUrl);
+    expect(JSON.stringify(trace)).not.toContain("Private secret");
+    expect(sendToTab.mock.calls.some(([tabId]) => tabId === 5)).toBe(false);
+    expect(send.mock.calls.some(([tabId]) => tabId === 5)).toBe(false);
   });
 
   it("records tab transitions and binds actions to each tab's observation", async () => {

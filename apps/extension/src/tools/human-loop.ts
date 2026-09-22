@@ -16,6 +16,7 @@ import {
   isHelpQueryMessage,
   isHelpResponseMessage,
 } from "@/lib/help-bridge";
+import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   HelpCompletionCondition,
@@ -44,6 +45,7 @@ const HELP_SEND_RETRY_DELAY_MS = 350;
 const HELP_REARM_DEBOUNCE_MS = 150;
 const HELP_REARM_MAX_ATTEMPTS = 12;
 const HELP_REARM_RETRY_DELAY_MS = 400;
+const HELP_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_COMPLETION_STABLE_MS = 1_000;
 const COMPLETION_POLL_MS = 500;
 
@@ -53,6 +55,7 @@ export interface RequestHelpNotifications {
 }
 
 export interface RequestHelpDeps {
+  preferences?: InteractionPreferenceStore;
   tabsApi: ChromeTabsApi;
   windows: {
     update(windowId: number, info: { focused?: boolean }): Promise<chrome.windows.Window>;
@@ -82,6 +85,7 @@ interface ActiveHelpRequest {
   completionCriteria?: HelpCompletionCriteria;
   deps: RequestHelpDeps;
   settled: boolean;
+  unsubscribePreferences?: () => void;
   resolve: (value: RequestHelpResult | RpcError) => void;
   timeoutTimer: ReturnType<typeof setTimeout>;
   completionTimer: ReturnType<typeof setInterval> | null;
@@ -145,11 +149,19 @@ async function sendHelpRequestWithAck(
   tabId: number,
   msg: HelpRequestMessage,
   deps: RequestHelpDeps,
+  isActive: () => boolean = () => true,
 ): Promise<HelpFinishMessage | null> {
   let lastError: unknown;
   for (let attempt = 0; attempt < HELP_SEND_RETRIES; attempt += 1) {
+    if (!isActive()) return null;
     try {
       const response = await deps.sendToTab(tabId, msg);
+      if (!isActive()) {
+        await deps
+          .sendToTab(tabId, { type: HELP_CANCEL, requestId: msg.requestId })
+          .catch(() => {});
+        return null;
+      }
       if (isHelpAckMessage(response)) return null;
       if (isHelpResponseMessage(response)) {
         return {
@@ -277,15 +289,29 @@ async function refreshHelpTargets(
 }
 
 async function cleanupHelp(help: ActiveHelpRequest): Promise<void> {
-  if (help.deps.notifications) {
-    await help.deps.notifications.clear(help.notificationId).catch(() => {});
-  }
   const tabsToCancel = new Set([help.primaryTabId, ...help.overlayTabIds]);
-  await Promise.all(
-    [...tabsToCancel].map((tabId) =>
+  // A stalled notification must not prevent cancellation of the page overlays.
+  await Promise.all([
+    ...[...tabsToCancel].map((tabId) =>
       help.deps.sendToTab(tabId, { type: HELP_CANCEL, requestId: help.requestId }).catch(() => {}),
     ),
-  );
+    help.deps.notifications?.clear(help.notificationId).catch(() => {}),
+  ]);
+}
+
+/** Never let best-effort UI cleanup hold the daemon RPC open indefinitely. */
+async function awaitCleanupWithinBudget(cleanup: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, HELP_CLEANUP_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function finishHelp(
@@ -296,6 +322,7 @@ async function finishHelp(
 ): Promise<void> {
   if (help.settled) return;
   help.settled = true;
+  help.unsubscribePreferences?.();
   activeHelpRequests.delete(help.requestId);
   clearTimeout(help.timeoutTimer);
   if (help.completionTimer) clearInterval(help.completionTimer);
@@ -304,7 +331,7 @@ async function finishHelp(
   for (const tabId of help.overlayTabIds) clearRearmTimer(tabId);
   if (notifyContent) {
     const cleanup = cleanupHelp(help);
-    if (waitForCleanup) await cleanup;
+    if (waitForCleanup) await awaitCleanupWithinBudget(cleanup);
     else void cleanup;
   }
   help.resolve(value);
@@ -351,6 +378,7 @@ async function sendCurrentHelpOverlay(help: ActiveHelpRequest): Promise<HelpFini
     help.primaryTabId,
     helpRequestMessage(help, help.primaryTabId),
     help.deps,
+    () => !help.settled,
   );
   help.overlayTabIds.add(help.primaryTabId);
   return legacyFinish;
@@ -360,11 +388,14 @@ async function refreshAndSendHelpOverlay(
   help: ActiveHelpRequest,
   tabId: number,
 ): Promise<HelpFinishMessage | null> {
+  if (help.settled) return null;
   if (tabId === help.primaryTabId) await refreshHelpTargets(help);
+  if (help.settled) return null;
   const legacyFinish = await sendHelpRequestWithAck(
     tabId,
     helpRequestMessage(help, tabId),
     help.deps,
+    () => !help.settled,
   );
   help.overlayTabIds.add(tabId);
   return legacyFinish;
@@ -372,6 +403,7 @@ async function refreshAndSendHelpOverlay(
 
 async function rearmHelp(help: ActiveHelpRequest, tabId: number): Promise<boolean> {
   for (let attempt = 0; attempt < HELP_REARM_MAX_ATTEMPTS; attempt += 1) {
+    if (help.settled) return false;
     try {
       const legacyFinish = await refreshAndSendHelpOverlay(help, tabId);
       if (legacyFinish && !help.settled) {
@@ -462,6 +494,10 @@ function attachHelpRuntimeListener(deps: RequestHelpDeps): () => void {
         }
         if (tabId === help.primaryTabId) {
           await refreshHelpTargets(help, { scrollIntoView: false });
+        }
+        if (help.settled) {
+          sendResponse({ active: false });
+          return;
         }
         help.overlayTabIds.add(tabId);
         sendResponse({
@@ -665,6 +701,20 @@ export async function handleRequestHelp(
   }
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
 
+  await deps.preferences?.readyOrFallback();
+  const helpDisabled = () => deps.preferences?.get().requestHelpEnabled === false;
+  const disabledResult = (tabId: number): RequestHelpResult => ({
+    outcome: "disabled",
+    tab_id: tabId,
+    note: [
+      "request-help disabled in browser settings.",
+      "Re-observe the page and try to complete the task autonomously using available browser tools.",
+      "Report a blocker only when required information or capability is missing, or no viable approach remains.",
+      "Do not request human help again or treat this result as completion.",
+    ].join(" "),
+  });
+  if (helpDisabled()) return disabledResult(params.tab_id ?? 0);
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "request_help");
@@ -681,28 +731,16 @@ export async function handleRequestHelp(
     { scrollIntoView: true },
   );
 
+  if (helpDisabled()) return disabledResult(tabId);
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
   await deps.windows.update(target.windowId, { focused: true }).catch(() => {});
+  if (helpDisabled()) return disabledResult(tabId);
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
   await deps.activateTab(tabId).catch(() => {});
 
   const requestId = makeRequestId(tabId);
   const notificationId = `bsk-help:${requestId}`;
   const timeoutMs = params.timeout_ms ?? DEFAULT_HELP_TIMEOUT_MS;
-
-  if (deps.notifications) {
-    const copy = deps.notificationCopy ?? {
-      title: "BrowserSkill: Agent needs your help",
-      body: params.prompt,
-    };
-    await deps.notifications
-      .create(notificationId, {
-        type: "basic",
-        iconUrl: "icon/logo.png",
-        title: copy.title,
-        message: copy.body || params.prompt,
-        priority: 2,
-      })
-      .catch(() => {});
-  }
 
   return new Promise<RequestHelpResult | RpcError>((resolve) => {
     const timeoutTimer = setTimeout(() => {
@@ -745,6 +783,33 @@ export async function handleRequestHelp(
       return;
     }
     deps.signal?.addEventListener("abort", onAbort, { once: true });
+    const onPreferencesChanged = () => {
+      if (helpDisabled()) void finishHelp(help, disabledResult(tabId));
+    };
+    help.unsubscribePreferences = deps.preferences?.subscribe(onPreferencesChanged);
+    onPreferencesChanged();
+    if (help.settled) return;
+    if (deps.notifications) {
+      const notifications = deps.notifications;
+      const copy = deps.notificationCopy ?? {
+        title: "BrowserSkill: Agent needs your help",
+        body: params.prompt,
+      };
+      void notifications
+        .create(notificationId, {
+          type: "basic",
+          iconUrl: "icon/logo.png",
+          title: copy.title,
+          message: copy.body || params.prompt,
+          priority: 2,
+        })
+        .then(() => {
+          // A preference change or cancellation can settle the request while
+          // Chrome is creating the notification. Remove that late notification.
+          if (help.settled) return notifications.clear(notificationId);
+        })
+        .catch(() => {});
+    }
     startCompletionPolling(help);
 
     void sendCurrentHelpOverlay(help)

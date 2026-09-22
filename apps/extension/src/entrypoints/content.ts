@@ -348,10 +348,10 @@ export default defineContentScript({
 
       if (message.type === "borrow-request") {
         let responded = false;
-        const respond = (allowed: boolean) => {
+        const respond = (allowed: boolean, timedOut = false) => {
           if (responded) return;
           responded = true;
-          sendResponse({ type: "borrow-response", allowed });
+          sendResponse({ type: "borrow-response", allowed, ...(timedOut ? { timedOut } : {}) });
           overlays.removeBorrowRequest(message.requestId);
           renderAll();
         };
@@ -362,7 +362,7 @@ export default defineContentScript({
           tabTitle: message.tabTitle,
           timeoutMs: message.timeoutMs,
           onAllow: () => respond(true),
-          onDeny: () => respond(false),
+          onDeny: (timedOut) => respond(false, timedOut),
         });
         renderAll();
         return true;

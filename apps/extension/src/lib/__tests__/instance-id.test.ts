@@ -1,12 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
 import {
   getConnectionEnabled,
   getControlHintsHidden,
+  getDaemonPort,
   getLabel,
   getOrCreateInstanceId,
   STORAGE_KEYS,
   setConnectionEnabled,
   setControlHintsHidden,
+  setDaemonPort,
   setLabel,
 } from "../instance-id";
 
@@ -116,5 +119,22 @@ describe("instance-id", () => {
     await setControlHintsHidden(true, backend);
     expect(store[STORAGE_KEYS.CONTROL_HINTS_HIDDEN]).toBe(true);
     expect(await getControlHintsHidden(backend)).toBe(true);
+  });
+
+  it("getDaemonPort returns default when storage is empty", async () => {
+    const { backend } = fakeStorage();
+    expect(await getDaemonPort(backend)).toBe(DEFAULT_DAEMON_PORT);
+  });
+
+  it("getDaemonPort normalizes invalid stored values to default", async () => {
+    const { backend } = fakeStorage({ [STORAGE_KEYS.DAEMON_PORT]: 0 });
+    expect(await getDaemonPort(backend)).toBe(DEFAULT_DAEMON_PORT);
+  });
+
+  it("setDaemonPort persists the value retrievable by getDaemonPort", async () => {
+    const { backend, store } = fakeStorage();
+    await setDaemonPort(53200, backend);
+    expect(store[STORAGE_KEYS.DAEMON_PORT]).toBe(53200);
+    expect(await getDaemonPort(backend)).toBe(53200);
   });
 });

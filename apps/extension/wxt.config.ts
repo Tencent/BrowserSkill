@@ -29,10 +29,12 @@ export default defineConfig({
     minimum_chrome_version: "125",
     permissions: [
       "alarms",
+      "activeTab",
       "debugger",
       "downloads",
       "idle",
       "notifications",
+      "scripting",
       "tabs",
       "storage",
       "webNavigation",

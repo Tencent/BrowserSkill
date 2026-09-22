@@ -15,13 +15,12 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody, StatusParams, StatusResult};
+    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody};
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
     use tokio::time::timeout;
 
-    use crate::daemon::info as daemon_info;
     use crate::ipc_client::{RpcOutcome, random_id};
 
     /// Connected IPC client. Holds an open UDS connection plus a buffered
@@ -33,35 +32,13 @@ mod platform {
     }
 
     impl Client {
-        /// Connect to the daemon described in `daemon.json`. Fails if no
-        /// info file exists, the pid is dead, or the UDS is unreachable.
-        pub async fn connect() -> Result<Self> {
-            let info = daemon_info::read_valid()
-                .context("read daemon.json")?
-                .ok_or_else(|| anyhow::anyhow!("no live daemon (daemon.json missing or stale)"))?;
-            let mut client = Self::connect_path(info.sock_path).await?;
-            let status = client
-                .call::<_, StatusResult>(
-                    Method::SystemStatus,
-                    &StatusParams::default(),
-                    Duration::from_secs(2),
-                )
-                .await?
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "daemon verification RPC failed: {} ({:?})",
-                        err.message,
-                        err.code
-                    )
-                })?;
-            if status.pid != info.pid {
-                return Err(anyhow::anyhow!(
-                    "daemon.json pid {} does not match IPC daemon pid {}",
-                    info.pid,
-                    status.pid
-                ));
-            }
-            Ok(client)
+        /// PID in the caller's namespace, supplied by the kernel, not JSON.
+        pub(crate) fn peer_pid(&self) -> std::io::Result<Option<u32>> {
+            let credentials = self.stream.get_ref().as_ref().peer_cred()?;
+            Ok(credentials
+                .pid()
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0))
         }
 
         /// Connect directly to a UDS path (used by tests + auto-spawn
@@ -161,50 +138,28 @@ mod platform {
     use std::time::Duration;
 
     use anyhow::{Context, Result};
-    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody, StatusParams, StatusResult};
+    use bsk_protocol::{Frame, Method, RequestFrame, ResponseBody};
     use serde::{Serialize, de::DeserializeOwned};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
     use tokio::time::{sleep, timeout};
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
-    use crate::daemon::info as daemon_info;
     use crate::ipc_client::{RpcOutcome, random_id};
 
     pub struct Client {
         stream: BufReader<tokio::io::ReadHalf<NamedPipeClient>>,
         write: tokio::io::WriteHalf<NamedPipeClient>,
         pipe_name: PathBuf,
+        peer_pid: std::io::Result<Option<u32>>,
     }
 
     impl Client {
-        pub async fn connect() -> Result<Self> {
-            let info = daemon_info::read_valid()
-                .context("read daemon.json")?
-                .ok_or_else(|| anyhow::anyhow!("no live daemon (daemon.json missing or stale)"))?;
-            let mut client = Self::connect_path(info.sock_path).await?;
-            let status = client
-                .call::<_, StatusResult>(
-                    Method::SystemStatus,
-                    &StatusParams::default(),
-                    Duration::from_secs(2),
-                )
-                .await?
-                .map_err(|err| {
-                    anyhow::anyhow!(
-                        "daemon verification RPC failed: {} ({:?})",
-                        err.message,
-                        err.code
-                    )
-                })?;
-            if status.pid != info.pid {
-                return Err(anyhow::anyhow!(
-                    "daemon.json pid {} does not match IPC daemon pid {}",
-                    info.pid,
-                    status.pid
-                ));
-            }
-            Ok(client)
+        pub(crate) fn peer_pid(&self) -> std::io::Result<Option<u32>> {
+            self.peer_pid
+                .as_ref()
+                .copied()
+                .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))
         }
 
         /// Total budget for retrying `ERROR_PIPE_BUSY` while connecting
@@ -238,11 +193,23 @@ mod platform {
                         Self::CONNECT_BUSY_TIMEOUT
                     )
                 })??;
+            // Fetch while the pipe handle is directly available; an identity
+            // lookup failure affects management only, not normal IPC use.
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
+            let mut pid = 0;
+            let peer_pid =
+                if unsafe { GetNamedPipeServerProcessId(client.as_raw_handle(), &mut pid) } != 0 {
+                    Ok((pid > 0).then_some(pid))
+                } else {
+                    Err(std::io::Error::last_os_error())
+                };
             let (read, write) = tokio::io::split(client);
             Ok(Self {
                 stream: BufReader::new(read),
                 write,
                 pipe_name,
+                peer_pid,
             })
         }
 
@@ -316,6 +283,24 @@ mod platform {
 }
 
 pub use platform::Client;
+
+impl Client {
+    /// Discover and verify the existing daemon without starting one.
+    pub async fn connect() -> anyhow::Result<Self> {
+        use crate::daemon::probe::{Probe, probe_async};
+        match probe_async(
+            std::time::Duration::from_secs(2),
+            bsk_protocol::StatusParams::default(),
+        )
+        .await?
+        {
+            Probe::Ready(daemon) => Ok(daemon.client),
+            Probe::Absent(_) => {
+                anyhow::bail!("no listening daemon (daemon.json or IPC endpoint missing)")
+            }
+        }
+    }
+}
 
 /// Result of a typed RPC: either the deserialised happy-path result or
 /// the structured `RpcError` returned by the daemon.

@@ -356,10 +356,8 @@ fn install_candidate_with_client(
     let binary = download_candidate_binary(candidate, client)?;
     let target = std::env::current_exe().context("locate current bsk executable")?;
 
-    let daemon_was_running = restart_daemon && crate::daemon::info::read_valid()?.is_some();
-    if daemon_was_running {
-        crate::daemon::start::run_stop().context("stop bsk daemon before update")?;
-    }
+    let daemon_was_running = restart_daemon
+        && crate::daemon::start::stop_if_running().context("stop bsk daemon before update")?;
 
     let restart_args = daemon_was_running.then(StartArgs::default);
     let action = replace_binary_for_update(&target, &binary, restart_args.as_ref())?;

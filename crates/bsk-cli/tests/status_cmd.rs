@@ -40,7 +40,19 @@ fn bsk_status_json_returns_structured_payload() {
     let home = tmp.path().join("bsk");
     std::fs::create_dir_all(&home).unwrap();
 
-    // Auto-spawn via `bsk status` — should bring up the daemon.
+    // Isolate the status rendering check from any user daemon on port 52800.
+    let start = Command::new(bsk_bin())
+        .args(["daemon", "start", "--port", "0", "--daemon-idle", "60s"])
+        .env("BSK_HOME", &home)
+        .env("BSK_AUTO_UPDATE", "0")
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+
     let out = Command::new(bsk_bin())
         .args(["--json", "status"])
         .env("BSK_HOME", &home)
@@ -61,7 +73,10 @@ fn bsk_status_json_returns_structured_payload() {
 
     assert!(parsed["pid"].as_u64().unwrap() > 0);
     assert!(!parsed["daemon_version"].as_str().unwrap().is_empty());
-    assert_eq!(parsed["protocol_version"], "1.1");
+    assert_eq!(
+        parsed["protocol_version"],
+        bsk::daemon::state::PROTOCOL_VERSION
+    );
     assert!(parsed["sock_path"].as_str().is_some());
     assert_eq!(parsed["browsers"], serde_json::json!([]));
     assert_eq!(parsed["sessions"], serde_json::json!([]));
@@ -196,6 +211,12 @@ fn bsk_doctor_does_not_treat_live_non_daemon_pid_as_running() {
         serde_json::to_vec_pretty(&info).unwrap(),
     )
     .unwrap();
+
+    // Keep the recorded instance unavailable rather than allowing doctor to
+    // recover it by starting a fresh daemon. This must not depend on whether
+    // the user's default WS port happens to be occupied.
+    let lock = std::fs::File::create(home.join("daemon.lock")).unwrap();
+    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
 
     let out = Command::new(bsk_bin())
         .args(["--json", "doctor"])

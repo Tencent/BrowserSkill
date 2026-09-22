@@ -73,7 +73,7 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
     let params = HandshakeParams {
         client: "browser-skill-extension".into(),
         version: "0.1.0-dev.0".parse().unwrap(),
-        protocol_version: "1.0".into(),
+        protocol_version: bsk::daemon::state::PROTOCOL_VERSION.into(),
         instance_id: TEST_EXT_ID.into(),
         browser: BrowserPeerInfo {
             name: "chrome".into(),
@@ -135,6 +135,7 @@ where
                     window_id += 1;
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            interaction: None,
                             agent_window_id: Some(id),
                         })
                         .unwrap(),
@@ -233,6 +234,8 @@ async fn screenshot_returns_image_base64_with_dimensions() {
         let _: ScreenshotParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(ScreenshotResult {
+                capture_id: None,
+                capture_unavailable: None,
                 image_base64: "iVBORw0KGgo=".into(),
                 width: 800,
                 height: 600,
@@ -281,6 +284,8 @@ async fn screenshot_forwards_ref_to_extension() {
         assert_eq!(params.ref_.as_deref(), Some("@e5"));
         ResponseBody::Ok(
             serde_json::to_value(ScreenshotResult {
+                capture_id: Some("capture-test".into()),
+                capture_unavailable: None,
                 image_base64: "iVBORw0KGgo=".into(),
                 width: 100,
                 height: 60,
@@ -304,6 +309,7 @@ async fn screenshot_forwards_ref_to_extension() {
     )
     .await
     .expect("screenshot with ref ok");
+    assert_eq!(result.capture_id.as_deref(), Some("capture-test"));
     assert_eq!(result.width, 100);
     assert_eq!(result.height, 60);
     handle.shutdown().await;
@@ -473,6 +479,7 @@ async fn observe_returns_semantic_text_and_ref_count() {
         let _: ObserveParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(ObserveResult {
+                next_cursor: None,
                 text: "@vom 1\n  @e1 button \"Products\" [hover: Shoes]\n".into(),
                 ref_count: 1,
                 tab_id: 13,
@@ -490,6 +497,7 @@ async fn observe_returns_semantic_text_and_ref_count() {
         &sock,
         Method::ToolObserve,
         ObserveParams {
+            cursor: None,
             session_id,
             tab_id: None,
             max_depth: None,

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { OVERLAY_HOST_MARKER_ATTR } from "@/lib/overlay-bridge";
 import { createCaptureCheckpoint } from "../capture-abort";
 import { buildDocumentIndex, type DecodedNode } from "../facts";
-import { decodeDocument, REQUESTED_STYLES } from "../snapshot";
+import { decodeDocument, REQUESTED_STYLES, VISUAL_SNAPSHOT } from "../snapshot";
 
 function node(id: number, parent: number | null): DecodedNode {
   return {
@@ -123,5 +123,46 @@ describe("document facts", () => {
       name: "AbortError",
     });
     expect(reads).toBeLessThanOrEqual(356);
+  });
+});
+
+describe("visual ancestry facts", () => {
+  it("distinguishes document roots, malformed roots, missing parents and cycles", async () => {
+    const input = [
+      { ...node(0, null), nodeType: 9 },
+      { ...node(1, 0), nodeType: 1 },
+      { ...node(2, 1), nodeType: 11 },
+      node(3, 2),
+      node(4, 99),
+      node(5, 6),
+      node(6, 5),
+      node(7, 5),
+      { ...node(8, null), nodeType: 1 },
+      { ...node(9, null), nodeType: 9, parentMissing: true },
+    ];
+    const index = await buildDocumentIndex(input.reverse(), undefined, true);
+    for (const id of [0, 1, 2, 3]) expect(index.ancestryComplete!.get(id)).toBe(true);
+    for (const id of [4, 5, 6, 7, 8, 9]) expect(index.ancestryComplete!.get(id)).toBe(false);
+  });
+
+  it("retains client offsets in their source units and does not disguise missing parent indices", async () => {
+    const decoded = await decodeDocument(
+      {
+        nodes: { backendNodeId: [1, 2], nodeType: [1, 1], nodeName: [0, 0], parentIndex: [99] },
+        layout: {
+          nodeIndex: [0],
+          bounds: [[745, 455.625, 97, 59.5]],
+          clientRects: [[5, 5, 68, 38]],
+        },
+      },
+      ["div"],
+      undefined,
+      VISUAL_SNAPSHOT,
+    );
+    expect(decoded.nodes[0].layout?.clientRect).toEqual([5, 5, 68, 38]);
+    expect(decoded.nodes[0].layout?.bounds).toEqual([745, 455.625, 97, 59.5]);
+    expect(decoded.nodes.every((node) => node.parentMissing)).toBe(true);
+    const index = await buildDocumentIndex(decoded.nodes, undefined, true);
+    expect([...index.ancestryComplete!.values()]).toEqual([false, false]);
   });
 });

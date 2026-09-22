@@ -1,12 +1,16 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { getAuditEnabled } from "@/lib/audit";
+import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
+import { watchDaemonConnection } from "@/lib/daemon-connection-preference";
 import { startHeartbeat } from "@/lib/heartbeat";
 import {
   getConnectionEnabled,
   setConnectionEnabled as persistConnectionEnabled,
   setLabel,
 } from "@/lib/instance-id";
+import { interactionPolicy, interactionPreferences } from "@/lib/interaction-preferences";
 import { startKeepalive } from "@/lib/keepalive";
 import {
   OVERLAY_AGENT_STATE,
@@ -23,6 +27,7 @@ import {
 import { POPUP_PORT_NAME, type PopupInbound, type PopupOutbound } from "@/lib/popup-bridge";
 import { recordFrameCoordinator } from "@/lib/recording/frame-coordinator";
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
+import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
@@ -44,22 +49,74 @@ import {
 import { chromeTabsApi } from "@/tools/shared";
 import { chromeTabMutationApi } from "@/tools/tabs";
 import { detectBrowserMeta } from "@/transport/handshake";
+import { watchRemoteAuthorization } from "@/transport/remote-authorization";
+import { type RemoteEndpoint, remoteSocket } from "@/transport/remote-endpoint";
 import type { Transport } from "@/transport/transport";
 import { WSTransport } from "@/transport/ws-transport";
 
 export default defineBackground(() => {
   const controller = new ConnectionController();
-  const transport = new WSTransport({ url: __BSK_DAEMON_WS_URL__ });
-  const sessions = new SessionManager();
+  let remoteEndpoint: RemoteEndpoint | null = null;
+  let connectionPreferenceValid = false;
+  let requestedConnection: { key: string; remote: boolean } | null = null;
+  const transport = new WSTransport({
+    url: __BSK_DAEMON_WS_URL__,
+    webSocketFactory: (url) => {
+      if (!connectionPreferenceValid) throw new Error("Connection settings are unavailable");
+      return remoteSocket(url, remoteEndpoint);
+    },
+  });
+  const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
+  attachLongScreenshot({
+    isTabBusy: (tabId) => sessions.list().some((session) => isAgentControlledTab(session, tabId)),
+  });
+  attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
+    onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
     shouldAutoAcceptDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
-      return sessions.findByWindowId(tab.windowId) !== null;
+      const session = sessions.findByWindowId(tab.windowId);
+      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
     },
   });
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
+
+  watchRemoteAuthorization();
+  const daemonPort = watchDaemonConnection(
+    (url, remote) => {
+      const key = JSON.stringify([remote ? "remote" : "local", url, remote?.deviceId ?? null]);
+      const sameRequest = requestedConnection?.key === key;
+      requestedConnection = { key, remote: remote !== null };
+      if (
+        sameRequest &&
+        connectionPreferenceValid &&
+        remote?.deviceId &&
+        remoteEndpoint?.deviceId === remote.deviceId &&
+        remoteEndpoint.url === remote.url
+      ) {
+        remoteEndpoint = remote;
+        return;
+      }
+      // Connection identity is public metadata. Credential rotation updates the
+      // socket factory above without ending the current device's tasks.
+      void controller.reconfigureTransport(key, () => {
+        connectionPreferenceValid = true;
+        remoteEndpoint = remote;
+        transport.setUrl(url);
+      });
+    },
+    () => {
+      console.error("[connection] invalid connection preference");
+      if (remoteEndpoint || requestedConnection?.remote) {
+        requestedConnection = null;
+        connectionPreferenceValid = false;
+        void controller.reconfigureTransport("unavailable", () => {});
+      }
+    },
+  );
+  let preferenceWrites = Promise.resolve();
 
   function setControlMode(sessionId: string, mode: OverlayMode): void {
     if (controlModes.get(sessionId) === mode) return;
@@ -216,7 +273,24 @@ export default defineBackground(() => {
   attachRecordFinishListener(recordDeps);
   attachRecordQueryListener(recordDeps);
 
+  interactionPreferences.subscribe((preferences) => {
+    for (const ctx of sessions.list()) {
+      try {
+        transport.send({
+          event: "session.interaction_changed",
+          payload: {
+            session_id: ctx.sessionId,
+            interaction: interactionPolicy(preferences),
+          },
+        });
+      } catch {
+        /* Reconnection tears down these sessions. */
+      }
+    }
+  });
+  void interactionPreferences.readyOrFallback();
   const dispatcher = new ToolDispatcher({
+    interactionPreferences,
     transport,
     sessions,
     cdp,
@@ -226,8 +300,14 @@ export default defineBackground(() => {
     onAgentTabClaimed: (tabId, windowId) => {
       void pushOverlayStateForTab(tabId, windowId);
     },
-    approveBorrow: (ctx) =>
-      requestBorrowConfirmation(ctx.tabId, {
+    approveBorrow: async (ctx) => {
+      await interactionPreferences.readyOrFallback();
+      return requestBorrowConfirmation(ctx.tabId, {
+        timeoutMs: ctx.timeoutMs,
+        autoAllow: {
+          get: () => !interactionPreferences.get().confirmTabBorrow,
+          subscribe: (listener) => interactionPreferences.subscribe(listener),
+        },
         ...(ctx.signal !== undefined ? { signal: ctx.signal } : {}),
         deps: {
           // Skip every Agent Window when choosing where to render the
@@ -238,7 +318,8 @@ export default defineBackground(() => {
           // without re-creating the dispatcher.
           notificationCopy: makeBorrowNotificationCopy(),
         },
-      }),
+      });
+    },
     helpNotificationCopy: () => ({
       title: i18n.t("helpRequest.notificationTitle", { ns: "extension" }),
       body: "",
@@ -285,7 +366,7 @@ export default defineBackground(() => {
   // the BrowserSkill connection.
   startKeepalive({
     transport,
-    shouldConnect: () => controller.isConnectionEnabled,
+    requestConnect: () => controller.requestConnect(),
   });
 
   // Application-level heartbeat (Chrome 116+): while the post-handshake
@@ -307,13 +388,7 @@ export default defineBackground(() => {
   // the worker and let us reconnect immediately instead of waiting for
   // the next 30s alarm tick. They only help when the daemon is actually
   // running; a cold daemon is (re)spawned by the next `bsk` command.
-  const reconnectIfNeeded = () => {
-    if (!controller.isConnectionEnabled) return;
-    if (transport.state === "connected") return;
-    void transport.connect().catch((err) => {
-      console.debug("[browser-skill] wake reconnect attempt failed", err);
-    });
-  };
+  const reconnectIfNeeded = () => controller.requestConnect();
   if (typeof chrome.runtime?.onStartup?.addListener === "function") {
     chrome.runtime.onStartup.addListener(reconnectIfNeeded);
   }
@@ -328,20 +403,23 @@ export default defineBackground(() => {
   }
 
   void (async () => {
-    const connectionEnabled = await getConnectionEnabled();
+    const [connectionEnabled, , auditEnabled] = await Promise.all([
+      getConnectionEnabled(),
+      daemonPort.ready,
+      getAuditEnabled(),
+    ]);
+    controller.setAuditEnabled(auditEnabled);
+    const cleanup = async () => {
+      const report = await cleanupAfterDisconnect();
+      if (report.failures.length > 0) {
+        throw new Error(
+          `Session cleanup incomplete: ${report.failures.map((failure) => failure.message).join("; ")}`,
+        );
+      }
+    };
     await controller.attach(transport, detectBrowserMeta(), connectionEnabled, {
-      beforeDisconnect: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup before disconnect was incomplete", report);
-        }
-      },
-      onDisconnected: async () => {
-        const report = await cleanupAfterDisconnect();
-        if (report.failures.length > 0) {
-          console.warn("[browser-skill] session cleanup after disconnect was incomplete", report);
-        }
-      },
+      beforeDisconnect: cleanup,
+      onDisconnected: cleanup,
     });
   })().catch((err) => {
     console.error("[browser-skill] controller failed to attach", err);
@@ -399,15 +477,14 @@ export default defineBackground(() => {
       if (msg && typeof msg === "object" && "kind" in msg) {
         if (msg.kind === "set_label") {
           void setLabel(msg.value).then(() => controller.refreshLabel());
-        } else if (msg.kind === "set_port") {
-          // Placeholder for the future custom-port UI; warn loudly so
-          // any reintroduced popup control is caught instead of
-          // silently doing nothing (review M4/M5 C2).
-          console.warn("[browser-skill] set_port is not wired yet; ignoring", msg.value);
         } else if (msg.kind === "set_connection_enabled") {
-          void controller
-            .setConnectionEnabled(msg.value)
-            .then(() => persistConnectionEnabled(msg.value));
+          void controller.setConnectionEnabled(msg.value);
+          // Persist user intent in message order, independently of slow cleanup.
+          preferenceWrites = preferenceWrites
+            .then(() => persistConnectionEnabled(msg.value))
+            .catch((err) => {
+              console.error("[browser-skill] connection preference write failed", err);
+            });
         }
       }
     });

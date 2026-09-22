@@ -3,7 +3,7 @@
 // `ref_not_found` errors for hard-failure tool paths.
 
 import type { SessionContext } from "@/session-manager/manager";
-import { normaliseRef } from "@/session-manager/ref-store";
+import { normaliseRef, type RefEntry } from "@/session-manager/ref-store";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 
@@ -14,14 +14,22 @@ export interface SnapshotRefLookup {
   cdpSessionId?: string;
 }
 
-function refEntryForTab(ctx: SessionContext, refKey: string, tabId: number) {
+/** Typed lookup never turns a visual anchor into a DOM operation target. */
+export function lookupRefTarget(
+  ctx: SessionContext,
+  refKey: string,
+  tabId: number,
+): RefEntry | null {
   const entry = ctx.refStore.resolveEntry(refKey);
-  return entry?.tabId === tabId ? entry : null;
+  if (!entry) return null;
+  const ownerTabId =
+    entry.kind === "visual-region" ? entry.candidate.document.target.tabId : entry.tabId;
+  return ownerTabId === tabId ? entry : null;
 }
 
 /**
  * Soft lookup: returns `null` when the ref is unknown or bound to a
- * different tab. Used by paths that report `matched: false` instead of
+ * different tab, or is a visual region. Used by paths that report `matched: false` instead of
  * emitting an RPC error (e.g. `tool.request_help`).
  */
 export function lookupSnapshotRef(
@@ -30,8 +38,8 @@ export function lookupSnapshotRef(
   tabId: number,
 ): SnapshotRefLookup | null {
   const refKey = normaliseRef(ref);
-  const entry = refEntryForTab(ctx, refKey, tabId);
-  if (!entry) return null;
+  const entry = lookupRefTarget(ctx, refKey, tabId);
+  if (!entry || entry.kind !== "dom") return null;
   return {
     backendNodeId: entry.backendNodeId,
     refKey,
@@ -50,6 +58,13 @@ export function resolveSnapshotRef(
   ref: string,
   tabId: number,
 ): SnapshotRefLookup | RpcError {
+  const entry = lookupRefTarget(ctx, ref, tabId);
+  if (entry?.kind === "visual-region")
+    return rpcError(
+      "unsupported",
+      "ref_kind_unsupported",
+      `ref ${ref} is a visual region, not a DOM operation target`,
+    );
   const looked = lookupSnapshotRef(ctx, ref, tabId);
   if (looked === null) {
     return rpcError(

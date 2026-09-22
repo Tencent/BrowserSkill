@@ -41,6 +41,102 @@ function document(
 }
 
 describe("semantic VOM graph", () => {
+  it.each<{ ax: boolean; ignored: boolean; attrs: Record<string, string>; disabled: boolean }>([
+    { ax: true, ignored: false, attrs: {}, disabled: true },
+    { ax: false, ignored: false, attrs: {}, disabled: false },
+    { ax: true, ignored: true, attrs: {}, disabled: false },
+    { ax: false, ignored: true, attrs: { disabled: "" }, disabled: true },
+    { ax: false, ignored: false, attrs: { "aria-disabled": "true" }, disabled: true },
+  ])("observes inherited AX disabled state while retaining DOM fallbacks: %j", ({
+    ax,
+    ignored,
+    attrs,
+    disabled,
+  }) => {
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [
+            {
+              nodeId: "button",
+              backendDOMNodeId: 2,
+              ignored,
+              role: { type: "role", value: "button" },
+              name: { type: "computedString", value: "Submit" },
+              properties: [{ name: "disabled", value: { value: ax } }],
+            },
+          ],
+          [dom(2, null, "button", attrs, "Submit")],
+        ),
+      ],
+    });
+    expect(scene.nodes.find((node) => node.backendNodeId === 2)?.disabled).toBe(disabled);
+    expect(renderVom(scene).text.includes("[disabled]")).toBe(disabled);
+  });
+
+  it.each([
+    { ax: "true", live: false, ignored: false, aria: "false", expected: true },
+    { ax: "false", live: true, ignored: false, aria: "true", expected: false },
+    { ax: "mixed", live: true, ignored: false, aria: "true", expected: "mixed" },
+    { ax: "true", live: false, ignored: true, aria: "true", expected: false },
+    { ax: undefined, live: false, ignored: false, aria: "true", expected: false },
+    { ax: undefined, live: undefined, ignored: false, aria: "mixed", expected: "mixed" },
+    { ax: undefined, live: undefined, ignored: false, aria: undefined, expected: undefined },
+  ])("resolves checked state without confusing value/default attributes: %j", ({
+    ax,
+    live,
+    ignored,
+    aria,
+    expected,
+  }) => {
+    const control = {
+      ...dom(2, 1, live === undefined ? "div" : "input", {
+        role: "checkbox",
+        type: "checkbox",
+        checked: "",
+        "aria-label": "Subscribe",
+        ...(aria !== undefined ? { "aria-checked": aria } : {}),
+      }),
+      formValue: "on",
+      ...(live !== undefined ? { checked: live } : {}),
+    };
+    const scene = buildSemanticVomScene({
+      viewport: { width: 800, height: 600 },
+      rootFrameId: "main",
+      documents: [
+        document(
+          "main",
+          [
+            {
+              nodeId: "root",
+              backendDOMNodeId: 1,
+              role: { type: "role", value: "RootWebArea" },
+              childIds: ["check"],
+            },
+            {
+              nodeId: "check",
+              parentId: "root",
+              backendDOMNodeId: 2,
+              ignored,
+              role: { type: "role", value: "checkbox" },
+              name: { type: "computedString", value: "Subscribe" },
+              ...(ax !== undefined
+                ? { properties: [{ name: "checked", value: { value: ax } }] }
+                : {}),
+            },
+          ],
+          [dom(1, null, "body"), control],
+        ),
+      ],
+    });
+    const resolved = scene.nodes.find((n) => n.backendNodeId === 2)!;
+    expect(resolved.checked).toBe(expected);
+    expect(resolved.value).toBe("on");
+  });
+
   it("preserves backend-less AX structure without making it referenceable", () => {
     const scene = buildSemanticVomScene({
       viewport: { width: 800, height: 600 },

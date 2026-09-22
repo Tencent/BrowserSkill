@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    HelpCompletionCriteria, HelpOutcome, HelpTarget, RequestHelpParams, RequestHelpResult,
+    HelpCompletionCriteria, HelpTarget, RequestHelpParams, RequestHelpResult,
 };
 use clap::Args;
 
@@ -16,27 +16,12 @@ use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
 use crate::cli::navigate::parse_timeout_ms;
 
-/// Environment variable that disables the blocking `request-help`
-/// human-in-loop tool, for unattended / background-server deployments
-/// where a blocking help overlay must never appear.
-pub(crate) const REQUEST_HELP_ENV: &str = "BSK_REQUEST_HELP";
-
-/// Note attached to the synthetic result returned when request-help is
-/// disabled, so the agent knows why no overlay was shown.
-pub(crate) const REQUEST_HELP_DISABLED_NOTE: &str =
-    "request-help disabled by BSK_REQUEST_HELP=off (unattended mode)";
-
-/// Whether `request-help` is disabled via [`REQUEST_HELP_ENV`]. Only the
-/// value `off` (case-insensitive, surrounding whitespace ignored)
-/// disables it; unset or any other value keeps the default enabled
-/// behaviour.
-pub(crate) fn request_help_disabled() -> bool {
-    is_off_value(std::env::var(REQUEST_HELP_ENV).ok().as_deref())
+/// Legacy environment setting. It is recognized only to explain that browser
+/// Automation settings now decide whether a help request can show UI.
+pub(crate) fn legacy_help_override_requested() -> bool {
+    is_off_value(std::env::var("BSK_REQUEST_HELP").ok().as_deref())
 }
 
-/// Pure value check behind [`request_help_disabled`], kept separate so it
-/// can be unit-tested without touching process env (parallel tests race
-/// on `std::env::set_var`, which is also `unsafe` in edition 2024).
 fn is_off_value(value: Option<&str>) -> bool {
     value.is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
 }
@@ -97,19 +82,11 @@ pub fn parse_target(raw: &str) -> HelpTarget {
 }
 
 pub fn dispatch(args: RequestHelpArgs, format: Format) -> Result<(), CliError> {
-    // Disabled (`BSK_REQUEST_HELP=off`): return a synthetic `disabled`
-    // result immediately — no daemon startup, no overlay, no waiting.
-    if request_help_disabled() {
-        let result = RequestHelpResult {
-            outcome: HelpOutcome::Disabled,
-            completed_by: None,
-            note: Some(REQUEST_HELP_DISABLED_NOTE.into()),
-            tab_id: args.tab_id.unwrap_or(0),
-            resolved_targets: None,
-        };
-        return render(&result, format);
+    if legacy_help_override_requested() {
+        crate::cli::interaction_policy::warn_legacy_override("BSK_REQUEST_HELP=off");
     }
     let info = ensure_daemon().context("ensure daemon is running")?;
+    crate::cli::interaction_policy::require_help_support(&info.sock_path)?;
     let targets: Vec<HelpTarget> = args.target.iter().map(|t| parse_target(t)).collect();
     let completion_criteria = args
         .completion_criteria

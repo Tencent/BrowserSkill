@@ -79,6 +79,14 @@ fn main() {
     dump!(ClickResult, "tool_click_result");
     dump!(HoverParams, "tool_hover_params");
     dump!(HoverResult, "tool_hover_result");
+    dump!(WheelParams, "tool_wheel_params");
+    dump!(WheelResult, "tool_wheel_result");
+    dump!(ScrollToParams, "tool_scroll_to_params");
+    dump!(ScrollToResult, "tool_scroll_to_result");
+    dump!(FocusParams, "tool_focus_params");
+    dump!(FocusResult, "tool_focus_result");
+    dump!(BlurParams, "tool_blur_params");
+    dump!(BlurResult, "tool_blur_result");
     dump!(FillParams, "tool_fill_params");
     dump!(FillResult, "tool_fill_result");
     dump!(PressParams, "tool_press_params");
@@ -98,6 +106,12 @@ fn main() {
     dump!(GetHtmlResult, "tool_get_html_result");
     dump!(ScreenshotParams, "tool_screenshot_params");
     dump!(ScreenshotResult, "tool_screenshot_result");
+    dump!(ScreenshotFullPageParams, "tool_screenshot_full_page_params");
+    dump!(ScreenshotFullPageResult, "tool_screenshot_full_page_result");
+    dump!(ScreenshotReadParams, "tool_screenshot_read_params");
+    dump!(ScreenshotReadResult, "tool_screenshot_read_result");
+    dump!(ScreenshotReleaseParams, "tool_screenshot_release_params");
+    dump!(ScreenshotReleaseResult, "tool_screenshot_release_result");
     dump!(ConsoleParams, "tool_console_params");
     dump!(ConsoleResult, "tool_console_result");
     dump!(ConsoleEntry, "tool_console_entry");

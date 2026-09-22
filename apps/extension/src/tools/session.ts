@@ -1,5 +1,10 @@
+import {
+  DEFAULT_INTERACTION_PREFERENCES,
+  type InteractionPreferenceStore,
+  interactionPolicy,
+} from "@/lib/interaction-preferences";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
-import type { RpcError } from "@/transport/types";
+import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
@@ -54,13 +59,17 @@ export interface SessionStartParams {
   height?: number;
   /** Defaults to true so existing clients preserve visible Agent Windows. */
   focused?: boolean;
+  /** Legacy input accepted for compatibility; browser settings always decide. */
+  unattended?: boolean;
 }
 
 export interface SessionStartResult {
+  interaction?: InteractionPolicy;
   agent_window_id?: number;
 }
 
 export interface SessionStartDeps {
+  preferences?: InteractionPreferenceStore;
   signal?: AbortSignal;
 }
 
@@ -119,15 +128,22 @@ export async function handleSessionStart(
       message: "session.start requires session_id",
     };
   }
+  if (params.unattended !== undefined && typeof params.unattended !== "boolean") {
+    return { code: "invalid_params", message: "unattended must be a boolean" };
+  }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
+    await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
       size: sizeOrErr,
       focused: params.focused,
       signal: deps.signal,
     });
-    return { agent_window_id: ctx.agentWindowId };
+    return {
+      agent_window_id: ctx.agentWindowId,
+      interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
+    };
   } catch (err) {
     if (err instanceof SessionStartCleanupError) {
       return rpcError("protocol_error", "cleanup_failed", err.message, {
@@ -197,6 +213,10 @@ export async function handleSessionStop(
   if (deps.signal?.aborted) {
     return { code: "cancelled", message: "session_stop aborted before teardown" };
   }
+
+  // Remote access must end before returning a tab. Preserve the local recording
+  // when a failed return keeps its session alive for a retry.
+  if (ctx.remote) clearRecordingForSession(params.session_id);
 
   // Step 1: auto-return borrowed tabs. Iterate over a snapshot of the
   // ids so deletions during iteration do not break the Map iterator.
@@ -272,7 +292,7 @@ export async function handleSessionStop(
   // Step 2: clear the per-session RefStore (review M6/M7 parity).
   ctx.refStore.clear();
 
-  clearRecordingForSession(params.session_id);
+  if (!ctx.remote) clearRecordingForSession(params.session_id);
 
   // Step 3: detach CDP sessions this session opened (no-op if none).
   await deps.cdp?.detachSession(params.session_id);
@@ -281,66 +301,81 @@ export async function handleSessionStop(
     return { code: "cancelled", message: "session_stop aborted before window close" };
   }
 
-  // Step 4: close every tab explicitly created by the agent, including the
-  // home tab. `tabsApi` is a
-  // TabMutationApi (remove only); `queryApi` is a separate read-only
-  // ChromeTabsApi. If neither is injected, we conservatively fall back to
-  // closing the window (see Step 5).
-  const tabsApi = deps.tabManagement?.tabs;
-  const queryApi = deps.tabsQuery;
+  return manager.withExpectedWindowClose(ctx, async () => {
+    // Step 4: close every tab explicitly created by the agent, including the
+    // home tab. `tabsApi` is a
+    // TabMutationApi (remove only); `queryApi` is a separate read-only
+    // ChromeTabsApi. If neither is injected, we conservatively fall back to
+    // closing the window (see Step 5).
+    const tabsApi = deps.tabManagement?.tabs;
+    const queryApi = deps.tabsQuery;
 
-  if (tabsApi) {
-    // Close each agent-created tab that still exists.
-    const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
-    for (const tabId of agentCreatedTabIds) {
+    if (tabsApi) {
+      // Close each agent-created tab that still exists.
+      const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
+      for (const tabId of agentCreatedTabIds) {
+        try {
+          await tabsApi.remove(tabId);
+          ctx.agentCreatedTabs.delete(tabId);
+        } catch (err) {
+          // Tab may already be gone (closed by the user). Non-fatal.
+          console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
+        }
+      }
+    }
+
+    // Step 5: decide whether to release (keep) the window or close it.
+    let shouldRelease = false;
+    if (queryApi) {
       try {
-        await tabsApi.remove(tabId);
-        ctx.agentCreatedTabs.delete(tabId);
-      } catch (err) {
-        // Tab may already be gone (closed by the user). Non-fatal.
-        console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
-      }
-    }
-  }
-
-  // Step 5: decide whether to release (keep) the window or close it.
-  let shouldRelease = false;
-  if (queryApi) {
-    try {
-      const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
-      // Only genuine *user* tabs count toward keeping the window open.
-      // An agent tab that failed to close in Step 4 may still be present
-      // here; if we counted it as a reason to release (dropOnly), the
-      // window would be kept and that agent tab would leak (issue #57
-      // regression). Exclude any id still tracked in agentCreatedTabs.
-      const userTabs = liveWindowTabs.filter((t) => {
-        if (t.id === undefined) return false;
-        return !ctx.agentCreatedTabs.has(t.id);
-      });
-      const leakedAgentTabs = liveWindowTabs.filter(
-        (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
-      );
-      if (leakedAgentTabs.length > 0) {
-        console.warn(
-          `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
-          leakedAgentTabs.map((t) => t.id),
+        const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
+        // Only genuine *user* tabs count toward keeping the window open.
+        // An agent tab that failed to close in Step 4 may still be present
+        // here; if we counted it as a reason to release (dropOnly), the
+        // window would be kept and that agent tab would leak (issue #57
+        // regression). Exclude any id still tracked in agentCreatedTabs.
+        const userTabs = liveWindowTabs.filter((t) => {
+          if (t.id === undefined) return false;
+          return !ctx.agentCreatedTabs.has(t.id);
+        });
+        const leakedAgentTabs = liveWindowTabs.filter(
+          (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (leakedAgentTabs.length > 0 && userTabs.length > 0) {
+          // Neither releasing ownership nor closing this mixed window is safe.
+          // Keep the binding so a later stop can retry only the agent tabs.
+          return rpcError(
+            "protocol_error",
+            "cleanup_failed",
+            "Agent tabs could not be closed; user tabs were preserved and cleanup can be retried",
+            {
+              resource_type: "agent_window",
+              resource_id: ctx.agentWindowId,
+            },
+          );
+        }
+        if (leakedAgentTabs.length > 0) {
+          console.warn(
+            `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
+            leakedAgentTabs.map((t) => t.id),
+          );
+        }
+        shouldRelease = userTabs.length > 0;
+      } catch {
+        // Query failed (e.g. window already gone) — conservatively close it.
+        shouldRelease = false;
       }
-      shouldRelease = userTabs.length > 0;
-    } catch {
-      // Query failed (e.g. window already gone) — conservatively close it.
-      shouldRelease = false;
     }
-  }
 
-  if (shouldRelease) {
-    // Keep the window + its user tabs; only drop the session binding.
-    await manager.stop(params.session_id, { dropOnly: true });
-    result.window_released = true;
-  } else {
-    // Window is empty (or we couldn't verify state) — close it.
-    await manager.stop(params.session_id);
-  }
+    if (shouldRelease) {
+      // Keep the window + its user tabs; only drop the session binding.
+      await manager.stop(params.session_id, { dropOnly: true });
+      result.window_released = true;
+    } else {
+      // Window is empty (or we couldn't verify state) — close it.
+      await manager.stop(params.session_id);
+    }
 
-  return result;
+    return result;
+  });
 }

@@ -3,14 +3,16 @@ import { SessionManager } from "@/session-manager/manager";
 import {
   cdpBlockedUrlReason,
   enforceCdpAccessibleTarget,
+  enforceToolTargetScope,
   lookupSession,
   parseBufferedReadBounds,
   resolveCdpAccessibleTargetTab,
+  resolveTargetTab,
 } from "../shared";
 
 function fakeAgentWindow() {
   return {
-    create: vi.fn(async () => 100),
+    create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
   };
@@ -169,5 +171,29 @@ describe("CDP target URL guard", () => {
       data: { reason: "restricted_tab_url" },
     });
     expect(tabsApi.query).not.toHaveBeenCalled();
+  });
+});
+
+describe("remote tab ownership", () => {
+  it("requires an explicit claim even for passive reads and user tabs inside the Agent Window", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow(), remote: () => true });
+    const context = await manager.start("remote");
+    const target = { tabId: 9, windowId: 100, active: true, url: "https://private.example" };
+    const tabs = {
+      get: vi.fn(async () => ({ id: 9, windowId: 100, active: true }) as chrome.tabs.Tab),
+      query: vi.fn(async () => []),
+    };
+    expect(await resolveTargetTab(manager, context, 9, tabs)).toMatchObject({
+      code: "permission_denied",
+    });
+    expect(enforceToolTargetScope(context, target, "passive_read", "snapshot")).toMatchObject({
+      code: "permission_denied",
+    });
+    context.agentCreatedTabs.add(9);
+    expect(await resolveTargetTab(manager, context, 9, tabs)).toMatchObject({ tabId: 9 });
+    context.agentCreatedTabs.delete(9);
+    expect(await resolveTargetTab(manager, context, 9, tabs)).toMatchObject({
+      code: "permission_denied",
+    });
   });
 });

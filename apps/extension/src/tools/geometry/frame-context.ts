@@ -20,8 +20,13 @@ import type { CoordinateOwner, CssViewport, SnapshotProjectionResult } from "./c
 import { readSnapshotOwnerSizes } from "./snapshot-owner-sizes";
 
 export interface LayoutMetrics {
-  cssVisualViewport?: { zoom?: number; clientWidth?: number; clientHeight?: number };
-  visualViewport?: { zoom?: number; clientWidth?: number; clientHeight?: number };
+  cssVisualViewport?: {
+    zoom?: number;
+    scale?: number;
+    clientWidth?: number;
+    clientHeight?: number;
+  };
+  visualViewport?: { zoom?: number; scale?: number; clientWidth?: number; clientHeight?: number };
   cssLayoutViewport?: {
     clientWidth?: number;
     clientHeight?: number;
@@ -207,11 +212,16 @@ export class GeometryContext {
     ownerBackendNodeId: number,
     ancestorClips: Polygon[],
     viewport: Size,
+    contentSize?: Size,
   ): Promise<SnapshotProjectionResult> {
     const key = `${cdpTargetKey(source.target)}:${ownerBackendNodeId}`;
     let promise = this.snapshotOwners.get(key);
     if (!promise) {
-      promise = this.snapshotOwner(source.target, ownerBackendNodeId);
+      promise = contentSize
+        ? this.ownerContent(source.target, ownerBackendNodeId).then((quad) =>
+            quad ? { quad, size: contentSize } : null,
+          )
+        : this.snapshotOwner(source.target, ownerBackendNodeId);
       this.snapshotOwners.set(key, promise);
     }
     let owner: { quad: Quad; size: Size } | null;

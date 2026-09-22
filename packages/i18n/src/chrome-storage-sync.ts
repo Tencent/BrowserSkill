@@ -154,11 +154,19 @@ export function bindChromeStorageLanguageSync(i18n: I18nType): void {
     return;
   }
 
-  storage.get(STORAGE_KEY, (items) => {
-    const saved = items[STORAGE_KEY];
-    if (typeof saved === "string" && saved !== i18n.language) {
-      void i18n.changeLanguage(saved);
+  const normalize = createLanguageNormalizer(Object.keys(i18n.options.resources ?? {}));
+  const applyStoredLanguage = (value: unknown) => {
+    if (typeof value !== "string") {
+      return;
     }
+    const language = normalize(value);
+    if (language !== i18n.language) {
+      void i18n.changeLanguage(language);
+    }
+  };
+
+  storage.get(STORAGE_KEY, (items) => {
+    applyStoredLanguage(items[STORAGE_KEY]);
   });
 
   i18n.on("languageChanged", (lng) => {
@@ -169,9 +177,6 @@ export function bindChromeStorageLanguageSync(i18n: I18nType): void {
     if (area !== "local" || !(STORAGE_KEY in changes)) {
       return;
     }
-    const next = changes[STORAGE_KEY]?.newValue;
-    if (typeof next === "string" && next !== i18n.language) {
-      void i18n.changeLanguage(next);
-    }
+    applyStoredLanguage(changes[STORAGE_KEY]?.newValue);
   });
 }

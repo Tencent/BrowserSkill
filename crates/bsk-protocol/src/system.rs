@@ -523,6 +523,8 @@ pub struct BrowserStatusEntry {
 /// Snapshot of a single live session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStatusEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<crate::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

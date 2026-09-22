@@ -1,3 +1,5 @@
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,7 +8,12 @@ import { describe, expect, it, vi } from "vitest";
 import { registerBrowserTools } from "../src/browser-tools";
 import { ObservationService } from "../src/observation";
 import { KeyedExecutor } from "../src/queue";
-import type { BskRunner, BskRunOptions, BskRunResult } from "../src/runner";
+import {
+  type BskRunner,
+  type BskRunOptions,
+  type BskRunResult,
+  createBskRunner,
+} from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
 import type { PluginConfig } from "../src/tools";
 
@@ -48,7 +55,23 @@ function fakeRunner(responses: Record<string, unknown>) {
     calls,
     runner: {
       async run(args: string[], options: BskRunOptions = {}): Promise<BskRunResult> {
-        calls.push({ args, options });
+        // Generic tool tests omit the claim acknowledgement from their business-call log; lifecycle tests exercise it explicitly.
+        if (!args.includes("--claim") && !args.includes("--prepare")) calls.push({ args, options });
+        if (args[0] === "session" && args[1] === "request") {
+          return {
+            code: 0,
+            stdout: JSON.stringify({
+              state: args.includes("--prepare")
+                ? "prepared"
+                : args.includes("--claim")
+                  ? "active"
+                  : "closed",
+            }),
+            stderr: "",
+            timedOut: false,
+            aborted: false,
+          };
+        }
         if (options.signal?.aborted) {
           return { code: null, stdout: "", stderr: "", timedOut: false, aborted: true };
         }
@@ -102,6 +125,10 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.network": ["browser_inspect", "network"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
+  "interact.wheel": ["browser_interact", "wheel"],
+  "interact.scroll-to": ["browser_interact", "scroll-to"],
+  "interact.focus": ["browser_interact", "focus"],
+  "interact.blur": ["browser_interact", "blur"],
   "interact.fill": ["browser_interact", "fill"],
   "interact.select": ["browser_interact", "select"],
   "interact.press": ["browser_interact", "press"],
@@ -200,7 +227,17 @@ const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
   browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network"],
-  browser_interact: ["click", "hover", "fill", "select", "press"],
+  browser_interact: [
+    "click",
+    "hover",
+    "wheel",
+    "scroll-to",
+    "focus",
+    "blur",
+    "fill",
+    "select",
+    "press",
+  ],
   browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
   browser_assist: ["resize", "emulate", "request-help"],
 } as const;
@@ -215,6 +252,23 @@ describe("tool registration", () => {
         | undefined;
       expect(properties?.action).toMatchObject({ enum: [...actions] });
     }
+  });
+
+  it("exposes optional stop targets and retry guidance in the public session schema", () => {
+    const { tools } = setup({});
+    const tool = tools.get("browser_session")!;
+    const properties = tool.parameters.properties as Record<string, unknown> | undefined;
+    expect(properties?.requestId).toMatchObject({
+      type: "string",
+      description: expect.stringMatching(/stop.*mutually exclusive with session/i),
+    });
+    expect(properties?.session).toMatchObject({
+      type: "string",
+      description: expect.stringMatching(/unacknowledged stop.*current session/i),
+    });
+    expect(tool.parameters.required).toEqual(["action"]);
+    expect(tool.description).toMatch(/session or requestId/);
+    expect(tool.description).toMatch(/unacknowledged stop/);
   });
 
   it("requires an action on every public tool", async () => {
@@ -263,7 +317,7 @@ describe("action dispatch", () => {
 
     expect(registry.current()).toBe("s1");
     expect(calls.map(({ args }) => args)).toEqual([
-      ["session", "start"],
+      ["session", "start", "--request-id", expect.any(String)],
       ["navigate", "--session", "s1", "https://example.test/"],
       ["observe", "--session", "s1"],
       ["fill", "--session", "s1", "--value", "hello", "@e1"],
@@ -307,6 +361,8 @@ describe("session.start", () => {
     expect(calls[0].args).toEqual([
       "session",
       "start",
+      "--request-id",
+      expect.any(String),
       "--width",
       "1280",
       "--height",
@@ -333,8 +389,72 @@ describe("session.start", () => {
     await expect(tool?.execute({ url: "https://example.com" }, makeExec())).rejects.toThrow(
       /navigate/,
     );
-    expect(calls.some((c) => c.args.join(" ") === "session stop s1")).toBe(true);
+    expect(calls.some((c) => c.args[1] === "request" && c.args.includes("--cancel"))).toBe(true);
     expect(registry.current()).toBeUndefined();
+  });
+
+  it("returns the session when bsk exits but something still holds its stdio pipes", async () => {
+    // Issue #180: `bsk session start` printed its JSON and exited, but the daemon
+    // it auto-spawned kept the stdio pipes open, so the child's `close` never
+    // fired and the tool call hung past its own timeout. Drive the real runner
+    // with a child that emits `exit` and never `close`.
+    const pipe = () => Object.assign(new EventEmitter(), { destroy: () => {} });
+    const makeChild = () =>
+      Object.assign(new EventEmitter(), {
+        stdout: pipe(),
+        stderr: pipe(),
+        exitCode: null as number | null,
+        signalCode: null as string | null,
+        kill: () => false,
+        unref: () => {},
+      });
+    const child = makeChild();
+    let spawned!: () => void;
+    const spawnedPromise = new Promise<void>((resolve) => {
+      spawned = resolve;
+    });
+    const runner = createBskRunner("bsk", (_command, args) => {
+      // Main now prepares and claims the start request around session start.
+      // Those commands close normally; only the start child keeps its pipes open.
+      if (args[0] === "session" && args[1] === "request") {
+        const request = makeChild();
+        queueMicrotask(() => {
+          request.stdout.emit(
+            "data",
+            JSON.stringify({ state: args.includes("--prepare") ? "prepared" : "active" }),
+          );
+          request.exitCode = 0;
+          request.emit("close", 0);
+        });
+        return request as unknown as ChildProcess;
+      }
+      expect(args.slice(0, 2)).toEqual(["session", "start"]);
+      spawned();
+      return child as unknown as ChildProcess;
+    });
+    const { ctx, tools } = makeCtx();
+    const registry = new SessionRegistry(5);
+    registerBrowserTools({
+      ctx: ctx as never,
+      runner,
+      registry,
+      config: CONFIG,
+      observation: disabledObservation({ ctx, runner, registry }),
+      queue: new KeyedExecutor(),
+    });
+    const pending = startSession(tools);
+    await spawnedPromise;
+    child.stdout.emit("data", JSON.stringify(START_REPLY("s1")));
+    child.exitCode = 0;
+    child.emit("exit", 0, null); // process gone; pipes still held, so no `close`
+    const value = await Promise.race([
+      pending,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("browser_session start never returned")), 2_000),
+      ),
+    ]);
+    expect(value.sessionId).toBe("s1");
+    expect(registry.current()).toBe("s1");
   });
 });
 
@@ -445,7 +565,7 @@ describe("session.stop / list", () => {
     const stop = tools.get("session.stop");
     const value = (await stop?.execute({}, makeExec())) as { stopped: string };
     expect(value.stopped).toBe("s1");
-    expect(calls[1].args).toEqual(["session", "stop", "s1"]);
+    expect(calls[1].args).toEqual(["session", "request", expect.any(String), "--cancel"]);
     expect(registry.current()).toBeUndefined();
   });
 
@@ -460,8 +580,20 @@ describe("session.stop / list", () => {
       sessions: { sessionId: string; current: boolean }[];
     };
     expect(value.sessions).toEqual([
-      { sessionId: "s1", browserInstanceId: "chrome-1", current: false },
-      { sessionId: "s2", browserInstanceId: "chrome-1", current: true },
+      {
+        sessionId: "s1",
+        browserInstanceId: "chrome-1",
+        current: false,
+        state: "active",
+        requestId: expect.any(String),
+      },
+      {
+        sessionId: "s2",
+        browserInstanceId: "chrome-1",
+        current: true,
+        state: "active",
+        requestId: expect.any(String),
+      },
     ]);
     // Registry-only: listing must not call the daemon at all.
     expect(calls.some((c) => c.args.join(" ").startsWith("session list"))).toBe(false);
@@ -497,6 +629,85 @@ describe("interaction tools", () => {
       "2",
       "@e1",
     ]);
+  });
+
+  it.each([
+    "focus",
+    "blur",
+  ] as const)("interact.%s maps focus state, target, tab and timeout", async (action) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      [action]: {
+        tab_id: 7,
+        focused: action === "focus",
+        ...(action === "blur" ? { was_focused: true } : {}),
+      },
+    });
+    await startSession(tools);
+    const target = action === "focus" ? "@e3" : "#field";
+    const value = await tools
+      .get(`interact.${action}`)
+      ?.execute({ target, tabId: 7, timeoutMs: 150_000 }, makeExec());
+    expect(value).toEqual({
+      session: "s1",
+      tabId: 7,
+      focused: action === "focus",
+      ...(action === "blur" ? { wasFocused: true } : {}),
+    });
+    expect(calls[1].args).toEqual([
+      action,
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--timeout",
+      "150000ms",
+      target,
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
+  });
+
+  it.each([
+    "focus",
+    "blur",
+    "scroll-to",
+  ] as const)("interact.%s validates arguments and session ownership before running", async (action) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const tool = tools.get(`interact.${action}`)!;
+    await expect(tool.execute({}, makeExec())).rejects.toThrow(/invalid arguments/i);
+    await expect(tool.execute({ target: " " }, makeExec())).rejects.toThrow(/non-empty/i);
+    await expect(tool.execute({ target: "e1", timeoutMs: 0 }, makeExec())).rejects.toThrow(
+      /greater than zero/i,
+    );
+    await expect(tool.execute({ target: "e1", session: "foreign" }, makeExec())).rejects.toThrow(
+      /session/i,
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(["@e3", "#target"])("interact.scroll-to maps %s, bounds and timeout", async (target) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "scroll-to": { tab_id: 7, x: 10, y: 20, width: 100, height: 80 },
+    });
+    await startSession(tools);
+    expect(
+      await tools
+        .get("interact.scroll-to")
+        ?.execute({ target, tabId: 7, timeoutMs: 150_000 }, makeExec()),
+    ).toEqual({ session: "s1", tabId: 7, x: 10, y: 20, width: 100, height: 80 });
+    expect(calls[1].args).toEqual([
+      "scroll-to",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--timeout",
+      "150000ms",
+      target,
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
   });
 
   it("interact.fill passes value and --no-clear", async () => {
@@ -907,7 +1118,15 @@ describe("inspect.screenshot", () => {
     const path = pngFile();
     const { tools, calls } = setup({
       "session start": START_REPLY("s1"),
-      screenshot: { tab_id: 7, width: 800, height: 600, format: "png", path, byte_size: 8 },
+      screenshot: {
+        tab_id: 7,
+        width: 800,
+        height: 600,
+        format: "png",
+        path,
+        byte_size: 8,
+        capture_id: "capture-1",
+      },
     });
     await startSession(tools);
     const screenshot = tools.get("inspect.screenshot");
@@ -916,10 +1135,12 @@ describe("inspect.screenshot", () => {
       image?: unknown;
     };
     expect(value.path).toBe(path);
+    expect(value).toHaveProperty("captureId", "capture-1");
     expect(value.image).toBeUndefined();
     expect(calls[1].args.slice(0, 3)).toEqual(["screenshot", "--session", "s1"]);
     expect(calls[1].args).toContain("--ref");
     const rendered = screenshot?.output.render({ session: "s1" }, value as never);
+    expect(JSON.stringify(rendered)).toContain("captureId=capture-1");
     expect(rendered?.every((block) => block.type === "text")).toBe(true);
   });
 
@@ -1135,7 +1356,17 @@ describe("screenshot scratch file lifecycle", () => {
           if (args[0] === "session") {
             return {
               code: 0,
-              stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+              stdout: JSON.stringify(
+                args[1] === "request"
+                  ? {
+                      state: args.includes("--prepare")
+                        ? "prepared"
+                        : args.includes("--claim")
+                          ? "active"
+                          : "closed",
+                    }
+                  : { session_id: "s1", browser_instance_id: "chrome-1" },
+              ),
               stderr: "",
               timedOut: false,
               aborted: false,
@@ -1242,7 +1473,17 @@ describe("observation action instrumentation timing", () => {
         if (args[0] === "session") {
           return {
             code: 0,
-            stdout: JSON.stringify({ session_id: "s1", browser_instance_id: "chrome-1" }),
+            stdout: JSON.stringify(
+              args[1] === "request"
+                ? {
+                    state: args.includes("--prepare")
+                      ? "prepared"
+                      : args.includes("--claim")
+                        ? "active"
+                        : "closed",
+                  }
+                : { session_id: "s1", browser_instance_id: "chrome-1" },
+            ),
             stderr: "",
             timedOut: false,
             aborted: false,
@@ -1325,4 +1566,112 @@ describe("observation action instrumentation timing", () => {
     );
     observation.dispose();
   });
+});
+
+describe("wheel action", () => {
+  it.each([
+    undefined,
+    "@e3",
+    "#panel",
+  ])("maps target %s, signed deltas, modifiers and timeout", async (target) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      wheel: { tab_id: 7, x: 10, y: 20, delta_x: -12.5, delta_y: 0 },
+    });
+    await startSession(tools);
+    expect(
+      await tools.get("interact.wheel")!.execute(
+        {
+          ...(target === undefined ? {} : { target }),
+          deltaX: -12.5,
+          modifiers: ["ctrl", "shift"],
+          tabId: 7,
+          timeoutMs: 150_000,
+        },
+        makeExec(),
+      ),
+    ).toEqual({ session: "s1", tabId: 7, x: 10, y: 20, deltaX: -12.5, deltaY: 0 });
+    expect(calls[1].args).toEqual([
+      "wheel",
+      "--session",
+      "s1",
+      "--delta-x",
+      "-12.5",
+      "--delta-y",
+      "0",
+      "--tab-id",
+      "7",
+      "--modifiers",
+      "ctrl,shift",
+      "--timeout",
+      "150000ms",
+      ...(target === undefined ? [] : [target]),
+    ]);
+    expect(calls[1].options.timeoutMs).toBe(165_000);
+  });
+
+  it.each([
+    {},
+    { deltaX: 0, deltaY: 0 },
+    { deltaY: NaN },
+    { deltaX: Infinity },
+    { target: " ", deltaY: 120 },
+    { deltaY: 120, timeoutMs: 0 },
+    { deltaY: 120, modifiers: ["invalid"] },
+    { deltaY: 120, session: "foreign" },
+  ])("rejects invalid or unowned arguments %j before invoking the CLI", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    await expect(tools.get("interact.wheel")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+});
+
+it("inspect.observe forwards continuation cursors and exposes the next cursor", async () => {
+  const { tools, calls } = setup({
+    "session start": { session_id: "s1", browser_instance_id: "b1", agent_window_id: 100 },
+    observe: { ...SNAPSHOT_REPLY, truncated: true, next_cursor: "page-three" },
+  });
+  await startSession(tools);
+  const value = await tools
+    .get("inspect.observe")
+    ?.execute({ cursor: "page-two", maxTokens: 100 }, makeExec());
+  expect(calls.at(-1)?.args).toEqual([
+    "observe",
+    "--session",
+    "s1",
+    "--cursor",
+    "page-two",
+    "--max-tokens",
+    "100",
+  ]);
+  expect(value).toMatchObject({ nextCursor: "page-three", truncated: true });
+});
+
+it("forwards screenshot-bound Canvas coordinates to click", async () => {
+  const { tools, calls } = setup({
+    "session start": START_REPLY("s1"),
+    click: { tab_id: 7, x: 40, y: 50 },
+  });
+  await startSession(tools);
+  await tools
+    .get("interact.click")!
+    .execute(
+      { target: "e1", captureId: "capture", imageX: 20, imageY: 30, modifiers: ["shift"] },
+      makeExec(),
+    );
+  expect(calls.at(-1)!.args).toEqual([
+    "click",
+    "--session",
+    "s1",
+    "--capture",
+    "capture",
+    "--image-x",
+    "20",
+    "--image-y",
+    "30",
+    "--modifiers",
+    "shift",
+    "e1",
+  ]);
 });

@@ -438,7 +438,7 @@ async fn dispatch_with_sender(
     lifecycle_cancel: Option<AbortToken>,
     cancel_cleanup_timeout: Duration,
 ) -> Result<Value, DispatchError> {
-    let effect_aware_transfer = is_effect_aware_transfer(&method);
+    let deadline_cleanup = waits_for_deadline_cleanup(&method);
     let (respond_tx, respond_rx) = oneshot::channel();
     let job = ToolJob {
         method,
@@ -475,10 +475,10 @@ async fn dispatch_with_sender(
             mpsc::error::TrySendError::Closed(_) => DispatchError::QueueClosed,
         });
     }
-    // Lifecycle teardown and effect-aware transfers both keep the worker busy
+    // Lifecycle teardown, native input and effect-aware transfers keep the worker busy
     // for bounded compensation after their original deadline. Keep the outer
     // waiter alive for the same grace period so it cannot abandon reconciliation.
-    let response_grace = if lifecycle_cancellable || effect_aware_transfer {
+    let response_grace = if lifecycle_cancellable || deadline_cleanup {
         cancel_cleanup_timeout
     } else {
         Duration::ZERO
@@ -654,7 +654,7 @@ async fn forward_one(
             .is_ok()
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
-        is_effect_aware_transfer(&job.method).then_some(&send_deadline_cancel);
+        waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
     let waited = await_with_optional_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
@@ -667,13 +667,25 @@ async fn forward_one(
     let response = match waited {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => {
-            if job.method == Method::ToolSessionStop
+            if matches!(job.method, Method::ToolSessionStop | Method::ToolTabBorrow)
                 && let ResponseBody::Ok(value) = &resp.body
             {
-                // Teardown crossed its final irreversible boundary before
-                // the cancel landed. Commit the real extension result so the
-                // daemon does not retain a session whose window is gone.
+                // The extension completed teardown or committed the borrow
+                // before cancellation. Preserve its confirmed result.
                 return Ok(value.clone());
+            }
+            if is_native_input(&job.method) {
+                if let ResponseBody::Err(err) = &resp.body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err.clone());
+                }
+                let mut error = cancelled_error(
+                    job.inflight.as_deref(),
+                    "tool dispatch cancelled after extension cleanup",
+                );
+                error.data = Some(input_effect_data(Some(&resp.body)));
+                return Err(error);
             }
             // File transfer commits are irreversible. A late cancel cannot
             // overwrite a confirmed success, and an unknown transfer effect
@@ -715,13 +727,26 @@ async fn forward_one(
             }
         }
         WaitOutcome::TimedOutAfterResponse(resp) => match resp.body {
+            body if is_native_input(&job.method) => {
+                if let ResponseBody::Err(err) = &body
+                    && !matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted)
+                {
+                    return Err(err.clone());
+                }
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: format!("tool RPC timed out after {:?}", job.timeout),
+                    data: Some(input_effect_data(Some(&body))),
+                });
+            }
             ResponseBody::Ok(value)
-                if job.method == Method::ToolSessionStop
-                    || is_effect_aware_transfer(&job.method) =>
+                if matches!(
+                    job.method,
+                    Method::ToolSessionStop | Method::ToolTabBorrow | Method::ToolRequestHelp
+                ) || is_effect_aware_transfer(&job.method) =>
             {
-                // The close crossed its irreversible boundary during the
-                // timeout cleanup grace, or the transfer committed before its
-                // deadline cancel settled. Preserve the irreversible result.
+                // Preserve a completed operation or a settled human-help
+                // outcome received during deadline cleanup.
                 return Ok(value);
             }
             ResponseBody::Err(err)
@@ -731,6 +756,13 @@ async fn forward_one(
             }
             ResponseBody::Err(err) if is_effect_aware_transfer(&job.method) => {
                 return Err(timed_out_transfer_error(&err));
+            }
+            _ if matches!(job.method, Method::ToolTabBorrow | Method::ToolRequestHelp) => {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "The human interaction deadline expired; the extension cancelled the request".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
             }
             _ => {
                 return Err(RpcError {
@@ -742,6 +774,9 @@ async fn forward_one(
         },
         WaitOutcome::CleanupTimeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::Timeout,
@@ -756,11 +791,40 @@ async fn forward_one(
                     "cancelled tool did not finish cleanup within {:?}",
                     job.cancel_cleanup_timeout
                 ),
-                data: Some(serde_json::json!({ "reason": "cancel_cleanup_timeout" })),
+                data: Some(if is_native_input(&job.method) {
+                    input_effect_data(None)
+                } else {
+                    serde_json::json!({ "reason": "cancel_cleanup_timeout" })
+                }),
             });
         }
         WaitOutcome::TimeoutCleanupFailed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
+            if job.method == Method::ToolRequestHelp {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: "request-help timed out and cleanup could not be confirmed".into(),
+                    data: Some(serde_json::json!({ "reason": "confirmation_timeout" })),
+                });
+            }
+            if is_native_input(&job.method) || job.method == Method::ToolScreenshotFullPage {
+                return Err(RpcError {
+                    code: ErrorCode::Timeout,
+                    message: if is_native_input(&job.method) {
+                        "input timed out and extension cleanup could not be confirmed".into()
+                    } else {
+                        "full-page screenshot timed out and extension cleanup could not be confirmed".into()
+                    },
+                    data: Some(if is_native_input(&job.method) {
+                        input_effect_data(None)
+                    } else {
+                        serde_json::json!({ "reason": "cancel_cleanup_timeout" })
+                    }),
+                });
+            }
             return Err(unknown_transfer_error(
                 ErrorCode::Timeout,
                 "file transfer timed out and cleanup could not be confirmed",
@@ -770,6 +834,9 @@ async fn forward_one(
         }
         WaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::ProtocolError));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::ProtocolError,
@@ -781,11 +848,14 @@ async fn forward_one(
             return Err(RpcError {
                 code: ErrorCode::ProtocolError,
                 message: "transport closed mid-call".into(),
-                data: None,
+                data: is_native_input(&job.method).then(|| input_effect_data(None)),
             });
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            if job.method == Method::ToolTabBorrow {
+                return Err(unknown_borrow_error(ErrorCode::Timeout));
+            }
             if is_effect_aware_transfer(&job.method) {
                 return Err(unknown_transfer_error(
                     ErrorCode::Timeout,
@@ -797,13 +867,58 @@ async fn forward_one(
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!("tool RPC timed out after {:?}", job.timeout),
-                data: None,
+                data: is_native_input(&job.method).then(|| input_effect_data(None)),
             });
         }
     };
     match response.body {
         ResponseBody::Ok(v) => Ok(v),
         ResponseBody::Err(err) => Err(err),
+    }
+}
+
+fn is_native_input(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::ToolClick | Method::ToolPress | Method::ToolWheel
+    )
+}
+
+// Preserve the extension's knowledge of whether input was sent. A missing
+// cleanup response cannot establish that replaying the input would be safe.
+fn input_effect_data(response: Option<&ResponseBody>) -> Value {
+    if let Some(ResponseBody::Err(err)) = response
+        && let Some(data) = &err.data
+        && matches!(
+            data.get("effect_state").and_then(Value::as_str),
+            Some("none" | "unknown")
+        )
+    {
+        return data.clone();
+    }
+    serde_json::json!({ "reason": "input_outcome_unknown", "effect_state": "unknown" })
+}
+
+// Native inputs and full-page screenshots must cancel at the daemon deadline: local
+// deadlines cannot account for transit delays. Keep the queue held for cleanup.
+// Human interaction deadlines also dismiss their pending UI before releasing the queue.
+fn waits_for_deadline_cleanup(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
+    ) || is_native_input(method)
+        || is_effect_aware_transfer(method)
+}
+
+fn unknown_borrow_error(code: ErrorCode) -> RpcError {
+    RpcError {
+        code,
+        message:
+            "Tab borrow ended without a confirmed outcome; inspect tab state before continuing"
+                .into(),
+        data: Some(
+            serde_json::json!({ "reason": "borrow_outcome_unknown", "effect_state": "unknown" }),
+        ),
     }
 }
 

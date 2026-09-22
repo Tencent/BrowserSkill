@@ -5,7 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // This regression owns its browser/profile. It never attaches to a user's Chrome.
-export async function withChrome({ executable, deviceScale, zoom }, run) {
+export async function withChrome(
+  {
+    executable,
+    deviceScale,
+    zoom,
+    extensionPath,
+    headless = true,
+    softwareRendering = false,
+    startupTimeout = 15_000,
+    onEvent,
+  },
+  run,
+) {
   const profile = await mkdtemp(join(tmpdir(), "bsk-snapshot-coordinates-"));
   let chrome;
   let socket;
@@ -21,10 +33,18 @@ export async function withChrome({ executable, deviceScale, zoom }, run) {
     chrome = spawn(
       executable,
       [
-        "--headless=new",
+        ...(headless ? ["--headless=new"] : []),
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-extensions",
+        ...(extensionPath
+          ? [
+              ...(softwareRendering
+                ? ["--use-angle=swiftshader", "--enable-unsafe-swiftshader"]
+                : ["--disable-gpu"]),
+              `--disable-extensions-except=${extensionPath}`,
+              `--load-extension=${extensionPath}`,
+            ]
+          : ["--disable-extensions"]),
         "--site-per-process",
         "--remote-debugging-port=0",
         "--window-size=1600,1200",
@@ -38,7 +58,7 @@ export async function withChrome({ executable, deviceScale, zoom }, run) {
       let output = "";
       const timeout = setTimeout(
         () => reject(new Error(`Chrome startup timed out: ${output}`)),
-        15_000,
+        startupTimeout,
       );
       const fail = (error) => {
         clearTimeout(timeout);
@@ -62,6 +82,10 @@ export async function withChrome({ executable, deviceScale, zoom }, run) {
     });
     socket.addEventListener("message", ({ data }) => {
       const reply = JSON.parse(data);
+      if (reply.method) {
+        onEvent?.(reply);
+        return;
+      }
       const request = pending.get(reply.id);
       if (!request) return;
       clearTimeout(request.timeout);
@@ -94,6 +118,7 @@ export async function withChrome({ executable, deviceScale, zoom }, run) {
       await exited;
       clearTimeout(timeout);
     }
-    await rm(profile, { recursive: true, force: true });
+    // Chrome children may finish writing their profile just after the parent exits.
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }

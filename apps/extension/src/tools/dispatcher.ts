@@ -1,13 +1,17 @@
+import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { OVERLAY_AUTOMATION_BYPASS } from "@/lib/overlay-bridge";
+import { ScreenshotExports } from "@/long-screenshot/exports";
 import type { SessionManager } from "@/session-manager/manager";
 import type { Transport } from "@/transport/transport";
 import type {
+  BlurParams,
   ClickParams,
   ConsoleParams,
   DownloadParams,
   EmulateParams,
   EvaluateParams,
   FillParams,
+  FocusParams,
   GetHtmlParams,
   HoverParams,
   HoverResult,
@@ -26,20 +30,35 @@ import type {
   RequestHelpParams,
   ResponseFrame,
   RpcError,
+  ScreenshotFullPageParams,
   ScreenshotParams,
+  ScreenshotReadParams,
+  ScreenshotReleaseParams,
+  ScrollToParams,
   SelectParams,
   SnapshotParams,
   UploadParams,
   WaitForNavigationParams,
+  WheelParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
+import { auditContext } from "./audit-context";
+import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
-import { handleClick, handleFill, handleHover, handlePress, handleSelect } from "./interaction";
+import {
+  handleBlur,
+  handleClick,
+  handleFill,
+  handleFocus,
+  handleHover,
+  handlePress,
+  handleSelect,
+} from "./interaction";
 import {
   handleNavigate,
   handleNavigateBack,
@@ -56,11 +75,14 @@ import {
   handleSnapshot,
 } from "./observation";
 import {
+  clearRecordingForSession,
   handleRecordAwait,
   handleRecordStart,
   handleRecordStop,
   type RecordRuntimeDeps,
 } from "./record";
+import { handleFullPageScreenshot } from "./screenshot-full-page";
+import { handleScrollTo } from "./scroll";
 import {
   handleSessionStart,
   handleSessionStop,
@@ -86,6 +108,7 @@ import {
 } from "./tabs";
 import { handleUpload } from "./upload";
 import { handleWaitForNavigation } from "./waits";
+import { handleWheel } from "./wheel";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
 type DispatcherCdpRunner = CdpRunner &
@@ -124,6 +147,7 @@ export interface DispatcherDeps {
   onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   /** User approval for `tool.tab_borrow` (overlay in content script). */
   approveBorrow?: BorrowConfirmationApprover;
+  interactionPreferences?: InteractionPreferenceStore;
   /** i18n notification copy for `tool.request_help` (resolved per-call). */
   helpNotificationCopy?: () => { title: string; body: string };
 }
@@ -147,12 +171,14 @@ export interface DispatcherDeps {
 export class ToolDispatcher {
   private readonly transport: Transport;
   private readonly sessions: SessionManager;
+  private screenshotExports: ScreenshotExports;
   private readonly cdp?: DispatcherCdpRunner;
   private readonly recording?: RecordRuntimeDeps;
   private readonly onSessionsChanged?: () => void;
   private readonly onBrowserControlResumed?: (sessionId: string) => void;
   private readonly onAgentTabClaimed?: (tabId: number, windowId: number) => void;
   private readonly approveBorrow?: BorrowConfirmationApprover;
+  private readonly interactionPreferences?: InteractionPreferenceStore;
   private readonly helpNotificationCopy?: () => { title: string; body: string };
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
@@ -168,12 +194,14 @@ export class ToolDispatcher {
   constructor(deps: DispatcherDeps) {
     this.transport = deps.transport;
     this.sessions = deps.sessions;
+    this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
     this.cdp = deps.cdp;
     this.recording = deps.recording;
     this.onSessionsChanged = deps.onSessionsChanged;
     this.onBrowserControlResumed = deps.onBrowserControlResumed;
     this.onAgentTabClaimed = deps.onAgentTabClaimed;
     this.approveBorrow = deps.approveBorrow;
+    this.interactionPreferences = deps.interactionPreferences;
     this.helpNotificationCopy = deps.helpNotificationCopy;
   }
 
@@ -197,6 +225,9 @@ export class ToolDispatcher {
       }
     }
     this.inflightAbortControllers.clear();
+    const exports = this.screenshotExports;
+    this.screenshotExports = new ScreenshotExports((id) => this.sessions.has(id));
+    void exports.dispose();
   }
 
   private async dispatch(msg: ProtocolFrame): Promise<void> {
@@ -238,6 +269,13 @@ export class ToolDispatcher {
     try {
       const sessionId = sessionIdForBrowserControlMethod(req);
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
+      // Best-effort context must never prevent the requested operation.
+      try {
+        const context = await auditContext(req, this.sessions);
+        if (context) this.transport.send({ event: "audit.context", payload: context });
+      } catch {
+        /* The daemon still has the original operation metadata. */
+      }
       const result = await this.invoke(req, ac.signal);
       if (isRpcError(result)) {
         body = { id: req.id, error: classifyCdpError(result) };
@@ -301,10 +339,35 @@ export class ToolDispatcher {
   }
 
   private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
+    const sessionId = (req.params as { session_id?: string } | undefined)?.session_id;
+    // Also enforce this for gateways backed by a local-mode daemon, where the
+    // standalone server's early IPC rejection does not apply.
+    if (
+      sessionId &&
+      this.sessions.get(sessionId)?.remote &&
+      (req.method === "tool.upload" || req.method === "tool.download")
+    ) {
+      return {
+        code: "unsupported",
+        message: "Remote connections do not support upload or download",
+      };
+    }
+    const preparationError = await prepareBackgroundExecution(
+      this.sessions,
+      req,
+      this.cdp,
+      chromeTabsApi,
+      signal,
+    );
+    if (preparationError) return preparationError;
     switch (req.method) {
       case "tool.session_start":
-        return handleSessionStart(this.sessions, req.params as SessionStartParams, { signal });
+        return handleSessionStart(this.sessions, req.params as SessionStartParams, {
+          signal,
+          preferences: this.interactionPreferences,
+        });
       case "tool.session_stop": {
+        await this.screenshotExports.releaseSession((req.params as SessionStopParams).session_id);
         await this.releaseHoverLatch((req.params as SessionStopParams).session_id);
         return handleSessionStop(this.sessions, req.params as SessionStopParams, {
           cdp: this.cdp,
@@ -321,6 +384,7 @@ export class ToolDispatcher {
       case "tool.tab_create": {
         const result = await handleTabCreate(this.sessions, req.params as TabCreateParams, {
           signal,
+          cdp: this.cdp,
         });
         if (!isRpcError(result)) {
           this.onAgentTabClaimed?.(result.tab_id, result.window_id);
@@ -339,6 +403,7 @@ export class ToolDispatcher {
         const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
+          cdp: this.cdp,
         });
         if (!isRpcError(result)) {
           this.onAgentTabClaimed?.(result.tab_id, result.agent_window_id);
@@ -349,7 +414,10 @@ export class ToolDispatcher {
         return handleTabReturn(this.sessions, req.params as TabReturnParams, {
           signal,
           cdp: this.cdp,
-          beforeReturn: (sessionId, tabId) => this.releaseHoverLatch(sessionId, tabId),
+          beforeReturn: async (sessionId, tabId) => {
+            if (this.sessions.get(sessionId)?.remote) clearRecordingForSession(sessionId);
+            await this.releaseHoverLatch(sessionId, tabId);
+          },
         });
       case "tool.window_resize":
         return handleWindowResize(
@@ -364,6 +432,22 @@ export class ToolDispatcher {
           req.params as EmulateParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
+      case "tool.screenshot_full_page":
+        if (!this.cdp) return { code: "unsupported", message: "Full-page screenshot requires CDP" };
+        return handleFullPageScreenshot(
+          this.sessions,
+          req.params as ScreenshotFullPageParams,
+          {
+            cdp: this.cdp,
+            tabsApi: chromeTabsApi,
+            exports: this.screenshotExports,
+          },
+          signal,
+        );
+      case "tool.screenshot_read":
+        return this.screenshotExports.read(req.params as ScreenshotReadParams);
+      case "tool.screenshot_release":
+        return this.screenshotExports.release(req.params as ScreenshotReleaseParams);
       case "tool.screenshot":
         return handleScreenshot(
           this.sessions,
@@ -442,7 +526,9 @@ export class ToolDispatcher {
             handleNavigate(
               this.sessions,
               req.params as NavigateParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -453,7 +539,9 @@ export class ToolDispatcher {
             handleNavigateBack(
               this.sessions,
               req.params as NavigateBackParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -464,7 +552,9 @@ export class ToolDispatcher {
             handleNavigateForward(
               this.sessions,
               req.params as NavigateForwardParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -475,7 +565,9 @@ export class ToolDispatcher {
             handleReload(
               this.sessions,
               req.params as ReloadParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -515,6 +607,53 @@ export class ToolDispatcher {
         );
         return this.rememberHover((req.params as HoverParams).session_id, result);
       }
+      case "tool.wheel":
+        return this.withHoverReassert(
+          req.params as WheelParams,
+          () =>
+            handleWheel(
+              this.sessions,
+              req.params as WheelParams,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, bypassOverlay }
+                : undefined,
+            ),
+          { releaseAfter: true },
+          signal,
+        );
+      case "tool.scroll_to":
+        return this.withHoverReleaseForRequest(
+          req.params as ScrollToParams,
+          () =>
+            handleScrollTo(
+              this.sessions,
+              req.params as ScrollToParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
+      case "tool.focus":
+        return this.withHoverReleaseForRequest(
+          req.params as FocusParams,
+          () =>
+            handleFocus(
+              this.sessions,
+              req.params as FocusParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
+      case "tool.blur":
+        return this.withHoverReleaseForRequest(
+          req.params as BlurParams,
+          () =>
+            handleBlur(
+              this.sessions,
+              req.params as BlurParams,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+            ),
+          signal,
+        );
       case "tool.fill":
         return this.withHoverReleaseForRequest(
           req.params as FillParams,
@@ -596,6 +735,7 @@ export class ToolDispatcher {
         );
       case "tool.request_help":
         return handleRequestHelp(this.sessions, req.params as RequestHelpParams, {
+          preferences: this.interactionPreferences,
           tabsApi: chromeTabsApi,
           windows: { update: (id, info) => chrome.windows.update(id, info) },
           activateTab: async (tabId) => {
@@ -785,6 +925,10 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.reload":
     case "tool.click":
     case "tool.hover":
+    case "tool.wheel":
+    case "tool.scroll_to":
+    case "tool.focus":
+    case "tool.blur":
     case "tool.fill":
     case "tool.press":
     case "tool.select":
@@ -792,6 +936,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.download":
     case "tool.evaluate":
     case "tool.observe":
+    case "tool.screenshot_full_page":
     case "tool.request_help":
     case "tool.record_start": {
       const sessionId = (req.params as { session_id?: unknown } | undefined)?.session_id;

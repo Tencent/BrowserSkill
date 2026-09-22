@@ -193,6 +193,10 @@ function updateChangelog(version) {
     }
   }
 
+  // Remove an empty development placeholder after preparing the release.
+  // Keep future release notes when this version already has a prepared entry.
+  content = content.replace(/^## \[Unreleased\][ \t]*(?:\r?\n[ \t]*)*(?=^## |(?![\s\S]))/m, "");
+
   return { path: changelogPath, content };
 }
 

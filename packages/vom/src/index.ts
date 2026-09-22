@@ -2,6 +2,8 @@ export {
   applyVomInteractionRecovery,
   isVomReferenceNode,
   isVomStructuralRole,
+  prepareObservationRender,
+  type RenderRow,
   renderVom,
 } from "./render";
 export type {
@@ -12,6 +14,7 @@ export type {
   Rect,
   RenderedRef,
   Viewport,
+  VisualEntry,
   VomNode,
   VomOptions,
   VomRef,

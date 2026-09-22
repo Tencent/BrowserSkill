@@ -4,7 +4,7 @@
 //! * `--foreground` — run the daemon loop in the current process and
 //!   inherit stdio. Used by tests and `--foreground` users.
 //! * default — fork-and-detach a child copy of the same binary, wait
-//!   for it to write a valid `daemon.json`, then return success.
+//!   for verified IPC readiness within the startup deadline, then return success.
 //!
 //! Detachment uses a hidden `BSK_DAEMONIZED=1` env handoff: when the
 //! parent spawns the child it sets the env var; the child sees it on
@@ -18,17 +18,27 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use bsk_protocol::{Method, StatusParams, StatusResult};
+use bsk_protocol::StatusResult;
 use tracing::{debug, info, warn};
 
 use crate::cli::daemon::StartArgs;
+use crate::cli::ensure_daemon::SPAWN_DEADLINE;
 use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
+    probe::{self, PROBE_TIMEOUT, Probe},
     sessions::{StopSessionError, forget_session, stop_session},
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
 };
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+type DaemonChild = crate::windows_process::Process;
+#[cfg(not(windows))]
+type DaemonChild = std::process::Child;
 
 /// Internal env-var contract: the parent sets this on the spawned child
 /// to indicate "you are the daemon, detach yourself and run".
@@ -43,6 +53,7 @@ pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 /// Concrete daemon configuration resolved from CLI flags / defaults.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
+    pub server: Option<super::remote::ServerConfig>,
     pub ws_port: u16,
     pub session_idle: Duration,
     pub daemon_idle: Duration,
@@ -65,6 +76,7 @@ impl DaemonConfig {
     /// a daemon via [`super::run`].
     pub fn new(port: u16) -> Self {
         Self {
+            server: None,
             ws_port: port,
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
@@ -80,6 +92,12 @@ impl DaemonConfig {
         self
     }
 
+    pub fn listen_ip(&self) -> IpAddr {
+        self.server
+            .as_ref()
+            .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |server| server.listen)
+    }
+
     /// Override the liveness reaper's silence threshold and scan cadence.
     /// Primarily for tests that need the reaper to act within
     /// sub-second windows instead of the production 60s/15s defaults.
@@ -93,6 +111,7 @@ impl DaemonConfig {
 impl From<&StartArgs> for DaemonConfig {
     fn from(args: &StartArgs) -> Self {
         Self {
+            server: None,
             ws_port: args.resolved_port(),
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
@@ -106,9 +125,10 @@ impl From<&StartArgs> for DaemonConfig {
 
 /// `bsk daemon start` entrypoint.
 pub fn run_start(args: StartArgs) -> Result<()> {
-    let cfg = DaemonConfig::from(&args);
+    let mut cfg = DaemonConfig::from(&args);
+    cfg.server = args.server_config()?;
 
-    if args.foreground {
+    if args.foreground || cfg.server.is_some() {
         return run_foreground(cfg);
     }
 
@@ -119,7 +139,9 @@ pub fn run_start(args: StartArgs) -> Result<()> {
         return run_foreground(cfg);
     }
 
-    if let Some(status) = verified_existing_daemon()? {
+    let deadline = Instant::now() + SPAWN_DEADLINE;
+    if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
+        let status = daemon.status;
         validate_existing_start(&args, &status)?;
         info!(
             pid = status.pid,
@@ -129,76 +151,171 @@ pub fn run_start(args: StartArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Parent: spawn ourselves detached and wait for ready.
-    spawn_detached(&args)?;
-    wait_for_ready(Duration::from_secs(3), args.port.filter(|port| *port != 0))?;
+    start_background(&args, deadline)?;
     Ok(())
+}
+
+/// Shared explicit/automatic startup, without an intermediate launcher or
+/// captured pipe. The deadline limits this caller's wait, not daemon lifetime.
+pub(crate) fn start_background(
+    args: &StartArgs,
+    deadline: Instant,
+) -> Result<daemon_info::DaemonInfo> {
+    anyhow::ensure!(
+        Instant::now() < deadline,
+        "daemon startup deadline exceeded"
+    );
+    let exe = std::env::current_exe().context("locate daemon executable")?;
+    let child = spawn_detached_at(&exe, args, None)?;
+    wait_for_background(child, args, deadline)
+}
+
+fn wait_for_background(
+    mut child: DaemonChild,
+    args: &StartArgs,
+    deadline: Instant,
+) -> Result<daemon_info::DaemonInfo> {
+    let result = probe::wait_for_ready(deadline.saturating_duration_since(Instant::now()));
+    let daemon = match result {
+        Ok(daemon) => daemon,
+        Err(err) => {
+            let exit = child.try_wait().ok().flatten();
+            // A paused or delayed launcher can time out after another client
+            // has already reused its daemon. Even absent discovery is not safe
+            // cancellation authority: publication can race any final probe.
+            disown_daemon(child);
+            return Err(err.context(match exit {
+                Some(status) => format!("daemon child exited during startup: {status}"),
+                None => "daemon child failed to become ready".into(),
+            }));
+        }
+    };
+    // A concurrent starter may have won the daemon lock. Losing children
+    // exit on that lock themselves; neither a caller error nor a snapshot of
+    // another daemon authorizes killing a child that can become shared.
+    disown_daemon(child);
+    if let Some(port) = args.port.filter(|port| *port != 0) {
+        anyhow::ensure!(
+            daemon.status.ws_port == port,
+            "daemon started on ws port {}, expected {port}",
+            daemon.status.ws_port
+        );
+    }
+    Ok(daemon.info)
+}
+
+// Automatic startup now makes the daemon a direct child of a business CLI.
+// That CLI may keep running after an idle exit or update, so reap exited Unix
+// children without making the command wait for the daemon's lifetime.
+#[cfg(unix)]
+fn disown_daemon(mut child: DaemonChild) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+#[cfg(not(unix))]
+fn disown_daemon(child: DaemonChild) {
+    drop(child);
 }
 
 /// `bsk daemon stop` entrypoint.
 pub fn run_stop() -> Result<()> {
-    let info = match daemon_info::read()? {
-        Some(info) => info,
-        None => {
-            info!("no daemon.json present — nothing to stop");
-            return Ok(());
+    stop_if_running().map(|_| ())
+}
+
+/// Stop with the same checks for explicit management and CLI self-update.
+/// The return value tells the updater whether it should restart a daemon.
+/// Observed replacement instances are errors, so update/restart must abort.
+pub(crate) fn stop_if_running() -> Result<bool> {
+    let daemon = match probe::probe(Duration::from_secs(2))? {
+        Probe::Ready(daemon) => daemon,
+        Probe::Absent(None) => return Ok(false),
+        Probe::Absent(Some(expected)) => {
+            // A missing PID cannot authorize cleanup across namespaces. The
+            // lock excludes a live daemon, including one still starting up.
+            let _lock =
+                lockfile::acquire().context("verify daemon is not running before cleanup")?;
+            anyhow::ensure!(
+                daemon_info::read()?.as_ref() == Some(&expected),
+                "daemon discovery changed during stop; retry"
+            );
+            anyhow::ensure!(
+                !lockfile::pid_alive(expected.pid),
+                "could not verify daemon identity for pid {}; refusing to stop",
+                expected.pid
+            );
+            match probe::probe(PROBE_TIMEOUT)? {
+                Probe::Absent(Some(current)) if current == expected => daemon_info::remove()?,
+                _ => anyhow::bail!("daemon became reachable during cleanup; retry stop"),
+            }
+            return Ok(false);
         }
     };
-
-    if !lockfile::pid_alive(info.pid) {
-        info!(
-            pid = info.pid,
-            "daemon.json points to a dead pid — cleaning up"
-        );
-        let _ = daemon_info::remove();
-        return Ok(());
+    let pid = daemon.require_local_pid()?;
+    send_term(pid)?;
+    if wait_for_stopped(&daemon.info, Duration::from_secs(5))? {
+        info!(pid, "daemon stopped");
+        return Ok(true);
     }
 
-    match confirm_daemon(&info, Duration::from_secs(2)) {
-        Ok(status) if status.pid == info.pid => {}
-        Ok(status) => {
-            warn!(
-                expected_pid = info.pid,
-                actual_pid = status.pid,
-                "daemon.json does not match IPC daemon; refusing to stop"
-            );
-            return Err(anyhow::anyhow!(
-                "daemon.json pid {} does not match IPC daemon pid {}; refusing to stop",
-                info.pid,
-                status.pid
-            ));
+    // Revalidate before escalation: a PID may have been reused, or a
+    // replacement daemon may already own the endpoint.
+    match probe::probe(Duration::from_secs(2))? {
+        Probe::Ready(current) if current.info == daemon.info => {
+            let pid = current.require_local_pid()?;
+            warn!(pid, "daemon did not exit within 5s; sending KILL");
+            send_kill(pid)?;
         }
-        Err(err) => {
-            warn!(
-                pid = info.pid,
-                ?err,
-                "daemon.json pid is alive but IPC validation failed; refusing to stop"
-            );
-            return Err(anyhow::anyhow!(
-                "could not verify daemon identity for pid {}; refusing to stop: {err:#}",
-                info.pid
-            ));
-        }
+        _ => anyhow::bail!("daemon identity changed while stopping; refusing to send KILL"),
     }
+    anyhow::ensure!(
+        wait_for_stopped(&daemon.info, Duration::from_secs(5))?,
+        "daemon did not release its lock after KILL"
+    );
+    Ok(true)
+}
 
-    send_term(info.pid)?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        if !lockfile::pid_alive(info.pid) {
-            let _ = daemon_info::remove();
-            info!(pid = info.pid, "daemon stopped");
-            return Ok(());
+fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Result<bool> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match lockfile::acquire() {
+            Ok(_lock) => {
+                // Normal shutdown removes its own metadata. A forced exit
+                // leaves it behind; only remove that exact instance's record.
+                if let Some(current) = daemon_info::read()? {
+                    anyhow::ensure!(
+                        &current == expected,
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
+                    match probe::probe(PROBE_TIMEOUT)? {
+                        Probe::Absent(Some(info)) if &info == expected => daemon_info::remove()?,
+                        _ => anyhow::bail!(
+                            "daemon endpoint still active after lock release; refusing cleanup"
+                        ),
+                    }
+                }
+                return Ok(true);
+            }
+            Err(err) if err.is::<lockfile::AlreadyLocked>() => {
+                if daemon_info::read()?
+                    .as_ref()
+                    .is_some_and(|info| info != expected)
+                {
+                    // The old instance exited, but update/restart must not
+                    // treat a replacement still running as a successful stop.
+                    anyhow::bail!(
+                        "daemon instance changed while stopping; aborting stop to preserve the replacement"
+                    );
+                }
+            }
+            Err(err) => return Err(err.context("check daemon shutdown lock")),
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-
-    warn!(
-        pid = info.pid,
-        "daemon did not exit within 5s; sending KILL"
-    );
-    let _ = send_kill(info.pid);
-    let _ = daemon_info::remove();
-    Ok(())
 }
 
 /// Run the daemon in the foreground of the current process: acquire
@@ -206,6 +323,13 @@ pub fn run_stop() -> Result<()> {
 pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
     paths::ensure_bsk_home()?;
     let _log_guard = init_tracing();
+    #[cfg(windows)]
+    info!(
+        pid = std::process::id(),
+        background = is_daemonized_child(),
+        in_job = ?crate::windows_process::current_process_in_job(),
+        "Windows daemon process started"
+    );
     let lock = lockfile::acquire().context("acquire daemon lock")?;
     info!(?lock, "daemon lock acquired");
 
@@ -237,7 +361,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let restart_notify = Arc::new(tokio::sync::Notify::new());
         let update_check_task =
             spawn_update_check_task(Arc::clone(&state), Arc::clone(&restart_notify));
-        let ws_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), cfg.ws_port);
+        let ws_addr = SocketAddr::new(cfg.listen_ip(), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
             .await
@@ -278,6 +402,10 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
                 Ok(Some(report)) => {
                     for harness in &report.updated {
                         info!(harness = harness.cli_name(), "skill synced");
+                    }
+                    for (harness, reason) in &report.paused {
+                        warn!(harness = harness.cli_name(), reason = reason.description(),
+                            "skill auto-update paused; content preserved; run `bsk doctor` for options");
                     }
                     for (harness, msg) in &report.errors {
                         warn!(harness = harness.cli_name(), error = %msg, "skill sync failed");
@@ -344,6 +472,9 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             let state = Arc::clone(&state);
             let daemon_idle = cfg.daemon_idle;
             tokio::spawn(async move {
+                if state.config.server.is_some() {
+                    return std::future::pending::<Option<()>>().await;
+                }
                 let tick = (daemon_idle / 4).max(Duration::from_millis(250));
                 let mut ticker = tokio::time::interval(tick);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -477,6 +608,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 
         loop {
             ticker.tick().await;
+            super::session_requests::reap(&state);
             let idle_ids = state.sessions.idle_ids_at(session_idle, Instant::now());
             for session_id in idle_ids {
                 match stop_session(
@@ -548,6 +680,11 @@ pub(crate) fn spawn_update_check_task(
     use crate::cli::update;
 
     tokio::spawn(async move {
+        // Server processes are supervised by the deployment. Do not replace
+        // them with an automatically spawned local-mode daemon.
+        if state.config.server.is_some() {
+            return;
+        }
         let cache_path = match paths::update_check_path() {
             Ok(path) => path,
             Err(err) => {
@@ -608,7 +745,7 @@ pub(crate) fn spawn_update_check_task(
                             update::self_install_candidate(
                                 candidate,
                                 target,
-                                &restart_start_args(&state.config),
+                                &restart_start_args(&state.config)?,
                             )
                         },
                     )
@@ -653,8 +790,9 @@ pub(crate) fn spawn_update_check_task(
                     // `exe_path` is always Some here: the install only
                     // runs when it was captured.
                     if let Some(exe) = &exe_path {
-                        let args = restart_start_args(&state.config);
-                        match spawn_detached_at(exe, &args, Some(std::process::id())) {
+                        match restart_start_args(&state.config).and_then(|args| {
+                            spawn_detached_at(exe, &args, Some(std::process::id())).map(drop)
+                        }) {
                             Ok(()) => {
                                 info!(
                                     pid = std::process::id(),
@@ -677,13 +815,18 @@ pub(crate) fn spawn_update_check_task(
 
 /// Rebuild the `StartArgs` for the replacement daemon from the running
 /// config so the respawn keeps the same port and idle timeouts.
-fn restart_start_args(cfg: &DaemonConfig) -> StartArgs {
-    StartArgs {
+fn restart_start_args(cfg: &DaemonConfig) -> Result<StartArgs> {
+    anyhow::ensure!(
+        cfg.server.is_none(),
+        "server restart is managed by the deployment supervisor"
+    );
+    Ok(StartArgs {
         port: Some(cfg.ws_port),
         foreground: false,
         session_idle: Some(cfg.session_idle),
         daemon_idle: Some(cfg.daemon_idle),
-    }
+        ..Default::default()
+    })
 }
 
 #[derive(Debug)]
@@ -851,8 +994,8 @@ fn detach_stdio() -> Result<()> {
 
 #[cfg(windows)]
 fn detach_stdio() -> Result<()> {
-    // On Windows the parent spawned us with DETACHED_PROCESS so stdio
-    // is already detached. Nothing extra to do here.
+    // The parent supplied dedicated NUL handles with an explicit inheritance
+    // list and verified Job breakaway before resuming us.
     Ok(())
 }
 
@@ -861,26 +1004,25 @@ fn detach_stdio() -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn spawn_detached(args: &StartArgs) -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
-    spawn_detached_at(&exe, args, None)
-}
-
 /// Spawn a detached daemon child running the binary at `exe`. When
 /// `predecessor_pid` is set, the child first waits for that process to
 /// exit ([`DAEMON_REPLACEMENT_WAIT_ENV`]) — used by the auto-update
 /// self-restart, where the on-disk binary has already been replaced, so
 /// the child runs the new version.
 #[cfg(unix)]
-fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<()> {
+fn spawn_detached_at(
+    exe: &Path,
+    args: &StartArgs,
+    predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(exe);
     apply_start_args(&mut cmd, args);
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .env(DAEMONIZED_ENV, "1");
+        .env(DAEMONIZED_ENV, "1")
+        .env_remove(DAEMON_REPLACEMENT_WAIT_ENV);
     if let Some(pid) = predecessor_pid {
         cmd.env(DAEMON_REPLACEMENT_WAIT_ENV, pid.to_string());
     }
@@ -891,46 +1033,24 @@ fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>)
             Ok(())
         });
     }
-    let child = cmd.spawn().context("spawn detached daemon child")?;
-    drop(child); // parent immediately disowns; child runs independently
-    Ok(())
+    cmd.spawn().context("spawn detached daemon child")
 }
 
 #[cfg(windows)]
-fn spawn_detached(args: &StartArgs) -> Result<()> {
-    let exe = std::env::current_exe().context("current_exe")?;
-    spawn_detached_at(&exe, args, None)
-}
-
-/// Windows counterpart of the unix [`spawn_detached_at`]; see its docs.
-#[cfg(windows)]
-fn spawn_detached_at(exe: &Path, args: &StartArgs, predecessor_pid: Option<u32>) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    let mut cmd = std::process::Command::new(exe);
-    apply_start_args(&mut cmd, args);
-    cmd.stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .env(DAEMONIZED_ENV, "1");
-    if let Some(pid) = predecessor_pid {
-        cmd.env(DAEMON_REPLACEMENT_WAIT_ENV, pid.to_string());
-    }
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    let _child = cmd.spawn().context("spawn detached daemon child")?;
-    Ok(())
+fn spawn_detached_at(
+    exe: &Path,
+    args: &StartArgs,
+    predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
+    windows::spawn(exe, args, predecessor_pid)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn spawn_detached(_args: &StartArgs) -> Result<()> {
-    Err(anyhow::anyhow!(
-        "detached daemon spawn is not supported on this platform"
-    ))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn spawn_detached_at(_exe: &Path, _args: &StartArgs, _predecessor_pid: Option<u32>) -> Result<()> {
+fn spawn_detached_at(
+    _exe: &Path,
+    _args: &StartArgs,
+    _predecessor_pid: Option<u32>,
+) -> Result<DaemonChild> {
     Err(anyhow::anyhow!(
         "detached daemon spawn is not supported on this platform"
     ))
@@ -959,16 +1079,6 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-fn verified_existing_daemon() -> Result<Option<StatusResult>> {
-    let Some(info) = daemon_info::read_valid()? else {
-        return Ok(None);
-    };
-    match confirm_daemon(&info, Duration::from_millis(500)) {
-        Ok(status) if status.pid == info.pid => Ok(Some(status)),
-        Ok(_) | Err(_) => Ok(None),
-    }
-}
-
 fn validate_existing_start(args: &StartArgs, status: &StatusResult) -> Result<()> {
     if let Some(port) = args.port
         && status.ws_port != port
@@ -984,67 +1094,6 @@ fn validate_existing_start(args: &StartArgs, status: &StatusResult) -> Result<()
         ));
     }
     Ok(())
-}
-
-fn wait_for_ready(timeout: Duration, expected_port: Option<u16>) -> Result<()> {
-    let info_path = paths::info_path()?;
-    let deadline = Instant::now() + timeout;
-    let _ = info_path;
-    loop {
-        if let Some(info) = daemon_info::read_valid()? {
-            match confirm_daemon(&info, Duration::from_millis(500)) {
-                Ok(status) if status.pid == info.pid => {
-                    if let Some(port) = expected_port
-                        && status.ws_port != port
-                    {
-                        return Err(anyhow::anyhow!(
-                            "daemon started on ws port {}, expected {port}",
-                            status.ws_port
-                        ));
-                    }
-                    tracing::debug!(?info, "daemon ready");
-                    return Ok(());
-                }
-                Ok(status) => {
-                    tracing::debug!(
-                        expected_pid = info.pid,
-                        actual_pid = status.pid,
-                        "daemon.json did not match IPC status yet"
-                    );
-                }
-                Err(err) => {
-                    tracing::debug!(?err, "daemon IPC not ready yet");
-                }
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow::anyhow!(
-                "daemon failed to start within {:?} (no valid daemon.json)",
-                timeout
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn confirm_daemon(info: &daemon_info::DaemonInfo, timeout: Duration) -> Result<StatusResult> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build tokio runtime for daemon verification")?;
-    rt.block_on(async {
-        let mut client = crate::ipc_client::Client::connect_path(info.sock_path.clone()).await?;
-        let outcome = client
-            .call::<_, StatusResult>(Method::SystemStatus, &StatusParams::default(), timeout)
-            .await?;
-        outcome.map_err(|err| {
-            anyhow::anyhow!(
-                "daemon verification RPC failed: {} ({:?})",
-                err.message,
-                err.code
-            )
-        })
-    })
 }
 
 #[cfg(unix)]
@@ -1097,6 +1146,228 @@ fn send_kill(_pid: u32) -> Result<()> {
 mod tests {
     use super::*;
 
+    // A gated real daemon makes the launcher/other-client interleaving
+    // deterministic, without test hooks or timing knobs in the shipped CLI.
+    #[test]
+    #[ignore = "subprocess entry point"]
+    fn lifecycle_daemon_process() {
+        let home = paths::bsk_home().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !home.join("resume-child").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "test did not release daemon gate"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let mut config = DaemonConfig::new(0);
+        config.daemon_idle = Duration::from_secs(10);
+        run_foreground(config).unwrap();
+    }
+
+    fn gated_daemon() -> DaemonChild {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "daemon::start::tests::lifecycle_daemon_process",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let home = paths::bsk_home().unwrap();
+        #[cfg(not(windows))]
+        {
+            command
+                .env("HOME", home)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        }
+        #[cfg(windows)]
+        {
+            let mut env: Vec<_> = std::env::vars_os()
+                .filter(|(key, _)| {
+                    let key = key.to_string_lossy();
+                    !key.eq_ignore_ascii_case("HOME") && !key.eq_ignore_ascii_case("USERPROFILE")
+                })
+                .collect();
+            env.push(("HOME".into(), home.as_os_str().to_owned()));
+            env.push(("USERPROFILE".into(), home.into_os_string()));
+            let input = std::fs::File::open("NUL").unwrap();
+            let output = std::fs::File::options().write(true).open("NUL").unwrap();
+            crate::windows_process::spawn(
+                command.get_program(),
+                &windows::command_line(
+                    std::iter::once(command.get_program()).chain(command.get_args()),
+                ),
+                &env,
+                [&input, &output, &output],
+                windows_sys::Win32::System::Threading::CREATE_NO_WINDOW,
+            )
+            .unwrap()
+        }
+    }
+
+    struct StopTestDaemon;
+
+    impl Drop for StopTestDaemon {
+        fn drop(&mut self) {
+            // Also release the gated fixture on an assertion failure. Its idle
+            // timeout bounds its lifetime if it cannot be reached for cleanup.
+            release_test_daemon();
+            let _ = probe::wait_for_ready(Duration::from_secs(1));
+            let _ = run_stop();
+        }
+    }
+
+    fn release_test_daemon() {
+        std::fs::write(paths::bsk_home().unwrap().join("resume-child"), []).unwrap();
+    }
+
+    #[test]
+    fn launcher_timeout_preserves_daemon_reused_by_another_client() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_timeout_preserves_daemon_reused_by_another_client"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                // Launcher A has spawned the child but is not allowed to continue
+                // its readiness wait until client B has successfully reused it.
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.info.pid;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                // Resume A with an expired budget, exactly as after SIGSTOP/SIGCONT.
+                let error =
+                    wait_for_background(child, &StartArgs::default(), Instant::now()).unwrap_err();
+                assert!(format!("{error:#}").contains("failed to become ready"));
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("launcher timeout killed the daemon already reused by B");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
+
+    #[test]
+    fn launcher_timeout_before_publication_allows_child_to_finish() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_timeout_before_publication_allows_child_to_finish"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                assert!(!paths::info_path().unwrap().exists());
+                assert!(wait_for_background(child, &StartArgs::default(), Instant::now()).is_err());
+                // Absence of discovery at the deadline is not cancellation authority:
+                // the daemon can publish immediately afterwards and become shared.
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.status.pid;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("daemon must be reusable after the launcher's timeout");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
+
+    #[test]
+    fn launcher_port_mismatch_preserves_shared_daemon() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::launcher_port_mismatch_preserves_shared_daemon"
+            ),
+            || {
+                let _cleanup = StopTestDaemon;
+                let child = gated_daemon();
+                release_test_daemon();
+                let ready = probe::wait_for_ready(Duration::from_secs(5)).unwrap();
+                let pid = ready.status.pid;
+                let wrong_port = (ready.status.ws_port % u16::MAX) + 1;
+                drop(ready);
+                run_start(StartArgs::default()).unwrap();
+                let args = StartArgs {
+                    port: Some(wrong_port),
+                    ..Default::default()
+                };
+                let error =
+                    wait_for_background(child, &args, Instant::now() + Duration::from_secs(3))
+                        .unwrap_err();
+                assert!(format!("{error:#}").contains("expected"));
+                let Probe::Ready(after) = probe::probe(Duration::from_secs(1)).unwrap() else {
+                    panic!("a caller's port mismatch killed the shared daemon");
+                };
+                assert_eq!(after.status.pid, pid);
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disowned_child_is_reaped_while_the_launcher_stays_alive() {
+        let child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        disown_daemon(child);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        // kill(pid, 0) also sees zombies; disappearance proves wait() reaped it.
+        while lockfile::pid_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "disowned child remained a zombie"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn stopping_rejects_replacement_metadata_with_or_without_a_held_lock() {
+        crate::daemon::test_support::isolated(
+            concat!(
+                module_path!(),
+                "::stopping_rejects_replacement_metadata_with_or_without_a_held_lock"
+            ),
+            || {
+                let expected = daemon_info::DaemonInfo::now(
+                    123,
+                    paths::bsk_home().unwrap().join("unused.sock"),
+                    12345,
+                    env!("CARGO_PKG_VERSION"),
+                );
+                let mut replacement = expected.clone();
+                replacement.pid += 1;
+                daemon_info::write(&replacement).unwrap();
+                for held in [true, false] {
+                    let _lock = held.then(|| lockfile::acquire().unwrap());
+                    let error = wait_for_stopped(&expected, Duration::from_secs(1)).unwrap_err();
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("daemon instance changed while stopping")
+                    );
+                    assert_eq!(daemon_info::read().unwrap(), Some(replacement.clone()));
+                    assert!(paths::lock_path().unwrap().exists());
+                }
+            },
+        );
+    }
+
     #[test]
     fn format_duration_round_trips_seconds_and_millis() {
         assert_eq!(format_duration(Duration::from_secs(5)), "5s");
@@ -1111,11 +1382,24 @@ mod tests {
             daemon_idle: Duration::from_secs(22),
             ..DaemonConfig::new(0)
         };
-        let args = restart_start_args(&cfg);
+        let args = restart_start_args(&cfg).unwrap();
         assert_eq!(args.port, Some(1234));
         assert!(!args.foreground);
         assert_eq!(args.session_idle, Some(Duration::from_secs(11)));
         assert_eq!(args.daemon_idle, Some(Duration::from_secs(22)));
+    }
+
+    #[test]
+    fn automatic_restart_rejects_server_configuration() {
+        let mut cfg = DaemonConfig::new(0);
+        cfg.server = StartArgs {
+            mode: crate::cli::daemon::DaemonMode::Server,
+            public_url: Some("wss://browser.example/extension".into()),
+            ..Default::default()
+        }
+        .server_config()
+        .unwrap();
+        assert!(restart_start_args(&cfg).is_err());
     }
 
     #[test]

@@ -42,7 +42,7 @@ use super::state::{
 /// depth gap for now because pairing happens through the popup, but
 /// a side-loaded extension on the same machine currently passes the
 /// gate.
-fn origin_allowed(origin: &str, allow_any: bool) -> bool {
+pub(super) fn origin_allowed(origin: &str, allow_any: bool) -> bool {
     if allow_any {
         return true;
     }
@@ -66,6 +66,9 @@ impl WsServer {
     }
 
     pub async fn bind(self, addr: SocketAddr) -> anyhow::Result<WsHandle> {
+        if self.state.config.server.is_some() {
+            return super::remote::bind(self.state, addr).await;
+        }
         let listener = TcpListener::bind(addr)
             .await
             .with_context(|| format!("bind WS server on {addr}"))?;
@@ -159,7 +162,7 @@ async fn handle_connection(
 
     let origin = captured_origin.lock().unwrap().clone().unwrap_or_default();
     debug!(?peer, %origin, "ws connection upgraded");
-    drive_connection(state, ws).await
+    drive_connection(state, ws, None).await
 }
 
 /// Hard cap on how long the daemon will wait for a freshly-upgraded
@@ -169,15 +172,24 @@ async fn handle_connection(
 /// socket FD indefinitely (review M4/M5 round 3 I-R3-1).
 const HANDSHAKE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn drive_connection(
+pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     state: Arc<DaemonState>,
-    ws: WebSocketStream<TcpStream>,
+    ws: WebSocketStream<S>,
+    authorization: Option<super::remote::ConnectionAuthorization>,
 ) -> anyhow::Result<()> {
     let (mut writer, mut reader) = ws.split();
 
     // The first frame MUST be `system.handshake` per §4.2. Bound the
     // wait so a stalled client cannot park resources forever.
-    let first = match tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()).await {
+    let first = if let Some(auth) = authorization.as_ref() {
+        tokio::select! {
+            first = tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()) => first,
+            _ = auth.revoked() => return Err(anyhow!("device authorization ended before handshake")),
+        }
+    } else {
+        tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()).await
+    };
+    let first = match first {
         Ok(Some(Ok(msg))) => msg,
         Ok(Some(Err(err))) => return Err(err.into()),
         Ok(None) => return Ok(()),
@@ -231,6 +243,10 @@ async fn drive_connection(
         .params
         .clone()
         .ok_or_else(|| anyhow!("handshake missing params"))?;
+    let audit_enabled = params_raw
+        .get("audit_enabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
     let params: HandshakeParams = serde_json::from_value(params_raw)
         .map_err(|err| anyhow!("invalid HandshakeParams: {err}"))?;
 
@@ -285,7 +301,15 @@ async fn drive_connection(
     // can be told apart from the previous BrowserClient — the old
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
-    let browser_id = BrowserId(params.instance_id.clone());
+    if let Some(auth) = authorization.as_ref() {
+        if !auth.authorized().await {
+            return Err(anyhow!("device authorization ended during handshake"));
+        }
+    }
+    let browser_id = BrowserId(authorization.as_ref().map_or_else(
+        || params.instance_id.clone(),
+        |auth| auth.device.browser_id.clone(),
+    ));
     // A fresh socket represents a fresh extension control plane. The
     // extension tears down its local sessions before reconnecting, so any
     // daemon-side sessions left under the same instance id are stale. Purge
@@ -319,6 +343,8 @@ async fn drive_connection(
         last_seen: std::sync::Mutex::new(std::time::Instant::now()),
         heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
     });
+    // Restore opt-in before making the browser available to CLI callers.
+    let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
     state.browsers.insert(Arc::clone(&client));
     info!(
         id = %browser_id,
@@ -340,21 +366,24 @@ async fn drive_connection(
         min_compatible_peer: Some(legacy_min_peer),
         min_compatible_protocol: Some(MIN_COMPATIBLE_PROTOCOL.to_string()),
     };
+    let mut result = serde_json::to_value(&result)?;
+    result["audit_version"] = serde_json::json!(1);
+    result["audit_ready"] = serde_json::json!(audit_ready);
     let resp = ResponseFrame {
         id: request.id.clone(),
-        body: ResponseBody::Ok(serde_json::to_value(&result).unwrap()),
+        body: ResponseBody::Ok(result),
     };
-    writer
-        .send(Message::Text(serde_json::to_string(&resp)?))
-        .await?;
-
     // Pump loop: outbound frames from sink → ws; inbound from ws → resolve.
     let pump_state = Arc::clone(&state);
     let pump_browser = Arc::clone(&client);
-    let result_outcome: anyhow::Result<()> = async {
+    let pump = async {
+        writer
+            .send(Message::Text(serde_json::to_string(&resp)?))
+            .await?;
         loop {
             tokio::select! {
                 outbound = rx.recv() => {
+                    if authorization.as_ref().is_some_and(|auth| !auth.active()) { break; }
                     match outbound {
                         Some(frame) => {
                             let json = serde_json::to_string(&frame)?;
@@ -364,6 +393,7 @@ async fn drive_connection(
                     }
                 }
                 msg = reader.next() => {
+                    if authorization.as_ref().is_some_and(|auth| !auth.active()) { break; }
                     match msg {
                         Some(Ok(Message::Text(t))) => {
                             // Any inbound frame — tool response, event, or the
@@ -392,8 +422,20 @@ async fn drive_connection(
             }
         }
         Ok(())
+    };
+    // Revocation must also interrupt a blocked socket write or slow inbound
+    // handler, not just an idle iteration of the message pump.
+    let (result_outcome, revoked): (anyhow::Result<()>, bool) = tokio::select! {
+        result = pump => (result, false),
+        _ = async {
+            if let Some(auth) = authorization.as_ref() { auth.revoked().await; }
+            else { std::future::pending::<()>().await; }
+        } => (Ok(()), true),
+    };
+    if revoked {
+        let _ =
+            tokio::time::timeout(Duration::from_secs(1), writer.send(Message::Close(None))).await;
     }
-    .await;
 
     // Cleanup: drop browser + purge its sessions, but only if the
     // registry still holds *this* generation. If a reconnect already
@@ -437,12 +479,27 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
         }
         Frame::Event(ev) => match ev.event {
+            bsk_protocol::EventKind::AuditContext => state.audit.context(&client.id.0, &ev.payload),
             bsk_protocol::EventKind::SystemHeartbeat => {
                 // `touch()` already ran for this frame in the read loop;
                 // additionally opt this browser in to liveness reaping now
                 // that we know it speaks the heartbeat.
                 client.mark_heartbeat_seen();
                 debug!(id = %client.id, "heartbeat");
+            }
+            bsk_protocol::EventKind::SessionInteractionChanged => {
+                #[derive(serde::Deserialize)]
+                struct Change {
+                    session_id: String,
+                    interaction: bsk_protocol::tools::InteractionPolicy,
+                }
+                if let Ok(change) = serde_json::from_value::<Change>(ev.payload) {
+                    state.sessions.update_interaction(
+                        &super::sessions::SessionId(change.session_id),
+                        &client.id,
+                        change.interaction,
+                    );
+                }
             }
             bsk_protocol::EventKind::SessionWindowClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);
@@ -455,10 +512,78 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
             }
         },
         Frame::Request(req) => {
-            // M5 onwards: support extension-originated requests if needed.
-            debug!(method = ?req.method, "extension request not yet handled");
+            let body = if req.method == bsk_protocol::Method::AuditRequest {
+                handle_audit_request(state, &client.id.0, req.params.unwrap_or_default())
+            } else {
+                ResponseBody::Err(RpcError {
+                    code: bsk_protocol::ErrorCode::UnknownMethod,
+                    message: "Unsupported extension request".into(),
+                    data: None,
+                })
+            };
+            let _ = client
+                .sink
+                .send(Frame::Response(ResponseFrame { id: req.id, body }));
         }
     }
+}
+
+fn handle_audit_request(
+    state: &DaemonState,
+    browser: &str,
+    params: serde_json::Value,
+) -> ResponseBody {
+    let action = params
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let id = params
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+        .min(1_000_000) as usize;
+    let limit = params
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100)
+        .min(500) as usize;
+    let result = match action {
+        "configure" => match params.get("enabled").and_then(serde_json::Value::as_bool) {
+            Some(enabled) => state.audit.configure(browser, enabled),
+            None => Err(anyhow!("Missing enabled preference")),
+        },
+        "list" => state.audit.list(browser, offset, limit),
+        "get" => state.audit.get(browser, id, offset, limit),
+        "delete" => state.audit.delete(browser, id),
+        "open_directory" => open_audit_directory(&state.audit),
+        _ => Err(anyhow!("Unknown audit action")),
+    };
+    match result {
+        Ok(value) => ResponseBody::Ok(value),
+        Err(_) => ResponseBody::Err(RpcError {
+            code: bsk_protocol::ErrorCode::ProtocolError,
+            message: "Audit request failed. Check local storage, task availability, or retry."
+                .into(),
+            data: None,
+        }),
+    }
+}
+
+fn open_audit_directory(audit: &super::audit::AuditStore) -> anyhow::Result<serde_json::Value> {
+    let path = audit.directory()?;
+    std::fs::create_dir_all(path)?;
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(windows)]
+    let program = "explorer.exe";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+    std::process::Command::new(program).arg(path).spawn()?;
+    Ok(serde_json::json!({"opened": true}))
 }
 
 fn handle_session_window_closed(
@@ -577,6 +702,7 @@ fn handle_session_user_interrupt(
         }
     }
 
+    state.audit.marker(&sid.0, "user_interrupt");
     state.session_interrupts.mark(&sid);
 }
 

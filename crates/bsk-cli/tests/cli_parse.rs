@@ -15,6 +15,63 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn parses_unattended_session_without_changing_normal_defaults() {
+    for unattended in [false, true] {
+        let mut argv = vec!["bsk", "session", "start"];
+        if unattended {
+            argv.extend(["--unattended", "--no-focus"]);
+        }
+        let Command::Session(SessionCmd {
+            sub: SessionSub::Start(args),
+        }) = parse(&argv).command
+        else {
+            panic!("expected session start");
+        };
+        assert_eq!(args.unattended, unattended);
+        assert_eq!(args.no_focus, unattended);
+    }
+}
+
+#[test]
+fn parses_single_borrow_override_and_confirmation_timeout() {
+    use bsk::cli::tab::TabSub;
+    for override_confirmation in [false, true] {
+        let mut argv = vec!["bsk", "tab", "borrow", "42", "--session", "s1"];
+        if override_confirmation {
+            argv.extend(["--no-confirm", "--timeout", "120s"]);
+        }
+        let Command::Tab(command) = parse(&argv).command else {
+            panic!("expected tab command");
+        };
+        let TabSub::Borrow(args) = command.sub else {
+            panic!("expected borrow");
+        };
+        assert_eq!(args.no_confirm, override_confirmation);
+        assert_eq!(
+            args.timeout,
+            if override_confirmation {
+                Some(120_000)
+            } else {
+                None
+            }
+        );
+    }
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "tab",
+            "borrow",
+            "42",
+            "--session",
+            "s1",
+            "--timeout",
+            "0ms"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn parses_upload_modes() {
     let cli = parse(&[
         "bsk",
@@ -253,6 +310,86 @@ fn parses_hover_with_settle() {
     };
     assert_eq!(args.target.as_deref(), Some("@e1"));
     assert_eq!(args.settle, 300);
+}
+
+#[test]
+fn parses_wheel_with_target_and_deltas() {
+    let cli = parse(&[
+        "bsk",
+        "wheel",
+        "#panel",
+        "--delta-x",
+        "12.5",
+        "--delta-y",
+        "600",
+        "--session",
+        "s1",
+    ]);
+    let Command::Wheel(args) = cli.command else {
+        panic!("expected wheel command");
+    };
+    assert_eq!(args.target.as_deref(), Some("#panel"));
+    assert_eq!(args.delta_x, 12.5);
+    assert_eq!(args.delta_y, 600.0);
+}
+
+#[test]
+fn parses_scroll_to_target() {
+    let cli = parse(&["bsk", "scroll-to", "@e2", "--session", "s1"]);
+    let Command::ScrollTo(args) = cli.command else {
+        panic!("expected scroll-to command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e2"));
+}
+
+#[test]
+fn parses_scroll_to_explicit_target_tab_and_timeout() {
+    for flag in ["--ref", "--selector"] {
+        let cli = parse(&[
+            "bsk",
+            "scroll-to",
+            flag,
+            "e3",
+            "--session",
+            "s1",
+            "--tab-id",
+            "42",
+            "--timeout",
+            "5s",
+        ]);
+        let Command::ScrollTo(args) = cli.command else {
+            panic!("expected scroll-to command");
+        };
+        assert_eq!(args.tab_id, Some(42));
+        assert_eq!(args.timeout, 5_000);
+        assert_eq!(
+            if flag == "--ref" {
+                args.ref_
+            } else {
+                args.selector
+            }
+            .as_deref(),
+            Some("e3")
+        );
+    }
+}
+
+#[test]
+fn parses_focus_target() {
+    let cli = parse(&["bsk", "focus", "@e2", "--session", "s1"]);
+    let Command::Focus(args) = cli.command else {
+        panic!("expected focus command");
+    };
+    assert_eq!(args.target.as_deref(), Some("@e2"));
+}
+
+#[test]
+fn parses_blur_selector() {
+    let cli = parse(&["bsk", "blur", "--selector", "#search", "--session", "s1"]);
+    let Command::Blur(args) = cli.command else {
+        panic!("expected blur command");
+    };
+    assert_eq!(args.selector.as_deref(), Some("#search"));
 }
 
 #[test]
@@ -600,4 +737,70 @@ fn parses_session_start_no_focus() {
         panic!("expected session start subcommand");
     };
     assert!(args.no_focus);
+}
+
+#[test]
+fn parses_signed_wheel_deltas_and_optional_axes() {
+    for (options, expected) in [
+        (vec!["--delta-y", "-120"], (0.0, -120.0)),
+        (vec!["--delta-x", "-20.5"], (-20.5, 0.0)),
+        (vec!["--delta-y=-120"], (0.0, -120.0)),
+        (
+            vec!["--delta-x", "12.5", "--delta-y", "-600"],
+            (12.5, -600.0),
+        ),
+    ] {
+        let mut argv = vec!["bsk", "wheel", "--session", "s1"];
+        argv.extend(options);
+        let Command::Wheel(args) = parse(&argv).command else {
+            panic!("expected wheel");
+        };
+        assert_eq!((args.delta_x, args.delta_y), expected);
+    }
+}
+
+#[test]
+fn rejects_invalid_wheel_numbers_and_timeouts() {
+    for options in [
+        vec!["--delta-y", "NaN"],
+        vec!["--delta-x", "inf"],
+        vec!["--delta-y", "oops"],
+        vec!["--delta-y", "120", "--timeout", "0ms"],
+    ] {
+        let mut argv = vec!["bsk", "wheel", "--session", "s1"];
+        argv.extend(options);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+}
+
+#[test]
+fn canvas_click_requires_complete_capture_coordinates() {
+    let cli = parse(&[
+        "bsk",
+        "click",
+        "e1",
+        "--session",
+        "test",
+        "--capture",
+        "image",
+        "--image-x",
+        "12.5",
+        "--image-y",
+        "20",
+    ]);
+    let Command::Click(args) = cli.command else {
+        panic!("expected click")
+    };
+    assert_eq!(args.capture_id.as_deref(), Some("image"));
+    assert_eq!(args.image_x, Some(12.5));
+    assert_eq!(args.image_y, Some(20.0));
+    for extra in [
+        vec!["--capture", "image"],
+        vec!["--image-x", "12"],
+        vec!["--capture", "image", "--image-x", "12"],
+    ] {
+        let mut argv = vec!["bsk", "click", "e1", "--session", "test"];
+        argv.extend(extra);
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
 }

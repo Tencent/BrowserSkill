@@ -6,7 +6,14 @@
  */
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
-import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM, WAIT_UNTIL_PARAM } from "./tool-params";
+import {
+  BROWSER_PARAM,
+  SESSION_PARAM,
+  SESSION_STOP_PARAMS,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+  WAIT_UNTIL_PARAM,
+} from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
 
 const DEVICE_PRESETS = [
@@ -98,20 +105,25 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_session",
     description:
       "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
-      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/browser " +
-      "are optional. For stop, session is optional and defaults to the current owned session.",
+      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus are " +
+      "optional. When a specific profile is required, always set browser to its verified instance " +
+      "ID or unique label, even with one connected browser; stop if the target is unknown or " +
+      "unavailable instead of omitting or changing browser. For stop, specify session or requestId " +
+      "(not both), or omit both to retry an " +
+      "unacknowledged stop before selecting the current owned session. If several stops await " +
+      "acknowledgement, specify a target. Once accepted, cleanup continues if the call is aborted.",
     actions: {
       start: "session.start",
       stop: "session.stop",
       list: "session.list",
     },
     parameters: {
-      session: SESSION_PARAM,
+      ...SESSION_STOP_PARAMS,
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
       noFocus: { type: "boolean", description: "Start the Agent Window in the background." },
-      browser: { type: "string", description: "Browser instance id for start." },
+      browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
     },
   },
@@ -156,6 +168,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       tabId: TAB_ID_PARAM,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
+      cursor: {
+        type: "string",
+        description: "Observe continuation cursor; use current refs before continuing.",
+      },
       ref: { type: "string", description: "Fresh ref for scoped html or cropped screenshot." },
       maxBytes: { type: "integer", description: "HTML byte cap." },
       since: { type: "integer", description: "Console/network sequence cursor." },
@@ -167,12 +183,16 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: "browser_interact",
     description:
-      "Interact with an element in the active Agent Window tab. Actions: click, hover, fill, select, " +
-      "press. click/hover/fill/select require target; fill also requires value; select requires " +
-      "values; press requires key and may optionally focus target first.",
+      "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
+      "press. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
+      "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       click: "interact.click",
       hover: "interact.hover",
+      wheel: "interact.wheel",
+      "scroll-to": "interact.scroll-to",
+      focus: "interact.focus",
+      blur: "interact.blur",
       fill: "interact.fill",
       select: "interact.select",
       press: "interact.press",
@@ -182,15 +202,29 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       tabId: TAB_ID_PARAM,
       target: TARGET_PARAM,
       button: { type: "string", enum: ["left", "middle", "right"], description: "Click button." },
-      clickCount: { type: "integer", description: "Click count." },
+      clickCount: { type: "integer", description: "Click count; Canvas accepts 1 or 2." },
+      captureId: { type: "string", description: "Single-use Canvas screenshot capture for click." },
+      imageX: {
+        type: "number",
+        description: "Click X in original PNG pixels; requires captureId/imageY.",
+      },
+      imageY: {
+        type: "number",
+        description: "Click Y in original PNG pixels; requires captureId/imageX.",
+      },
       value: { type: "string", description: "Text for fill." },
       noClear: { type: "boolean", description: "Append instead of clearing for fill." },
       modifiers: {
         type: "array",
         items: { type: "string", enum: ["alt", "ctrl", "meta", "shift"] },
-        description: "Modifiers held during hover.",
+        description: "Modifiers held during hover or wheel input.",
       },
       settleMs: { type: "integer", description: "Hover settle delay." },
+      deltaX: {
+        type: "number",
+        description: "Horizontal wheel input in CSS pixels; defaults to 0.",
+      },
+      deltaY: { type: "number", description: "Vertical wheel input in CSS pixels; defaults to 0." },
       timeoutMs: TIMEOUT_MS_PARAM,
       values: {
         type: "array",

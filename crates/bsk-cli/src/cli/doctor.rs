@@ -7,11 +7,14 @@ use bsk_protocol::StatusResult;
 use console::style;
 use serde::Serialize;
 
-use crate::cli::browser_wait::doctor_browser_connect_wait;
-use crate::cli::ensure_daemon::ensure_daemon;
-use crate::cli::status::{self, Output};
-use crate::daemon::info::{self, DaemonInfo};
+use crate::cli::browser_wait::{
+    browser_query_ipc_timeout, doctor_browser_connect_wait, wait_for_browser_ms,
+};
+use crate::cli::ensure_daemon::{AUTO_START_DISABLED_HINT, auto_start_enabled, ensure_daemon};
+use crate::cli::status::Output;
+use crate::daemon::info::DaemonInfo;
 use crate::daemon::paths;
+use crate::daemon::probe::{self, Probe};
 use crate::daemon::state::PROTOCOL_VERSION;
 
 /// Chrome Web Store listing for the browser-skill extension.
@@ -24,17 +27,15 @@ const EXTENSION_STORE_URL_EDGE: &str = "https://microsoftedge.microsoft.com/addo
 /// Store listings highlighted in repair hints, in the order they appear.
 const EXTENSION_STORE_URLS: [&str; 2] = [EXTENSION_STORE_URL, EXTENSION_STORE_URL_EDGE];
 
-/// Status of a single doctor check. `Ok` / `Fail` are the legacy two
-/// states; `NotApplicable` (review M2) is reported as "N/A" in human
-/// output and as `"status": "na"` in `--json` output, so a check that
-/// has nothing to compare against (e.g. browsers protocol-compat with
-/// zero connected browsers) does not falsely report green.
+/// A warning needs attention but does not fail the overall health check.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckStatus {
     #[default]
     Ok,
     Fail,
+    #[serde(rename = "warn")]
+    Warning,
     /// The check could not run because its precondition is absent.
     /// Treated as informational and never flips an exit code.
     #[serde(rename = "na")]
@@ -44,21 +45,14 @@ pub enum CheckStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CheckResult {
     pub name: String,
-    /// Pre-M2 boolean status, retained for backwards-compatible JSON
-    /// consumers. `true` means the check passed or was not applicable
-    /// (i.e. nothing flips the overall doctor verdict red); `false`
-    /// means the check actively failed. New consumers should read the
-    /// `status` field below for the tri-state (`ok` / `fail` / `na`)
-    /// distinction — the legacy boolean intentionally collapses
-    /// `ok` and `na` so a doctor run that includes an N/A check does
-    /// not regress for callers that still consult `ok` only.
+    /// Backwards-compatible verdict: only a failure is false. Read `status`
+    /// to distinguish a warning or a check that is not applicable.
     pub ok: bool,
-    /// Tri-state status (review M2): `ok` / `fail` / `na`.
+    /// `ok`, `fail`, `warn`, or `na`.
     #[serde(default)]
     pub status: CheckStatus,
     pub detail: String,
-    /// User-facing repair hint (only meaningful when `status` is
-    /// `Fail`).
+    /// Actionable guidance for a failure or warning.
     pub hint: Option<String>,
 }
 
@@ -78,6 +72,16 @@ impl CheckResult {
             name: name.into(),
             ok: false,
             status: CheckStatus::Fail,
+            detail: detail.into(),
+            hint: Some(hint.into()),
+        }
+    }
+
+    fn warn(name: impl Into<String>, detail: impl Into<String>, hint: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ok: true,
+            status: CheckStatus::Warning,
             detail: detail.into(),
             hint: Some(hint.into()),
         }
@@ -111,7 +115,7 @@ pub fn run(output: Output) -> Result<Vec<CheckResult>> {
 }
 
 /// Whether the rendered doctor report contains an active failure.
-/// `NotApplicable` remains informational and must not change the exit code.
+/// Warnings and `NotApplicable` remain informational and do not change the exit code.
 pub fn has_failures(checks: &[CheckResult]) -> bool {
     checks.iter().any(|check| check.status == CheckStatus::Fail)
 }
@@ -122,12 +126,10 @@ pub fn has_failures(checks: &[CheckResult]) -> bool {
 fn resolve_daemon_state(output: Output) -> DaemonState {
     let mut state = current_state(Duration::ZERO);
 
-    if matches!(state, DaemonState::Missing | DaemonState::StaleDead(_)) && ensure_daemon().is_err()
-    {
-        return current_state(Duration::ZERO);
-    }
-
-    if matches!(state, DaemonState::Missing | DaemonState::StaleDead(_)) {
+    if matches!(state, DaemonState::Missing | DaemonState::NoListener(_)) && auto_start_enabled() {
+        if let Err(err) = ensure_daemon() {
+            return DaemonState::ProbeError(format!("{err:#}"));
+        }
         state = current_state(Duration::ZERO);
     }
 
@@ -150,7 +152,7 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
 
 fn needs_browser_wait(state: &DaemonState) -> bool {
     match state {
-        DaemonState::Verified { status } => status.browsers.is_empty(),
+        DaemonState::Verified { status, .. } => status.browsers.is_empty(),
         _ => false,
     }
 }
@@ -158,32 +160,19 @@ fn needs_browser_wait(state: &DaemonState) -> bool {
 /// What the disk + IPC says about a possibly-running daemon. Threaded
 /// through every check so they share one snapshot.
 enum DaemonState {
-    /// No `daemon.json` at all.
     Missing,
-    /// `daemon.json` exists but reading it failed.
-    ReadError(String),
-    /// `daemon.json` exists but its pid is not alive on this host.
-    StaleDead(DaemonInfo),
-    /// `daemon.json` exists, pid is alive, but IPC didn't answer.
-    IpcUnreachable(DaemonInfo, String),
-    /// `daemon.json` exists, IPC answered, but the pid reported by
-    /// `system.status` does not match the pid recorded on disk. This
-    /// usually means a stale `daemon.json` left over from a previous
-    /// daemon points at a sock that now belongs to a different daemon.
-    PidMismatch {
-        info: DaemonInfo,
+    NoListener(DaemonInfo),
+    ProbeError(String),
+    Verified {
         status: StatusResult,
+        local_identity_error: Option<String>,
     },
-    /// Everything lines up: pid alive + IPC answered + pid matches.
-    Verified { status: StatusResult },
 }
 
 impl DaemonState {
     fn status(&self) -> Option<&StatusResult> {
         match self {
-            DaemonState::Verified { status, .. } | DaemonState::PidMismatch { status, .. } => {
-                Some(status)
-            }
+            DaemonState::Verified { status, .. } => Some(status),
             _ => None,
         }
     }
@@ -194,6 +183,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_home_writable(),
         check_skill_up_to_date(),
         check_daemon_running(&state),
+        check_daemon_management(&state),
         check_version_compatible(state.status()),
         check_extension_connected(state.status()),
         check_browsers_protocol_compatible(state.status()),
@@ -201,23 +191,21 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
 }
 
 fn current_state(browser_wait: Duration) -> DaemonState {
-    let info = match info::read() {
-        Ok(Some(info)) => info,
-        Ok(None) => return DaemonState::Missing,
-        Err(err) => return DaemonState::ReadError(format!("{err:#}")),
+    let params = bsk_protocol::StatusParams {
+        wait_for_browser_ms: wait_for_browser_ms(browser_wait),
     };
-    if !crate::daemon::lockfile::pid_alive(info.pid) {
-        return DaemonState::StaleDead(info);
-    }
-    match status::query_sock_with_wait(info.sock_path.clone(), browser_wait) {
-        Ok(status) => {
-            if status.pid == info.pid {
-                DaemonState::Verified { status }
-            } else {
-                DaemonState::PidMismatch { info, status }
-            }
-        }
-        Err(err) => DaemonState::IpcUnreachable(info, format!("{err}")),
+    let timeout = browser_query_ipc_timeout(browser_wait, Duration::from_secs(2));
+    match probe::probe_with_params(timeout, params) {
+        Ok(Probe::Ready(daemon)) => DaemonState::Verified {
+            local_identity_error: daemon
+                .require_local_pid()
+                .err()
+                .map(|err| format!("{err:#}")),
+            status: daemon.status,
+        },
+        Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
+        Ok(Probe::Absent(None)) => DaemonState::Missing,
+        Err(err) => DaemonState::ProbeError(format!("{err:#}")),
     }
 }
 
@@ -225,11 +213,7 @@ fn check_home_writable() -> CheckResult {
     let name = "bsk home writable";
     match paths::ensure_bsk_home() {
         Ok(home) => CheckResult::ok(name, home.display().to_string()),
-        Err(err) => CheckResult::fail(
-            name,
-            format!("{err:#}"),
-            "ensure $HOME or $BSK_HOME is writable",
-        ),
+        Err(err) => CheckResult::fail(name, format!("{err:#}"), paths::BSK_HOME_HINT),
     }
 }
 
@@ -247,41 +231,68 @@ fn check_skill_up_to_date() -> CheckResult {
     };
     let report = crate::skill_install::sync::sync_installed_skills(&home);
 
+    skill_check_from_report(&report)
+}
+
+fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> CheckResult {
+    let name = "agent skill up to date";
+    let mut details = Vec::new();
+    for (label, harnesses) in [
+        ("synced", &report.updated),
+        ("up to date", &report.up_to_date),
+        (
+            "custom skill preserved (automatic updates disabled) in",
+            &report.protected,
+        ),
+        ("busy, sync deferred in", &report.busy),
+    ] {
+        if !harnesses.is_empty() {
+            let names = harnesses
+                .iter()
+                .map(|h| h.cli_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            details.push(format!("{label}: {names}"));
+        }
+    }
+    let mut hints = Vec::new();
+    for (harness, reason) in &report.paused {
+        let id = harness.cli_name();
+        details.push(format!(
+            "automatic updates paused for {id}: {}; content preserved",
+            reason.description()
+        ));
+        for (_, conflicts) in report
+            .conflict_details
+            .iter()
+            .filter(|(id, _)| id == harness)
+        {
+            details.extend(conflicts.iter().cloned());
+        }
+        hints.push(format!(
+            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+        ));
+    }
+    for (harness, message) in &report.errors {
+        details.push(format!("sync failed for {}: {message}", harness.cli_name()));
+    }
+    let detail = details.join("; ");
+
     if !report.errors.is_empty() {
-        let detail = report
-            .errors
-            .iter()
-            .map(|(h, msg)| format!("{}: {msg}", h.cli_name()))
-            .collect::<Vec<_>>()
-            .join("; ");
-        return CheckResult::fail(
-            name,
-            detail,
-            "re-run `bsk install-skill --force --harness <id>` for the failing harness",
+        hints.insert(
+            0,
+            "check filesystem access for the failing harness, then re-run `bsk doctor`".into(),
         );
+        CheckResult::fail(name, detail, hints.join("; "))
+    } else if !report.paused.is_empty() {
+        CheckResult::warn(name, detail, hints.join("; "))
+    } else if !report.updated.is_empty() || !report.up_to_date.is_empty() {
+        CheckResult::ok(name, detail)
+    } else if !details.is_empty() {
+        CheckResult::na(name, detail)
+    } else {
+        CheckResult::na(name, "no agent skill installed")
     }
-
-    if !report.updated.is_empty() {
-        let names = report
-            .updated
-            .iter()
-            .map(|h| h.cli_name())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return CheckResult::ok(
-            name,
-            format!("synced {} harness(es): {names}", report.updated.len()),
-        );
-    }
-
-    if !report.up_to_date.is_empty() {
-        return CheckResult::ok(
-            name,
-            format!("up to date in {} harness(es)", report.up_to_date.len()),
-        );
-    }
-
-    CheckResult::na(name, "no agent skill installed")
 }
 
 fn check_daemon_running(state: &DaemonState) -> CheckResult {
@@ -297,31 +308,48 @@ fn check_daemon_running(state: &DaemonState) -> CheckResult {
         DaemonState::Missing => CheckResult::fail(
             name,
             "daemon.json not found",
-            "run `bsk daemon start` or any `bsk` command (daemon is auto-spawned)",
+            if auto_start_enabled() {
+                "run `bsk daemon start` or any `bsk` command (daemon is auto-spawned)"
+            } else {
+                AUTO_START_DISABLED_HINT
+            },
         ),
-        DaemonState::ReadError(err) => CheckResult::fail(
-            name,
-            format!("could not read daemon.json: {err}"),
-            "check permissions on ~/.bsk",
-        ),
-        DaemonState::StaleDead(info) => CheckResult::fail(
-            name,
-            format!("daemon.json is stale (pid {} does not exist)", info.pid),
-            "run `bsk daemon start` (or delete ~/.bsk/daemon.json)",
-        ),
-        DaemonState::IpcUnreachable(info, err) => CheckResult::fail(
-            name,
-            format!("pid {} is alive but IPC is unreachable: {err}", info.pid),
-            "run `bsk daemon restart`, then check `bsk logs`",
-        ),
-        DaemonState::PidMismatch { info, status } => CheckResult::fail(
+        DaemonState::NoListener(info) => CheckResult::fail(
             name,
             format!(
-                "daemon.json records pid {} but system.status returned pid {}",
-                info.pid, status.pid
+                "no daemon listening at {} (recorded pid {})",
+                info.sock_path.display(),
+                info.pid
             ),
-            "daemon.json is stale; run `bsk daemon stop && bsk status` to reset",
+            if auto_start_enabled() {
+                "run `bsk daemon start`; check `bsk logs` if startup fails"
+            } else {
+                AUTO_START_DISABLED_HINT
+            },
         ),
+        DaemonState::ProbeError(err) => CheckResult::fail(
+            name,
+            err.clone(),
+            "check daemon IPC permissions and `bsk logs`; keep existing runtime files",
+        ),
+    }
+}
+
+fn check_daemon_management(state: &DaemonState) -> CheckResult {
+    let name = "daemon local process identity";
+    match state {
+        DaemonState::Verified {
+            local_identity_error: Some(err),
+            ..
+        } => CheckResult::warn(
+            name,
+            format!("IPC is available, but local process identity is unverified: {err}"),
+            "the daemon may be in another PID namespace, or IPC peer identity may be unavailable; browser commands can use IPC; run daemon management commands in the owning host environment",
+        ),
+        DaemonState::Verified { .. } => {
+            CheckResult::ok(name, "IPC peer PID matches daemon identity")
+        }
+        _ => CheckResult::na(name, "daemon IPC is unavailable"),
     }
 }
 
@@ -456,10 +484,13 @@ fn render_human(checks: &[CheckResult]) {
         let mark = match c.status {
             CheckStatus::Ok => "ok  ",
             CheckStatus::Fail => "FAIL",
+            CheckStatus::Warning => "WARN",
             CheckStatus::NotApplicable => "N/A ",
         };
         let detail = match (&c.hint, c.status) {
-            (Some(h), CheckStatus::Fail) => format!("{} — hint: {}", c.detail, style_hint(h)),
+            (Some(h), CheckStatus::Fail | CheckStatus::Warning) => {
+                format!("{} — hint: {}", c.detail, style_hint(h))
+            }
             _ => c.detail.clone(),
         };
         let name = &c.name;
@@ -494,6 +525,180 @@ mod m2_tests {
             sessions: Vec::new(),
             version_skew_browsers: skew,
         }
+    }
+
+    #[test]
+    fn unverified_local_identity_warns_without_failing_usable_ipc() {
+        let state = DaemonState::Verified {
+            status: fake_status(Vec::new(), Vec::new()),
+            local_identity_error: Some("peer identity is unavailable".into()),
+        };
+        let running = check_daemon_running(&state);
+        let management = check_daemon_management(&state);
+        assert_eq!(running.status, CheckStatus::Ok);
+        assert_eq!(management.status, CheckStatus::Warning);
+        assert!(management.detail.contains("IPC is available"));
+        assert!(!has_failures(&[running, management]));
+    }
+
+    #[test]
+    fn skill_check_reports_protected_harnesses_with_managed_results() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        for updated in [true, false] {
+            let mut report = SyncReport {
+                protected: vec![HarnessId::Cursor],
+                ..Default::default()
+            };
+            if updated {
+                report.updated.push(HarnessId::ClaudeCode);
+            } else {
+                report.up_to_date.push(HarnessId::ClaudeCode);
+            }
+            let check = skill_check_from_report(&report);
+            assert_eq!(check.status, CheckStatus::Ok);
+            assert!(check.detail.contains("claude-code"));
+            assert!(
+                check
+                    .detail
+                    .contains("preserved (automatic updates disabled) in: cursor")
+            );
+            let json = serde_json::to_value(&check).unwrap();
+            assert_eq!(json["status"], "ok");
+            assert!(
+                json["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("preserved (automatic updates disabled) in: cursor")
+            );
+        }
+    }
+
+    #[test]
+    fn skill_check_keeps_all_outcomes_when_another_harness_fails() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        let check = skill_check_from_report(&SyncReport {
+            updated: vec![HarnessId::ClaudeCode],
+            up_to_date: vec![HarnessId::PiAgent],
+            protected: vec![HarnessId::Cursor],
+            busy: vec![HarnessId::Hermes],
+            errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
+            paused: Vec::new(),
+            ..Default::default()
+        });
+        assert_eq!(check.status, CheckStatus::Fail);
+        for text in [
+            "synced: claude-code",
+            "up to date: pi",
+            "preserved (automatic updates disabled) in: cursor",
+            "sync deferred in: hermes",
+            "workbuddy: permission denied",
+        ] {
+            assert!(check.detail.contains(text), "{}", check.detail);
+        }
+        assert!(!check.hint.unwrap().contains("--force"));
+    }
+
+    #[test]
+    fn paused_skills_warn_with_actions_even_alongside_successful_updates() {
+        use crate::skill_install::{
+            HarnessId,
+            sync::{PauseReason, SyncReport},
+        };
+        for reason in [
+            PauseReason::Untracked,
+            PauseReason::MissingBaseline,
+            PauseReason::LocalChanges,
+            PauseReason::InvalidMarker,
+            PauseReason::InterruptedUpdate,
+        ] {
+            for updated in [false, true] {
+                let mut report = SyncReport {
+                    paused: vec![(HarnessId::Cursor, reason)],
+                    ..Default::default()
+                };
+                if updated {
+                    report.updated.push(HarnessId::ClaudeCode);
+                }
+                let check = skill_check_from_report(&report);
+                assert_eq!(check.status, CheckStatus::Warning);
+                assert!(check.detail.contains("automatic updates paused for cursor"));
+                assert!(check.detail.contains(reason.description()));
+                if updated {
+                    assert!(check.detail.contains("synced: claude-code"));
+                }
+                assert!(!has_failures(std::slice::from_ref(&check)));
+                let json = serde_json::to_value(&check).unwrap();
+                assert_eq!(json["status"], "warn");
+                assert_eq!(json["ok"], true);
+                let hint = json["hint"].as_str().unwrap();
+                assert!(
+                    hint.contains("--harness cursor --source <existing-skill-directory> --force")
+                );
+                assert!(hint.contains("--harness cursor --force"));
+                assert!(hint.contains("overwrites existing instructions"));
+                // An I/O failure takes precedence without hiding paused installations.
+                report
+                    .errors
+                    .push((HarnessId::PiAgent, "permission denied".into()));
+                let failed = skill_check_from_report(&report);
+                assert_eq!(failed.status, CheckStatus::Fail);
+                assert!(
+                    failed
+                        .detail
+                        .contains("automatic updates paused for cursor")
+                );
+                assert!(failed.hint.as_ref().unwrap().contains("--harness cursor"));
+                assert!(has_failures(&[failed]));
+            }
+        }
+    }
+
+    #[test]
+    fn skill_check_includes_each_conflict_in_text_and_json() {
+        use crate::skill_install::{
+            HarnessId,
+            sync::{PauseReason, SyncReport},
+        };
+        let conflicts = vec![
+            "references/changed.md: modified".into(),
+            "references/missing.md: deleted".into(),
+            "references/new.md: new resource conflicts with an existing file".into(),
+        ];
+        let check = skill_check_from_report(&SyncReport {
+            paused: vec![(HarnessId::Cursor, PauseReason::LocalChanges)],
+            conflict_details: vec![(HarnessId::Cursor, conflicts.clone())],
+            ..Default::default()
+        });
+        assert_eq!(check.status, CheckStatus::Warning);
+        let json = serde_json::to_value(&check).unwrap();
+        for conflict in conflicts {
+            assert!(check.detail.contains(&conflict));
+            assert!(json["detail"].as_str().unwrap().contains(&conflict));
+        }
+    }
+
+    #[test]
+    fn protected_or_busy_skills_are_informational() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        for report in [
+            SyncReport {
+                protected: vec![HarnessId::Cursor],
+                ..Default::default()
+            },
+            SyncReport {
+                busy: vec![HarnessId::Cursor],
+                ..Default::default()
+            },
+        ] {
+            let check = skill_check_from_report(&report);
+            assert_eq!(check.status, CheckStatus::NotApplicable);
+            assert!(check.detail.contains("cursor"));
+            assert!(!has_failures(std::slice::from_ref(&check)));
+            assert_eq!(serde_json::to_value(&check).unwrap()["status"], "na");
+        }
+        let empty = skill_check_from_report(&SyncReport::default());
+        assert_eq!(empty.status, CheckStatus::NotApplicable);
+        assert_eq!(empty.detail, "no agent skill installed");
     }
 
     #[test]

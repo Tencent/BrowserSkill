@@ -23,11 +23,12 @@ describe("RefStore", () => {
     s.set("@e1", 1);
     s.set("@e2", 2);
     s.replace([
-      ["e10", { backendNodeId: 10, tabId: 1 }],
+      ["e10", { backendNodeId: 10, tabId: 1, name: "Save" }],
       ["@e11", { backendNodeId: 11, tabId: 1 }],
     ]);
     expect(s.resolve("@e1")).toBeNull();
     expect(s.resolve("@e10")).toBe(10);
+    expect(s.resolveEntry("e10")).toMatchObject({ kind: "dom", name: "Save" });
     expect(s.resolve("@e10", { tabId: 1 })).toBe(10);
     expect(s.resolve("@e10", { tabId: 2 })).toBeNull();
     expect(s.resolve("@e11")).toBe(11);
@@ -47,5 +48,29 @@ describe("RefStore", () => {
       frameId: "child-frame",
       cdpSessionId: "child-session",
     });
+  });
+});
+
+describe("document invalidation", () => {
+  it("rejects old refs without disturbing another tab's refs", () => {
+    const refs = new RefStore();
+    refs.set("e1", 10, { tabId: 7 });
+    refs.set("e2", 10, { tabId: 8 });
+    refs.invalidateTab(7);
+    expect(refs.resolve("e1")).toBeNull();
+    expect(refs.resolve("e2")).toBe(10);
+    expect(refs.documentRevision(7)).toBe(1);
+    expect(refs.documentRevision(8)).toBe(0);
+    refs.set("e3", 10, { tabId: 7 });
+    expect(refs.resolve("e1")).toBeNull();
+    expect(refs.resolve("e3")).toBe(10);
+  });
+
+  it("records navigation during an in-flight first observation", () => {
+    const refs = new RefStore();
+    const revision = refs.documentRevision(7);
+    refs.invalidateTab(7);
+    expect(refs.documentRevision(7)).not.toBe(revision);
+    expect(refs.isEmpty()).toBe(true);
   });
 });

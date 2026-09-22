@@ -1,12 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   chromeUiLanguageDetector,
   createLanguageNormalizer,
   getLanguageDetectionOptions,
 } from "../src/chrome-storage-sync";
+import i18n from "../src/i18n";
 
-/** What `packages/i18n` ships today — kept in sync with `resources` in i18n.ts. */
-const SHIPPED_RESOURCE_KEYS = ["zh-CN", "en-US"];
+const SHIPPED_RESOURCE_KEYS = Object.keys(i18n.options.resources ?? {});
+
+afterEach(() => vi.unstubAllGlobals());
 
 /**
  * Locks the locale-resolution table from issue #168: the UI must follow the
@@ -23,6 +25,11 @@ describe("createLanguageNormalizer", () => {
     ["en-GB", "en-US"],
     ["en-CN", "en-US"],
     ["en-AU", "en-US"],
+
+    ["ko", "ko-KR"],
+    ["ko-KR", "ko-KR"],
+    ["KO-kr", "ko-KR"],
+    ["ko_KR", "ko-KR"],
 
     // Chinese — only `zh-CN` ships today, so every variant resolves to it
     // directly rather than leaking into the fallback chain. Traditional picks
@@ -64,9 +71,9 @@ describe("createLanguageNormalizer", () => {
  */
 describe("createLanguageNormalizer extensibility", () => {
   it("auto-resolves a newly registered language", () => {
-    const normalize = createLanguageNormalizer(["en-US", "zh-CN", "ko-KR"]);
-    expect(normalize("ko")).toBe("ko-KR");
-    expect(normalize("ko-KR")).toBe("ko-KR");
+    const normalize = createLanguageNormalizer([...SHIPPED_RESOURCE_KEYS, "ja-JP"]);
+    expect(normalize("ja")).toBe("ja-JP");
+    expect(normalize("ja-JP")).toBe("ja-JP");
   });
 
   it("disambiguates zh once a Traditional bundle ships", () => {

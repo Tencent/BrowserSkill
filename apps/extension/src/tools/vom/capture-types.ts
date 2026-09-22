@@ -32,6 +32,8 @@ export interface CapturedNode {
   textContent?: string;
   formState?: "empty" | "filled" | "default";
   formValue?: string;
+  /** Live native checked state, independent of the submitted form value. */
+  checked?: boolean;
   formDefaultValue?: string;
   formPlaceholder?: string;
 }

@@ -1,7 +1,7 @@
 /**
  * The BrowserSkill product mark (apps/extension/assets/logo.png, downscaled
  * to 32px and inlined): the sidebar tab icon, so the tracking view reads as
- * BSK's own surface next to better-sidebar's built-in "browser" tab.
+ * BSK's own surface next to the host's other sidebar tabs.
  * Regenerate with: resize the source to 32x32 PNG and replace the payload.
  */
 export const BSK_LOGO_URL =
