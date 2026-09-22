@@ -25,7 +25,9 @@ dsh --profile web
 ```
 
 Replace `web` with your profile name if you use a different profile. The plugin
-includes the `browser-skill` skill; no separate `bsk install-skill` step is needed.
+includes the complete `browser-skill` package; no separate `bsk install-skill` step is needed.
+Its compact entry point loads first; references ship with the plugin and are read only
+when needed. Relative paths resolve from the packaged skill directory, not your project.
 
 In a conversation, try:
 
