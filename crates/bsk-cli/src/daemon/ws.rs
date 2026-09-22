@@ -171,32 +171,31 @@ async fn handle_connection(
 /// that completes the WS upgrade but never speaks pins a tokio task +
 /// socket FD indefinitely (review M4/M5 round 3 I-R3-1).
 const HANDSHAKE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+/// Extra wait after a WebSocket pong. One extension only: a live browser
+/// process can pong before its service worker sends `system.handshake`.
+const HANDSHAKE_PONG_GRACE: Duration = Duration::from_secs(10);
 
-pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    state: Arc<DaemonState>,
-    ws: WebSocketStream<S>,
-    authorization: Option<super::remote::ConnectionAuthorization>,
-) -> anyhow::Result<()> {
-    let (mut writer, mut reader) = ws.split();
-
-    // The first frame MUST be `system.handshake` per §4.2. Bound the
-    // wait so a stalled client cannot park resources forever.
-    let first = if let Some(auth) = authorization.as_ref() {
-        tokio::select! {
-            first = tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()) => first,
-            _ = auth.revoked() => return Err(anyhow!("device authorization ended before handshake")),
-        }
-    } else {
-        tokio::time::timeout(HANDSHAKE_FIRST_FRAME_TIMEOUT, reader.next()).await
-    };
-    let first = match first {
-        Ok(Some(Ok(msg))) => msg,
-        Ok(Some(Err(err))) => return Err(err.into()),
-        Ok(None) => return Ok(()),
-        Err(_) => {
+/// Wait for the first data frame. `Ok(None)` is a clean close.
+async fn await_handshake_message<S>(
+    writer: &mut futures_util::stream::SplitSink<WebSocketStream<S>, Message>,
+    reader: &mut futures_util::stream::SplitStream<WebSocketStream<S>>,
+    first_timeout: Duration,
+    pong_grace: Duration,
+    authorization: Option<&super::remote::ConnectionAuthorization>,
+) -> anyhow::Result<Option<Message>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let _ = writer.send(Message::Ping(Vec::new())).await;
+    let mut extended = false;
+    let mut deadline = tokio::time::Instant::now() + first_timeout;
+    let mut revoked = authorization.map(|auth| Box::pin(auth.revoked()));
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
             warn!(
-                timeout_secs = HANDSHAKE_FIRST_FRAME_TIMEOUT.as_secs(),
-                "client did not send handshake in time; dropping connection"
+                timeout_secs = first_timeout.as_secs(),
+                extended, "client did not send handshake in time; dropping connection"
             );
             let _ = writer
                 .send(Message::Close(Some(CloseFrame {
@@ -207,6 +206,54 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
                 .await;
             return Err(anyhow!("handshake first-frame timeout"));
         }
+        let incoming = tokio::select! {
+            biased;
+            _ = async {
+                match revoked.as_mut() {
+                    Some(fut) => fut.await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => return Err(anyhow!("device authorization ended before handshake")),
+            incoming = tokio::time::timeout(remaining, reader.next()) => incoming,
+        };
+        match incoming {
+            Err(_) => {}
+            Ok(Some(Ok(Message::Ping(payload)))) => {
+                let _ = writer.send(Message::Pong(payload)).await;
+            }
+            Ok(Some(Ok(Message::Pong(_)))) if !extended => {
+                extended = true;
+                deadline = tokio::time::Instant::now() + pong_grace;
+            }
+            Ok(Some(Ok(Message::Pong(_)))) => {}
+            Ok(Some(Ok(msg))) => return Ok(Some(msg)),
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Ok(None) => return Ok(None),
+        }
+    }
+}
+
+pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    state: Arc<DaemonState>,
+    ws: WebSocketStream<S>,
+    authorization: Option<super::remote::ConnectionAuthorization>,
+) -> anyhow::Result<()> {
+    let (mut writer, mut reader) = ws.split();
+
+    // The first data frame MUST be `system.handshake` per §4.2. Control
+    // frames do not count. A pong means the browser process is alive, so
+    // the service worker gets one extra window to send the handshake.
+    let first = match await_handshake_message(
+        &mut writer,
+        &mut reader,
+        HANDSHAKE_FIRST_FRAME_TIMEOUT,
+        HANDSHAKE_PONG_GRACE,
+        authorization.as_ref(),
+    )
+    .await?
+    {
+        Some(msg) => msg,
+        None => return Ok(()),
     };
     let first_text = match first {
         Message::Text(t) => t,
@@ -342,6 +389,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         version_skew,
         last_seen: std::sync::Mutex::new(std::time::Instant::now()),
         heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
+        unresponsive: std::sync::atomic::AtomicBool::new(false),
     });
     // Restore opt-in before making the browser available to CLI callers.
     let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
@@ -904,5 +952,86 @@ mod session_user_interrupt_tests {
     fn test_only_daemon_state() -> std::sync::Arc<DaemonState> {
         use crate::daemon::start::DaemonConfig;
         std::sync::Arc::new(DaemonState::new(DaemonConfig::new(0)))
+    }
+
+    async fn handshake_pair() -> (
+        tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
+        tokio::task::JoinHandle<anyhow::Result<Option<Message>>>,
+    ) {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(async move {
+            let ws = tokio_tungstenite::accept_async(server_io).await?;
+            let (mut writer, mut reader) = ws.split();
+            await_handshake_message(
+                &mut writer,
+                &mut reader,
+                Duration::from_millis(80),
+                Duration::from_millis(200),
+                None,
+            )
+            .await
+        });
+        let (client, _) = tokio_tungstenite::client_async("ws://127.0.0.1/bsk", client_io)
+            .await
+            .expect("websocket upgrade");
+        (client, server)
+    }
+
+    #[tokio::test]
+    async fn handshake_text_arrives_without_waiting_for_pong() {
+        let (mut client, server) = handshake_pair().await;
+        client
+            .send(Message::Text("{}".into()))
+            .await
+            .expect("send handshake text");
+        let msg = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("handshake wait")
+            .expect("server task")
+            .expect("handshake result");
+        assert!(matches!(msg, Some(Message::Text(_))));
+    }
+
+    #[tokio::test]
+    async fn handshake_without_pong_keeps_the_short_deadline() {
+        let (_client, server) = handshake_pair().await;
+        let started = std::time::Instant::now();
+        let err = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("handshake wait")
+            .expect("server task")
+            .expect_err("silence should time out");
+        assert!(err.to_string().contains("handshake first-frame timeout"));
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "pong grace must not apply without a pong, elapsed {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_pong_extends_the_deadline_once() {
+        let (mut client, server) = handshake_pair().await;
+        let ping = tokio::time::timeout(Duration::from_secs(1), client.next())
+            .await
+            .expect("ping wait")
+            .expect("ping stream")
+            .expect("ping frame");
+        assert!(matches!(ping, Message::Ping(_)));
+        client
+            .send(Message::Pong(Vec::new()))
+            .await
+            .expect("pong");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        client
+            .send(Message::Text("{}".into()))
+            .await
+            .expect("late handshake");
+        let msg = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("handshake wait")
+            .expect("server task")
+            .expect("handshake result");
+        assert!(matches!(msg, Some(Message::Text(_))));
     }
 }

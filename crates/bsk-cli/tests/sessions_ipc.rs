@@ -108,10 +108,12 @@ async fn handshake_with_protocol(ws: &mut TestWs, protocol: &str) -> HandshakeRe
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
-    let resp = ws.next().await.unwrap().unwrap();
-    let text = match resp {
-        Message::Text(t) => t,
-        _ => panic!(),
+    let text = loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Text(t) => break t,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            _ => panic!("expected text handshake response"),
+        }
     };
     let resp: ResponseFrame = serde_json::from_str(&text).unwrap();
     match resp.body {

@@ -36,6 +36,7 @@ fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc
         version_skew: false,
         last_seen: Mutex::new(Instant::now() - Duration::from_secs(idle_secs)),
         heartbeat_seen: AtomicBool::new(heartbeat_seen),
+        unresponsive: AtomicBool::new(false),
     })
 }
 

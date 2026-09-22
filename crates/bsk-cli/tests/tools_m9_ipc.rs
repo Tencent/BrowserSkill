@@ -103,10 +103,12 @@ async fn do_handshake(ws: &mut Ws) -> HandshakeResult {
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
-    let resp = ws.next().await.unwrap().unwrap();
-    let text = match resp {
-        Message::Text(t) => t,
-        _ => panic!("expected text"),
+    let text = loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Text(t) => break t,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("expected text, got {other:?}"),
+        }
     };
     let frame: ResponseFrame = serde_json::from_str(&text).unwrap();
     match frame.body {

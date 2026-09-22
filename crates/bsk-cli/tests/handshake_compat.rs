@@ -95,13 +95,15 @@ async fn send_handshake_with_floors(
     ws.send(Message::Text(serde_json::to_string(&req).unwrap()))
         .await
         .unwrap();
-    let resp = ws.next().await.unwrap().unwrap();
-    let text = match resp {
-        Message::Text(t) => t,
-        Message::Close(_) => panic!("connection closed before reply"),
-        other => panic!("unexpected ws frame {other:?}"),
-    };
-    serde_json::from_str(&text).unwrap()
+    loop {
+        let resp = ws.next().await.unwrap().unwrap();
+        match resp {
+            Message::Text(t) => return serde_json::from_str(&t).unwrap(),
+            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Close(_) => panic!("connection closed before reply"),
+            other => panic!("unexpected ws frame {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -244,6 +246,7 @@ async fn status_surfaces_version_skew_for_skewed_browser() {
         version_skew: true,
         last_seen: Mutex::new(std::time::Instant::now()),
         heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
+        unresponsive: std::sync::atomic::AtomicBool::new(false),
     });
     state.browsers.insert(client);
 

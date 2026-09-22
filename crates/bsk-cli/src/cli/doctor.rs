@@ -447,6 +447,20 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
         );
     };
     let browsers = status.browsers.len();
+    let unresponsive = status
+        .browsers
+        .iter()
+        .filter(|browser| browser.unresponsive)
+        .count();
+    if unresponsive > 0 {
+        return CheckResult::warn(
+            name,
+            format!(
+                "{unresponsive} of {browsers} browser(s) connected, but the extension is not responding"
+            ),
+            "commands fail until the extension sends another frame; reload the extension if this persists",
+        );
+    }
     if browsers > 0 {
         CheckResult::ok(name, format!("{} browser(s) connected", browsers))
     } else {
@@ -752,6 +766,31 @@ mod m2_tests {
     }
 
     #[test]
+    fn extension_check_warns_when_a_connected_browser_is_unresponsive() {
+        let mut entry = BrowserStatusEntry {
+            instance_id: "alpha".into(),
+            browser_name: "chrome".into(),
+            browser_version: "131".into(),
+            extension_version: "0.1.0-dev.0".into(),
+            label: "Personal".into(),
+            session_count: 1,
+            connected_at_ms: 1,
+            version_skew: false,
+            extension_protocol_version: "1.0".into(),
+            unresponsive: true,
+        };
+        let status = fake_status(vec![entry.clone()], Vec::new());
+        let check = check_extension_connected(Some(&status));
+        assert_eq!(check.status, CheckStatus::Warning);
+        assert!(check.detail.contains("not responding"));
+        assert!(check.ok);
+
+        entry.unresponsive = false;
+        let healthy = check_extension_connected(Some(&fake_status(vec![entry], Vec::new())));
+        assert_eq!(healthy.status, CheckStatus::Ok);
+    }
+
+    #[test]
     fn browsers_check_reports_na_when_no_browser_connected() {
         // Review M2: 0 browsers means there is nothing to compare
         // against; the check must surface `N/A`, not a false-positive
@@ -776,6 +815,7 @@ mod m2_tests {
                 connected_at_ms: 1,
                 version_skew: false,
                 extension_protocol_version: "1.0".into(),
+                unresponsive: false,
             }],
             Vec::new(),
         );
@@ -797,6 +837,7 @@ mod m2_tests {
                 connected_at_ms: 1,
                 version_skew: true,
                 extension_protocol_version: "1.1".into(),
+                unresponsive: false,
             }],
             vec![VersionSkewEntry {
                 instance_id: "alpha".into(),
@@ -835,6 +876,7 @@ mod m2_tests {
                 connected_at_ms: 1,
                 version_skew: true,
                 extension_protocol_version: String::new(),
+                unresponsive: false,
             }],
             vec![VersionSkewEntry {
                 instance_id: "legacy".into(),
