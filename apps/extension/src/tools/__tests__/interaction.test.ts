@@ -322,6 +322,53 @@ describe("handleClick", () => {
     expect(bypassOverlay).toHaveBeenCalledWith(4, false);
   });
 
+  it("enables overlay bypass when the overlay host itself captures the point", async () => {
+    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
+    const host = document.createElement("browser-skill-overlay");
+    host.setAttribute("data-bsk-overlay", "");
+    host.style.cssText =
+      "position:fixed;inset:0;width:100vw;height:100vh;pointer-events:auto;display:block";
+    host.attachShadow({ mode: "closed" });
+    document.body.append(host);
+    Object.defineProperty(host, "getBoundingClientRect", {
+      value: () => ({
+        x: 0,
+        y: 0,
+        width: 1280,
+        height: 720,
+        top: 0,
+        left: 0,
+        right: 1280,
+        bottom: 720,
+      }),
+    });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Runtime.evaluate": (params: unknown) => {
+        const expr = String((params as { expression?: string })?.expression ?? "");
+        const value = new Function(`return (${expr})`)();
+        return { result: { value } };
+      },
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+    try {
+      const res = await handleClick(
+        sm,
+        { session_id: "aa11", ref: "@e3" },
+        { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+      );
+      if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+      expect(bypassOverlay).toHaveBeenCalledWith(4, true);
+      expect(bypassOverlay).toHaveBeenCalledWith(4, false);
+    } finally {
+      host.remove();
+    }
+  });
+
   it("skips overlay bypass when overlay does not block the click point", async () => {
     const bypassOverlay = vi.fn().mockResolvedValue(undefined);
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });

@@ -820,8 +820,51 @@ interface OverlayHitInspection {
 }
 
 /**
- * Returns true when the control overlay shadow root has a visible layer
- * with pointer-events blocking the click point (mirrors intern execClick).
+ * Page-world hit test for the control overlay. The host itself is the
+ * full-viewport blocker (`:host([data-bsk-overlay-blocking])`), and WXT
+ * mounts it with a closed shadow root, so page JS cannot see the inner
+ * layers. Checking only shadow children therefore missed every real
+ * click. Keep this function self-contained: CDP evals `fn.toString()`.
+ */
+export function inspectOverlayHitAtPoint(x: number, y: number): OverlayHitInspection {
+  const blocks = (node: HTMLElement): boolean => {
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return (
+      node.isConnected &&
+      style.display !== "none" &&
+      style.pointerEvents !== "none" &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      x >= rect.x &&
+      x <= rect.x + rect.width &&
+      y >= rect.y &&
+      y <= rect.y + rect.height
+    );
+  };
+  const overlayHost = document.querySelector("[data-bsk-overlay]");
+  if (!(overlayHost instanceof HTMLElement) || !overlayHost.isConnected) {
+    return {
+      overlayHostPresent: !!overlayHost,
+      overlayHostConnected: false,
+      hitIndex: -1,
+    };
+  }
+  if (blocks(overlayHost)) {
+    return { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 };
+  }
+  const overlays = Array.from(overlayHost.shadowRoot?.querySelectorAll("*") ?? []);
+  const hitIndex = overlays.findIndex((node) => node instanceof HTMLElement && blocks(node));
+  return {
+    overlayHostPresent: true,
+    overlayHostConnected: true,
+    hitIndex,
+  };
+}
+
+/**
+ * Returns true when the control overlay has a visible layer with
+ * pointer-events blocking the click point.
  */
 async function checkOverlayAtPoint(
   cdp: CdpRunner,
@@ -856,43 +899,7 @@ async function checkOverlayAtPoint(
     const inspection = await cdp.send<{
       result?: { value?: OverlayHitInspection | null };
     }>(tabId, "Runtime.evaluate", {
-      expression: `(function() {
-        const overlayHost = document.querySelector("[data-bsk-overlay]");
-        const shadowRoot = overlayHost instanceof HTMLElement ? overlayHost.shadowRoot : null;
-        const overlays = Array.from(shadowRoot?.querySelectorAll("*") ?? []);
-        const overlayDetails = overlays
-          .map((node) => {
-            if (!(node instanceof HTMLElement)) return null;
-            const style = window.getComputedStyle(node);
-            const rect = node.getBoundingClientRect();
-            return {
-              display: style.display,
-              pointerEvents: style.pointerEvents,
-              connected: node.isConnected,
-              rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-            };
-          })
-          .filter((node) => {
-            if (!node) return false;
-            return (
-              node.connected &&
-              node.display !== "none" &&
-              node.pointerEvents !== "none" &&
-              node.rect.width > 0 &&
-              node.rect.height > 0
-            );
-          });
-        const hitIndex = overlayDetails.findIndex((node) => {
-          const withinX = ${x} >= node.rect.x && ${x} <= node.rect.x + node.rect.width;
-          const withinY = ${y} >= node.rect.y && ${y} <= node.rect.y + node.rect.height;
-          return withinX && withinY;
-        });
-        return {
-          overlayHostPresent: true,
-          overlayHostConnected: true,
-          hitIndex,
-        };
-      })()`,
+      expression: `(${inspectOverlayHitAtPoint.toString()})(${x},${y})`,
       returnByValue: true,
     });
 
