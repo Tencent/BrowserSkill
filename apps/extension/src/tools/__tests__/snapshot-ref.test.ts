@@ -8,7 +8,7 @@ function fakeAgentWindow(ids: number[]) {
     create: async () => {
       const id = ids[i++];
       if (id === undefined) throw new Error("ran out of fake ids");
-      return id;
+      return { windowId: id, initialTabIds: [] };
     },
     remove: async () => {},
     ensureActiveTab: async () => 1,

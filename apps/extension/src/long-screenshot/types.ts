@@ -2,6 +2,14 @@ export const LONG_SCREENSHOT = "bsk/long-screenshot";
 export const LONG_SCREENSHOT_PAGE = "bsk/long-screenshot-page";
 export const LONG_SCREENSHOT_STATE = "longScreenshotState";
 
+export type CaptureScope = "follow" | "current";
+export type CaptureCancelReason =
+  | "user_cancelled"
+  | "page_hidden"
+  | "navigation"
+  | "watchdog_timeout";
+export type CaptureFailureReason = CaptureCancelReason | "stale_frame" | "loading_stalled";
+
 export type CapturePhase =
   | "preparing"
   | "capturing"
@@ -61,18 +69,21 @@ export interface PageMetrics {
   tailStart?: number;
   /** False while the current bottom is loading or has not settled yet. */
   bottomReady?: boolean;
+  loading?: boolean;
 }
 
 export type PageCommand =
   | { action: "probe" }
-  | { action: "begin"; label: string; cancelLabel: string }
+  | { action: "begin"; label: string; cancelLabel: string; scope?: CaptureScope }
   | { action: "move"; y: number; capture: boolean; final?: boolean }
   | { action: "inspect" }
   | { action: "pause"; paused: boolean }
   | { action: "finish" };
 
 export type PageRequest = PageCommand & { type: typeof LONG_SCREENSHOT_PAGE; id: string };
-export type PageReply = { ok: true; metrics: PageMetrics } | { ok: false; error: CaptureError };
+export type PageReply =
+  | { ok: true; metrics: PageMetrics }
+  | { ok: false; error: CaptureError; reason?: CaptureFailureReason };
 
 export type CaptureMode = "auto" | "manual" | "visible";
 
@@ -88,7 +99,10 @@ export type CaptureReply =
   | { ok: false; error: CaptureError };
 
 export class ScreenshotError extends Error {
-  constructor(public readonly code: CaptureError) {
+  constructor(
+    public readonly code: CaptureError,
+    public readonly reason?: CaptureFailureReason,
+  ) {
     super(code);
   }
 }

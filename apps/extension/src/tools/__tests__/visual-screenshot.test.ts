@@ -447,7 +447,7 @@ describe("visual screenshot", () => {
     const f = fixture();
     const manager = new SessionManager({
       agentWindow: {
-        create: async () => 100,
+        create: async () => ({ windowId: 100, initialTabIds: [] }),
         remove: async () => {},
         ensureActiveTab: async () => 4,
       },
@@ -471,7 +471,7 @@ async function pointFixture(child = false, oopif = false) {
   const f = fixture(child, oopif);
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },
@@ -484,8 +484,23 @@ async function pointFixture(child = false, oopif = false) {
   const original = f.send.getMockImplementation()!;
   const input: Record<string, unknown>[] = [];
   const hitPoints: number[][] = [];
-  const control = { hit: true, onMove: () => {}, failPress: false };
+  const control = {
+    hit: true,
+    onMove: () => {},
+    failPress: false,
+    visibility: "visible",
+    onFocus: () => {},
+    focusCommands: [] as boolean[],
+  };
   f.send.mockImplementation(async (target, method, params = {}) => {
+    if (method === "Runtime.evaluate" && params.expression === "document.visibilityState")
+      return { result: { value: control.visibility } };
+    if (method === "Runtime.evaluate" && params.awaitPromise) return { result: { value: true } };
+    if (method === "Emulation.setFocusEmulationEnabled") {
+      control.focusCommands.push(params.enabled as boolean);
+      if (params.enabled) control.onFocus();
+      return {};
+    }
     if (
       method === "Runtime.callFunctionOn" &&
       String(params.functionDeclaration).includes("elementFromPoint")
@@ -553,6 +568,34 @@ it.each([
     [4, true],
     [4, false],
   ]);
+});
+
+it.each([
+  "success",
+  "geometry",
+  "cancel",
+])("scopes hidden visual click readiness: %s", async (kind) => {
+  const f = await pointFixture();
+  const controller = new AbortController();
+  f.pointControl.visibility = "hidden";
+  f.pointControl.onFocus = () => {
+    if (kind === "geometry") f.topRows[0].box.x += 10;
+    if (kind === "cancel") controller.abort();
+  };
+  const result = await handleClick(f.manager, f.params, { ...f.deps, signal: controller.signal });
+  if (kind === "success") {
+    expect(result).not.toHaveProperty("code");
+    expect(f.input).toHaveLength(3);
+  } else {
+    expect(result).toHaveProperty("code", kind === "cancel" ? "cancelled" : "not_found");
+    expect(f.input).toHaveLength(0);
+  }
+  expect(f.pointControl.focusCommands).toEqual([true, false]);
+  expect(await handleClick(f.manager, f.params, f.deps)).toHaveProperty(
+    "data.reason",
+    "visual_capture_stale",
+  );
+  expect(f.pointControl.focusCommands).toHaveLength(2);
 });
 
 it.each([

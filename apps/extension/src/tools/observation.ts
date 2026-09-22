@@ -34,7 +34,11 @@ import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
 } from "@/lib/capture-suppress-bridge";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type {
   GetHtmlParams,
   GetHtmlResult,
@@ -63,6 +67,7 @@ import {
   type ToolEffect,
 } from "./shared";
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
+import { captureControlledViewport } from "./viewport-screenshot";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
@@ -350,6 +355,39 @@ export async function handleScreenshot(
       format: "png",
       tab_id: target.tabId,
     });
+  }
+
+  // Pin controlled captures to their page, including when initially active:
+  // the user can select another tab while overlay suppression is pending.
+  if (isAgentControlledTab(ctx, target.tabId) && target.windowId === ctx.agentWindowId) {
+    const cdp = deps.cdp;
+    if (!cdp) {
+      return rpcError(
+        "cdp_failed",
+        "screenshot_capture_failed",
+        "Controlled viewport capture requires CDP",
+      );
+    }
+    cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    const captured = await captureControlledViewport(
+      cdp,
+      target.tabId,
+      async () => {
+        if (manager.get(ctx.sessionId) !== ctx || !isAgentControlledTab(ctx, target.tabId))
+          return false;
+        const tab = await deps.tabsApi.get(target.tabId);
+        return (
+          manager.get(ctx.sessionId) === ctx &&
+          isAgentControlledTab(ctx, target.tabId) &&
+          tab.id === target.tabId &&
+          tab.windowId === ctx.agentWindowId
+        );
+      },
+      signal,
+      deps.sendToTab,
+    );
+    if (isRpcError(captured)) return captured;
+    return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });
   }
 
   if (!target.active) {
@@ -1070,6 +1108,7 @@ async function handleVomObservation(
       return isRpcError(page) ? page : attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
     }
     clearObservationContinuation(ctx.refStore);
+    const documentRevision = ctx.refStore.documentRevision(target.tabId);
     const observation = await captureVomObservation(deps.cdp, target.tabId, target.url, {
       includeVisualFacts: toolName === "observe",
       maxDepth: params.max_depth,
@@ -1080,6 +1119,13 @@ async function handleVomObservation(
       signal,
     });
     throwIfAborted(signal, toolName);
+    if (ctx.refStore.documentRevision(target.tabId) !== documentRevision) {
+      return {
+        code: "not_found",
+        message: "Document changed during observation; observe again",
+        data: { reason: "ref_not_found" },
+      };
+    }
     if (observation.visualOutput) {
       const page = await publishObservationPage(
         ctx.refStore,

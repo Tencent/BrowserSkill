@@ -1,7 +1,7 @@
 {
   "name": "@wxg-prc-cpg/browser-skill-dsh-plugin",
   "description": "DeepSeek Harness tool plugin that exposes BrowserSkill browser automation (browser_* tools) to the model",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "license": "MIT",
   "publishConfig": {
     "access": "public",
@@ -37,6 +37,7 @@
   },
   "files": [
     "lib",
+    "skill",
     "cordis.patch.yml",
     "LICENSE"
   ],
@@ -107,6 +108,7 @@
     "@deepseek-ai/dsh-client-ui-tool": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-scope": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "0.1.0-rc.6",
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@deepseek-ai/schemastery": "^3.18.1",

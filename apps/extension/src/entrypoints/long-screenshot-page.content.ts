@@ -1,14 +1,19 @@
 import { createPageCapture, pageError } from "@/long-screenshot/page";
-import { LONG_SCREENSHOT, LONG_SCREENSHOT_PAGE, type PageRequest } from "@/long-screenshot/types";
+import {
+  LONG_SCREENSHOT,
+  LONG_SCREENSHOT_PAGE,
+  type PageRequest,
+  ScreenshotError,
+} from "@/long-screenshot/types";
 
 export default defineContentScript({
   matches: ["http://*/*", "https://*/*"],
   runAt: "document_end",
   allFrames: false,
   main(ctx) {
-    const capture = createPageCapture((id) => {
+    const capture = createPageCapture((id, reason) => {
       void chrome.runtime
-        .sendMessage({ type: LONG_SCREENSHOT, action: "cancel", id })
+        .sendMessage({ type: LONG_SCREENSHOT, action: "cancel", id, reason })
         .catch(() => {});
     });
     const listener = (
@@ -21,7 +26,12 @@ export default defineContentScript({
       if (request.type !== LONG_SCREENSHOT_PAGE || typeof request.id !== "string") return;
       void capture.handle(request).then(
         (metrics) => respond({ ok: true, metrics }),
-        (error) => respond({ ok: false, error: pageError(error) }),
+        (error) =>
+          respond({
+            ok: false,
+            error: pageError(error),
+            ...(error instanceof ScreenshotError && error.reason ? { reason: error.reason } : {}),
+          }),
       );
       return true;
     };

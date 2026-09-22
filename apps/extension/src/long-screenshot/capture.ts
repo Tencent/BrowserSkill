@@ -1,4 +1,12 @@
-import { type CapturePhase, type PageCommand, type PageMetrics, ScreenshotError } from "./types";
+import { frameSignature, isStaleFrame } from "./frame-freshness";
+import { type FrameSignature } from "./manual";
+import {
+  type CapturePhase,
+  type CaptureScope,
+  type PageCommand,
+  type PageMetrics,
+  ScreenshotError,
+} from "./types";
 
 /** Round document boundaries once, so fractional zoom cannot accumulate seams. */
 export function sliceForFrame(metrics: PageMetrics, covered: number, scale: number) {
@@ -48,6 +56,9 @@ export interface CaptureDeps {
   checkpoint?(): Promise<void>;
   prepared?(): void;
   finished?(): boolean;
+  scope?: CaptureScope;
+  loadingTimeoutMs?: number;
+  checkFreshness?: boolean;
   label: string;
   cancelLabel: string;
 }
@@ -60,6 +71,8 @@ export async function capturePage(deps: CaptureDeps) {
   let width = 0;
   let scale = 1;
   let frames = 0;
+  let previousFrame: { y: number; pixels: FrameSignature } | undefined;
+  let bottomWait: { height: number; since: number } | undefined;
   let baseline: PageMetrics | undefined;
   const checkpoint = async () => {
     signal.throwIfAborted();
@@ -68,12 +81,18 @@ export async function capturePage(deps: CaptureDeps) {
   };
   try {
     await checkpoint();
-    let metrics = await page({ action: "begin", label: deps.label, cancelLabel: deps.cancelLabel });
+    let metrics = await page({
+      action: "begin",
+      label: deps.label,
+      cancelLabel: deps.cancelLabel,
+      ...(deps.scope ? { scope: deps.scope } : {}),
+    });
     let previous = metrics;
     let repairThrough = 0;
     deps.prepared?.();
     let y = 0;
-    let failures = 0;
+    let layoutFailures = 0;
+    let staleFailures = 0;
     let final = false;
     while (true) {
       await checkpoint();
@@ -100,17 +119,31 @@ export async function capturePage(deps: CaptureDeps) {
       }
       // A loading indicator or recent layout/content changes keeps the bottom
       // provisional. Checkpoints still allow pause, Finish and cancellation.
-      if (final && metrics.bottomReady === false && covered >= metrics.height - 0.5) continue;
+      if (final && metrics.bottomReady === false && covered >= metrics.height - 0.5) {
+        if (!metrics.loading) bottomWait = undefined;
+        else {
+          if (!bottomWait || bottomWait.height !== metrics.height)
+            bottomWait = { height: metrics.height, since: performance.now() };
+          if (
+            deps.loadingTimeoutMs !== undefined &&
+            performance.now() - bottomWait.since >= deps.loadingTimeoutMs
+          )
+            throw new ScreenshotError("timeout", "loading_stalled");
+        }
+        continue;
+      }
+      bottomWait = undefined;
       const bitmap = await deps.screenshot();
       try {
         signal.throwIfAborted();
         const after = await page({ action: "inspect" });
         if (final && after.bottomReady === false) continue;
         if (!sameLayout(metrics, after)) {
-          if (++failures >= 3) throw new ScreenshotError("changed");
+          staleFailures = 0;
+          if (++layoutFailures >= 3) throw new ScreenshotError("changed");
           continue;
         }
-        failures = 0;
+        layoutFailures = 0;
         if (!frames) {
           scale = bitmap.width / metrics.innerWidth;
           width = Math.round(metrics.viewportWidth * scale);
@@ -120,6 +153,20 @@ export async function capturePage(deps: CaptureDeps) {
           Math.abs(bitmap.height - metrics.innerHeight * scale) > 1
         )
           throw new ScreenshotError("changed");
+        const pixels = deps.checkFreshness ? frameSignature(bitmap) : undefined;
+        if (
+          pixels &&
+          previousFrame &&
+          isStaleFrame(
+            previousFrame.pixels,
+            pixels,
+            Math.round((metrics.y - previousFrame.y) * scale),
+          )
+        ) {
+          if (++staleFailures >= 3) throw new ScreenshotError("captureFailed", "stale_frame");
+          continue;
+        }
+        staleFailures = 0;
         const slice = sliceForFrame(metrics, covered, scale);
         if (slice.sourceY < 0 || slice.sourceY + slice.height > bitmap.height || slice.height < 0)
           throw new ScreenshotError("changed");
@@ -128,6 +175,7 @@ export async function capturePage(deps: CaptureDeps) {
           covered = slice.end;
           frames++;
         }
+        if (pixels) previousFrame = { y: metrics.y, pixels };
         progress("capturing", Math.min(99, Math.round((covered / metrics.height) * 100)), frames);
       } finally {
         bitmap.close();

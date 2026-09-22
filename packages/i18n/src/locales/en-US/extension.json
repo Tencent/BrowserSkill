@@ -114,7 +114,13 @@
     "remoteSavedDisabled": "Paired successfully. The connection switch is off; turn it on to connect.",
     "remoteFormatError": "The pairing link is incomplete or invalid. Copy the full link provided by the server.",
     "remotePermissionsInfo": "About remote connection permissions",
-    "remotePermissionsHint": "The server can control dedicated task windows. Confirmation for borrowing existing tabs follows the Automation settings below."
+    "remotePermissionsHint": "The server can control dedicated task windows. Confirmation for borrowing existing tabs follows the Automation settings below.",
+    "profile": {
+      "hint": "Check that this is the browser profile you want to use, then send its instructions to your agent.",
+      "copyButton": "Copy profile instructions",
+      "copyFailed": "Could not copy the instructions. Please try again.",
+      "promptTemplate": "Use BrowserSkill in this browser profile for this task. Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance."
+    }
   },
   "controlOverlay": {
     "status": "Agent controlling",

@@ -6,7 +6,16 @@ import { join } from "node:path";
 
 // This regression owns its browser/profile. It never attaches to a user's Chrome.
 export async function withChrome(
-  { executable, deviceScale, zoom, extensionPath, headless = true, softwareRendering = false },
+  {
+    executable,
+    deviceScale,
+    zoom,
+    extensionPath,
+    headless = true,
+    softwareRendering = false,
+    startupTimeout = 15_000,
+    onEvent,
+  },
   run,
 ) {
   const profile = await mkdtemp(join(tmpdir(), "bsk-snapshot-coordinates-"));
@@ -49,7 +58,7 @@ export async function withChrome(
       let output = "";
       const timeout = setTimeout(
         () => reject(new Error(`Chrome startup timed out: ${output}`)),
-        15_000,
+        startupTimeout,
       );
       const fail = (error) => {
         clearTimeout(timeout);
@@ -73,6 +82,10 @@ export async function withChrome(
     });
     socket.addEventListener("message", ({ data }) => {
       const reply = JSON.parse(data);
+      if (reply.method) {
+        onEvent?.(reply);
+        return;
+      }
       const request = pending.get(reply.id);
       if (!request) return;
       clearTimeout(request.timeout);
@@ -105,6 +118,7 @@ export async function withChrome(
       await exited;
       clearTimeout(timeout);
     }
-    await rm(profile, { recursive: true, force: true });
+    // Chrome children may finish writing their profile just after the parent exits.
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }

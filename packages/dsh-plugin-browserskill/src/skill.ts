@@ -8,6 +8,7 @@
  * repository skill is intentionally a separate interface.
  */
 
+import { fileURLToPath } from "node:url";
 import type { Context } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import {
@@ -23,6 +24,7 @@ interface SkillsLike {
     description: string;
     content: string;
     source?: string;
+    resourceBase?: { kind: "directory"; path: string };
   }): () => void;
 }
 
@@ -47,6 +49,12 @@ export function registerBskSkill(ctx: Context): () => void {
     content: BSK_SKILL_MARKDOWN,
     // Prompt-visible origin bucket: packaged with a plugin, not user/project files.
     source: "bundled",
+    // Both src/ (tests) and lib/ (npm) are one level below the package root.
+    // Resolve from this module, never from the user's current working directory.
+    resourceBase: {
+      kind: "directory",
+      path: fileURLToPath(new URL("../skill/", import.meta.url)),
+    },
   });
 }
 

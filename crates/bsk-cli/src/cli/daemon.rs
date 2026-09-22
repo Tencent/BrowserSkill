@@ -81,7 +81,7 @@ pub struct StartArgs {
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
 
-    /// Run in the foreground (do not double-fork). Useful for development.
+    /// Run in the foreground, owned by the current terminal or supervisor.
     #[arg(long)]
     pub foreground: bool,
 

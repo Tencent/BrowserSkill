@@ -14,7 +14,7 @@ import {
 } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
-import { type CdpRunner, isRpcError, lookupSession } from "./shared";
+import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
 
 export type TabScope = "user" | "agent" | "all";
 
@@ -290,7 +290,7 @@ export interface TabManagementDeps {
   /** Clears Agent-scoped overlays after a borrowed tab is returned. */
   agentOverlayReset?: AgentOverlayResetApi;
   /** Releases this session's CDP claim after a borrowed tab is returned. */
-  cdp?: Pick<CdpRunner, "releaseSessionTab">;
+  cdp?: Pick<CdpRunner, "acquireBackgroundExecution" | "releaseSessionTab">;
   /** Runs after tab_return validation, before moving the borrowed tab. */
   beforeReturn?: (sessionId: string, tabId: number) => Promise<void>;
   /**
@@ -436,13 +436,64 @@ export async function handleTabCreate(
   const paramErr = validateTabCreateParams(params);
   if (paramErr) return paramErr;
 
-  const tab = await createTabAndCleanup(ctx, deps, buildCreateProps(ctx, params));
+  const props = buildCreateProps(ctx, params);
+  // Match the session home: an unspecified automation URL is a navigable blank
+  // document, not Chrome's restricted New Tab page.
+  if (deps.cdp?.acquireBackgroundExecution && params.url === undefined) props.url = "about:blank";
+  const prepare = deps.cdp?.acquireBackgroundExecution && !cdpBlockedUrlReason(props.url);
+  const tab = await createTabAndCleanup(
+    ctx,
+    deps,
+    prepare ? { ...props, url: "about:blank" } : props,
+  );
   if (isRpcError(tab)) return tab;
+  if (prepare) {
+    try {
+      await deps.cdp!.acquireBackgroundExecution!(ctx.sessionId, tab.id);
+      if (
+        deps.signal?.aborted ||
+        manager.get(ctx.sessionId) !== ctx ||
+        !isAgentControlledTab(ctx, tab.id)
+      ) {
+        throw new Error("Tab creation cancelled during background execution setup");
+      }
+      // Preserve create's no-load-wait contract. The destination script cannot run
+      // before the blank document's execution policy has been acknowledged.
+      if (props.url !== "about:blank") await getTabsApi(deps).update(tab.id, { url: props.url });
+      if (deps.signal?.aborted) throw new Error("Tab creation cancelled during navigation");
+    } catch (error) {
+      const cleanupErrors: string[] = [];
+      try {
+        await deps.cdp?.releaseSessionTab?.(ctx.sessionId, tab.id);
+      } catch (cleanupError) {
+        cleanupErrors.push(`release: ${describeError(cleanupError)}`);
+      }
+      try {
+        await getTabsApi(deps).remove(tab.id);
+        ctx.agentCreatedTabs.delete(tab.id);
+      } catch (cleanupError) {
+        // Keep the claim only when closing fails, so session cleanup can retry.
+        cleanupErrors.push(`close: ${describeError(cleanupError)}`);
+      }
+      if (cleanupErrors.length) {
+        return rpcError(
+          "protocol_error",
+          "cleanup_failed",
+          `Background tab initialization failed: ${describeError(error)}; cleanup failed: ${cleanupErrors.join("; ")}`,
+          { resource_type: "tab", resource_id: tab.id },
+        );
+      }
+      return {
+        code: deps.signal?.aborted ? "cancelled" : "cdp_failed",
+        message: describeError(error),
+      };
+    }
+  }
 
   return {
     tab_id: tab.id,
     window_id: ctx.agentWindowId,
-    url: tab.url ?? tab.pendingUrl ?? "",
+    url: prepare ? (props.url ?? "about:blank") : (tab.url ?? tab.pendingUrl ?? ""),
   };
 }
 
@@ -894,11 +945,33 @@ export async function handleTabBorrow(
         message: `tab_borrow claim could not be committed: ${describeError(err)}`,
       };
     }
-    // Activate after commit so overlay/event observers see the tab as claimed.
+    // Preserve borrow's default-target contract: subsequent commands without a
+    // tab_id operate on the borrowed page. Background execution survives later
+    // user tab switches; selecting a tab does not focus its window.
     try {
+      const tab = await tabsApi.get(params.tab_id);
+      if (!cdpBlockedUrlReason(tab.url)) {
+        await deps.cdp?.acquireBackgroundExecution?.(ctx.sessionId, params.tab_id);
+      }
+      if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
+        throw new Error("Borrow cancelled during background execution setup");
+      }
       await tabsApi.update(params.tab_id, { active: true });
-    } catch (err) {
-      console.debug("[bsk tab_borrow] activate after move failed", err);
+      if (deps.signal?.aborted || manager.get(ctx.sessionId) !== ctx) {
+        throw new Error("Borrow cancelled during background execution setup");
+      }
+    } catch (error) {
+      const rollback = await returnBorrowedTab(ctx, params.tab_id, {
+        ...deps,
+        signal: undefined,
+        isAgentWindowId: (id) => manager.findByWindowId(id) !== null,
+      });
+      if (isRpcError(rollback)) return rollback;
+      ctx.borrowedTabs.delete(params.tab_id);
+      return {
+        code: deps.signal?.aborted ? "cancelled" : "cdp_failed",
+        message: describeError(error),
+      };
     }
     return {
       tab_id: params.tab_id,

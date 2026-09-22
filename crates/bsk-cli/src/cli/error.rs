@@ -497,4 +497,48 @@ mod tests {
                 .contains("CSS selector")
         );
     }
+    #[test]
+    fn pre_input_errors_keep_their_diagnostics_without_a_readiness_reason() {
+        for (code, message) in [
+            (ErrorCode::Cancelled, "click aborted"),
+            (
+                ErrorCode::InvalidParams,
+                "click_count must be greater than zero",
+            ),
+            (ErrorCode::CdpFailed, "action geometry query failed"),
+        ] {
+            let cli = CliError::from_rpc(RpcError {
+                code,
+                message: message.into(),
+                data: Some(serde_json::json!({"effect_state": "none"})),
+            });
+            let human = render_human_to_string(&cli, None);
+            assert!(human.contains(message));
+            assert!(!human.contains("did not become ready"));
+            assert!(!human.contains("observe the page again before retrying"));
+        }
+    }
+
+    #[test]
+    fn unknown_input_keeps_the_original_message_in_human_and_json_output() {
+        let message = "visual target changed after the first click";
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: message.into(),
+            data: Some(
+                serde_json::json!({"reason": "input_outcome_unknown", "effect_state": "unknown"}),
+            ),
+        });
+        let human = render_human_to_string(&cli, None);
+        assert!(human.contains("do not repeat the input"));
+        assert!(human.contains(&format!("details: {message}")));
+        let json: serde_json::Value = serde_json::from_str(&json_error_string(
+            &cli,
+            cli.exit_code(),
+            hint_for(&cli, render_info_for(&cli).as_ref()),
+        ))
+        .unwrap();
+        assert_eq!(json["message"], message);
+        assert_eq!(json["data"]["effect_state"], "unknown");
+    }
 }

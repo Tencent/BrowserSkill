@@ -249,10 +249,20 @@ pub struct ScreenshotResult {
     pub dialogs: Vec<JavaScriptDialogInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenshotScope {
+    Follow,
+    Current,
+}
+
 /// Scroll the session's active web page from top to bottom. PNG bytes are
 /// exported in bounded chunks through `tool.screenshot_read`, then released.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotFullPageParams {
+    /// Follow appended content (default), or capture the initial document height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScreenshotScope>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
@@ -263,6 +273,8 @@ pub struct ScreenshotFullPageParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ScreenshotFullPageResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScreenshotScope>,
     /// Opaque, session-scoped export capability. Never an agent filesystem path.
     pub capture_id: String,
     pub width: u32,

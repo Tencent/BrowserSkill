@@ -13,6 +13,7 @@ use bsk_protocol::Method;
 use bsk_protocol::tools::{
     ScreenshotFullPageParams, ScreenshotFullPageResult, ScreenshotParams, ScreenshotReadParams,
     ScreenshotReadResult, ScreenshotReleaseParams, ScreenshotReleaseResult, ScreenshotResult,
+    ScreenshotScope,
 };
 use clap::Args;
 
@@ -39,6 +40,10 @@ pub struct ScreenshotArgs {
     /// Scroll an ordinary web page from top to bottom and stitch a full-page PNG.
     #[arg(long, conflicts_with = "ref_")]
     pub full_page: bool,
+
+    /// Full-page range: follow appended content, or capture the initial document height.
+    #[arg(long, requires = "full_page", value_parser = ["follow", "current"])]
+    pub scope: Option<String>,
 
     /// Full-page capture/encoding timeout (e.g. 30s, 5m). Defaults to 2m.
     #[arg(long, requires = "full_page", value_parser = crate::cli::navigate::parse_timeout_ms)]
@@ -119,12 +124,27 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
         "screenshot-full-page",
         Method::ToolScreenshotFullPage,
         Some(ScreenshotFullPageParams {
+            scope: args.scope.as_deref().map(|value| {
+                if value == "current" {
+                    ScreenshotScope::Current
+                } else {
+                    ScreenshotScope::Follow
+                }
+            }),
             session_id: args.session.clone(),
             tab_id: args.tab_id,
             timeout_ms: Some(timeout),
         }),
         Duration::from_millis(u64::from(timeout) + 5_000),
     )?;
+    // An older extension may ignore new optional params. Never save a capture
+    // that did not explicitly acknowledge the requested range.
+    if args.scope.as_deref() == Some("current") && reply.scope != Some(ScreenshotScope::Current) {
+        let _ = release_full_page(&sock, &args.session, &reply.capture_id);
+        return Err(CliError::Local(anyhow!(
+            "extension did not acknowledge --scope current; update the extension"
+        )));
+    }
     let out = args.out.unwrap_or_else(default_out_path);
     let result = write_full_page(&sock, &args.session, &reply, &out);
     // Cleanup must run even after Ctrl-C or a local write failure. Unlike the
@@ -140,6 +160,7 @@ fn run_full_page(sock: PathBuf, args: ScreenshotArgs, format: Format) -> Result<
                 "format": reply.format,
                 "path": out.to_string_lossy(),
                 "byte_size": reply.byte_size,
+                "scope": reply.scope,
             });
             println!(
                 "{}",
@@ -326,6 +347,9 @@ mod tests {
         assert!(parse(&["--full-page", "--timeout", "5m"]).is_ok());
         assert!(parse(&["--full-page", "--ref", "@e1"]).is_err());
         assert!(parse(&["--timeout", "5m"]).is_err());
+        assert!(parse(&["--scope", "current"]).is_err());
+        assert!(parse(&["--full-page", "--scope", "current"]).is_ok());
+        assert!(parse(&["--full-page", "--scope", "invalid"]).is_err());
         assert!(parse(&["--full-page", "--timeout", "0ms"]).is_err());
     }
 

@@ -58,6 +58,12 @@ pub mod reason {
     pub const CDP_EXTENSION_ACCESS_DENIED: &str = "cdp_extension_access_denied";
     pub const BORROW_CONFLICT: &str = "borrow_conflict";
     pub const SCREENSHOT_CAPTURE_FAILED: &str = "screenshot_capture_failed";
+    pub const SCREENSHOT_USER_CANCELLED: &str = "user_cancelled";
+    pub const SCREENSHOT_PAGE_HIDDEN: &str = "page_hidden";
+    pub const SCREENSHOT_NAVIGATION: &str = "navigation";
+    pub const SCREENSHOT_WATCHDOG_TIMEOUT: &str = "watchdog_timeout";
+    pub const SCREENSHOT_STALE_FRAME: &str = "stale_frame";
+    pub const SCREENSHOT_LOADING_STALLED: &str = "loading_stalled";
     pub const FILE_INPUT_PROBE_FAILED: &str = "file_input_probe_failed";
     pub const FILE_INPUT_NOT_ACTIVATED: &str = "file_input_not_activated";
     pub const SET_FILE_INPUT_FAILED: &str = "set_file_input_failed";
@@ -253,6 +259,41 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (_, "input_not_ready") => RenderInfo {
+            summary: "the browser did not become ready for native input",
+            hint: Some(
+                "no click, key press or wheel input was sent; observe the page again before retrying",
+            ),
+            ..base
+        },
+        (_, "input_cleanup_failed") => RenderInfo {
+            summary: "input completed but temporary browser state could not be restored",
+            hint: Some(
+                "do not repeat the input; observe the page to check its result before continuing",
+            ),
+            ..base
+        },
+        (_, "input_outcome_unknown") => RenderInfo {
+            summary: "the browser input may already have taken effect",
+            hint: Some(
+                "do not repeat the input; observe the page to check its result before continuing",
+            ),
+            ..base
+        },
+        (_, "input_paint_unconfirmed") => RenderInfo {
+            summary: "wheel input was sent but paint completion could not be confirmed",
+            hint: Some(
+                "do not repeat the wheel input; observe the page to check its scroll position before continuing",
+            ),
+            ..base
+        },
+        (ErrorCode::Timeout, "cancel_cleanup_timeout") => RenderInfo {
+            summary: "the browser operation did not finish cancellation in time",
+            hint: Some(
+                "the operation may already have taken effect; observe the page before deciding whether to retry",
+            ),
+            ..base
+        },
         (_, reason::TRANSFER_OUTCOME_UNKNOWN) => RenderInfo {
             summary: "the file transfer outcome could not be confirmed",
             hint: Some(
@@ -402,6 +443,40 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
                 "wait for the current command to finish, cancel it with Ctrl-C, or stop/restart the session",
             ),
             exit_code: base.exit_code,
+        },
+        (ErrorCode::Cancelled, reason::SCREENSHOT_USER_CANCELLED) => RenderInfo {
+            summary: "full-page screenshot cancelled by user input",
+            hint: Some("respect the interruption; do not automatically retry"),
+            exit_code: 2,
+        },
+        (ErrorCode::CdpFailed, reason::SCREENSHOT_PAGE_HIDDEN) => RenderInfo {
+            summary: "screenshot page became hidden",
+            hint: Some("keep the capture tab visible before starting another screenshot"),
+            exit_code: 3,
+        },
+        (ErrorCode::CdpFailed, reason::SCREENSHOT_NAVIGATION) => RenderInfo {
+            summary: "screenshot page navigated",
+            hint: Some("inspect the current page before starting another screenshot"),
+            exit_code: 3,
+        },
+        (ErrorCode::Timeout, reason::SCREENSHOT_WATCHDOG_TIMEOUT) => RenderInfo {
+            summary: "screenshot lost contact with the page",
+            hint: Some(
+                "check that the browser is responsive; increasing the total deadline does not repair page communication",
+            ),
+            exit_code: 4,
+        },
+        (ErrorCode::CdpFailed, reason::SCREENSHOT_STALE_FRAME) => RenderInfo {
+            summary: "screenshot pixels did not update after scrolling",
+            hint: Some("keep the capture window visible; do not stitch repeated viewport images"),
+            exit_code: 3,
+        },
+        (ErrorCode::Timeout, reason::SCREENSHOT_LOADING_STALLED) => RenderInfo {
+            summary: "page loading stalled at the bottom",
+            hint: Some(
+                "use --full-page --scope current only if the currently loaded document range satisfies the request",
+            ),
+            exit_code: 4,
         },
         (ErrorCode::CdpFailed, reason::SCREENSHOT_CAPTURE_FAILED) => RenderInfo {
             summary: "the browser could not capture the tab image",
@@ -676,6 +751,25 @@ mod tests {
     }
 
     #[test]
+    fn full_page_recovery_distinguishes_stalled_loading_from_user_input() {
+        let stalled = serde_json::json!({ "reason": reason::SCREENSHOT_LOADING_STALLED });
+        let info = info_for_error(ErrorCode::Timeout, Some(&stalled));
+        assert!(info.hint.unwrap().contains("--scope current"));
+        assert!(!info.hint.unwrap().contains("increase"));
+        assert_eq!(info.exit_code, 4);
+
+        let cancelled = serde_json::json!({ "reason": reason::SCREENSHOT_USER_CANCELLED });
+        let info = info_for_error(ErrorCode::Cancelled, Some(&cancelled));
+        assert!(info.hint.unwrap().contains("do not automatically retry"));
+        assert_eq!(info.exit_code, 2);
+
+        let hidden = serde_json::json!({ "reason": reason::SCREENSHOT_PAGE_HIDDEN });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&hidden));
+        assert!(info.hint.unwrap().contains("visible"));
+        assert_eq!(info.exit_code, 3);
+    }
+
+    #[test]
     fn file_transfer_reasons_render_actionable_fallbacks() {
         let unsupported = serde_json::json!({ "reason": reason::FILE_INPUT_NOT_ACTIVATED });
         let info = info_for_error(ErrorCode::Unsupported, Some(&unsupported));
@@ -785,5 +879,73 @@ mod tests {
             "single-select requires exactly one option value"
         );
         assert!(info.hint.unwrap().contains("exactly one"));
+    }
+    #[test]
+    fn acknowledged_wheel_with_unconfirmed_paint_has_a_scroll_specific_hint() {
+        for code in [
+            ErrorCode::CdpFailed,
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+            ErrorCode::UserAborted,
+        ] {
+            let info = info_for_error(
+                code,
+                Some(&serde_json::json!({
+                    "reason": "input_paint_unconfirmed",
+                    "effect_state": "unknown"
+                })),
+            );
+            assert!(info.summary.contains("wheel input was sent"));
+            let hint = info.hint.unwrap();
+            assert!(hint.contains("do not repeat"));
+            assert!(hint.contains("scroll position"));
+            assert_eq!(info.exit_code, info_for(code).exit_code);
+        }
+    }
+
+    #[test]
+    fn input_recovery_hints_do_not_encourage_blind_replay() {
+        let ready = info_for_error(
+            ErrorCode::CdpFailed,
+            Some(&serde_json::json!({"reason":"input_not_ready"})),
+        );
+        assert!(
+            ready
+                .hint
+                .unwrap()
+                .contains("no click, key press or wheel input was sent")
+        );
+        let cleanup = info_for_error(
+            ErrorCode::CdpFailed,
+            Some(&serde_json::json!({"reason":"input_cleanup_failed"})),
+        );
+        assert!(cleanup.hint.unwrap().contains("do not repeat"));
+        for code in [
+            ErrorCode::CdpFailed,
+            ErrorCode::Timeout,
+            ErrorCode::Cancelled,
+        ] {
+            let unknown = info_for_error(
+                code,
+                Some(&serde_json::json!({
+                    "reason": "input_outcome_unknown",
+                    "effect_state": "unknown"
+                })),
+            );
+            assert!(unknown.summary.contains("may already have taken effect"));
+            assert!(unknown.hint.unwrap().contains("do not repeat"));
+            assert_eq!(unknown.exit_code, info_for(code).exit_code);
+        }
+        let timeout = info_for_error(
+            ErrorCode::Timeout,
+            Some(&serde_json::json!({"reason":"cancel_cleanup_timeout"})),
+        );
+        assert!(
+            timeout
+                .hint
+                .unwrap()
+                .contains("may already have taken effect")
+        );
+        assert_eq!(timeout.exit_code, 4);
     }
 }

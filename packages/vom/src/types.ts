@@ -32,6 +32,8 @@ export interface VomNode {
   role?: string;
   name?: string;
   value?: string;
+  /** Checked state is separate from the control's submitted value. */
+  checked?: boolean | "mixed";
   placeholder?: string;
   inputState?: "empty" | "filled" | "default" | "unknown";
   href?: string; // hostname of external link target; omitted for same-origin links

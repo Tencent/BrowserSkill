@@ -144,6 +144,23 @@ function inputState(
   return value ? "filled" : "empty";
 }
 
+function checkedState(node: SemanticGraphNode, role: string | undefined): VomNode["checked"] {
+  if (
+    !["checkbox", "radio", "switch", "menuitemcheckbox", "menuitemradio"].includes(
+      role?.toLowerCase() ?? "",
+    )
+  )
+    return undefined;
+  const axChecked = node.ax?.ignored === true ? undefined : axProperty(node.ax, "checked");
+  if (axChecked === "true" || axChecked === "false") return axChecked === "true";
+  if (axChecked === "mixed") return "mixed";
+  // Native live state must not be inferred from the default HTML checked attribute.
+  if (node.dom?.checked !== undefined) return node.dom.checked;
+  const ariaChecked = node.dom?.attrs["aria-checked"];
+  if (ariaChecked === "true" || ariaChecked === "false") return ariaChecked === "true";
+  return ariaChecked === "mixed" ? "mixed" : undefined;
+}
+
 function externalHrefHost(
   href: string | undefined,
   pageUrl: string | undefined,
@@ -464,6 +481,7 @@ export function resolveSemanticGraph(
     const isSensitive = sensitive(node);
     const sourceValue = node.dom?.formValue ?? axValue(node.ax?.value);
     const value = isSensitive ? undefined : sourceValue;
+    const checked = checkedState(node, role);
     const attrs = { ...(node.dom?.attrs ?? {}) };
     if (isSensitive) delete attrs.value;
     const frame = graph.frames.get(node.frameId);
@@ -478,6 +496,7 @@ export function resolveSemanticGraph(
       ...(role ? { role } : {}),
       ...(name ? { name } : {}),
       ...(value !== undefined ? { value } : {}),
+      ...(checked !== undefined ? { checked } : {}),
       ...(clean(node.dom?.formPlaceholder ?? attrs.placeholder)
         ? { placeholder: clean(node.dom?.formPlaceholder ?? attrs.placeholder) }
         : {}),
@@ -491,6 +510,7 @@ export function resolveSemanticGraph(
         tag === "dialog" ||
         (attrs["aria-modal"] ?? "").toLowerCase() === "true",
       disabled:
+        (node.ax?.ignored !== true && axProperty(node.ax, "disabled") === "true") ||
         Object.prototype.hasOwnProperty.call(attrs, "disabled") ||
         (attrs["aria-disabled"] ?? "").toLowerCase() === "true",
       inert: Object.prototype.hasOwnProperty.call(attrs, "inert"),

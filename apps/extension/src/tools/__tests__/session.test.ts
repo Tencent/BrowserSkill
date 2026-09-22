@@ -27,7 +27,7 @@ function fakeAgentWindow(ids: number[]) {
   const create = vi.fn(async () => {
     const id = ids[i++];
     if (id === undefined) throw new Error("ran out of fake ids");
-    return id;
+    return { windowId: id, initialTabIds: [] };
   });
   const remove = vi.fn(async () => {});
   const ensureActiveTab = vi.fn(async () => 0);

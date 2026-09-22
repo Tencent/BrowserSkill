@@ -34,6 +34,16 @@
       "format": "uint32",
       "minimum": 0.0
     },
+    "scope": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ScreenshotScope"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "tab_id": {
       "type": "integer",
       "format": "int64"
@@ -111,6 +121,13 @@
         "confirm",
         "prompt",
         "beforeunload"
+      ]
+    },
+    "ScreenshotScope": {
+      "type": "string",
+      "enum": [
+        "follow",
+        "current"
       ]
     }
   }

@@ -28,12 +28,15 @@ import {
   parseBskJson,
   runWithSessionBusyRetry,
 } from "./runner";
+import { SessionStarts } from "./session-starts";
 import type { SessionRegistry } from "./sessions";
-import { SESSION_PARAM } from "./tool-params";
+import { BROWSER_PARAM, SESSION_PARAM, SESSION_STOP_PARAMS } from "./tool-params";
 
 /** Plugin configuration resolved from the Schemastery schema in index.ts. */
 export interface PluginConfig {
   bskPath: string;
+  /** Optional durable start journal directory (isolated by host/profile when configured). */
+  sessionStateDirectory?: string;
   defaultTimeoutMs: number;
   maxSessions: number;
   observationEnabled: boolean;
@@ -56,6 +59,7 @@ export interface ToolDeps {
   observation: ObservationService;
   /** Per-session FIFO: the daemon rejects a second command while one is unfinished. */
   queue: KeyedExecutor;
+  starts?: SessionStarts;
 }
 
 /** Device presets supported by `bsk emulate --device`. */
@@ -83,6 +87,7 @@ async function runBsk(
   label: string,
   observeSession?: string,
   runnerTimeoutMs?: number,
+  initializing = false,
 ): Promise<unknown> {
   const releaseForeground =
     observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
@@ -99,15 +104,19 @@ async function runBsk(
           began = true;
           deps.observation.beginAction(observeSession, actionForLabel(label));
         }
-        return runWithSessionBusyRetry(
-          () =>
-            deps.runner.run(args, {
-              signal: exec.signal,
-              timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
-              ...(observeSession !== undefined ? { tag: observeSession } : {}),
-            }),
-          exec.signal,
-        );
+        return runWithSessionBusyRetry(async () => {
+          if (
+            observeSession !== undefined &&
+            !(initializing && deps.registry.stateFor(observeSession) === "starting")
+          ) {
+            deps.registry.assertUsable(observeSession, label);
+          }
+          return deps.runner.run(args, {
+            signal: exec.signal,
+            timeoutMs: runnerTimeoutMs ?? deps.config.defaultTimeoutMs,
+            ...(observeSession !== undefined ? { tag: observeSession } : {}),
+          });
+        }, exec.signal);
       };
       result =
         observeSession !== undefined
@@ -187,11 +196,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           type: "boolean",
           description: "Open the Agent Window in the background without stealing focus.",
         },
-        browser: {
-          type: "string",
-          description:
-            "Target browser instance id (only needed when multiple browsers are connected).",
-        },
+        browser: BROWSER_PARAM,
         device: {
           type: "string",
           enum: DEVICE_PRESETS,
@@ -228,8 +233,10 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         }
         // Reserve the slot BEFORE spawning: check-and-reserve is synchronous,
         // so concurrent starts can never both pass the cap and leak a session.
-        registry.reserveStart();
-        const startArgs = ["session", "start"];
+        const starts = (deps.starts ??= new SessionStarts(deps));
+        await starts.reconcile();
+        const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
+        const startArgs = ["session", "start", "--request-id", record.requestId];
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
@@ -237,21 +244,15 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         if (args.browser !== undefined) startArgs.push("--browser", args.browser);
         let reply: { session_id: string; browser_instance_id: string };
         try {
+          await starts.prepare(record, exec.signal);
           reply = (await runBsk(deps, exec, startArgs, "session start")) as typeof reply;
         } catch (error) {
-          registry.abandonStart();
+          await starts.fail(record).catch(() => {});
           throw error;
         }
-        registry.completeStart({
-          sessionId: reply.session_id,
-          browserInstanceId: reply.browser_instance_id,
-          startedAtMs: Date.now(),
-        });
-        // Ownership for archive cleanup: the calling conversation and its
-        // ancestors reap this session when any of them is archived.
-        registry.trackOwner(reply.session_id, ownerSessionIds(deps.ctx, exec.agent?.id));
-        deps.observation.addSession(reply.session_id, args.url);
         try {
+          starts.register(record, reply);
+          deps.observation.addSession(reply.session_id, args.url);
           if (args.device !== undefined) {
             await runBsk(
               deps,
@@ -259,6 +260,8 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               ["emulate", "--session", reply.session_id, "--device", args.device],
               "emulate",
               reply.session_id,
+              undefined,
+              true,
             );
           }
           if (args.url !== undefined) {
@@ -268,19 +271,13 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               ["navigate", "--session", reply.session_id, args.url],
               "navigate",
               reply.session_id,
+              undefined,
+              true,
             );
           }
+          await starts.claim(record, exec.signal);
         } catch (error) {
-          // A half-initialized session must not leak: stop it before surfacing.
-          // Reuse the same capture-preempting, idempotent path as explicit and
-          // overlay stops; local ownership is dropped even when daemon cleanup
-          // itself fails, because this start never becomes usable to the model.
-          try {
-            await deps.observation.stopSession(reply.session_id);
-          } catch {
-            registry.remove(reply.session_id);
-            deps.observation.removeSession(reply.session_id);
-          }
+          await starts.fail(record).catch(() => {});
           throw error;
         }
         return {
@@ -309,35 +306,51 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
       name: "session.stop",
       description:
         "Stop a browser session and close its Agent Window. Stops the given session, or the " +
-        "current session when `session` is omitted. Only plugin-created sessions " +
-        "can be stopped — sessions owned by other programs sharing the bsk daemon are refused.",
-      parameters: { session: SESSION_PARAM },
+        "current session when `session` is omitted. An unacknowledged stop is retried before " +
+        "selecting another session; specify session or requestId if several stops are pending. " +
+        "A requestId identifies the original start even if its short session ID is reused. Once accepted, " +
+        "cleanup continues if this call is aborted. Only plugin-created sessions can be stopped.",
+      parameters: SESSION_STOP_PARAMS,
       output: {
         schema: {
           type: "object",
           additionalProperties: false,
-          properties: { stopped: { type: "string", required: true } },
+          properties: {
+            stopped: { type: "string", required: true },
+            requestId: { type: "string", required: true },
+            alreadyClosed: { type: "boolean", required: true },
+          },
         },
         render: (_args, value) => [
-          { type: "text", text: `stopped browser session ${value.stopped}` },
+          {
+            type: "text",
+            text: `${value.alreadyClosed ? "previous stop completed for" : "stopped browser session"} ${value.stopped} (request ${value.requestId})`,
+          },
         ],
       },
       async execute(args, exec) {
-        const sessionId = registry.resolveForStop(args.session);
         try {
-          const stopped = await deps.observation.stopSession(sessionId, exec.signal);
-          if (!stopped) throw new Error(`browser session ${sessionId} is not owned by this plugin`);
+          const starts = (deps.starts ??= new SessionStarts(deps));
+          return await starts.stop({
+            sessionId: args.session,
+            requestId: args.requestId,
+            signal: exec.signal,
+          });
         } catch (error) {
           if (isCommandNotFound(error)) {
             throw new Error(bskInstallMessage(deps.config.bskPath));
           }
           throw error;
         }
-        return { stopped: sessionId };
       },
       presentCall: (args) => ({
         card: "terminal",
-        title: cmdline(deps, ["session", "stop", args.session ?? "(current session)"]),
+        title: cmdline(
+          deps,
+          args.requestId
+            ? ["session", "request", args.requestId, "--cancel"]
+            : ["session", "stop", args.session ?? "(current or pending stop)"],
+        ),
         description: "Stop a browser session",
       }),
       presentResult: presentTerminalResult,
@@ -357,6 +370,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           type: "object",
           additionalProperties: false,
           properties: {
+            pendingCleanup: { type: "integer", required: true },
             sessions: {
               type: "array",
               required: true,
@@ -366,7 +380,13 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
                 properties: {
                   sessionId: { type: "string", required: true },
                   browserInstanceId: { type: "string", required: true },
+                  requestId: { type: "string" },
                   current: { type: "boolean", required: true },
+                  state: {
+                    type: "string",
+                    enum: ["starting", "active", "cleanup"],
+                    required: true,
+                  },
                 },
               },
             },
@@ -377,26 +397,31 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             type: "text",
             text:
               value.sessions.length === 0
-                ? "no active browser sessions"
+                ? value.pendingCleanup > 0
+                  ? `${value.pendingCleanup} browser start(s) awaiting cleanup; retry list or stop`
+                  : "no active browser sessions"
                 : value.sessions
                     .map(
                       (s) =>
-                        `${s.sessionId} (browser ${s.browserInstanceId})${s.current ? " [current]" : ""}`,
+                        `${s.sessionId} (browser ${s.browserInstanceId})${s.current ? " [current]" : ""}${s.state !== "active" ? ` [${s.state}]` : ""}${s.requestId ? ` (request ${s.requestId})` : ""}`,
                     )
                     .join("\n"),
           },
         ],
       },
       isConcurrencySafe: () => true,
-      // Registry-only by design: no daemon call, so foreign sessions on a
-      // shared daemon can never even be SEEN through this tool.
+      // Reconcile only our journaled requests; never enumerate foreign sessions.
       async execute() {
+        await deps.starts?.reconcile();
         const current = registry.current();
         return {
+          pendingCleanup: deps.starts?.pendingCleanup() ?? 0,
           sessions: registry.list().map((entry) => ({
             sessionId: entry.sessionId,
             browserInstanceId: entry.browserInstanceId ?? "",
+            ...(entry.requestId ? { requestId: entry.requestId } : {}),
             current: entry.sessionId === current,
+            state: entry.state,
           })),
         };
       },

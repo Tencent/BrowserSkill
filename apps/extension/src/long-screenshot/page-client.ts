@@ -26,7 +26,11 @@ export function createPageClient(
       if (error instanceof ScreenshotError || signal.aborted) throw error;
       throw new ScreenshotError("unavailable");
     }
-    if (!response?.ok) throw new ScreenshotError(response?.error ?? "unavailable");
+    if (!response?.ok)
+      throw new ScreenshotError(
+        response?.error ?? "unavailable",
+        response?.ok === false ? response.reason : undefined,
+      );
     return response.metrics;
   };
   return {

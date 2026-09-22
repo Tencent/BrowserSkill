@@ -251,7 +251,9 @@ export async function decodeDocument(
             ...(formState ? { formState } : {}),
           }
         : {}),
-      ...(checkedInputs.has(n) ? { formValue: "true", formState: "filled" } : {}),
+      ...(tag === "input" && ["checkbox", "radio"].includes((attrs.type ?? "").toLowerCase())
+        ? { checked: checkedInputs.has(n) }
+        : {}),
       ...(selectedOptions.has(n) ? { formValue: attrs.value ?? textContent ?? "" } : {}),
     });
   }

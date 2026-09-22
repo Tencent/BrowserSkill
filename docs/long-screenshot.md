@@ -34,17 +34,50 @@ whole-page rescan is needed for that repair.
 ```sh
 bsk screenshot --session <id> --full-page --out page.png
 bsk screenshot --session <id> --full-page --timeout 5m --out page.png --json
+bsk screenshot --session <id> --full-page --scope current --out loaded.png --json
 ```
 
+`--scope follow` (the default) follows appended content. `--scope current` captures
+only the document region measured at capture start, in CSS pixels. It still scrolls
+through that region to expose lazy images, but later height growth does not extend
+the range. Layout shifts can move content past that boundary; this mode is a bounded
+visual capture, not a promise to include every initially present article. The loading
+row remains visible. Success means the selected range was captured, not that the
+website finished loading. JSON results include the acknowledged `scope`; the CLI
+refuses to save a `current` request if an older extension does not acknowledge it.
+
+On Windows, Agent captures prefer their session's renderer screenshot source to
+avoid stale window-surface pixels seen after script-driven scrolling on some builds.
+Those captures also check compact frame signatures against the measured displacement
+and retry a clearly stale frame twice before failing with `stale_frame`. Blank or
+ambiguous content alone does not trigger this error. Layout and stale-frame retries
+have separate consecutive-failure counters.
+
+On other platforms, Agent captures retain a working window-surface source and fall
+back to their session renderer only if the initial probe fails. Popup captures keep
+their existing backend selection and do not enable the Agent freshness check.
+Screenshot backends never switch midway through an image.
+
+In Agent `follow` mode, 30 seconds at an unchanged bottom with a rendered loading
+indicator produces `loading_stalled`, rather than waiting until the total deadline.
+This saves no partial image. Errors carry phase, frame count, progress and captured
+height when available. `user_cancelled`, `page_hidden`, `navigation` and
+`watchdog_timeout` distinguish user input, visibility changes, navigation and lost
+page contact. Keeping the tab selected is necessary; hiding it can stop capture.
+Individual browser operations retain their own shorter deadlines.
+
 The default viewport screenshot and `--ref` crop are unchanged. `--full-page` is exclusive
-with `--ref`. An optional `--tab-id` must identify the selected tab in the session's Agent
-Window; the tab must have been created or borrowed by that session. Automatic document
+with `--ref`. An optional `--tab-id` identifies a tab in the session's Agent Window;
+the tab must have been created or borrowed by that session. Background targets are supported
+without selecting the tab or focusing the window. Agent capture uses target-scoped CDP
+for every viewport, with no fallback to the window's selected tab. Automatic document
 scrolling is transient page input and obeys the existing user-interrupt gate. It supports
 scriptable HTTP(S) pages, not restricted browser pages or nested/virtualized scrollers.
 
 Agent capture restores scroll and temporary styles on completion, failure, timeout or
-cancellation. Ctrl-C cancels capture or transfer; a page navigation or tab switch stops the
-capture. Unlike interactive Quick Actions, an Agent failure never returns partial success.
+cancellation while the original document remains responsive. Ctrl-C cancels capture or transfer.
+Navigation, loss of control or a debugger connection change stops capture; selecting another
+tab does not. All tiles must belong to the same document and debugger connection. Unlike interactive Quick Actions, an Agent failure never returns partial success.
 The capture/encoding deadline is two minutes by default and can be changed with `--timeout`.
 No fixed page-height or full-image canvas limit is added. Infinite scrolling may reach the
 deadline. The popup and any existing user previews are independent of Agent captures.
@@ -53,7 +86,8 @@ deadline. The popup and any existing user previews are independent of Agent capt
 `tool.screenshot_read` and `tool.screenshot_release` RPCs. This distinct capture method lets
 the daemon gate scrolling and wait for cancellation cleanup without changing the existing
 passive `tool.screenshot` route. Full-page requests use `session_id`, optional `tab_id` and
-optional `timeout_ms`. Results contain dimensions, `format: "png"`, `tab_id`, `byte_size`,
+optional `timeout_ms` and `scope` (`follow` or `current`). Results include the acknowledged
+`scope` and dimensions, `format: "png"`, `tab_id`, `byte_size`,
 optional dialogs and an opaque session-scoped `capture_id`; they contain no whole-image
 base64 or agent filesystem path. Read requests use `session_id`, `capture_id` and byte
 `offset`, returning at most 256 KiB encoded as `data_base64`, `next_offset` and `eof`.

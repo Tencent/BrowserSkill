@@ -6,6 +6,7 @@ Install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 ```
 
 Documentation: [../../README.md](../../README.md) · [../../docs/architecture.md](../../docs/architecture.md)

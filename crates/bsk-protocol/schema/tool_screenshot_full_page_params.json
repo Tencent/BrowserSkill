@@ -7,6 +7,17 @@
     "session_id"
   ],
   "properties": {
+    "scope": {
+      "description": "Follow appended content (default), or capture the initial document height.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ScreenshotScope"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "session_id": {
       "type": "string"
     },
@@ -25,6 +36,15 @@
       ],
       "format": "uint32",
       "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ScreenshotScope": {
+      "type": "string",
+      "enum": [
+        "follow",
+        "current"
+      ]
     }
   }
 }

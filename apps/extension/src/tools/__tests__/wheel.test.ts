@@ -16,7 +16,7 @@ interface Call {
 async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },
@@ -61,6 +61,8 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
     hooks.after(call);
     if (override) return override as T;
     const args = call.params ?? {};
+    if (method === "Runtime.evaluate" && args.expression === "document.visibilityState")
+      return { result: { value: "visible" } } as T;
     const replies: Record<string, unknown> = {
       "DOM.getDocument": { root: { nodeId: 1 } },
       "DOM.querySelector": { nodeId: 2 },
@@ -122,6 +124,98 @@ async function fixture(frame: "top" | "same-target" | "oopif" = "top") {
 afterEach(() => vi.restoreAllMocks());
 
 describe("handleWheel", () => {
+  it.each([
+    "geometry",
+    "move",
+    "wheel",
+  ])("distinguishes a %s failure from a sent wheel input", async (step) => {
+    const f = await fixture();
+    f.hooks.reply = (call) => {
+      if (
+        (step === "geometry" && call.method === "Page.getLayoutMetrics") ||
+        (step === "move" && call.params?.type === "mouseMoved") ||
+        (step === "wheel" && call.params?.type === "mouseWheel")
+      )
+        throw new Error("injected failure");
+      return undefined;
+    };
+    const result = await f.run();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: {
+        effect_state: step === "wheel" ? "unknown" : "none",
+        ...(step === "wheel" ? { reason: "input_outcome_unknown" } : {}),
+      },
+    });
+    if (step !== "wheel") expect(result).not.toHaveProperty("data.reason");
+  });
+  it.each([
+    "complete",
+    "cancel",
+    "failed",
+  ])("keeps hidden rendering ready until the wheel is painted (%s)", async (mode) => {
+    const f = await fixture();
+    let finish: ((value: object) => void) | undefined;
+    f.hooks.reply = (call) => {
+      if (call.method === "Emulation.setFocusEmulationEnabled") return {};
+      if (call.method === "Page.captureScreenshot") return { data: "frame" };
+      if (call.method === "Runtime.evaluate") {
+        if (call.params?.expression === "document.visibilityState")
+          return { result: { value: "hidden" } };
+        return new Promise<object>((resolve) => {
+          finish = resolve;
+        });
+      }
+    };
+    const pending = f.run();
+    await vi.waitFor(() => expect(finish).toBeDefined());
+    expect(
+      f.calls.filter((c) => c.method === "Emulation.setFocusEmulationEnabled").map((c) => c.params),
+    ).toEqual([{ enabled: true }]);
+    if (mode === "cancel") f.abort.abort();
+    else finish!({ result: { value: mode === "complete" } });
+    const result = await pending;
+    if (mode === "complete") expect(result).not.toHaveProperty("code");
+    else
+      expect(result).toMatchObject({
+        code: mode === "cancel" ? "cancelled" : "cdp_failed",
+        data: { reason: "input_paint_unconfirmed", effect_state: "unknown" },
+      });
+    expect(f.calls.filter((c) => c.params?.type === "mouseWheel")).toHaveLength(1);
+    expect(
+      f.calls.filter((c) => c.method === "Emulation.setFocusEmulationEnabled").at(-1)?.params,
+    ).toEqual({ enabled: false });
+    finish!({ result: { value: true } });
+  });
+
+  it("preserves the paint diagnostic on deadline and cleans up without replaying the wheel", async () => {
+    vi.useFakeTimers();
+    try {
+      const f = await fixture();
+      f.hooks.reply = (call) => {
+        if (call.method === "Emulation.setFocusEmulationEnabled") return {};
+        if (call.method === "Page.captureScreenshot") return { data: "frame" };
+        if (call.method === "Runtime.evaluate") {
+          if (call.params?.expression === "document.visibilityState")
+            return { result: { value: "hidden" } };
+          return new Promise(() => {});
+        }
+      };
+      const pending = f.run({ timeout_ms: 100 });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toMatchObject({
+        code: "timeout",
+        data: { reason: "input_paint_unconfirmed", effect_state: "unknown" },
+      });
+      expect(f.calls.filter((c) => c.params?.type === "mouseWheel")).toHaveLength(1);
+      expect(
+        f.calls.filter((c) => c.method === "Emulation.setFocusEmulationEnabled").at(-1)?.params,
+      ).toEqual({ enabled: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("moves to the viewport centre and sends signed native deltas and modifiers", async () => {
     const f = await fixture();
     expect(
@@ -134,6 +228,10 @@ describe("handleWheel", () => {
       delta_y: 600,
     });
     expect(f.calls.map(({ method, params }) => ({ method, params }))).toEqual([
+      {
+        method: "Runtime.evaluate",
+        params: { expression: "document.visibilityState", returnByValue: true },
+      },
       { method: "Page.getLayoutMetrics", params: {} },
       {
         method: "Input.dispatchMouseEvent",
@@ -347,7 +445,10 @@ describe("handleWheel", () => {
       return undefined;
     };
     expect(await f.run({ ref: "@e3" })).toMatchObject({ code: "cancelled" });
-    expect(f.calls.map((c) => c.method)).toEqual(["DOM.scrollIntoViewIfNeeded"]);
+    expect(f.calls.map((c) => c.method)).toEqual([
+      "Runtime.evaluate",
+      "DOM.scrollIntoViewIfNeeded",
+    ]);
   });
 
   it.each([

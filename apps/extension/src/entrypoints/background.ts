@@ -72,6 +72,7 @@ export default defineBackground(() => {
   });
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
+    onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
     shouldAutoAcceptDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);

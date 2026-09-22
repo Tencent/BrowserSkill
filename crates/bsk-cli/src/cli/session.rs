@@ -46,6 +46,8 @@ pub enum SessionSub {
     Stop(SessionStopArgs),
     /// List active sessions.
     List,
+    /// Inspect, claim, or cancel a recoverable start request.
+    Request(SessionRequestArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -53,11 +55,14 @@ pub struct SessionStartArgs {
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
+    /// Recoverable request token: <expiry-unix-ms>:<UUID>. Valid for at most ten minutes.
+    #[arg(long)]
+    pub request_id: Option<String>,
     /// Optional task name displayed in local operation history.
     #[arg(long)]
     pub name: Option<String>,
-    /// Target browser instance id (only required when multiple browsers
-    /// are connected).
+    /// Target browser instance ID or unique label. Always set this when
+    /// a specific browser profile is required.
     #[arg(long)]
     pub browser: Option<String>,
 
@@ -101,8 +106,21 @@ pub struct SessionStopArgs {
     pub all: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct SessionRequestArgs {
+    pub request_id: String,
+    #[arg(long, conflicts_with_all = ["claim", "prepare"])]
+    pub cancel: bool,
+    #[arg(long, conflicts_with = "claim")]
+    pub prepare: bool,
+    #[arg(long)]
+    pub claim: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     task_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,11 +177,37 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
     let info = ensure_daemon().context("ensure daemon is running")?;
     match cmd.sub {
         SessionSub::Start(args) => {
-            run_skill_sync_for_session_start(format);
+            // Embedded clients use their own tool instructions. Keep recoverable
+            // lifecycle requests free of unrelated harness filesystem writes.
+            if args.request_id.is_none() {
+                run_skill_sync_for_session_start(format);
+            }
             run_start(info.sock_path, args, format)
         }
         SessionSub::Stop(args) => run_stop(info.sock_path, args, format),
         SessionSub::List => run_list(info.sock_path, format),
+        SessionSub::Request(args) => {
+            let action = if args.prepare {
+                "prepare"
+            } else if args.cancel {
+                "cancel"
+            } else if args.claim {
+                "claim"
+            } else {
+                "status"
+            };
+            let reply: serde_json::Value = call(
+                info.sock_path,
+                Method::SessionRequest,
+                Some(serde_json::json!({"request_id": args.request_id, "action": action})),
+                Duration::from_secs(40),
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).context("encode request status")?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -196,6 +240,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
         sock,
         SessionStartOptions {
             name: args.name,
+            request_id: args.request_id,
             browser: args.browser,
             width: args.width,
             height: args.height,
@@ -231,6 +276,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
+    pub request_id: Option<String>,
     pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
@@ -242,8 +288,13 @@ pub struct SessionStartOptions {
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
     call(
         sock,
-        Method::SessionStart,
+        if opts.request_id.is_some() {
+            Method::SessionStartTracked
+        } else {
+            Method::SessionStart
+        },
         Some(StartParams {
+            request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
             width: opts.width,
@@ -580,6 +631,7 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,
                 width: None,

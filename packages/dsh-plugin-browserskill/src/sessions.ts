@@ -15,11 +15,16 @@
 
 export interface TrackedSession {
   sessionId: string;
+  /** Stable lifecycle handle, retained even if the short session ID is reused. */
+  requestId?: string;
   browserInstanceId?: string;
   startedAtMs: number;
   /** Always true: only plugin-created sessions enter the registry at all. */
   owned: boolean;
+  state: "starting" | "active" | "cleanup";
 }
+
+type NewSession = Omit<TrackedSession, "owned" | "state">;
 
 export class SessionRegistry {
   private readonly sessions = new Map<string, TrackedSession>();
@@ -44,8 +49,8 @@ export class SessionRegistry {
    * Reserve a start slot synchronously, BEFORE spawning.
    * @throws when the configured concurrency cap (tracked + in-flight) is reached.
    */
-  reserveStart(): void {
-    if (this.sessions.size + this.pendingStarts >= this.maxSessions) {
+  reserveStart(recoveredPending = 0): void {
+    if (this.sessions.size + this.pendingStarts + recoveredPending >= this.maxSessions) {
       throw new Error(
         `session limit reached (${this.maxSessions} concurrent sessions); ` +
           "stop one with browser_session action=stop before starting another",
@@ -63,7 +68,13 @@ export class SessionRegistry {
    * Register a freshly started session, consuming its reservation, and make
    * it current.
    */
-  completeStart(session: Omit<TrackedSession, "owned">): void {
+  completeStart(session: NewSession): void {
+    this.trackStart(session);
+    this.activate(session.sessionId);
+  }
+
+  /** Own a resource without exposing it to ordinary browser commands. */
+  trackStart(session: NewSession, state: "starting" | "cleanup" = "starting"): void {
     this.pendingStarts = Math.max(0, this.pendingStarts - 1);
     // Backstop only: with the reservation protocol above this never fires.
     if (!this.sessions.has(session.sessionId) && this.sessions.size >= this.maxSessions) {
@@ -72,8 +83,47 @@ export class SessionRegistry {
           "stop one with browser_session action=stop before starting another",
       );
     }
-    this.sessions.set(session.sessionId, { ...session, owned: true });
-    this.currentId = session.sessionId;
+    this.sessions.set(session.sessionId, { ...session, owned: true, state });
+  }
+
+  /** Publish only after initialization and the daemon claim have succeeded. */
+  activate(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session?.state !== "starting")
+      throw new Error("browser start is no longer awaiting activation");
+    session.state = "active";
+    this.touch(sessionId);
+  }
+
+  markForCleanup(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.state = "cleanup";
+    if (this.currentId === sessionId) this.selectCurrent();
+  }
+
+  private selectCurrent(): void {
+    this.currentId = [...this.sessions.values()]
+      .filter((s) => s.state === "active")
+      .at(-1)?.sessionId;
+  }
+
+  isUsable(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.state === "active";
+  }
+
+  stateFor(sessionId: string): TrackedSession["state"] | undefined {
+    return this.sessions.get(sessionId)?.state;
+  }
+
+  assertUsable(sessionId: string, toolName: string): void {
+    if (!this.isOwned(sessionId)) throw this.foreignError(sessionId, toolName);
+    if (!this.isUsable(sessionId)) {
+      const reason = this.stateFor(sessionId) === "cleanup" ? "awaiting cleanup" : "not ready";
+      throw new Error(
+        `${toolName}: session "${sessionId}" is ${reason}; only stop is available until the session is active`,
+      );
+    }
   }
 
   /** Forget a session; falls back to the most recent remaining one. */
@@ -81,8 +131,7 @@ export class SessionRegistry {
     this.sessions.delete(sessionId);
     this.dshOwners.delete(sessionId);
     if (this.currentId === sessionId) {
-      const rest = [...this.sessions.values()];
-      this.currentId = rest.length > 0 ? rest[rest.length - 1].sessionId : undefined;
+      this.selectCurrent();
     }
   }
 
@@ -141,6 +190,10 @@ export class SessionRegistry {
     return this.sessions.get(sessionId)?.owned === true;
   }
 
+  requestFor(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.requestId;
+  }
+
   size(): number {
     return this.sessions.size;
   }
@@ -161,7 +214,7 @@ export class SessionRegistry {
    */
   resolve(explicit: string | undefined, toolName: string): string {
     if (explicit !== undefined && explicit.trim().length > 0) {
-      if (!this.isOwned(explicit)) throw this.foreignError(explicit, toolName);
+      this.assertUsable(explicit, toolName);
       this.touch(explicit);
       return explicit;
     }
@@ -176,12 +229,15 @@ export class SessionRegistry {
   }
 
   /**
-   * Resolve the session a STOP call acts on. Same ownership rule as every
-   * other tool; a rejected stop never moves the current pointer.
+   * Stop can also reach starting/cleanup resources. If no usable session is
+   * current, default to the most recent owned resource so cleanup is retryable.
+   * A rejected stop never moves the current pointer.
    */
   resolveForStop(explicit: string | undefined): string {
     const candidate =
-      explicit !== undefined && explicit.trim().length > 0 ? explicit : this.current();
+      explicit !== undefined && explicit.trim().length > 0
+        ? explicit
+        : (this.current() ?? this.list().at(-1)?.sessionId);
     if (candidate === undefined) {
       throw new Error(
         "browser_session action=stop needs a session but none is active — use action=start first",

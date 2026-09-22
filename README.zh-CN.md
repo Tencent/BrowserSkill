@@ -73,6 +73,7 @@ BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器�
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
+export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 ```
 
 **Windows**（PowerShell，安装到 `~/.local/bin`）：
@@ -81,7 +82,10 @@ curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.s
 irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
 ```
 
-验证二进制：
+上面的 export 让当前 Unix shell 能找到 CLI。正在运行的 Agent 可能需要在每次 Shell
+调用中设置同样的 PATH，或使用安装后二进制的绝对路径。如果 Agent 安装后仍沿用旧 PATH，请重启 Agent。
+
+在实际使用工具的终端或 Agent 环境中验证二进制：
 
 ```bash
 bsk --version
@@ -123,33 +127,86 @@ bsk install-skill
 
 用 <kbd>Space</kbd> 选择需要安装的 Agent harness，然后按 <kbd>Enter</kbd> 安装 skill。运行 `bsk install-skill --list` 可查看 internal 变体及安装路径。
 
-安装自定义指令可运行 `bsk install-skill --harness cursor --source ./SKILL.md`。
-显式指定 `--source` 的安装始终视为自定义，即使内容与内置 skill 相同。
+非交互安装时显式指定目标 harness，例如 `bsk install-skill --harness cursor --json`。
+即使未检测到该 harness，也可显式选择。单独使用 `--yes` 会安装到所有检测到的 harness，
+一个也未检测到时会报错。
+
+安装器会复制完整技能包：`SKILL.md` 和 `references/`。入口保留核心流程与安全规则，
+Agent 只在任务需要时读取对应参考文件。
+
+安装自定义技能包可运行 `bsk install-skill --harness cursor --source ./my-skill`，
+目录中必须包含 `SKILL.md`；原来的单文件 `--source ./SKILL.md` 方式仍可使用。
+显式指定的来源路径可以是符号链接；目录包内部和安装目标的资源路径仍拒绝符号链接。
+显式指定 `--source` 始终视为自定义，即使内容与内置技能包相同。
 已有安装默认跳过，添加 `--force` 才会覆盖。
 
-daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只有文件内容仍与
-上次安装或同步时的内容一致，才继续自动更新。检测到本地编辑时会保留文件并暂停更新。
-没有内容基线的历史安装，只有与当前内置 skill 字节级一致时才自动纳入管理；此时只补齐
-来源标记，不重写 `SKILL.md`。明确的自定义安装即使内容相同，也不会被自动纳入管理。
+daemon 启动、`session start` 和 `doctor` 会检查已安装的技能包：所有受管理文件仍与
+记录的校验值一致，才会自动更新。修改或删除 `SKILL.md`、任一 reference 都会暂停整个
+技能包的更新。用户额外添加的文件会保留；新增资源遇到同名且内容不同的文件时，也会
+暂停更新。已废弃且未被修改的受管理资源会删除。更新中断后，使用同一版本技能包且未
+发现本地修改时，会继续完成更新。
 
-对于内容不同的历史文件、本地编辑或无法识别的来源标记，`doctor` 会显示 `WARN`，
-说明暂停原因及恢复方法。这类警告不会让健康检查失败（`--json` 中为 `status: "warn"`、
-`ok: true`）。其他安装或同步正在进行时，本次同步会推迟到后续再试。
+带有效校验值的旧单文件安装会自动迁移；更早没有校验值的安装，内容与已知官方历史版本
+（LF 或 CRLF 行尾）或当前入口完全一致时也会迁移。显式自定义安装始终保持自定义。无法识别的历史内容、
+本地修改、无效标记或其他版本未完成的更新，会让 `doctor` 显示 `WARN` 并给出恢复方法，
+但不会使健康检查失败（`--json` 中为 `status: "warn"`、`ok: true`）。其他安装或同步正在
+进行时，本次同步会推迟到后续再试。
 
-如需将当前指令保留为明确的自定义安装，运行
-`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`，将
-`<existing-SKILL.md>` 替换为现有文件路径。如需恢复内置 skill 并重新启用自动更新，运行
-`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖现有指令。
+如需将当前技能包保留为明确的自定义安装，运行
+`bsk install-skill --harness cursor --source <existing-skill-directory> --force`。
+如需恢复内置技能包并重新启用自动更新，运行
+`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖内置技能包
+提供的文件，包括 references。采用上一版校验值机制的 CLI 无法识别新的包标记，因此会保留这些安装，不会覆盖。
 
-其他支持 Shell 的 Agent harness 也可使用 BrowserSkill，但需手动将 [`skill/SKILL.md`](skill/SKILL.md) 复制到对应 skills 目录下的 `browser-skill/SKILL.md`。DeepSeek Harness 走独立插件，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
+其他支持 Shell 的 Agent harness 可手动将整个
+[`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) 目录复制到对应 skills 目录，命名为
+`browser-skill/`，保留 `references/`。通用版只维护这一套源文件。
+DeepSeek Harness 使用插件内独立的技能包，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
+
+#### 4. 验证连接
+
+运行 `bsk doctor` 并按提示处理，打开扩展弹窗确认已连接。测试浏览器操作前，说明警告并解决失败项。
+未安装任何 skill 时，doctor 仍可能通过（该项为 `N/A`）；skill 是否被发现需要单独验证。
 
 </details>
 
-启动一个新的 Agent 会话，写一条需要使用浏览器的 prompt，例如：
+启动一个新的 Agent 会话，确认 harness 中可用 `browser-skill`，再让它打开
+`https://example.com` 并总结页面。对于支持斜杠命令调用 skill 的 harness，例如：
 
 ```text
 /browser-skill open example.com and summarize what is on the page.
 ```
+
+首次使用验证应成功读取页面，并停止本次 BrowserSkill session。
+如果找不到 skill，先检查目标 harness 和安装路径，再重试。
+
+### 升级
+
+默认本地配置下，先结束正在执行的浏览器任务，再更新：
+
+```sh
+bsk update --yes
+```
+
+如果 Windows 提示更新已暂存（staged），请等待替换完成后再检查 `bsk --version`。
+
+该命令安装新版本时，会以默认启动配置重启正在运行的 daemon。
+如果通过安装脚本替换了二进制，则在任务结束后运行 `bsk daemon restart`，重启已有 daemon。
+
+对于自定义端口、宿主管理的沙盒 daemon 或远程服务器，先在所属宿主环境或进程管理器中停止 daemon，
+运行 `bsk update --yes --no-restart-daemon`，再以原有参数和 `BSK_HOME` 在那里启动。
+维护期间，在 Agent 命令中设置 `BSK_AUTO_START=0`；详见[沙盒](docs/sandboxed-agents.md)和
+[远程连接](docs/remote-extension-connection.md)配置说明。
+
+通过浏览器商店更新扩展；开发时加载的解压版本需要重新构建并重新加载。
+商店版本可能晚于 CLI 上线。使用 `bsk --version` 和 `bsk status` 核对 CLI、daemon 和扩展版本，
+再运行 `bsk doctor`。长截图等新功能需要匹配的版本。
+[DSH 插件需要单独更新](#deepseek-harness-插件)，并重启对应 profile。
+受管理的 CLI skill 会在 daemon 启动、`session start` 或 `doctor` 时同步；本地编辑和自定义 skill 会保留。
+启动新的 Agent 会话以加载更新后的指令。
+
+**升级到 0.3.0：** `--unattended`、`tab borrow --no-confirm` 和 `BSK_REQUEST_HELP=off`
+不再跳过确认或关闭人工协助。请在扩展中选择下文说明的对应设置。版本变化见[更新日志](CHANGELOG.md)。
 
 ### 自动化设置与无人值守
 
@@ -168,6 +225,9 @@ daemon 启动、`session start` 和 `doctor` 会检查已安装的 skill：只�
 允许人工协助意味着 `request-help` 可用，不代表每个浏览器操作都必须先请求许可；任务授权和宿主审批仍然有效。
 
 正常使用 `bsk session start`；需要后台打开 Agent Window 时添加 `--no-focus`。
+需要指定 Chrome Profile 时，在目标 Profile 的扩展弹窗中点击“复制此 Profile 的指令”，
+再发给 Agent。指令通过 `--browser` 为每个新会话固定实例，即使只有一个浏览器在线也不省略。
+详见[浏览器 Profile 选择](docs/browser-profiles.md)。
 无人值守由用户在插件中关闭相应开关。`--unattended`、`tab borrow --no-confirm`、
 `BSK_REQUEST_HELP=off` 保留兼容识别，但已弃用，不能覆盖插件开关。CLI 使用这些输入时会输出说明，
 Daemon 也会为自身继承的旧环境设置记录说明。原先只依靠这些输入避免等待的脚本，现在需要遵循浏览器设置。

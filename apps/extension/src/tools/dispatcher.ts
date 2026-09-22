@@ -43,6 +43,7 @@ import type {
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
 import { auditContext } from "./audit-context";
+import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
@@ -351,6 +352,14 @@ export class ToolDispatcher {
         message: "Remote connections do not support upload or download",
       };
     }
+    const preparationError = await prepareBackgroundExecution(
+      this.sessions,
+      req,
+      this.cdp,
+      chromeTabsApi,
+      signal,
+    );
+    if (preparationError) return preparationError;
     switch (req.method) {
       case "tool.session_start":
         return handleSessionStart(this.sessions, req.params as SessionStartParams, {
@@ -375,6 +384,7 @@ export class ToolDispatcher {
       case "tool.tab_create": {
         const result = await handleTabCreate(this.sessions, req.params as TabCreateParams, {
           signal,
+          cdp: this.cdp,
         });
         if (!isRpcError(result)) {
           this.onAgentTabClaimed?.(result.tab_id, result.window_id);
@@ -393,6 +403,7 @@ export class ToolDispatcher {
         const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,
           approveBorrow: this.approveBorrow,
+          cdp: this.cdp,
         });
         if (!isRpcError(result)) {
           this.onAgentTabClaimed?.(result.tab_id, result.agent_window_id);
@@ -515,7 +526,9 @@ export class ToolDispatcher {
             handleNavigate(
               this.sessions,
               req.params as NavigateParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -526,7 +539,9 @@ export class ToolDispatcher {
             handleNavigateBack(
               this.sessions,
               req.params as NavigateBackParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -537,7 +552,9 @@ export class ToolDispatcher {
             handleNavigateForward(
               this.sessions,
               req.params as NavigateForwardParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );
@@ -548,7 +565,9 @@ export class ToolDispatcher {
             handleReload(
               this.sessions,
               req.params as ReloadParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp
+                ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, backgroundExecution: true }
+                : undefined,
             ),
           signal,
         );

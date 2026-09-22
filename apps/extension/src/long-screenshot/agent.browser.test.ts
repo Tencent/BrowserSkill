@@ -54,6 +54,15 @@ async function withAgent(
       return;
     }
     res.setHeader("Content-Type", "text/html");
+    if (req.url?.startsWith("/ref-")) {
+      const name = req.url === "/ref-before" ? "Original action" : "Different action";
+      res.end(
+        "<!doctype html><button>" +
+          name +
+          '</button><script>window.clicks=[];document.querySelector("button").onclick=e=>clicks.push(e.isTrusted)</script>',
+      );
+      return;
+    }
     res.end(
       fixture(req.url?.includes("large") ? 34_003 : 2603) +
         `
@@ -237,7 +246,21 @@ async function harness(
     evaluate<string[]>(
       `(async()=>{try {const d=await(await navigator.storage.getDirectory()).getDirectoryHandle('long-screenshots');return (await Array.fromAsync(d.keys())).filter(n=>n.startsWith('agent-'));}catch{return []}})()`,
     );
-  return { directory, baseUrl, session, command, ok, onPage, restored, scratch, rpc };
+  const setWindowState = (state: "minimized" | "normal") =>
+    evaluate(`chrome.windows.update(${started.agent_window_id},${JSON.stringify({ state })})`);
+  return {
+    directory,
+    baseUrl,
+    session,
+    tabId,
+    setWindowState,
+    command,
+    ok,
+    onPage,
+    restored,
+    scratch,
+    rpc,
+  };
 }
 
 function verifyPng(png: Buffer, expectedHeight: number, scale = 1) {
@@ -281,6 +304,66 @@ function verifyPng(png: Buffer, expectedHeight: number, scale = 1) {
 describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME || !process.env.BSK_LONG_SCREENSHOT_CLI)(
   "Agent full-page screenshots",
   () => {
+    it(
+      "rejects old refs after document navigation and accepts a fresh observation",
+      () =>
+        withAgent(async (h) => {
+          const session = ["--session", h.session];
+          for (let i = 0; i < 3; i++) {
+            await h.ok(["navigate", h.baseUrl + "/ref-before", ...session]);
+            const observation = await h.ok(["observe", ...session]);
+            const ref = observation.text.match(/@e\d+/)[0];
+            await h.ok(["navigate", h.baseUrl + "/ref-after", ...session]);
+            const stale = await h.command(["click", ref, ...session]).done;
+            expect(stale.code).not.toBe(0);
+            expect(stale.stdout + stale.stderr).toContain("ref_not_found");
+            expect(await h.onPage("window.clicks")).toEqual([]);
+            const fresh = (await h.ok(["observe", ...session])).text.match(/@e\d+/)[0];
+            await h.ok(["click", fresh, ...session]);
+            expect(await h.onPage("window.clicks")).toEqual([true]);
+          }
+        }),
+      90_000,
+    );
+
+    it(
+      "rejects hidden full-page capture without changing the page and recovers in the same session",
+      () =>
+        withAgent(async (h) => {
+          const session = ["--session", h.session];
+          const target = [...session, "--tab-id", String(h.tabId)];
+          const original = await h.restored();
+          await h.setWindowState("minimized");
+          await poll(async () => (await h.onPage("document.visibilityState")) === "hidden");
+          expect(await h.onPage("document.visibilityState")).toBe("hidden");
+          const rejected = await h.command([
+            "screenshot",
+            "--full-page",
+            ...target,
+            "--out",
+            path.join(h.directory, "hidden.png"),
+          ]).done;
+          expect(rejected.code).not.toBe(0);
+          expect(rejected.stdout + rejected.stderr).toContain("page_hidden");
+          expect(await h.restored()).toEqual(original);
+          expect(await h.scratch()).toEqual([]);
+          await h.setWindowState("normal");
+          await poll(async () => (await h.onPage("document.visibilityState")) === "visible");
+          const viewport = await h.ok([
+            "screenshot",
+            ...target,
+            "--out",
+            path.join(h.directory, "recovered-viewport.png"),
+          ]);
+          expect(viewport.height).toBeGreaterThan(0);
+          const out = path.join(h.directory, "recovered-full.png");
+          await h.ok(["screenshot", "--full-page", ...target, "--out", out]);
+          verifyPng(await readFile(out), 2634);
+          expect(await h.restored()).toEqual(original);
+        }),
+      120_000,
+    );
+
     it.each([1, 2])(
       "captures exact full-page pixels at scale %i through the CLI and releases all export files",
       (scale) =>
@@ -311,6 +394,33 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_CHROME || !process.env.BSK_LONG
           expect(viewport.height).toBeLessThan(reply.height);
           expect(viewport.width).toBeGreaterThan(0);
         }, scale),
+      120_000,
+    );
+
+    it(
+      "captures the current range when the loading indicator never clears",
+      () =>
+        withAgent(async (h) => {
+          const original = await h.restored();
+          await h.onPage(
+            `document.body.insertAdjacentHTML('beforeend', '<span style="position:absolute;top:2500px;left:500px">加载中...</span>')`,
+          );
+          const out = path.join(h.directory, "current.png");
+          const reply = await h.ok([
+            "screenshot",
+            "--session",
+            h.session,
+            "--full-page",
+            "--scope",
+            "current",
+            "--out",
+            out,
+          ]);
+          expect(reply.scope).toBe("current");
+          verifyPng(await readFile(out), 2634, 1);
+          expect(await h.restored()).toEqual(original);
+          expect(await h.scratch()).toEqual([]);
+        }),
       120_000,
     );
 

@@ -6,6 +6,7 @@ import { attachDialogs, markDialogCursor } from "./dialogs";
 import { cdpError, rpcError } from "./errors";
 import { resolveNodeGeometry } from "./frame-geometry";
 import { clipPolygon, polygonArea, polygonCentroid, rectPolygon } from "./geometry";
+import { waitForInputPaint, withInputReady } from "./input-readiness";
 import { modifiersBitfield, resolveBackendNode } from "./interaction";
 import { scrollVisibleBounds } from "./scroll-visibility";
 import {
@@ -121,39 +122,53 @@ export async function handleWheel(
     if (isRpcError(target)) return target;
     const denied = enforceAgentWindow(ctx, target, "wheel");
     if (denied) return denied;
-    const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
-    cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    const point = await resolveWheelPoint(cdp, ctx, target, params, deadline);
-    checkActive();
-    if (isRpcError(point)) return point;
-
-    if (deps.bypassOverlay) {
-      bypassTab = target.tabId;
-      await deps.bypassOverlay(target.tabId, true);
+    // Reject stale refs before changing hidden-page focus or rendering state.
+    if (params.ref) {
+      const node = await resolveBackendNode(cdp, ctx, target, { ref: params.ref }, "wheel");
+      if (isRpcError(node)) return node;
     }
-    const modifiers = modifiersBitfield(params.modifiers);
-    await cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseMoved",
-      x: point.x,
-      y: point.y,
-      modifiers,
-    });
-    await cdp.send(target.tabId, "Input.dispatchMouseEvent", {
-      type: "mouseWheel",
-      x: point.x,
-      y: point.y,
-      deltaX,
-      deltaY,
-      modifiers,
-    });
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: point.usedRef,
-      used_selector: point.usedSelector,
-      x: point.x,
-      y: point.y,
-      delta_x: deltaX,
-      delta_y: deltaY,
+    return await withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
+      const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
+      cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      const point = await resolveWheelPoint(cdp, ctx, target, params, deadline);
+      checkActive();
+      if (isRpcError(point)) return point;
+
+      if (deps.bypassOverlay) {
+        bypassTab = target.tabId;
+        await deps.bypassOverlay(target.tabId, true);
+      }
+      const modifiers = modifiersBitfield(params.modifiers);
+      await cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: point.x,
+        y: point.y,
+        modifiers,
+      });
+      // markSent checks cancellation/deadline. Dispatch directly so a second
+      // guard cannot reject between recording the attempt and sending the wheel.
+      input.markSent();
+      await deps.cdp.send(target.tabId, "Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: point.x,
+        y: point.y,
+        deltaX,
+        deltaY,
+        modifiers,
+      });
+      // Wheel acknowledgement precedes compositor scrolling. Keep the hidden renderer
+      // awake until its resulting frame is available, then restore focus.
+      if (input.hidden) await waitForInputPaint(cdp, target.tabId, deps.signal, deadline);
+      checkActive();
+      return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+        tab_id: target.tabId,
+        used_ref: point.usedRef,
+        used_selector: point.usedSelector,
+        x: point.x,
+        y: point.y,
+        delta_x: deltaX,
+        delta_y: deltaY,
+      });
     });
   } catch (error) {
     if (deps.signal?.aborted) return { code: "cancelled", message: "wheel aborted" };

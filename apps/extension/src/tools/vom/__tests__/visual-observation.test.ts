@@ -461,7 +461,7 @@ it("observe discovers and registers visual refs from its single production captu
   const index = (s: string) => strings.indexOf(s);
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },
@@ -702,7 +702,7 @@ it.each([
   const f = fixture(35, 100);
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },
@@ -866,7 +866,7 @@ it("preserves DOM labels for audit on the first and continuation pages", async (
   f.output.render = prepareObservationRender(f.scene);
   const manager = new SessionManager({
     agentWindow: {
-      create: async () => 100,
+      create: async () => ({ windowId: 100, initialTabIds: [] }),
       remove: async () => {},
       ensureActiveTab: async () => 4,
     },

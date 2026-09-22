@@ -53,7 +53,7 @@ function fakeAgentWindow(ids: number[]) {
     create: vi.fn(async () => {
       const id = ids[i++];
       if (id === undefined) throw new Error("ran out of fake ids");
-      return id;
+      return { windowId: id, initialTabIds: [] };
     }),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
@@ -2748,12 +2748,15 @@ describe("handleSnapshot", () => {
     );
   });
 
-  it("hovers the page only after the accessibility tree has been captured", async () => {
+  it.each([
+    false,
+    true,
+  ])("does not publish refs if navigation interrupts capture (%s)", async (navigated) => {
     // Hovering can open menus and reflow the page. Probing between the DOM and
     // AX captures would leave the two halves of one observation describing the
     // page on either side of that change.
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    await sm.start("aa11");
+    const ctx = await sm.start("aa11");
     const root: CdpAxNode = {
       nodeId: "1",
       role: { type: "role", value: "RootWebArea" },
@@ -2774,7 +2777,10 @@ describe("handleSnapshot", () => {
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
       methodOrder.push(method);
       if (method === "Accessibility.enable") return {};
-      if (method === "Accessibility.getFullAXTree") return { nodes: [root, button] };
+      if (method === "Accessibility.getFullAXTree") {
+        if (navigated) ctx.refStore.invalidateTab(4);
+        return { nodes: [root, button] };
+      }
       if (method === "Page.getLayoutMetrics") {
         return {
           visualViewport: { clientWidth: 1000 },
@@ -2847,6 +2853,11 @@ describe("handleSnapshot", () => {
       },
     );
 
+    if (navigated) {
+      expect(res).toMatchObject({ code: "not_found", data: { reason: "ref_not_found" } });
+      expect(ctx.refStore.isEmpty()).toBe(true);
+      return;
+    }
     if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
     const firstHover = methodOrder.indexOf("Input.dispatchMouseEvent");
     expect(firstHover).toBeGreaterThan(-1);
@@ -4395,4 +4406,147 @@ describe("handleGetHtml", () => {
     expect(res.byte_size).toBe(10_000);
     expect(res.html.length).toBe(100);
   });
+});
+
+describe("controlled viewport screenshot routing", () => {
+  it.each([
+    false,
+    true,
+  ])("uses the exact controlled target instead of the window surface (active=%s)", async (active) => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await manager.start("aa11");
+    ctx.agentCreatedTabs.add(7);
+    const capture = vi.fn(async () => {
+      throw new Error("Window capture must not run");
+    });
+    const { cdp, sent } = makeFakeCdp({
+      "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+      "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+      "Runtime.evaluate": () => ({
+        result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+      }),
+      "Runtime.releaseObjectGroup": () => ({}),
+      "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+    });
+    cdp.getAttachmentId = () => "attachment";
+    let nowActive = active;
+    const deps = makeScreenshotDeps({
+      cdp,
+      captureVisibleTab: capture,
+      get: vi.fn(async () => ({ id: 7, windowId: 100, active: nowActive }) as chrome.tabs.Tab),
+    });
+    deps.sendToTab = async () => {
+      nowActive = false;
+    };
+    const result = await handleScreenshot(manager, { session_id: "aa11", tab_id: 7 }, deps);
+    expect(result).toMatchObject({ tab_id: 7, image_base64: TINY_PNG, width: 1, height: 1 });
+    expect(capture).not.toHaveBeenCalled();
+    expect(sent.find((call) => call.method === "Page.captureScreenshot")?.params).toMatchObject({
+      captureBeyondViewport: false,
+    });
+  });
+
+  it("does not fall back to the window when controlled capture has no CDP", async () => {
+    const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await manager.start("aa11");
+    ctx.agentCreatedTabs.add(7);
+    const capture = vi.fn();
+    expect(
+      await handleScreenshot(
+        manager,
+        { session_id: "aa11", tab_id: 7 },
+        makeScreenshotDeps({ captureVisibleTab: capture }),
+      ),
+    ).toMatchObject({ code: "cdp_failed", data: { reason: "screenshot_capture_failed" } });
+    expect(capture).not.toHaveBeenCalled();
+  });
+});
+
+it.each([
+  "borrowed-default",
+  "background-explicit",
+] as const)("keeps screenshot targeting compatible with PR249 (%s)", async (mode) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  const ctx = await manager.start("aa11");
+  ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
+  ctx.agentCreatedTabs.add(8);
+  const capture = vi.fn();
+  const { cdp } = makeFakeCdp({
+    "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+    "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+    "Runtime.evaluate": () => ({
+      result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+    }),
+    "Runtime.releaseObjectGroup": () => ({}),
+    "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+  });
+  cdp.getAttachmentId = () => "attachment";
+  let activeTab = mode === "borrowed-default" ? 7 : 8;
+  const tab = (id: number) => ({ id, windowId: 100, active: id === activeTab }) as chrome.tabs.Tab;
+  const query = vi.fn(async () => [tab(activeTab)]);
+  const deps = makeScreenshotDeps({
+    cdp,
+    get: async (id) => tab(id),
+    query,
+    captureVisibleTab: capture,
+  });
+  deps.sendToTab = async () => {
+    activeTab = 8;
+  };
+  const result = await handleScreenshot(
+    manager,
+    {
+      session_id: "aa11",
+      ...(mode === "background-explicit" ? { tab_id: 7 } : {}),
+    },
+    deps,
+  );
+  expect(result).toMatchObject({ tab_id: 7, image_base64: TINY_PNG });
+  expect(cdp.send).toHaveBeenCalledWith(7, "Page.captureScreenshot", expect.any(Object));
+  expect(capture).not.toHaveBeenCalled();
+  expect(activeTab).toBe(8);
+  if (mode === "borrowed-default")
+    expect(query).toHaveBeenCalledWith({ active: true, windowId: 100 });
+  else expect(query).not.toHaveBeenCalled();
+});
+
+it.each([
+  "returned",
+  "moved",
+  "session-ended",
+] as const)("discards a viewport result when target ownership changes during capture (%s)", async (kind) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  const ctx = await manager.start("aa11");
+  ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
+  let windowId = 100;
+  const capture = vi.fn();
+  const { cdp } = makeFakeCdp({
+    "Page.getFrameTree": () => ({ frameTree: { frame: { id: "main" } } }),
+    "Page.createIsolatedWorld": () => ({ executionContextId: 1 }),
+    "Runtime.evaluate": () => ({
+      result: { deepSerializedValue: { type: "node", value: { backendNodeId: 42 } } },
+    }),
+    "Runtime.releaseObjectGroup": () => ({}),
+    "Page.captureScreenshot": () => ({ data: TINY_PNG }),
+  });
+  cdp.getAttachmentId = () => "attachment";
+  const deps = makeScreenshotDeps({
+    cdp,
+    get: async () => ({ id: 7, windowId, active: false }) as chrome.tabs.Tab,
+    captureVisibleTab: capture,
+  });
+  const phases: string[] = [];
+  deps.sendToTab = async (_id, message) => {
+    phases.push(message.phase);
+    if (message.phase !== "end") return;
+    if (kind === "returned") ctx.borrowedTabs.delete(7);
+    if (kind === "moved") windowId = 200;
+    if (kind === "session-ended") await manager.stop("aa11");
+  };
+  expect(await handleScreenshot(manager, { session_id: "aa11", tab_id: 7 }, deps)).toMatchObject({
+    code: "not_found",
+    data: { reason: "visual_target_changed" },
+  });
+  expect(phases).toEqual(["begin", "end"]);
+  expect(capture).not.toHaveBeenCalled();
 });

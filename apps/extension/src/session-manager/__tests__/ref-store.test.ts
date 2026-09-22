@@ -50,3 +50,27 @@ describe("RefStore", () => {
     });
   });
 });
+
+describe("document invalidation", () => {
+  it("rejects old refs without disturbing another tab's refs", () => {
+    const refs = new RefStore();
+    refs.set("e1", 10, { tabId: 7 });
+    refs.set("e2", 10, { tabId: 8 });
+    refs.invalidateTab(7);
+    expect(refs.resolve("e1")).toBeNull();
+    expect(refs.resolve("e2")).toBe(10);
+    expect(refs.documentRevision(7)).toBe(1);
+    expect(refs.documentRevision(8)).toBe(0);
+    refs.set("e3", 10, { tabId: 7 });
+    expect(refs.resolve("e1")).toBeNull();
+    expect(refs.resolve("e3")).toBe(10);
+  });
+
+  it("records navigation during an in-flight first observation", () => {
+    const refs = new RefStore();
+    const revision = refs.documentRevision(7);
+    refs.invalidateTab(7);
+    expect(refs.documentRevision(7)).not.toBe(revision);
+    expect(refs.isEmpty()).toBe(true);
+  });
+});

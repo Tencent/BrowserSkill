@@ -5,6 +5,10 @@ Consolidates design §2, §3, §5, and §6.
 
 ## System diagram
 
+The diagram shows the default local setup. In [remote mode](remote-extension-connection.md),
+the CLI and daemon run on a server; the extension connects from the user's browser
+over authenticated WSS. CLI-to-daemon communication remains local IPC on the server.
+
 ```mermaid
 flowchart TB
   subgraph harness [Agent harness]
@@ -46,7 +50,8 @@ Key modules:
 
 ### bsk daemon (same binary: `bsk daemon`)
 
-- Listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
+- In local mode, listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
+- Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
 - Validates `Origin: chrome-extension://…` on handshake.
 - Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
 - **Per-session queue** serializes tool calls targeting one session.
@@ -101,6 +106,9 @@ mutation for session queueing and user-interruption gating.
 - **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
   (default 5 min) is a safety net only.
 - Multiple sessions on one browser → multiple Agent Windows, fully isolated.
+- Remote content reads and actions require task-created or explicitly borrowed tabs.
+  A page-opened popup or a user tab moved into the Agent Window does not become
+  controlled automatically; see [remote tab ownership](remote-extension-connection.md#browser-permissions-and-task-lifetime).
 
 ### tab_list scopes
 
@@ -144,14 +152,23 @@ flowchart LR
   CLI <-->|JSON protocol| T
 ```
 
-## Security (v1)
+## Connection security
 
-- Daemon and WebSocket bind to **loopback** only.
+- Local mode binds WebSocket to **loopback**. Server mode permits remote access
+  through authenticated WSS; plaintext listeners remain on loopback behind TLS
+  termination or for development.
 - Extension origin allow-list at WS upgrade.
-- No credential storage in bsk — cookies stay in the user's browser profile.
+- Website cookies stay in the user's browser profile. Remote device credentials
+  are stored in extension-origin IndexedDB; the built-in server stores credential
+  hashes in its private `BSK_HOME`. Pairing and device grants govern remote access.
 - `evaluate` restricted to Agent Window tabs in sandbox mode.
+- Operation audit, when enabled, is stored on the daemon host, including the
+  server in remote mode. See [operation audit](operation-audit.md).
 
 ### File-transfer boundary
+
+Upload and download are supported only for local connections. Remote sessions
+return `unsupported`; screenshots and other RPC content results remain available.
 
 - The invoking agent/harness decides whether a transfer is authorized and supplies the task-local source or destination path.
 - The CLI is the only component that reads an upload source or writes the final download destination. Before browser dispatch it owns rollback of partially staged uploads; after dispatch, ownership moves to the session because a transport timeout cannot prove that Chrome did not attach the file. Download output becomes visible through one atomic commit, and replacement is opt-in without a pre-delete window. The extension never receives either agent-facing path.
@@ -167,8 +184,28 @@ browser-skill/
 ├── apps/extension/       # WXT Chromium extension
 ├── crates/
 │   ├── bsk-cli/           # `bsk` binary (CLI + daemon)
+│   │   └── skill/        # Canonical CLI SKILL.md + references/
 │   └── bsk-protocol/      # Wire types + schemas
 ├── install.sh            # CLI installer (GitHub Releases)
-├── skill/SKILL.md        # Agent harness instructions
+├── packages/dsh-plugin-browserskill/skill/  # DSH SKILL.md + references/
 └── docs/                 # architecture, guides
 ```
+
+
+The two skill directories above are the only authored skill sources. The CLI build
+embeds every file from its crate-local directory without copying or modifying sources.
+Installation writes the complete package. A versioned `.bsk-source` manifest tracks
+SHA-256 checksums per file; automatic updates verify all managed files and new-path
+collisions before replacing anything. Resources precede the entry point, and a pending
+manifest records expected old/new hashes so interrupted writes can be resumed safely.
+Known historical single-file checksums in `src/skill_install/legacy-digests.txt` are
+migration data, not a third instruction source. They recognize exact LF originals
+and CRLF copies; recorded per-file checksums remain byte-exact. Frozen pre-bundle
+snapshots under `tests/fixtures/legacy-skills/` cover adoption and edit protection
+without requiring Git history during CI. Explicit custom installations opt out.
+
+The DSH build embeds only its entry point. Its npm package ships the complete `skill/`
+directory, registered with a module-relative `resourceBase` so agents can read references
+on demand regardless of their working directory. CI validates local links, entry point
+budgets, Cargo contents and the actual npm archive, including resource resolution from
+the unpacked runtime.

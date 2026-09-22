@@ -4,7 +4,6 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { armArchiveCleanup, ownerSessionIds } from "../src/archive-cleanup";
-import type { ObservationService } from "../src/observation";
 import { SessionRegistry } from "../src/sessions";
 
 /** A ctx stub carrying a session store with the given lineage headers. */
@@ -71,8 +70,7 @@ describe("SessionRegistry owner tracking", () => {
 
 describe("armArchiveCleanup", () => {
   function harness(opts: { archived?: string[] } = {}) {
-    const registry = new SessionRegistry(5);
-    const observation = { stopSession: vi.fn(async () => true) };
+    const lifecycle = { archive: vi.fn() };
     const listeners = new Set<(change: unknown) => void>();
     const ctx = {
       get: (key: string) =>
@@ -86,33 +84,22 @@ describe("armArchiveCleanup", () => {
       for (const listener of [...listeners]) listener(change);
     };
     return {
-      registry,
-      observation: observation as unknown as ObservationService,
-      stopSession: observation.stopSession,
+      archive: lifecycle.archive,
       emit,
-      arm: () =>
-        armArchiveCleanup(ctx as never, registry, observation as unknown as ObservationService),
+      arm: () => armArchiveCleanup(ctx as never, lifecycle),
     };
   }
 
-  function startOwned(registry: SessionRegistry, bskId: string, owners: string[]): void {
-    registry.reserveStart();
-    registry.completeStart({ sessionId: bskId, startedAtMs: 1 });
-    registry.trackOwner(bskId, owners);
-  }
-
-  it("stops every bsk session owned by a freshly archived conversation, until disarmed", () => {
+  it("forwards fresh archive ownership to the lifecycle manager, until disarmed", () => {
     const h = harness();
-    startOwned(h.registry, "bsk1", ["conv-a", "root"]);
-    startOwned(h.registry, "bsk2", ["conv-b"]);
     const disarm = h.arm();
     h.emit({
       domain: "workspace",
       table: "",
       value: { archivedSessionIds: ["root"] },
     });
-    expect(h.stopSession).toHaveBeenCalledTimes(1);
-    expect(h.stopSession).toHaveBeenCalledWith("bsk1");
+    expect(h.archive).toHaveBeenCalledTimes(1);
+    expect(h.archive).toHaveBeenCalledWith("root");
     // After the disposer runs the watcher is silent again.
     disarm();
     h.emit({
@@ -120,38 +107,44 @@ describe("armArchiveCleanup", () => {
       table: "",
       value: { archivedSessionIds: ["root", "conv-b"] },
     });
-    expect(h.stopSession).toHaveBeenCalledTimes(1);
+    expect(h.archive).toHaveBeenCalledTimes(1);
   });
 
   it("ignores pre-archived ids, foreign domains, and malformed frames", () => {
     const h = harness({ archived: ["old-conv"] });
-    startOwned(h.registry, "bsk1", ["old-conv"]);
-    startOwned(h.registry, "bsk2", ["conv-a"]);
     h.arm();
     // Seeded from the registry: the pre-archived id must not retro-fire.
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["old-conv"] } });
     h.emit({ domain: "settings", table: "", value: { archivedSessionIds: ["conv-a"] } });
     h.emit({ domain: "workspace", table: "rows", value: { archivedSessionIds: ["conv-a"] } });
     h.emit({ domain: "workspace", table: "", value: {} });
-    expect(h.stopSession).not.toHaveBeenCalled();
+    expect(h.archive).not.toHaveBeenCalled();
     // A genuinely new archive still fires.
     h.emit({
       domain: "workspace",
       table: "",
       value: { archivedSessionIds: ["old-conv", "conv-a"] },
     });
-    expect(h.stopSession).toHaveBeenCalledWith("bsk2");
+    expect(h.archive).toHaveBeenCalledWith("conv-a");
+  });
+
+  it("handles the host updating its registry before broadcasting the first archive", () => {
+    const options = { archived: [] as string[] };
+    const h = harness(options);
+    h.arm();
+    options.archived = ["conv-a"];
+    h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
+    expect(h.archive).toHaveBeenCalledWith("conv-a");
   });
 
   it("treats a re-archived session as fresh again after unarchive", () => {
     const h = harness();
-    startOwned(h.registry, "bsk1", ["conv-a"]);
     h.arm();
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
-    expect(h.stopSession).toHaveBeenCalledTimes(1);
+    expect(h.archive).toHaveBeenCalledTimes(1);
     // Unarchive, then re-archive: the second archival cleans up again.
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: [] } });
     h.emit({ domain: "workspace", table: "", value: { archivedSessionIds: ["conv-a"] } });
-    expect(h.stopSession).toHaveBeenCalledTimes(2);
+    expect(h.archive).toHaveBeenCalledTimes(2);
   });
 });

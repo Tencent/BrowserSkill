@@ -35,6 +35,7 @@ export type RefInput =
 export class RefStore {
   private map = new Map<string, RefEntry>();
   private generation = 0;
+  private readonly documents = new Map<number, number>();
 
   get revision(): number {
     return this.generation;
@@ -88,6 +89,24 @@ export class RefStore {
       ...(opts.cdpSessionId ? { cdpSessionId: opts.cdpSessionId } : {}),
       generation: this.generation,
     });
+  }
+
+  documentRevision(tabId: number): number {
+    return this.documents.get(tabId) ?? 0;
+  }
+
+  /** A CDP node id may be reused by a new document in the same tab. */
+  invalidateTab(tabId: number): void {
+    this.documents.set(tabId, this.documentRevision(tabId) + 1);
+    let changed = false;
+    for (const [ref, entry] of this.map) {
+      const owner = entry.kind === "dom" ? entry.tabId : entry.candidate.document.target.tabId;
+      if (owner === tabId) {
+        this.map.delete(ref);
+        changed = true;
+      }
+    }
+    if (changed) this.generation++;
   }
 
   clear(): void {

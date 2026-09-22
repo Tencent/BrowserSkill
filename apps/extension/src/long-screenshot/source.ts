@@ -1,6 +1,13 @@
 import { ScreenshotError } from "./types";
 import { waitForReply } from "./wait";
 
+export interface ScreenshotSource {
+  capture(): Promise<string>;
+  close(): Promise<void>;
+  /** Validate exposures for the Windows Agent renderer workaround. */
+  checkFreshness?: boolean;
+}
+
 /** Select a capture backend before measuring the page: attaching a debugger can
  * change the viewport through Chrome's infobar. Never switch midway through a PNG. */
 export async function openScreenshotSource(
@@ -11,8 +18,17 @@ export async function openScreenshotSource(
   allowDebugger = true,
   // Agent requests can reuse their session's debugger instead of attaching a
   // second owner. Popup captures keep the standalone attachment below.
-  fallback?: () => Promise<{ capture(): Promise<string>; close(): Promise<void> }>,
-) {
+  ownedSource?: () => Promise<ScreenshotSource>,
+): Promise<ScreenshotSource> {
+  // Limit this workaround to Windows Agent captures. Other platforms and
+  // popup captures retain the working surface source and its fallback policy.
+  if (allowDebugger && ownedSource) {
+    const platform = await waitForReply(chrome.runtime.getPlatformInfo(), signal);
+    if (platform.os === "win") {
+      await checkTab();
+      return { ...(await ownedSource()), checkFreshness: true };
+    }
+  }
   let lastShot = Date.now();
   try {
     // A short probe keeps ordinary captures free of debugger attachments, while
@@ -33,7 +49,7 @@ export async function openScreenshotSource(
     if (!allowDebugger) throw new ScreenshotError("unavailable");
   }
   await checkTab();
-  if (fallback) return fallback();
+  if (ownedSource) return ownedSource();
   const target = { tabId };
   const attaching = chrome.debugger.attach(target, "1.3");
   try {

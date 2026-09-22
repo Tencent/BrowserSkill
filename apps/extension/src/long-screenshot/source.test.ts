@@ -5,12 +5,15 @@ const native = vi.fn();
 const attach = vi.fn();
 const detach = vi.fn();
 const sendCommand = vi.fn();
+const platform = vi.fn();
 beforeEach(() => {
+  platform.mockReset().mockResolvedValue({ os: "linux" });
   native.mockReset().mockResolvedValue("data:image/png;base64,native");
   attach.mockReset().mockResolvedValue(undefined);
   detach.mockReset().mockResolvedValue(undefined);
   sendCommand.mockReset().mockResolvedValue({ data: "renderer" });
   vi.stubGlobal("chrome", {
+    runtime: { getPlatformInfo: platform },
     tabs: { captureVisibleTab: native },
     debugger: { attach, detach, sendCommand },
   });
@@ -21,7 +24,8 @@ afterEach(() => {
 });
 
 describe("screenshot backends", () => {
-  it("keeps a working window capture free of debugger attachments", async () => {
+  it.each(["win", "mac", "linux"])("keeps popup surface capture unchanged on %s", async (os) => {
+    platform.mockResolvedValue({ os });
     vi.useFakeTimers();
     const source = await openScreenshotSource(4, 1, new AbortController().signal, async () => {});
     const shot = source.capture();
@@ -30,6 +34,8 @@ describe("screenshot backends", () => {
     await source.close();
     expect(attach).not.toHaveBeenCalled();
     expect(detach).not.toHaveBeenCalled();
+    expect(platform).not.toHaveBeenCalled();
+    expect(source.checkFreshness).toBeUndefined();
   });
 
   it("falls back before page measurement and releases its own attachment", async () => {
@@ -90,5 +96,51 @@ describe("screenshot backends", () => {
     await assertion;
     complete();
     await vi.waitFor(() => expect(detach).toHaveBeenCalledExactlyOnceWith({ tabId: 4 }));
+  });
+});
+
+describe("agent screenshot source", () => {
+  it.each(["mac", "linux"])("retains a working surface source on %s", async (os) => {
+    platform.mockResolvedValue({ os });
+    vi.useFakeTimers();
+    const owned = vi.fn(async () => ({ capture: async () => "renderer", close: async () => {} }));
+    const source = await openScreenshotSource(
+      4,
+      1,
+      new AbortController().signal,
+      async () => {},
+      true,
+      owned,
+    );
+    const pending = source.capture();
+    await vi.advanceTimersByTimeAsync(600);
+    expect(await pending).toContain("native");
+    expect(native).toHaveBeenCalledTimes(2);
+    expect(owned).not.toHaveBeenCalled();
+    expect(attach).not.toHaveBeenCalled();
+    expect(source.checkFreshness).toBeUndefined();
+    await source.close();
+  });
+
+  it("uses the owned renderer and frame validation on Windows", async () => {
+    platform.mockResolvedValue({ os: "win" });
+    native.mockResolvedValue("stale");
+    const capture = vi.fn(async () => "current");
+    const close = vi.fn(async () => {});
+    const check = vi.fn(async () => {});
+    const source = await openScreenshotSource(
+      1,
+      2,
+      new AbortController().signal,
+      check,
+      true,
+      async () => ({ capture, close }),
+    );
+    expect(await source.capture()).toBe("current");
+    expect(native).not.toHaveBeenCalled();
+    expect(source.checkFreshness).toBe(true);
+    expect(check).toHaveBeenCalledOnce();
+    await source.close();
+    expect(close).toHaveBeenCalledOnce();
   });
 });

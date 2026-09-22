@@ -614,11 +614,32 @@ function collectSameContainerContext(
   let guard = 0;
   while (parentId !== null && guard <= state.parentMap.size) {
     const siblings = state.children.get(parentId) ?? [];
-    for (const sibling of siblings) {
-      if (sibling.id === childId) break;
-      collectWeakLabelsFromSubtree(sibling, node, nodeName, state, labels);
-      while (labels.length > MAX_HANDLE_CONTEXT_ITEMS) labels.shift();
+    const end = state.siblingIndex.get(childId) ?? siblings.length;
+    let cache = state.siblingContextCache.get(parentId);
+    if (!cache) {
+      cache = new Map();
+      state.siblingContextCache.set(parentId, cache);
     }
+    // The subtree collector depends on scope, target name and incoming labels.
+    // Include all three so descendants arriving from different containers retain
+    // the original context semantics. DFS visits sibling prefixes in order.
+    const key = JSON.stringify([node.contextScopeId, nodeName, labels]);
+    let prefix = cache.get(key);
+    if (!prefix || prefix.nextIndex > end) prefix = { nextIndex: 0, labels: [...labels] };
+    for (; prefix.nextIndex < end; prefix.nextIndex++) {
+      collectWeakLabelsFromSubtree(
+        siblings[prefix.nextIndex],
+        node,
+        nodeName,
+        state,
+        prefix.labels,
+      );
+      while (prefix.labels.length > MAX_HANDLE_CONTEXT_ITEMS) prefix.labels.shift();
+    }
+    labels.splice(0, labels.length, ...prefix.labels);
+    // Bound retained variants on pages with many distinct action names.
+    if (!cache.has(key) && cache.size >= 64) cache.delete(cache.keys().next().value!);
+    cache.set(key, prefix);
 
     const parent = state.nodesById.get(parentId);
     if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
@@ -713,6 +734,10 @@ function renderNodeLine(
   const rawValue = cleaned(node.value);
   const role = normalizedRole(node);
   const fillable = ["textbox", "searchbox"].includes(role);
+  if (node.disabled) line += " [disabled]";
+  if (node.checked !== undefined) {
+    line += ` [${node.checked === "mixed" ? "mixed" : node.checked ? "checked" : "unchecked"}]`;
+  }
   if (fillable) {
     line += ` [${node.inputState ?? (rawValue === undefined ? "empty" : "filled")}]`;
   }
@@ -787,6 +812,8 @@ interface RenderState {
   redactValues: boolean;
   truncated: boolean;
   children: Map<number | null, VomNode[]>;
+  siblingIndex: Map<number, number>;
+  siblingContextCache: Map<number, Map<string, { nextIndex: number; labels: string[] }>>;
   parentMap: Map<number, number | null>;
   nodesById: Map<number, VomNode>;
   domContextIndex: DomContextIndex;
@@ -903,8 +930,15 @@ function createRenderState(
   activeScopeBlocks: ActiveScopeBlock[],
 ): RenderState {
   const children = buildChildren(nodes);
+  const siblingIndex = new Map<number, number>();
+  for (const siblings of children.values()) {
+    for (let index = 0; index < siblings.length; index++)
+      siblingIndex.set(siblings[index].id, index);
+  }
   const state: RenderState = {
     visualAncestors: new Set(),
+    siblingIndex,
+    siblingContextCache: new Map(),
     lines: [...initialLines],
     refs: [],
     nextRef: 1,

@@ -11,7 +11,7 @@ import { handleUpload } from "../upload";
 function sessions() {
   return new SessionManager({
     agentWindow: {
-      create: vi.fn(async () => 100),
+      create: vi.fn(async () => ({ windowId: 100, initialTabIds: [] })),
       remove: vi.fn(async () => {}),
       ensureActiveTab: vi.fn(async () => 1),
     },

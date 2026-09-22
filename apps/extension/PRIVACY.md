@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** September 14, 2026
+**Last updated:** September 15, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -22,7 +22,7 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 
 | Category | What is accessed | Why |
 |---|---|---|
-| **Web page content** | The DOM, accessibility tree, HTML, and visible-tab screenshots of pages opened in the BrowserSkill-controlled "Agent Window," or in user tabs the user explicitly approves for borrowing. | Required so the AI agent can read pages, locate elements, and verify results. |
+| **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in the "Agent Window," tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Tab and window metadata** | Tab IDs, URLs, titles and window IDs, including user tabs listed to select a tab for borrowing. | Required to target automation commands at the correct tab/window. |
 | **Local extension storage** | A randomly generated 8-character instance ID, an optional user-supplied label, feature preferences including the audit toggle, and optionally a paired endpoint and device credential. | Used to recognize this browser instance and restore user settings. |
@@ -41,12 +41,15 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 
 The Extension requests the following Chrome permissions. Each is used solely for the single purpose described above.
 
-- **`debugger`** — Attach the Chrome DevTools Protocol to the Agent Window so the agent can observe and interact with pages. Used only on tabs explicitly under BrowserSkill's control.
+- **`debugger`** — Attach the Chrome DevTools Protocol to tabs selected for automation or user-initiated capture, so BrowserSkill can observe, interact with, and capture those pages.
+- **`activeTab`** — Allow temporary access to the active tab when the user invokes the Extension, for user-initiated Quick Actions.
+- **`scripting`** — Inject the full-page screenshot helper into the selected page when it is missing, such as after an extension reload.
+- **`webNavigation`** — Track page navigation and frames so captures, recordings, and human-help completion checks follow the correct document.
 - **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
 - **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
 - **`alarms`** — Periodically wake the service worker to keep the selected connection alive and renew remote device authorization.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the selected WebSocket connection after the machine wakes. No idle data is stored or transmitted.
-- **`notifications`** — Show a system notification to obtain user approval before the agent borrows a user-owned tab.
+- **`notifications`** — Show a system notification to obtain user approval before borrowing a user-owned tab when browser confirmation is enabled.
 - **`downloads`** — Correlate and route the one browser download initiated by an active `bsk download` command. If that claimed transaction fails, BrowserSkill cancels an in-progress file or removes its completed temporary browser file. It is not used to enumerate download history or alter unclaimed downloads.
 - **`storage`** — Persist a random instance ID, optional label, and feature preferences in `chrome.storage.local`. Remote credentials are kept separately in extension-origin IndexedDB.
 - **Host permission `<all_urls>`** — Inject a small status overlay (showing "Agent Active") on pages controlled by the agent, and enable automation across whatever sites the user directs the agent to. Remote connections also use this permission for the selected endpoint. Remote page-content access requires a task-created or explicitly borrowed tab.
@@ -74,7 +77,7 @@ Users can at any time:
 - Uninstall the Extension from `chrome://extensions`, which removes extension storage. Audit files on the daemon host and exported copies must be deleted separately.
 - Turn operation audit off in Quick Features to stop collecting new operations while retaining existing history. Previously recorded tasks still receive their final lifecycle status.
 - Close the Agent Window to stop all agent automation immediately.
-- Deny tab-borrow notification prompts to keep their existing tabs off-limits.
+- Enable confirmation before borrowing and deny tab-borrow prompts to keep existing tabs off-limits.
 - Disable the connection, choose Local connection, or stop the selected daemon to disconnect.
 - Revoke a paired device from the server with `bsk daemon revoke DEVICE_ID`, or use the gateway operator’s revocation controls.
 

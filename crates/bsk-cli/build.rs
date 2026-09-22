@@ -1,32 +1,53 @@
-//! Keep the packaged `skill/SKILL.md` in sync with the repo-root skill during dev builds.
+//! Embed the canonical skill directory, including resources, without modifying sources.
 
-use std::env;
-use std::fs;
-use std::path::PathBuf;
+use std::{env, fs, path::Path};
 
-fn main() {
-    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let src = manifest.join("../../skill/SKILL.md");
-    let dst = manifest.join("skill/SKILL.md");
-
-    println!("cargo:rerun-if-changed={}", src.display());
-    println!("cargo:rerun-if-changed=build.rs");
-
-    if !src.is_file() {
-        // `cargo package` on crates.io ships `skill/SKILL.md` committed in-tree.
-        return;
-    }
-
-    // The repo-root skill may be a symlink to the packaged skill.
-    // Avoid copying a file onto itself through the symlink.
-    if let (Ok(src_real), Ok(dst_real)) = (src.canonicalize(), dst.canonicalize()) {
-        if src_real == dst_real {
-            return;
+fn collect(root: &Path, dir: &Path, files: &mut Vec<String>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
+    for entry in fs::read_dir(dir).expect("read skill directory") {
+        let entry = entry.expect("read skill entry");
+        let kind = entry.file_type().expect("read skill file type");
+        let path = entry.path();
+        if kind.is_dir() {
+            collect(root, &path, files);
+        } else {
+            assert!(kind.is_file(), "skill resources must be regular files");
+            let name = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace('\\', "/");
+            assert!(
+                !name.split('/').any(|part| part.starts_with('.')),
+                "hidden skill resource"
+            );
+            files.push(name);
         }
     }
+}
 
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).expect("create skill/ directory");
+fn main() {
+    let manifest = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let root = Path::new(&manifest).join("skill");
+    let mut files = Vec::new();
+    collect(&root, &root, &mut files);
+    files.sort();
+    assert!(
+        files.iter().any(|name| name == "SKILL.md"),
+        "missing SKILL.md"
+    );
+    let mut output = String::from("pub const BUNDLED_FILES: &[(&str, &[u8])] = &[\n");
+    for name in files {
+        output.push_str(&format!(
+            "({name:?}, include_bytes!({:?})),\n",
+            root.join(&name)
+        ));
     }
-    fs::copy(&src, &dst).expect("sync skill/SKILL.md from repo root");
+    output.push_str("];\n");
+    fs::write(
+        Path::new(&env::var("OUT_DIR").unwrap()).join("skill_bundle.rs"),
+        output,
+    )
+    .expect("generate embedded skill bundle");
 }

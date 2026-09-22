@@ -1,9 +1,11 @@
 // Browser skill injection: registration wiring, catalog content, progressive-load
 // weight, and silent degradation without the skill seam.
 
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import { Context } from "@deepseek-ai/cordis";
 import { createScope, scopeTarget } from "@deepseek-ai/dsh-scope";
-import { SkillRegistry } from "@deepseek-ai/dsh-skill";
+import { renderSkillContent, SkillRegistry } from "@deepseek-ai/dsh-skill";
 import { describe, expect, it } from "vitest";
 import { armAgentScopedBskSkill, registerBskSkill } from "../src/skill";
 
@@ -50,7 +52,21 @@ describe("registerBskSkill", () => {
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
-    expect(content.length).toBeLessThan(7_000);
+    expect(content.length).toBeLessThan(4_500);
+    const base = skill.resourceBase as { kind: string; path: string };
+    expect(base.kind).toBe("directory");
+    expect(isAbsolute(base.path)).toBe(true);
+    const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
+    expect(new Set(references).size).toBe(4);
+    for (const path of references) {
+      const reference = readFileSync(join(base.path, path), "utf8");
+      expect(reference.length).toBeGreaterThan(0);
+      expect(content).not.toContain(reference.trim());
+    }
+    expect(readFileSync(join(base.path, "references/tabs-and-profiles.md"), "utf8")).toContain(
+      'browser_session({ action: "start", browser: "<verified-instance-id>" })',
+    );
+    expect(content).toMatch(/Never omit\s+`browser` or substitute another instance/);
     expect(content).toContain("[visual:screenshot]");
     expect(content).toContain("nextCursor");
     expect(skill.source).toBe("bundled");
@@ -130,6 +146,9 @@ describe("armAgentScopedBskSkill", () => {
     expect(after?.content).toMatch(/All browser work\s+must use the injected tools directly/);
     expect(after?.content).not.toMatch(/\bbsk\b/i);
     expect(after?.source).toBe("bundled");
+    expect(after?.resourceBase?.kind).toBe("directory");
+    expect(renderSkillContent(after!)).toContain("Base directory for this skill:");
+    expect(renderSkillContent(after!)).toContain("Load referenced resources only as needed.");
 
     disarm();
     await agentScope.dispose();

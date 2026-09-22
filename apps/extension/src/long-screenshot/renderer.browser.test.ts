@@ -24,14 +24,16 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
       { scale: 2, height: 2603, lazy: false },
       { scale: 1, height: 2190, lazy: false },
       { scale: 1, height: 488, lazy: false },
+      { scale: 1, height: 2603, lazy: false, current: true },
       { scale: 1, height: 2603, lazy: true },
       { scale: 1.25, height: 2603, lazy: false, delayedBatches: 2 },
       { scale: 2, height: 50_000, lazy: false },
-    ])("captures exact pixels and previews at scale $scale, height $height, lazy $lazy", async ({
+    ])("captures exact pixels and previews at scale $scale, height $height, lazy $lazy, current $current", async ({
       scale,
       height,
       lazy,
       delayedBatches = 0,
+      current = false,
     }) => {
       const totalRows = height + (lazy ? 400 : 0) + delayedBatches * 900;
       const require = createRequire(import.meta.resolve("wxt"));
@@ -56,7 +58,7 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
         globalThis.nextShot = null;
         globalThis.captureTrace = [];
         globalThis.runCapture = () => {
-          capturePage({signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
+          capturePage({checkFreshness:true,scope:${JSON.stringify(current ? "current" : "follow")},signal:abort.signal,label:'Capturing',cancelLabel:'Cancel',progress:()=>{},
             write:(...args)=>writer.write(...args),
             page:async command=>{const metrics=await page.handle({type:'bsk/long-screenshot-page',id:'pixel-test',...command});
               captureTrace.push({command,metrics});if(captureTrace.length>8)captureTrace.shift();return metrics;},
@@ -79,7 +81,12 @@ describe.skipIf(!process.env.BSK_LONG_SCREENSHOT_RENDERER)(
         const url = new URL(req.url || "/", "http://localhost");
         if (url.pathname === "/") {
           res.setHeader("Content-Type", "text/html");
-          res.end(fixture(height, lazy, delayedBatches));
+          res.end(
+            fixture(height, lazy, delayedBatches) +
+              (current
+                ? `<span style="position:absolute;top:${height - 120}px;left:500px">加载中...</span>`
+                : ""),
+          );
           return;
         }
         const root = path.resolve("dist/chrome-mv3");

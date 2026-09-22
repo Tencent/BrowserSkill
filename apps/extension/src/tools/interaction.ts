@@ -1,3 +1,4 @@
+import { withInputReady } from "./input-readiness";
 import { consumeVisualCapture, isVisualPointRequest } from "./visual-capture";
 import { resolveVisualRegionNow, sameVisualMapping, verifyVisualHit } from "./visual-target";
 import { isAbortError } from "./vom/capture-abort";
@@ -456,17 +457,26 @@ export async function handleClick(
 ): Promise<ClickResult | RpcError> {
   const ctxOrErr = lookupSession(manager, params, "click");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const deadline = Date.now() + (params.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
   const ctx = ctxOrErr;
   const aborted = throwIfAborted(deps.signal);
-  if (aborted) return aborted;
+  if (aborted) return { ...aborted, data: { effect_state: "none" } };
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "click");
   if (denied) return denied;
-  if (isVisualPointRequest(params)) return clickVisualPoint(ctx, target, params, deps);
+  if (isVisualPointRequest(params)) {
+    const consumed = consumeVisualCapture(ctx.refStore, target.tabId, params);
+    if (isRpcError(consumed)) return consumed;
+    return withInputReady(ctx, target.tabId, { ...deps, deadline }, (input) =>
+      clickVisualPoint(ctx, target, params, deps, consumed, input.markSent),
+    );
+  }
   const resolved = await resolveActionTarget(deps.cdp, ctx, target, params, "click");
   if (isRpcError(resolved)) return resolved;
-  return clickResolvedTarget(ctx, resolved, params, deps);
+  return withInputReady(ctx, target.tabId, { ...deps, deadline }, (input) =>
+    clickResolvedTarget(ctx, resolved, params, deps, input.markSent),
+  );
 }
 
 export async function clickResolvedTarget(
@@ -474,6 +484,7 @@ export async function clickResolvedTarget(
   resolved: ResolvedActionTarget,
   params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
   deps: InteractionDeps,
+  markSent?: () => void,
 ): Promise<ClickResult | RpcError> {
   const { tab: target } = resolved;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
@@ -516,7 +527,14 @@ export async function clickResolvedTarget(
   }
 
   try {
-    const error = await dispatchClickAtPoint(target.tabId, centre, params, deps);
+    const error = await dispatchClickAtPoint(
+      target.tabId,
+      centre,
+      params,
+      deps,
+      undefined,
+      markSent,
+    );
     if (error) return error;
   } finally {
     if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
@@ -544,6 +562,7 @@ async function dispatchClickAtPoint(
   params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
   deps: InteractionDeps,
   beforePress?: () => Promise<RpcError | null>,
+  markSent?: () => void,
 ): Promise<RpcError | null> {
   const button = params.button ?? "left",
     modifiers = modifiersBitfield(params.modifiers);
@@ -591,6 +610,7 @@ async function dispatchClickAtPoint(
         if (error) return failure(error);
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      markSent?.();
       attempted = true;
       releaseNeeded = true;
       await deps.cdp.send(tabId, "Input.dispatchMouseEvent", {
@@ -607,7 +627,12 @@ async function dispatchClickAtPoint(
     return null;
   } catch (error) {
     return failure({
-      code: deps.signal?.aborted || isAbortError(error) ? "cancelled" : "cdp_failed",
+      code:
+        deps.signal?.aborted || isAbortError(error)
+          ? "cancelled"
+          : error instanceof Error && error.name === "TimeoutError"
+            ? "timeout"
+            : "cdp_failed",
       message: error instanceof Error ? error.message : String(error),
     });
   } finally {
@@ -620,9 +645,9 @@ async function clickVisualPoint(
   target: ResolvedTargetTab,
   params: ClickParams,
   deps: InteractionDeps,
+  consumed: Exclude<ReturnType<typeof consumeVisualCapture>, RpcError>,
+  markSent: () => void,
 ): Promise<ClickResult | RpcError> {
-  const consumed = consumeVisualCapture(ctx.refStore, target.tabId, params);
-  if (isRpcError(consumed)) return consumed;
   const { capture, point } = consumed;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
   const changed = () =>
@@ -663,10 +688,17 @@ async function clickVisualPoint(
     }
     const invalid = await validate();
     if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
-    const error = await dispatchClickAtPoint(target.tabId, point, params, deps, async () => {
-      await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
-      return validate();
-    });
+    const error = await dispatchClickAtPoint(
+      target.tabId,
+      point,
+      params,
+      deps,
+      async () => {
+        await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
+        return validate();
+      },
+      markSent,
+    );
     if (error) return error;
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       tab_id: target.tabId,
@@ -1418,6 +1450,7 @@ export async function handlePress(
   params: PressParams,
   deps: InteractionDeps = getDefaultDeps(),
 ): Promise<PressResult | RpcError> {
+  const deadline = Date.now() + (params?.timeout_ms ?? deps.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS);
   if (!params || typeof params.key !== "string" || params.key.length === 0) {
     return { code: "invalid_params", message: "press requires a key string" };
   }
@@ -1448,97 +1481,108 @@ export async function handlePress(
     };
   }
 
-  // Optional focus before key dispatch.
-  if (params.ref || params.selector) {
-    const node = await resolveBackendNode(deps.cdp, ctx, target, params, "press");
-    if (isRpcError(node)) return node;
-    const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
-    try {
-      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-      const scrollErr = await scrollElementAndFramesIntoView(
-        deps.cdp,
-        target.tabId,
-        node.cdpTarget,
-        node.backendNodeId,
-        node.frameId,
-      );
-      if (scrollErr) return scrollErr;
-      if (throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "press aborted" };
+  const node =
+    params.ref || params.selector
+      ? await resolveBackendNode(deps.cdp, ctx, target, params, "press")
+      : undefined;
+  if (node && isRpcError(node)) return node;
+  return withInputReady(ctx, target.tabId, { ...deps, deadline }, async (input) => {
+    // Optional focus before key dispatch.
+    if (node) {
+      const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+      try {
+        deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+        const scrollErr = await scrollElementAndFramesIntoView(
+          deps.cdp,
+          target.tabId,
+          node.cdpTarget,
+          node.backendNodeId,
+          node.frameId,
+        );
+        if (scrollErr) return scrollErr;
+        if (throwIfAborted(deps.signal)) {
+          return { code: "cancelled", message: "press aborted" };
+        }
+        await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+      } catch (err) {
+        return {
+          code: "cdp_failed",
+          message: err instanceof Error ? err.message : String(err),
+        };
       }
-      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
-    } catch (err) {
-      return {
-        code: "cdp_failed",
-        message: err instanceof Error ? err.message : String(err),
-      };
     }
-  }
 
-  if (throwIfAborted(deps.signal)) {
-    return { code: "cancelled", message: "press aborted" };
-  }
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "press aborted" };
+    }
 
-  const modifiers = modifiersBitfield(mods);
-  // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
-  // should not also type the character "a" into the focused field.
-  const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
-  try {
-    let cancelled = false;
-    deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-      type: "rawKeyDown",
-      key: descriptor.key,
-      code: descriptor.code,
-      windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-      modifiers,
-    });
-    cancelled = throwIfAborted(deps.signal) !== null;
-    if (
-      !cancelled &&
-      !suppressText &&
-      typeof descriptor.text === "string" &&
-      descriptor.text.length > 0
-    ) {
+    const modifiers = modifiersBitfield(mods);
+    // Suppress `text` when any non-shift modifier is held — `Ctrl+a`
+    // should not also type the character "a" into the focused field.
+    const suppressText = mods.some((m) => m === "ctrl" || m === "meta" || m === "alt");
+    try {
+      let cancelled = false;
+      deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      input.markSent();
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-        type: "char",
+        type: "rawKeyDown",
         key: descriptor.key,
         code: descriptor.code,
-        text: descriptor.text,
+        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
         modifiers,
       });
       cancelled = throwIfAborted(deps.signal) !== null;
-    }
-    if (!cancelled && params.hold_ms && params.hold_ms > 0) {
-      await sleep(params.hold_ms, deps.signal);
-      if (throwIfAborted(deps.signal)) {
-        // Still send keyUp so the page doesn't think the key is stuck
-        // down — best-effort.
-        cancelled = true;
+      if (
+        !cancelled &&
+        !suppressText &&
+        typeof descriptor.text === "string" &&
+        descriptor.text.length > 0
+      ) {
+        await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+          type: "char",
+          key: descriptor.key,
+          code: descriptor.code,
+          text: descriptor.text,
+          modifiers,
+        });
+        cancelled = throwIfAborted(deps.signal) !== null;
       }
+      if (!cancelled && params.hold_ms && params.hold_ms > 0) {
+        await sleep(params.hold_ms, deps.signal);
+        if (throwIfAborted(deps.signal)) {
+          // Still send keyUp so the page doesn't think the key is stuck
+          // down — best-effort.
+          cancelled = true;
+        }
+      }
+      await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: descriptor.key,
+        code: descriptor.code,
+        windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
+        modifiers,
+      });
+      if (cancelled || throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "press aborted" };
+      }
+    } catch (err) {
+      return {
+        code:
+          deps.signal?.aborted || isAbortError(err)
+            ? "cancelled"
+            : err instanceof Error && err.name === "TimeoutError"
+              ? "timeout"
+              : "cdp_failed",
+        message: err instanceof Error ? err.message : String(err),
+      };
     }
-    await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
-      type: "keyUp",
+
+    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      tab_id: target.tabId,
       key: descriptor.key,
       code: descriptor.code,
-      windowsVirtualKeyCode: descriptor.windowsVirtualKeyCode,
-      modifiers,
+      modifiers: mods,
     });
-    if (cancelled || throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "press aborted" };
-    }
-  } catch (err) {
-    return {
-      code: "cdp_failed",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-
-  return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-    tab_id: target.tabId,
-    key: descriptor.key,
-    code: descriptor.code,
-    modifiers: mods,
   });
 }
 
@@ -1650,7 +1694,7 @@ export async function handleSelect(
           ok: true,
           multiple,
           selected_values: selected.map((o) => o.value),
-          selected_labels: selected.map((o) => o.text),
+          selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
         };
       }`,
       arguments: [{ value: params.values }],
