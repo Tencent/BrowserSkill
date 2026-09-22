@@ -1,5 +1,5 @@
 import type { CdpRunner } from "../shared";
-import { isAbortError, throwIfAborted } from "./capture-abort";
+import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import type { CapturedNode } from "./capture-types";
 
 interface RuntimeEvaluateReply {
@@ -145,7 +145,7 @@ export async function enrichFormControlStates(
     }
     return true;
   } catch (error) {
-    if (isAbortError(error)) throw error;
+    if (isCaptureTerminalError(error)) throw error;
     // Best-effort enrichment. DOMSnapshot/AX data still carries the nodes.
     return false;
   } finally {

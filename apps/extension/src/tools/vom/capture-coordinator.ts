@@ -1,14 +1,16 @@
+import { CdpReadTimeoutError } from "@/browser-driver/command-deadline";
 import {
   type CdpFrame,
   type CdpFrameGraph,
   type CdpTarget,
   cdpTargetKey,
+  omitFrameSubtrees,
 } from "@/browser-driver/frame-graph";
 import { cssViewport, GeometryContext } from "../geometry/frame-context";
 import { type CdpRunner, cdpRunnerForTarget } from "../shared";
 import { collectOverlayExcludedBackendIds } from "./capture";
 import {
-  isAbortError as isCaptureAbort,
+  isCaptureTerminalError as isCaptureAbort,
   throwIfAborted as throwCaptureAborted,
 } from "./capture-abort";
 import { verifyDocumentIdentity } from "./document-identity";
@@ -21,7 +23,7 @@ import {
   type FrameDocument,
   type FrameOwnedAxNode,
 } from "./frame-document";
-import { type NormalizedFrameDocument, normalizeSnapshot } from "./normalize";
+import { type PreparedFrameDocument, prepareSnapshot, projectSnapshot } from "./normalize";
 import {
   BASIC_SNAPSHOT,
   describeSnapshotFrames,
@@ -33,7 +35,7 @@ interface TargetBatch<T extends FrameOwnedAxNode> {
   target: CdpTarget;
   frames: CdpFrame[];
   snapshotAttachmentId?: string;
-  documents: NormalizedFrameDocument[];
+  documents: PreparedFrameDocument[];
   ax: FrameAxBatch<T>[];
   fallbackExcluded: Set<number>;
   snapshotFrameIds?: Set<string>;
@@ -87,7 +89,13 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   }
   throwCaptureAborted(signal);
   const geometry = new GeometryContext(cdp, tabId, graph, signal);
-  const issues: CaptureIssue[] = [];
+  const issues: CaptureIssue[] = (graph?.unavailableFrames ?? []).map((frame) => ({
+    target: frame.target,
+    frameId: frame.frameId,
+    stage: "dom",
+    reason: "capture-unavailable",
+  }));
+  const unavailableFrameIds = new Set(graph?.unavailableFrames?.map((frame) => frame.frameId));
   const graphFrames = new Map(graph?.frames.map((frame) => [frame.frameId, frame]) ?? []);
   const groups = new Map<string, TargetBatch<T>>();
   for (const frame of graph?.frames ?? []) {
@@ -122,9 +130,37 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
     issues.push({ target: batch.target, frameId, stage, reason: "capture-unavailable" });
   let firstFailure: unknown;
   const axReady = new Set<TargetBatch<T>>();
+  const stopped = new Set<TargetBatch<T>>();
+  const isolateChildTimeout = (error: unknown, batch: TargetBatch<T>): boolean => {
+    if (
+      !(error instanceof CdpReadTimeoutError) ||
+      !batch.target.sessionId ||
+      !error.sessionId ||
+      error.tabId !== tabId
+    )
+      return false;
+    const failed = batches.find((item) => item.target.sessionId === error.sessionId);
+    if (!failed) return false;
+    // Projection of a nested OOPIF can fail in an ancestor's session. Omit
+    // that dependency subtree as well, without turning it into a root failure.
+    const omitted = omitFrameSubtrees(
+      { rootFrameId: graph?.rootFrameId ?? "root", frames: batches.flatMap((item) => item.frames) },
+      new Map([...failed.frames, ...batch.frames].map((frame) => [frame.frameId, frame.target])),
+    );
+    for (const frame of omitted.unavailableFrames ?? []) unavailableFrameIds.add(frame.frameId);
+    for (const item of batches) {
+      if (!item.target.sessionId) continue;
+      if (item !== batch && !item.frames.some((frame) => unavailableFrameIds.has(frame.frameId)))
+        continue;
+      if (!stopped.has(item)) unavailable(item, "dom");
+      stopped.add(item);
+    }
+    return true;
+  };
   await collectTasks(
     batches,
     async (batch) => {
+      if (stopped.has(batch)) return;
       const scoped = cdpRunnerForTarget(cdp, batch.target);
       try {
         throwCaptureAborted(signal);
@@ -138,21 +174,21 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         });
         throwCaptureAborted(signal);
         const observed = describeSnapshotFrames(snapshot, batch.target, graphFrames, pageUrl);
-        batch.snapshotFrameIds = observed.ids;
+        batch.snapshotFrameIds = new Set(
+          [...observed.ids].filter((id) => !unavailableFrameIds.has(id)),
+        );
         batch.rootFrameId = observed.rootFrameId;
         // Keep graph-only frames for AX fallback, never in preference to observed membership.
         batch.frames = [
-          ...observed.frames,
+          ...observed.frames.filter((frame) => !unavailableFrameIds.has(frame.frameId)),
           ...batch.frames.filter((frame) => !observed.ids.has(frame.frameId)),
         ];
-        batch.documents = await normalizeSnapshot(
+        batch.documents = await prepareSnapshot(
           snapshot,
           batch.target,
           batch.frames.filter((frame) => observed.ids.has(frame.frameId)),
-          geometry,
           issues,
           signal,
-          observed.rootFrameId,
           profile,
         );
         const formsAvailable = await enrichFormControlStates(
@@ -168,11 +204,13 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
           if (!present.has(frame.frameId)) unavailable(batch, "dom", frame.frameId);
       } catch (error) {
         throwCaptureAborted(signal);
+        if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
         firstFailure ??= error;
         unavailable(batch, "dom");
         batch.fallbackExcluded = await collectOverlayExcludedBackendIds(scoped, tabId, signal);
       }
+      if (stopped.has(batch)) return;
       if (!batch.frames.length && !graph)
         batch.frames = [
           {
@@ -186,6 +224,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         await scoped.send(tabId, "Accessibility.enable", {});
       } catch (error) {
         throwCaptureAborted(signal);
+        if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
         firstFailure ??= error;
         unavailable(batch, "ax");
@@ -206,6 +245,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
     axTasks,
     async (task) => {
       const { batch, frame } = task;
+      if (stopped.has(batch)) return;
       try {
         throwCaptureAborted(signal);
         const result = await cdpRunnerForTarget(cdp, batch.target).send<{ nodes?: T[] }>(
@@ -217,6 +257,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         task.result = { frame, nodes: result.nodes ?? [] };
       } catch (error) {
         throwCaptureAborted(signal);
+        if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
         firstFailure ??= error;
         unavailable(batch, "ax", frame.frameId);
@@ -226,18 +267,10 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   );
   for (const task of axTasks) if (task.result) task.batch.ax.push(task.result);
 
-  let viewport = { width: 0, height: 0 };
-  try {
-    const measured = cssViewport(await geometry.layoutMetrics({ tabId }));
-    viewport = { width: measured.width, height: measured.height };
-  } catch (error) {
-    if (isCaptureAbort(error)) throw error;
-  }
-
   // A snapshot claim outranks an old graph hint. Conflicting actual claims
   // cannot be resolved by completion order or by overwriting a frameId map.
   const claims = new Map<string, string>();
-  const invalid = new Set<string>();
+  const invalid = new Set(unavailableFrameIds);
   for (const batch of batches) {
     const targetKey = cdpTargetKey(batch.target);
     for (const id of batch.snapshotFrameIds ?? []) {
@@ -270,40 +303,121 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
       )
       .map((frame) => ({ batch, frame, doc: docs.get(frame.frameId) }));
   });
-  await collectTasks(
-    checks,
-    async ({ batch, frame, doc }) => {
+  const checkIdentities = (recheck = false) =>
+    collectTasks(
+      checks,
+      async ({ batch, frame, doc }) => {
+        throwCaptureAborted(signal);
+        if (
+          stopped.has(batch) ||
+          invalid.has(frame.frameId) ||
+          (recheck && !identities.has(frame.frameId))
+        )
+          return;
+        if (!batch.snapshotAttachmentId || doc?.documentElementBackendNodeId === undefined) {
+          issues.push({
+            target: frame.target,
+            frameId: frame.frameId,
+            stage: "identity",
+            reason: "identity-unverified",
+          });
+          return;
+        }
+        const identity: DocumentIdentity = {
+          attachmentId: batch.snapshotAttachmentId,
+          target: frame.target,
+          frameId: frame.frameId,
+          documentElementBackendNodeId: doc.documentElementBackendNodeId,
+        };
+        let verified: Awaited<ReturnType<typeof verifyDocumentIdentity>>;
+        try {
+          verified = await verifyDocumentIdentity(cdp, identity, signal);
+        } catch (error) {
+          throwCaptureAborted(signal);
+          if (!isolateChildTimeout(error, batch)) throw error;
+          for (const id of unavailableFrameIds) invalid.add(id);
+          return;
+        }
+        const status =
+          cdp.getAttachmentId?.(tabId) === identity.attachmentId ? verified : "changed";
+        if (status === "current") identities.set(frame.frameId, identity);
+        else {
+          invalid.add(frame.frameId);
+          issues.push({
+            target: frame.target,
+            frameId: frame.frameId,
+            stage: "identity",
+            reason: status === "changed" ? "document-changed" : "identity-unavailable",
+          });
+        }
+      },
+      signal,
+    );
+  await checkIdentities();
+  let viewport = { width: 0, height: 0 };
+  let layoutTimedOut = false;
+  if (!invalid.has(rootFrameId)) {
+    try {
+      const measured = cssViewport(await geometry.layoutMetrics({ tabId }));
+      viewport = { width: measured.width, height: measured.height };
+    } catch (error) {
       throwCaptureAborted(signal);
-      if (!batch.snapshotAttachmentId || doc?.documentElementBackendNodeId === undefined) {
-        issues.push({
-          target: frame.target,
-          frameId: frame.frameId,
-          stage: "identity",
-          reason: "identity-unverified",
-        });
-        return;
-      }
-      const identity: DocumentIdentity = {
-        attachmentId: batch.snapshotAttachmentId,
-        target: frame.target,
-        frameId: frame.frameId,
-        documentElementBackendNodeId: doc.documentElementBackendNodeId,
-      };
-      const verified = await verifyDocumentIdentity(cdp, identity, signal);
-      const status = cdp.getAttachmentId?.(tabId) === identity.attachmentId ? verified : "changed";
-      if (status === "current") identities.set(frame.frameId, identity);
-      else {
-        invalid.add(frame.frameId);
-        issues.push({
-          target: frame.target,
-          frameId: frame.frameId,
-          stage: "identity",
-          reason: status === "changed" ? "document-changed" : "identity-unavailable",
-        });
-      }
-    },
-    signal,
-  );
+      if (error instanceof CdpReadTimeoutError) layoutTimedOut = true;
+      else if (isCaptureAbort(error)) throw error;
+    }
+    if (layoutTimedOut) {
+      // All required reads and identity checks have completed. Keep their
+      // results, report missing geometry, and issue no reads behind the gate.
+      for (const frame of currentFrames)
+        if (!invalid.has(frame.frameId))
+          issues.push({
+            target: frame.target,
+            frameId: frame.frameId,
+            stage: "geometry",
+            reason: "geometry-unavailable",
+          });
+    } else {
+      await collectTasks(
+        batches,
+        async (batch) => {
+          if (stopped.has(batch)) return;
+          try {
+            await projectSnapshot(
+              batch.documents,
+              batch.target,
+              batch.frames.filter((frame) => !invalid.has(frame.frameId)),
+              geometry,
+              issues,
+              signal,
+              batch.rootFrameId,
+              profile,
+            );
+          } catch (error) {
+            throwCaptureAborted(signal);
+            if (!isolateChildTimeout(error, batch)) throw error;
+          }
+        },
+        signal,
+      );
+      for (const id of unavailableFrameIds) invalid.add(id);
+      // Preserve the existing post-geometry check on successful reads. Only a
+      // timed-out optional root layout uses the earlier, captured identity.
+      await checkIdentities(true);
+    }
+  }
+  // Reattachment during optional layout work invalidates even an earlier
+  // successful identity proof. This check requires no renderer command.
+  for (const [frameId, identity] of identities) {
+    if (cdp.getAttachmentId?.(tabId) !== identity.attachmentId) {
+      invalid.add(frameId);
+      issues.push({
+        target: identity.target,
+        frameId,
+        stage: "identity",
+        reason: "document-changed",
+      });
+    }
+  }
   const children = new Map<string, string[]>();
   for (const frame of currentFrames) {
     if (!frame.parentFrameId) continue;

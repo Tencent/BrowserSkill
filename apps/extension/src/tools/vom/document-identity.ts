@@ -1,6 +1,6 @@
 import type { CdpRunner } from "../shared";
 import { sendToCdpTarget } from "../shared";
-import { isAbortError, throwIfAborted } from "./capture-abort";
+import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import type { DocumentIdentity } from "./facts";
 import type { VisualCandidate } from "./visual-discovery";
 
@@ -120,7 +120,7 @@ async function verifyIdentity(
     };
   } catch (error) {
     throwIfAborted(signal);
-    if (isAbortError(error)) throw error;
+    if (isCaptureTerminalError(error)) throw error;
     return { status: attached() ? "unavailable" : "changed" };
   } finally {
     if (!retained)

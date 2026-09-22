@@ -29,6 +29,7 @@ import {
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { readTimeoutDetails } from "@/browser-driver/command-deadline";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
@@ -907,7 +908,12 @@ async function runHoverProbes(
   staticSemantics: ReturnType<typeof resolveSemanticGraph>,
   options: CaptureVomObservationOptions,
 ): Promise<HoverProbeOutcome> {
-  if (!options.conditionalSurfaceProbe) return NO_HOVER_PROBES;
+  if (
+    !options.conditionalSurfaceProbe ||
+    captured.viewport.width <= 0 ||
+    captured.viewport.height <= 0
+  )
+    return NO_HOVER_PROBES;
 
   return withOverlayBypass(options.hoverProbeBypassOverlay, tabId, async () => {
     const surfaceProbes = await probeHoverSurfaces(cdp, tabId, captured.nodes, {
@@ -1212,6 +1218,7 @@ async function handleVomObservation(
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
+      ...readTimeoutDetails(err),
     };
   }
 }

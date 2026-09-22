@@ -10,7 +10,7 @@ import {
 import { type CssViewport } from "./geometry/coordinate-types";
 import { cssViewport, GeometryContext } from "./geometry/frame-context";
 import { type CdpRunner, sendToCdpTarget } from "./shared";
-import { isAbortError, throwIfAborted } from "./vom/capture-abort";
+import { isCaptureTerminalError, throwIfAborted } from "./vom/capture-abort";
 import { resolveVerifiedNode } from "./vom/document-identity";
 import type { DocumentIdentity } from "./vom/facts";
 import { VISUAL_STYLES } from "./vom/snapshot";
@@ -224,6 +224,7 @@ export async function resolveVisualRegionNow(
   candidate: VisualCandidate,
   signal?: AbortSignal,
   allowGeometryChange = false,
+  onIdentityVerified?: () => void,
 ): Promise<VisualTargetState | RpcError> {
   throwIfAborted(signal);
   if (!candidate.framePath || !sameIdentity(candidate.document, candidate.framePath.document))
@@ -279,11 +280,22 @@ export async function resolveVisualRegionNow(
   let finalRegion: VisualCandidate["region"] | undefined;
   let topDpr = 0;
   const mappings: VisualTargetState["mappings"] = [];
+  // Finish validating the recorded path before optional geometry reads. The
+  // screenshot caller can then retain viewing-only pixels if geometry times
+  // out, without issuing another identity read behind the stuck command.
+  const liveFrames: LiveFrame[] = [];
   for (let i = 0; i < path.length; i++) {
     const { frame, anchor } = path[i];
     const live = await readFrame(cdp, frame.document, anchor, signal);
     if ("code" in live) return live;
     if (live.top !== (i === 0)) return stale("visual root frame changed");
+    liveFrames.push(live);
+  }
+  throwIfAborted(signal);
+  onIdentityVerified?.();
+  for (let i = 0; i < path.length; i++) {
+    const { frame, anchor } = path[i];
+    const live = liveFrames[i];
     if (i === 0) topDpr = live.dpr;
     const metrics = await geometry.layoutMetrics(frame.document.target);
     const viewport = cssViewport(metrics);
@@ -439,7 +451,7 @@ export async function verifyCapturedTarget(
       : stale("visual attachment changed");
   } catch (error) {
     throwIfAborted(signal);
-    if (isAbortError(error)) throw error;
+    if (isCaptureTerminalError(error)) throw error;
     return stale("visual identity unavailable after capture");
   }
 }

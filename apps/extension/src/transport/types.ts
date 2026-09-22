@@ -60,6 +60,7 @@ export type RpcErrorReason =
   | "confirmation_ui_unavailable"
   | "borrow_outcome_unknown"
   | "screenshot_capture_failed"
+  | "renderer_read_timeout"
   | "user_cancelled"
   | "page_hidden"
   | "navigation"

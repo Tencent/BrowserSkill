@@ -4,12 +4,22 @@ function captureAbortError(): Error {
   return error;
 }
 
+function errorName(error: unknown): string {
+  return typeof error === "object" && error !== null
+    ? ((error as { name?: string }).name ?? "")
+    : "";
+}
+
 export function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { name?: string }).name === "AbortError"
-  );
+  return errorName(error) === "AbortError";
+}
+
+/** Errors after which the capture pipeline must stop instead of falling back.
+ * A timed-out renderer read is terminal too: AX/geometry fallback must not keep
+ * issuing reads after the renderer stopped answering. It is still reported as
+ * a browser failure, not as a caller abort. */
+export function isCaptureTerminalError(error: unknown): boolean {
+  return ["AbortError", "CdpReadTimeoutError"].includes(errorName(error));
 }
 
 export function throwIfAborted(signal: AbortSignal | undefined): void {
