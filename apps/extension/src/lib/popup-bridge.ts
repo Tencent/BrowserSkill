@@ -2,7 +2,7 @@ import type { SnapshotInfo } from "./connection-controller";
 
 /**
  * Wire protocol for `chrome.runtime.connect({ name: "popup" })`:
- *  - Background pushes `{ kind: "snapshot", data: SnapshotInfo }`.
+ *  - Background pushes `{ kind: "snapshot", data: PopupSnapshotInfo }`.
  *  - Popup sends `{ kind: "set_label" }`, `{ kind: "set_connection_enabled" }`, etc.
  *
  * Daemon port preference is persisted via `chrome.storage.local` instead
@@ -11,8 +11,13 @@ import type { SnapshotInfo } from "./connection-controller";
 
 export const POPUP_PORT_NAME = "popup";
 
+export interface PopupSnapshotInfo extends SnapshotInfo {
+  /** Live sessions in this browser instance. Label changes are blocked while nonzero. */
+  sessionCount: number;
+}
+
 export type PopupOutbound =
   | { kind: "set_label"; value: string }
   | { kind: "set_connection_enabled"; value: boolean };
 
-export type PopupInbound = { kind: "snapshot"; data: SnapshotInfo };
+export type PopupInbound = { kind: "snapshot"; data: PopupSnapshotInfo };

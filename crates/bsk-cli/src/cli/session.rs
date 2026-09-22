@@ -61,8 +61,8 @@ pub struct SessionStartArgs {
     /// Optional task name displayed in local operation history.
     #[arg(long)]
     pub name: Option<String>,
-    /// Target browser instance id (only required when multiple browsers
-    /// are connected).
+    /// Target browser instance ID or unique label. Always set this when
+    /// a specific browser profile is required.
     #[arg(long)]
     pub browser: Option<String>,
 

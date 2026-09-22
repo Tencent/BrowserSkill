@@ -30,7 +30,7 @@ import {
 } from "./runner";
 import { SessionStarts } from "./session-starts";
 import type { SessionRegistry } from "./sessions";
-import { SESSION_PARAM, SESSION_STOP_PARAMS } from "./tool-params";
+import { BROWSER_PARAM, SESSION_PARAM, SESSION_STOP_PARAMS } from "./tool-params";
 
 /** Plugin configuration resolved from the Schemastery schema in index.ts. */
 export interface PluginConfig {
@@ -196,11 +196,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           type: "boolean",
           description: "Open the Agent Window in the background without stealing focus.",
         },
-        browser: {
-          type: "string",
-          description:
-            "Target browser instance id (only needed when multiple browsers are connected).",
-        },
+        browser: BROWSER_PARAM,
         device: {
           type: "string",
           enum: DEVICE_PRESETS,

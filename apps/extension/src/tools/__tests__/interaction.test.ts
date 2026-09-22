@@ -322,6 +322,53 @@ describe("handleClick", () => {
     expect(bypassOverlay).toHaveBeenCalledWith(4, false);
   });
 
+  it("enables overlay bypass when the overlay host itself captures the point", async () => {
+    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
+    const host = document.createElement("browser-skill-overlay");
+    host.setAttribute("data-bsk-overlay", "");
+    host.style.cssText =
+      "position:fixed;inset:0;width:100vw;height:100vh;pointer-events:auto;display:block";
+    host.attachShadow({ mode: "closed" });
+    document.body.append(host);
+    Object.defineProperty(host, "getBoundingClientRect", {
+      value: () => ({
+        x: 0,
+        y: 0,
+        width: 1280,
+        height: 720,
+        top: 0,
+        left: 0,
+        right: 1280,
+        bottom: 720,
+      }),
+    });
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e3", 1234, { tabId: 4 });
+    const fake = makeFakeCdp({
+      "DOM.scrollIntoViewIfNeeded": () => ({}),
+      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+      "Runtime.evaluate": (params: unknown) => {
+        const expr = String((params as { expression?: string })?.expression ?? "");
+        const value = new Function(`return (${expr})`)();
+        return { result: { value } };
+      },
+      "Input.dispatchMouseEvent": () => ({}),
+    });
+    try {
+      const res = await handleClick(
+        sm,
+        { session_id: "aa11", ref: "@e3" },
+        { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+      );
+      if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+      expect(bypassOverlay).toHaveBeenCalledWith(4, true);
+      expect(bypassOverlay).toHaveBeenCalledWith(4, false);
+    } finally {
+      host.remove();
+    }
+  });
+
   it("skips overlay bypass when overlay does not block the click point", async () => {
     const bypassOverlay = vi.fn().mockResolvedValue(undefined);
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
@@ -1338,6 +1385,12 @@ describe("resolveKeyDescriptor", () => {
   it("returns null for unknown keys", () => {
     expect(resolveKeyDescriptor("UnknownKey")).toBeNull();
   });
+  it("maps special keys without requiring CDP casing", () => {
+    expect(resolveKeyDescriptor("enter")).toEqual(resolveKeyDescriptor("Enter"));
+    expect(resolveKeyDescriptor("ESCAPE")).toEqual(resolveKeyDescriptor("Escape"));
+    expect(resolveKeyDescriptor("arrowdown")).toMatchObject({ code: "ArrowDown" });
+    expect(resolveKeyDescriptor("space")).toMatchObject({ key: " ", code: "Space" });
+  });
 });
 
 // PressResult also has a `code` field (the CDP keyboard code), so
@@ -1495,6 +1548,21 @@ describe("handlePress", () => {
 
     expect(res).toMatchObject({ code: "cancelled" });
     expect(fake.sent.some((c) => c.method === "DOM.focus")).toBe(false);
+  });
+
+  it("presses Enter when the key name is lowercase", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "ctrl+enter" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res.key).toBe("Enter");
+    expect(res.code).toBe("Enter");
+    expect(res.modifiers).toEqual(["ctrl"]);
   });
 
   it("returns invalid_params for an unknown key", async () => {
@@ -1656,6 +1724,72 @@ describe("handleSelect", () => {
     expect(res).toMatchObject({
       code: "invalid_params",
       data: { reason: "option_not_found" },
+    });
+  });
+
+  it.each([
+    {
+      name: "an explicit option label with no text",
+      options: '<option value="us" label="United States"></option>',
+      values: ["us"],
+      selectedValues: ["us"],
+      labels: ["United States"],
+    },
+    {
+      name: "option text when the label is absent",
+      options: '<option value="ca">Canada</option>',
+      values: ["ca"],
+      selectedValues: ["ca"],
+      labels: ["Canada"],
+    },
+    {
+      name: "option text when the label is empty",
+      options: '<option value="ca" label="">Canada</option>',
+      values: ["ca"],
+      selectedValues: ["ca"],
+      labels: ["Canada"],
+    },
+    {
+      name: "mixed labels in selected-value order",
+      options:
+        '<option value="us" label="United States">US</option><option value="ca">Canada</option>',
+      values: ["ca", "us"],
+      selectedValues: ["us", "ca"],
+      labels: ["United States", "Canada"],
+    },
+  ])("returns $name", async ({ options, values, selectedValues, labels }) => {
+    const select = document.createElement("select");
+    select.multiple = values.length > 1;
+    select.innerHTML = options;
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    ctx.refStore.set("e1", 555, { tabId: 4 });
+    const fake = makeFakeCdp({
+      ...selectHandlers({ ok: true, multiple: select.multiple }),
+      "Runtime.callFunctionOn": (params) => {
+        const script = params as {
+          functionDeclaration: string;
+          arguments: Array<{ value: unknown }>;
+        };
+        const fn = new Function(`return (${script.functionDeclaration})`)();
+        return {
+          result: {
+            value: fn.apply(
+              select,
+              script.arguments.map((arg) => arg.value),
+            ),
+          },
+        };
+      },
+    });
+    const res = await handleSelect(
+      sm,
+      { session_id: "aa11", ref: "e1", values },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({
+      selected_values: selectedValues,
+      selected_labels: labels,
     });
   });
 

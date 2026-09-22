@@ -31,28 +31,41 @@ describe("createLanguageNormalizer", () => {
     ["KO-kr", "ko-KR"],
     ["ko_KR", "ko-KR"],
 
-    // Chinese — only `zh-CN` ships today, so every variant resolves to it
-    // directly rather than leaking into the fallback chain. Traditional picks
-    // up `zh-TW` automatically once that bundle is registered (see below).
+    // Chinese — Simplified and Traditional both ship, disambiguated by
+    // script/region; every other Chinese variant defaults to Simplified.
     ["zh", "zh-CN"],
     ["zh-CN", "zh-CN"],
     ["zh-SG", "zh-CN"],
     ["zh-Hans", "zh-CN"],
     ["zh-Hans-CN", "zh-CN"],
     ["zh-Hans-SG", "zh-CN"],
-    ["zh-TW", "zh-CN"],
-    ["zh-HK", "zh-CN"],
-    ["zh-MO", "zh-CN"],
-    ["zh-Hant", "zh-CN"],
-    ["zh-Hant-TW", "zh-CN"],
-    ["zh-Hant-HK", "zh-CN"],
+    ["zh-TW", "zh-TW"],
+    ["zh-HK", "zh-TW"],
+    ["zh-MO", "zh-TW"],
+    ["zh-Hant", "zh-TW"],
+    ["zh-Hant-TW", "zh-TW"],
+    ["zh-Hant-HK", "zh-TW"],
+
+    // Other shipped languages — a bare primary subtag resolves to the single
+    // registered resource; exact tags stay unchanged.
+    ["ja", "ja-JP"],
+    ["ja-JP", "ja-JP"],
+    ["fr", "fr-FR"],
+    ["fr-FR", "fr-FR"],
+    ["de", "de-DE"],
+    ["de-DE", "de-DE"],
+    ["it", "it-IT"],
+    ["it-IT", "it-IT"],
+    ["es", "es-ES"],
+    ["es-ES", "es-ES"],
+    ["pt", "pt-BR"],
+    ["pt-BR", "pt-BR"],
 
     // No translation shipped — returned unchanged so i18next applies the
     // `default` fallback (en-US) rather than Chinese.
-    ["ja", "ja"],
-    ["ja-JP", "ja-JP"],
-    ["fr-FR", "fr-FR"],
-    ["de-DE", "de-DE"],
+    ["ru", "ru"],
+    ["ru-RU", "ru-RU"],
+    ["nl-NL", "nl-NL"],
   ];
 
   it.each(cases)("maps %s to %s", (detected, resource) => {
@@ -61,7 +74,7 @@ describe("createLanguageNormalizer", () => {
 
   it("is case-insensitive", () => {
     expect(normalize("EN-us")).toBe("en-US");
-    expect(normalize("zh-hant-tw")).toBe("zh-CN");
+    expect(normalize("zh-hant-tw")).toBe("zh-TW");
   });
 });
 
@@ -71,9 +84,9 @@ describe("createLanguageNormalizer", () => {
  */
 describe("createLanguageNormalizer extensibility", () => {
   it("auto-resolves a newly registered language", () => {
-    const normalize = createLanguageNormalizer([...SHIPPED_RESOURCE_KEYS, "ja-JP"]);
-    expect(normalize("ja")).toBe("ja-JP");
-    expect(normalize("ja-JP")).toBe("ja-JP");
+    const normalize = createLanguageNormalizer([...SHIPPED_RESOURCE_KEYS, "nl-NL"]);
+    expect(normalize("nl")).toBe("nl-NL");
+    expect(normalize("nl-NL")).toBe("nl-NL");
   });
 
   it("disambiguates zh once a Traditional bundle ships", () => {
@@ -123,7 +136,7 @@ describe("getLanguageDetectionOptions", () => {
   it("normalises whatever the detectors report", () => {
     const { convertDetectedLanguage } = getLanguageDetectionOptions(SHIPPED_RESOURCE_KEYS);
     expect(convertDetectedLanguage("en-GB")).toBe("en-US");
-    expect(convertDetectedLanguage("zh-TW")).toBe("zh-CN");
+    expect(convertDetectedLanguage("zh-TW")).toBe("zh-TW");
     expect(convertDetectedLanguage("ja-JP")).toBe("ja-JP");
   });
 

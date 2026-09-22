@@ -8,6 +8,7 @@ pub mod browsers;
 pub mod business_rpc;
 pub mod console;
 pub mod daemon;
+pub mod debug;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
@@ -155,6 +156,9 @@ pub enum Command {
 
     /// Read buffered network responses / failures.
     Network(NetworkArgs),
+
+    /// Opt-in website debugging: requests, page context, and recording export.
+    Debug(Box<debug::DebugArgs>),
 
     /// Dump raw HTML for a tab or a snapshot ref.
     #[command(name = "get-html")]

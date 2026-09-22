@@ -1,5 +1,8 @@
 import { i18n } from "@browser-skill/i18n";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { LocalDebugArchive } from "@/debug/archive";
+import { attachDebugBridge } from "@/debug/bridge";
+import { DebugManager } from "@/debug/manager";
 import { getAuditEnabled } from "@/lib/audit";
 import { attachAuditBridge } from "@/lib/audit-bridge";
 import { ConnectionController } from "@/lib/connection-controller";
@@ -97,7 +100,13 @@ export default defineBackground(() => {
       return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
     },
   });
+  const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
+  attachDebugBridge(sessions, debug);
+  chrome.debugger.onDetach.addListener((source) => {
+    if (source.tabId !== undefined) debug.stopTab(source.tabId, "debugger_detached");
+  });
   const sessionsLive = attachSessionsLiveFlag({ manager: sessions });
+  const popupSnapshotRefreshers = new Set<() => void>();
   let overlayGeneration = 0;
   const controlModes = new Map<string, OverlayMode>();
 
@@ -214,6 +223,7 @@ export default defineBackground(() => {
   }
 
   function onOverlaySessionStateChanged(): void {
+    debug.sync();
     void sessionsLive.syncFromManager();
     const liveSessionIds = new Set(sessions.list().map((ctx) => ctx.sessionId));
     for (const sessionId of controlModes.keys()) {
@@ -221,6 +231,7 @@ export default defineBackground(() => {
     }
     overlayGeneration += 1;
     pushAllAgentOverlayStates();
+    for (const refresh of popupSnapshotRefreshers) refresh();
   }
 
   function onBrowserControlResumed(sessionId: string): void {
@@ -249,8 +260,11 @@ export default defineBackground(() => {
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
+  chrome.tabs.onDetached.addListener((tabId) => debug.releaseTab(tabId));
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
+    debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
+    debug.sync();
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
@@ -265,9 +279,7 @@ export default defineBackground(() => {
       tabManagement: { tabs: chromeTabMutationApi },
       tabsQuery: chromeTabsApi,
     },
-    onSessionsChanged: () => {
-      void sessionsLive.syncFromManager();
-    },
+    onSessionsChanged: onOverlaySessionStateChanged,
   });
   const recordDeps = {
     tabsApi: chrome.tabs,
@@ -308,6 +320,7 @@ export default defineBackground(() => {
   });
   void interactionPreferences.readyOrFallback();
   const dispatcher = new ToolDispatcher({
+    debug,
     interactionPreferences,
     transport,
     sessions,
@@ -428,6 +441,7 @@ export default defineBackground(() => {
     ]);
     controller.setAuditEnabled(auditEnabled);
     const cleanup = async () => {
+      debug.dispose();
       const report = await cleanupAfterDisconnect();
       if (report.failures.length > 0) {
         throw new Error(
@@ -487,14 +501,29 @@ export default defineBackground(() => {
         console.debug("[browser-skill] popup post failed", err);
       }
     };
+    const postSnapshot = () => {
+      post({
+        kind: "snapshot",
+        data: { ...controller.snapshot(), sessionCount: sessions.list().length },
+      });
+    };
     const unsubscribe = controller.subscribe((snap) => {
-      post({ kind: "snapshot", data: snap });
+      post({ kind: "snapshot", data: { ...snap, sessionCount: sessions.list().length } });
     });
+    popupSnapshotRefreshers.add(postSnapshot);
     connection.onMessage.addListener((raw: unknown) => {
       const msg = raw as PopupOutbound;
       if (msg && typeof msg === "object" && "kind" in msg) {
         if (msg.kind === "set_label") {
-          void setLabel(msg.value).then(() => controller.refreshLabel());
+          // A reconnect is required for the daemon to receive the new label.
+          // Never turn a display-name edit into an implicit session teardown.
+          void dispatcher
+            .runWhenIdle(async () => {
+              await setLabel(msg.value);
+              await controller.refreshLabel();
+            })
+            .then(() => postSnapshot())
+            .catch((err) => console.error("[browser-skill] label update failed", err));
         } else if (msg.kind === "set_connection_enabled") {
           void controller.setConnectionEnabled(msg.value);
           // Persist user intent in message order, independently of slow cleanup.
@@ -506,7 +535,10 @@ export default defineBackground(() => {
         }
       }
     });
-    connection.onDisconnect.addListener(() => unsubscribe());
+    connection.onDisconnect.addListener(() => {
+      popupSnapshotRefreshers.delete(postSnapshot);
+      unsubscribe();
+    });
   });
 
   // Stash on globalThis so the SW DevTools can poke at internals.
