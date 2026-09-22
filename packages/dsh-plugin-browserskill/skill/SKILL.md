@@ -1,6 +1,6 @@
 ---
 name: browser-skill
-description: Automate the user's logged-in Chromium through this plugin's injected browser_* tools. Use to read pages, fill forms, operate tabs, inspect page activity, or test a UI.
+description: Automate the user's logged-in Chromium through this plugin's injected browser_* tools. Use to read pages, fill forms, operate tabs, inspect page activity, debug a website, or test a UI.
 ---
 
 # browser-skill for DeepSeek Harness
@@ -21,7 +21,9 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 ## Mandatory workflow
 
 1. Define success. Start a session and retain `sessionId`. Include the verified `browser`
-   when a profile is required. Otherwise, for a new page:
+   when a profile is required. For debugging, read the reference below and start
+   capture before navigation/reproduction. Leave capture off for ordinary browsing.
+   Otherwise, for a new page:
 
    ```text
    browser_session({ action: "start" })
@@ -71,6 +73,7 @@ the working directory. Read the matching file before acting; do not preload all 
 
 | When | Read |
 | --- | --- |
+| Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |

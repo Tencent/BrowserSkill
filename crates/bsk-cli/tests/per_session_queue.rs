@@ -833,3 +833,125 @@ async fn assert_deadline_waits_for_cleanup(
         handle.shutdown().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_activity_wait_and_busy_observe_without_dispatching_or_cancelling_work() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session = ipc_session_start(&sock).await;
+    let first = {
+        let sock = sock.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            bsk::ipc_client::IpcClient::connect(&sock)
+                .await
+                .unwrap()
+                .call_with_id::<_, serde_json::Value>(
+                    "original".into(),
+                    Method::ToolTabList,
+                    Some(json!({"session_id":session,"tag":"held"})),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+        })
+    };
+    let (original_rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+    let busy = client
+        .call::<_, serde_json::Value>(
+            "busy",
+            Method::ToolTabList,
+            Some(json!({"session_id":session})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    let data = busy.data.unwrap();
+    assert_eq!(data["reason"], "session_busy");
+    assert_eq!(data["dispatched"], false);
+    assert_eq!(data["activity"]["command_id"], "original");
+    let activity = client
+        .call::<_, serde_json::Value>(
+            "activity",
+            Method::ToolDebug,
+            Some(json!({"session_id":session,"action":"activity"})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(activity["activity"]["method"], "tool.tab_list");
+    assert_eq!(activity["activity"]["state"], "running");
+    let timeout = client
+        .call::<_, serde_json::Value>(
+            "poll",
+            Method::ToolDebug,
+            Some(json!({"session_id":session,"action":"wait","wait_ms":0})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(timeout["activity"]["wait_complete"], false);
+    assert_eq!(timeout["activity"]["wait_timed_out"], true);
+    let old_command = client.call::<_, serde_json::Value>("older", Method::ToolDebug, Some(json!({"session_id":session,"action":"wait","command_id":"already-finished","wait_ms":0})), Duration::from_secs(2)).await.unwrap().unwrap();
+    assert_eq!(old_command["activity"]["wait_complete"], true);
+    let state = handle.state();
+    let token = bsk::daemon::abort::AbortToken::new();
+    token.cancel();
+    let cancelled = state
+        .tool_queues
+        .wait_idle(
+            &bsk::daemon::sessions::SessionId(session.clone()),
+            Some("original"),
+            1000,
+            token,
+        )
+        .await;
+    assert!(
+        matches!(cancelled, Err(DispatchError::Rpc(error)) if error.code == ErrorCode::Cancelled)
+    );
+    assert_eq!(
+        state
+            .tool_queues
+            .activity(&bsk::daemon::sessions::SessionId(session.clone()))
+            .unwrap()
+            .command_id
+            .as_deref(),
+        Some("original")
+    );
+    let waiter = {
+        let sock = sock.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            bsk::ipc_client::IpcClient::connect(&sock).await.unwrap()
+                .call::<_, serde_json::Value>("waiter", Method::ToolDebug, Some(json!({"session_id":session,"action":"wait","command_id":"original","wait_ms":2000})), Duration::from_secs(3)).await.unwrap().unwrap()
+        })
+    };
+    assert!(
+        req_rx.try_recv().is_err(),
+        "observers must not reach the extension"
+    );
+    reply_tx.send((original_rpc, json!({"done":true}))).unwrap();
+    assert!(first.await.unwrap().is_ok());
+    assert_eq!(waiter.await.unwrap()["activity"]["wait_complete"], true);
+    assert!(
+        req_rx.try_recv().is_err(),
+        "waiting must not retry the original command"
+    );
+    handle.shutdown().await;
+}

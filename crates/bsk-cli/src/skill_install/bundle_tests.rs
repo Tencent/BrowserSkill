@@ -39,6 +39,7 @@ fn default_install_contains_every_embedded_resource() {
     );
     assert!(source.files.contains_key("references/files.md"));
     assert!(source.files.contains_key("references/help-and-recovery.md"));
+    assert!(source.files.contains_key("references/debugging.md"));
     let dir = install(home.path(), &source, SkillSource::Bundled, false);
     assert_bundle(&dir, &source);
     let mtimes: BTreeMap<_, _> = source
@@ -127,6 +128,7 @@ fn version_one_single_file_installs_migrate_to_complete_bundles() {
     )
     .unwrap();
     let source = SkillBundle::bundled();
+    assert!(source.files.contains_key("references/debugging.md"));
     assert_eq!(
         sync_with_bundle(home.path(), &source).updated,
         [HarnessId::Cursor]

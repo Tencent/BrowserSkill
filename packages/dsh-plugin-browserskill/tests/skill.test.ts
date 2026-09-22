@@ -57,7 +57,13 @@ describe("registerBskSkill", () => {
     expect(base.kind).toBe("directory");
     expect(isAbsolute(base.path)).toBe(true);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
-    expect(new Set(references).size).toBe(4);
+    expect([...new Set(references)].sort()).toEqual([
+      "references/debugging.md",
+      "references/help-and-recovery.md",
+      "references/interaction-details.md",
+      "references/screenshots-and-canvas.md",
+      "references/tabs-and-profiles.md",
+    ]);
     for (const path of references) {
       const reference = readFileSync(join(base.path, path), "utf8");
       expect(reference.length).toBeGreaterThan(0);
