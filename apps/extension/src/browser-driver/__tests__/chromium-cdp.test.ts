@@ -150,6 +150,64 @@ describe("ChromiumCdp", () => {
     }
   });
 
+  it("refuses further reads while a timed-out read is still running, until it settles", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api } = fakeApi();
+    let finish!: (value: unknown) => void;
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "DOMSnapshot.captureSnapshot")
+        return new Promise((resolve) => {
+          finish = resolve;
+        });
+      return {};
+    });
+    const cdp = new ChromiumCdp(api);
+    const reads = () =>
+      vi.mocked(api.sendCommand).mock.calls.filter((c) => c[1] === "DOMSnapshot.captureSnapshot");
+    try {
+      await cdp.ensureAttached(4);
+      const first = expect(cdp.send(4, "DOMSnapshot.captureSnapshot")).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await first;
+      await expect(cdp.send(4, "Accessibility.getFullAXTree")).rejects.toThrow(
+        "still running in the renderer",
+      );
+      await expect(cdp.send(4, "Runtime.evaluate", { expression: "1" })).resolves.toEqual({});
+      await expect(cdp.send(5, "Accessibility.getFullAXTree")).resolves.toEqual({});
+      expect(reads()).toHaveLength(1);
+      finish({ documents: [] });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(cdp.send(4, "Accessibility.getFullAXTree")).resolves.toEqual({});
+    } finally {
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the stuck-read fence when the tab detaches", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onDetach } = fakeApi();
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) =>
+      method === "DOMSnapshot.captureSnapshot" ? new Promise(() => {}) : {},
+    );
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      const first = expect(cdp.send(4, "DOMSnapshot.captureSnapshot")).rejects.toThrow("timed out");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await first;
+      onDetach.fire({ tabId: 4 }, "canceled_by_user");
+      await expect(cdp.send(4, "Accessibility.getFullAXTree")).resolves.toEqual({});
+    } finally {
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("changes attachment identity only across real debugger attachments", async () => {
     const { api, onEvent, onDetach } = fakeApi();
     const cdp = new ChromiumCdp(api);

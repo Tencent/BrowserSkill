@@ -29,6 +29,7 @@ import {
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { readTimeoutDetails } from "@/browser-driver/command-deadline";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
@@ -1212,6 +1213,7 @@ async function handleVomObservation(
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
+      ...readTimeoutDetails(err),
     };
   }
 }

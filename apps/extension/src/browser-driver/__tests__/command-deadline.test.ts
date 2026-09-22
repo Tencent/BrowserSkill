@@ -1,7 +1,13 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { isAbortError, isCaptureTerminalError } from "@/tools/vom/capture-abort";
 import { captureObservationFacts } from "@/tools/vom/capture-coordinator";
-import { CdpReadTimeoutError, READ_TIMEOUT_MS, runCdpCommand } from "../command-deadline";
+import {
+  CdpReadTimeoutError,
+  READ_TIMEOUT_MS,
+  RENDERER_READ_TIMEOUT,
+  readTimeoutDetails,
+  runCdpCommand,
+} from "../command-deadline";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -60,6 +66,46 @@ it("ignores the late reply of a timed-out read", async () => {
   finish({ nodes: [] });
   await Promise.resolve();
   expect(vi.getTimerCount()).toBe(0);
+});
+
+it("handles a late rejection of a timed-out read without an unhandled rejection", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "debug").mockImplementation(() => {});
+  const unhandled = vi.fn();
+  process.on("unhandledRejection", unhandled);
+  try {
+    let fail!: (error: Error) => void;
+    const work = runCdpCommand(
+      { tabId: 4 },
+      "DOMSnapshot.captureSnapshot",
+      () =>
+        new Promise<object>((_, reject) => {
+          fail = reject;
+        }),
+    );
+    const checked = expect(work).rejects.toBeInstanceOf(CdpReadTimeoutError);
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS);
+    await checked;
+    fail(new Error("Detached while handling command"));
+    await vi.advanceTimersByTimeAsync(0);
+    vi.useRealTimers();
+    // Node reports unhandled rejections after the microtask queue drains.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(unhandled).not.toHaveBeenCalled();
+  } finally {
+    process.off("unhandledRejection", unhandled);
+  }
+});
+
+it("reports a renderer read timeout with a gateway-readable reason", () => {
+  expect(
+    readTimeoutDetails(new CdpReadTimeoutError("DOMSnapshot.captureSnapshot", 4, READ_TIMEOUT_MS)),
+  ).toEqual({ data: { reason: RENDERER_READ_TIMEOUT } });
+  expect(readTimeoutDetails(CdpReadTimeoutError.stillPending("Page.getLayoutMetrics", 4))).toEqual({
+    data: { reason: RENDERER_READ_TIMEOUT },
+  });
+  expect(readTimeoutDetails(new Error("boom"))).toEqual({});
 });
 
 it("does not bound mutations, screenshots or evaluation", async () => {
