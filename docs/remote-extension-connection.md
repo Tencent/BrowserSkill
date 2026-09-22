@@ -163,7 +163,9 @@ Pair only with a server you trust to operate your browser. A paired server can c
 
 Remote content reads, screenshots, recording and page operations require a tab explicitly created or borrowed by the task. Listing tab titles and URLs remains available to select a tab to borrow. A user tab moved or opened inside an Agent Window does not by itself become authorized. Borrowing uses the existing browser-controlled confirmation preference; remote request flags cannot change that preference. After a borrowed tab is returned, remote content access ends. Returning a tab during remote recording cancels that recording before releasing the tab.
 
-This also applies to tabs or windows opened by a page through `target="_blank"`, `window.open`, or an OAuth flow. An opener relationship does not grant control, and neither does sharing the Agent Window. During an uncancelled click, key press, evaluation, navigation, fill or select operation, the extension observes Chrome navigation-target events from a source tab still controlled by the task in its Agent Window. Valid targets, including `rel="noopener"` targets and popups that open a separate window, are attributed and moved into the Agent Window. If a target was observed, a fixed 100 ms tail also accepts related events. This source-and-time relationship is not proof that a particular input caused a popup. Events outside that lifetime, or without a validated source, keep the ordinary borrow flow. If such a tab is already inside the Agent Window, it cannot be borrowed in place: the browser user must first move it to a regular browser window, then the Agent can use the ordinary borrow flow. Tabs explicitly created through `bsk tab create` are controlled immediately.
+A page may open targets through `target="_blank"`, `window.open`, or a login flow. An opener relationship and window membership alone do not authorize them. During a short observation window armed immediately before native click/key dispatch, a main-frame navigation-target event from a currently controlled source may grant control of a new tab already in the same Agent Window. Nested same-window targets follow the same source checks. These observed tabs are kept separate from explicitly agent-created tabs: session stop releases their control and preserves them and their window. An explicit `tab_close` remains a separate destructive tool action.
+
+Cross-window popups are never automatically moved or claimed. They use the ordinary `tab_borrow` flow. Late or unattributed targets also retain that flow; an unowned target already inside the Agent Window must first be moved to a regular browser window before borrowing. Tabs explicitly created by `tab_create` remain agent-owned and are closed on stop. A tab already controlled by any session cannot acquire a second borrow claim.
 
 Disconnecting cancels task work, returns borrowed tabs and closes task-created tabs. User-created tabs survive cleanup. Failed returns preserve the window and must be resolved before reconnecting. Reconnection starts new tasks; commands and sessions are never replayed. Failed remote authentication does not select a local connection automatically.
 
@@ -187,18 +189,10 @@ BSK_REMOTE_CHROME=/absolute/path/to/chrome-for-testing \
 
 The remote server integration tests cover credential exchange, rotation retries, stable device routing, replacement connections, revocation, connection capacity, file-lock contention and native TLS. Unit tests additionally cover rate-limit saturation, unavailable extension storage, local recovery, renewal retry frequency and popup authorization states. TLS fixtures contain a test-only private key and must never be used for deployment.
 
-### Popup attribution lifetime
+### Popup observation lifetime
 
-Popup attribution observes Chrome source-tab relationships during an uncancelled
-operation and, when a tab was created during it, for at most 100 ms afterward.
-Chrome does not provide a per-input causal identifier: a source page script can
-also open a target during that interval. Late or unattributed targets require
-explicit borrowing; an unowned target inside the Agent Window must first be
-moved to a regular window under the current borrow contract.
+Only `tool.click` and `tool.press` arm observation, immediately before sending native input rather than during target lookup, scrolling, navigation, evaluation or other RPC preparation. Each input phase opens at most 100 ms of observation; operation completion and cancellation close the listener sooner. There is no browser-global `tabs.onCreated` tail. This remains a best-effort source-and-time policy, not proof of causality. Targets delivered outside that interval require explicit borrowing.
 
-Candidates do not grant access. The source must still be in the Agent Window
-(and explicitly owned for remote sessions), and the target must not belong to
-or be reserved by another task. Nested targets wait for their parent's validation
-and migration. Cancellation removes listeners immediately and prevents new claims
-and not-yet-issued moves. Already-issued Chrome moves cannot be recalled; tabs
-legitimately claimed before cancellation remain tracked for session cleanup.
+Only main-frame source events qualify. Source ownership and its actual window, target window, competing claims and borrow reservations are rechecked before granting non-destructive control. Candidate processing can delay the tool result by at most 500 ms after its action finishes. Expiry or abort removes listeners and invalidates late continuations without granting ownership; no Chrome movement needs compensation because observation never moves tabs.
+
+Closing a tab or moving it out of its window revokes observed control. On stop, only the session's explicitly created tabs are closed. Observed tabs are preserved even when they originated from a page script or user interaction during the short input window.

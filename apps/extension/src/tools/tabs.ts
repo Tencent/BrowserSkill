@@ -596,6 +596,7 @@ export async function handleTabClose(
     // Keep the tracking set accurate so session_stop won't try to close a
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
+    ctx.observedTabs?.delete(params.tab_id);
   } catch (err) {
     return {
       code: "protocol_error",
@@ -697,6 +698,13 @@ async function validateBorrowTarget(
   if (typeof tab.id !== "number" || typeof tab.windowId !== "number") {
     return { code: "not_found", message: `tab ${tabId} not found` };
   }
+  const owner = manager.findControllingSession(tabId);
+  if (owner)
+    return rpcError(
+      "permission_denied",
+      "borrow_conflict",
+      `tab_borrow: tab ${tabId} is already controlled by session ${owner}`,
+    );
   if (tab.windowId === ctx.agentWindowId) {
     return {
       code: "invalid_params",

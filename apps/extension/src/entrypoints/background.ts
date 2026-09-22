@@ -242,7 +242,13 @@ export default defineBackground(() => {
     if (!sessions.findByWindowId(tab.windowId)) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
-  chrome.tabs.onDetached.addListener((tabId) => debug.releaseTab(tabId));
+  chrome.tabs.onDetached.addListener((tabId) => {
+    debug.releaseTab(tabId);
+    for (const sessionId of sessions.releaseObservedTab(tabId))
+      void cdp
+        .releaseSessionTab(sessionId, tabId)
+        .catch((error) => console.debug("[bsk] observed tab release failed", error));
+  });
   chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });

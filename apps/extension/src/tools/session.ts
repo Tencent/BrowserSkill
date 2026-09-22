@@ -325,7 +325,7 @@ export async function handleSessionStop(
     }
 
     // Step 5: decide whether to release (keep) the window or close it.
-    let shouldRelease = false;
+    let shouldRelease = (ctx.observedTabs?.size ?? 0) > 0;
     if (queryApi) {
       try {
         const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });

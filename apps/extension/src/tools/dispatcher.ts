@@ -158,16 +158,7 @@ export interface DispatcherDeps {
 }
 
 /** Tools whose page input can make the page open another tab or window. */
-const OPENS_TABS = new Set([
-  "tool.click",
-  "tool.press",
-  "tool.evaluate",
-  "tool.navigate",
-  "tool.navigate_back",
-  "tool.navigate_forward",
-  "tool.fill",
-  "tool.select",
-]);
+const OPENS_TABS = new Set(["tool.click", "tool.press"]);
 
 /**
  * Routes RPC requests pushed by the daemon over the Transport to the
@@ -336,7 +327,7 @@ export class ToolDispatcher {
         ? await withTaskPopups(
             this.sessions,
             (req.params ?? {}) as { session_id?: string; tab_id?: number },
-            () => this.invoke(req, ac.signal),
+            (inputSent) => this.invoke(req, ac.signal, inputSent),
             this.onAgentTabClaimed,
             ac.signal,
           )
@@ -409,7 +400,11 @@ export class ToolDispatcher {
     }
   }
 
-  private async invoke(req: RequestFrame, signal: AbortSignal): Promise<unknown | RpcError> {
+  private async invoke(
+    req: RequestFrame,
+    signal: AbortSignal,
+    onInputSent?: (tabId: number) => void,
+  ): Promise<unknown | RpcError> {
     const sessionId = (req.params as { session_id?: string } | undefined)?.session_id;
     // Also enforce this for gateways backed by a local-mode daemon, where the
     // standalone server's early IPC rejection does not apply.
@@ -670,6 +665,7 @@ export class ToolDispatcher {
                     tabsApi: chromeTabsApi,
                     signal,
                     bypassOverlay,
+                    onInputSent,
                   }
                 : undefined,
             ),
@@ -758,7 +754,7 @@ export class ToolDispatcher {
             handlePress(
               this.sessions,
               req.params as PressParams,
-              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+              this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal, onInputSent } : undefined,
             ),
           signal,
         );

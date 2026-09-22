@@ -1840,3 +1840,46 @@ describe("handleSelect", () => {
     expect(fake.sent.some((c) => c.method === "Runtime.callFunctionOn")).toBe(false);
   });
 });
+
+it.each([
+  "click",
+  "press",
+])("arms popup observation at native %s dispatch, after preparation", async (kind) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  const task = await manager.start("popup");
+  task.refStore.set("e1", 1234, { tabId: 4 });
+  const order: string[] = [];
+  const fake = makeFakeCdp({
+    "DOM.scrollIntoViewIfNeeded": () => {
+      order.push("prepare");
+      return {};
+    },
+    "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
+    "Input.dispatchMouseEvent": (p) => {
+      order.push((p as { type: string }).type);
+      return {};
+    },
+    "Input.dispatchKeyEvent": (p) => {
+      order.push((p as { type: string }).type);
+      return {};
+    },
+  });
+  const onInputSent = vi.fn((id: number) => {
+    expect(id).toBe(4);
+    order.push("arm");
+  });
+  const deps = { cdp: fake.cdp, tabsApi: fake.tabsApi, onInputSent };
+  const result =
+    kind === "click"
+      ? await handleClick(manager, { session_id: "popup", ref: "e1" }, deps)
+      : await handlePress(manager, { session_id: "popup", key: "Enter" }, deps);
+  expect(result).toHaveProperty("tab_id", 4);
+  expect(onInputSent).toHaveBeenCalledTimes(2);
+  if (kind === "click")
+    expect(order).toEqual(["prepare", "mouseMoved", "arm", "mousePressed", "arm", "mouseReleased"]);
+  else {
+    expect(order.indexOf("arm")).toBeLessThan(order.indexOf("rawKeyDown"));
+    expect(order.at(-2)).toBe("arm");
+    expect(order.at(-1)).toBe("keyUp");
+  }
+});

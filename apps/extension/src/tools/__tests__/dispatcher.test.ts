@@ -1377,11 +1377,15 @@ it.each([
     },
   });
   const task = await sessions.start("popup");
-  const listeners = new Set<(e: { sourceTabId: number; tabId: number }) => void>();
+  const listeners = new Set<
+    (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void
+  >();
   const event = {
-    addListener: (fn: (e: { sourceTabId: number; tabId: number }) => void) => listeners.add(fn),
-    removeListener: (fn: (e: { sourceTabId: number; tabId: number }) => void) =>
-      listeners.delete(fn),
+    addListener: (fn: (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void) =>
+      listeners.add(fn),
+    removeListener: (
+      fn: (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void,
+    ) => listeners.delete(fn),
   };
   vi.stubGlobal("chrome", {
     tabs: {
@@ -1393,17 +1397,25 @@ it.each([
   const f = fakeTransport();
   const dispatcher = new ToolDispatcher({ transport: f.transport, sessions });
   vi.spyOn(
-    dispatcher as unknown as { invoke: () => Promise<unknown> },
+    dispatcher as unknown as {
+      invoke: (
+        req: RequestFrame,
+        signal: AbortSignal,
+        inputSent: (tabId: number) => void,
+      ) => Promise<unknown>;
+    },
     "invoke",
-  ).mockImplementation(async () => {
-    for (const fn of listeners) fn({ sourceTabId: 10, tabId: 20 });
+  ).mockImplementation(async (_req, _signal, inputSent) => {
+    inputSent(10);
+    for (const fn of listeners) fn({ sourceTabId: 10, sourceFrameId: 0, tabId: 20 });
     return {};
   });
   dispatcher.start();
   try {
     f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10 } });
     await vi.waitFor(() => expect(f.sent.some((r) => "id" in r && r.id === "open")).toBe(true));
-    expect(task.agentCreatedTabs.has(20)).toBe(true);
+    expect(task.observedTabs?.has(20)).toBe(true);
+    expect(task.agentCreatedTabs.has(20)).toBe(false);
     expect(listeners.size).toBe(0);
   } finally {
     dispatcher.stop();
@@ -1421,7 +1433,9 @@ it("passes dispatcher cancellation to popup tracking before the tool settles", a
     },
   });
   const task = await sessions.start("popup");
-  const listeners = new Set<(e: { sourceTabId: number; tabId: number }) => void>();
+  const listeners = new Set<
+    (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void
+  >();
   vi.stubGlobal("chrome", {
     tabs: {
       get: async (id: number) => ({ id, windowId: 10 }),
@@ -1443,17 +1457,22 @@ it("passes dispatcher cancellation to popup tracking before the tool settles", a
   const invoke = vi
     .spyOn(
       dispatcher as unknown as {
-        invoke: (req: RequestFrame, signal: AbortSignal) => Promise<unknown>;
+        invoke: (
+          req: RequestFrame,
+          signal: AbortSignal,
+          inputSent: (tabId: number) => void,
+        ) => Promise<unknown>;
       },
       "invoke",
     )
-    .mockImplementation(async () => {
+    .mockImplementation(async (_req, _signal, inputSent) => {
+      inputSent(10);
       await gate;
       return {};
     });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method: "tool.evaluate", params: { session_id: "popup", tab_id: 10 } });
+    f.deliver({ id: "open", method: "tool.press", params: { session_id: "popup", tab_id: 10 } });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
     f.deliver({ id: "cancel", method: "cancel", params: { rpc_id: "open" } });
     await vi.waitFor(() =>
