@@ -64,6 +64,92 @@ describe("ChromiumCdp", () => {
     cdp.dispose();
   });
 
+  it("keeps a child frame session whose auto-attach configuration timed out", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onEvent } = fakeApi();
+    let childConfigurations = 0;
+    vi.mocked(api.sendCommand).mockImplementation(
+      async (target: chrome.debugger.Debuggee & { sessionId?: string }, method: string) => {
+        if (method === "Target.setAutoAttach" && target.sessionId === "child") {
+          childConfigurations += 1;
+          if (childConfigurations === 1) return new Promise(() => {});
+          return {};
+        }
+        if (method === "DOM.getFrameOwner") return { backendNodeId: 200 };
+        if (method !== "Page.getFrameTree") return {};
+        if (target.sessionId === "child")
+          return { frameTree: { frame: { id: "child", url: "https://child.test" } } };
+        return {
+          frameTree: {
+            frame: { id: "main", url: "https://app.test" },
+            childFrames: [{ frame: { id: "child", parentId: "main", url: "https://child.test" } }],
+          },
+        };
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    try {
+      await cdp.ensureAttached(4);
+      onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "child" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(childConfigurations).toBe(1);
+      const graph = cdp.getFrameGraph(4);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect((await graph).frames.find((frame) => frame.frameId === "child")?.target).toEqual({
+        tabId: 4,
+        sessionId: "child",
+      });
+      expect(childConfigurations).toBe(2);
+    } finally {
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["Target.setAutoAttach", undefined],
+    ["Page.getFrameTree", "child"],
+    ["DOM.getFrameOwner", undefined],
+  ])("propagates a %s read timeout instead of returning a partial frame graph", async (stuckMethod, stuckSession) => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    const { api, onEvent } = fakeApi();
+    vi.mocked(api.sendCommand).mockImplementation(
+      async (target: chrome.debugger.Debuggee & { sessionId?: string }, method: string) => {
+        if (method === stuckMethod && target.sessionId === stuckSession)
+          return new Promise(() => {});
+        if (method === "DOM.getFrameOwner") return { backendNodeId: 200 };
+        if (method !== "Page.getFrameTree") return {};
+        if (target.sessionId === "child")
+          return { frameTree: { frame: { id: "child", url: "https://child.test" } } };
+        return {
+          frameTree: {
+            frame: { id: "main", url: "https://app.test" },
+            childFrames: [{ frame: { id: "child", parentId: "main", url: "https://child.test" } }],
+          },
+        };
+      },
+    );
+    const cdp = new ChromiumCdp(api);
+    try {
+      if (stuckMethod !== "Target.setAutoAttach") {
+        await cdp.ensureAttached(4);
+        onEvent.fire({ tabId: 4 }, "Target.attachedToTarget", { sessionId: "child" });
+      }
+      const graph = cdp.getFrameGraph(4);
+      const rejected = expect(graph).rejects.toThrow(`${stuckMethod} timed out`);
+      // A stuck root configuration is first waited for by the attach path.
+      await vi.advanceTimersByTimeAsync(22_000);
+      await rejected;
+    } finally {
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("changes attachment identity only across real debugger attachments", async () => {
     const { api, onEvent, onDetach } = fakeApi();
     const cdp = new ChromiumCdp(api);

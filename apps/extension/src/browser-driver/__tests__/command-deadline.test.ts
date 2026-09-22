@@ -30,6 +30,17 @@ it("times out stuck snapshots with the actual method and stops fallback reads", 
   expect(vi.getTimerCount()).toBe(0);
 });
 
+it("does not start a snapshot after the frame graph read timed out", async () => {
+  const send = vi.fn(async () => ({}));
+  const getFrameGraph = vi.fn(async () => {
+    throw new CdpReadTimeoutError("DOM.getFrameOwner", 4, READ_TIMEOUT_MS);
+  });
+  await expect(captureObservationFacts({ send, getFrameGraph } as never, 4)).rejects.toThrow(
+    "DOM.getFrameOwner timed out",
+  );
+  expect(send).not.toHaveBeenCalled();
+});
+
 it("ignores the late reply of a timed-out read", async () => {
   vi.useFakeTimers();
   vi.spyOn(console, "warn").mockImplementation(() => {});

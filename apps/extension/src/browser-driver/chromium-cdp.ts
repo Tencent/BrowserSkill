@@ -32,7 +32,7 @@ import type {
   NetworkResult,
 } from "@/transport/types";
 import { BackgroundExecution } from "./background-execution";
-import { runCdpCommand } from "./command-deadline";
+import { CdpReadTimeoutError, runCdpCommand } from "./command-deadline";
 import {
   buildFrameGraph,
   type CdpFrameGraph,
@@ -344,7 +344,11 @@ export class ChromiumCdp {
 
   async getFrameGraph(tabId: number): Promise<CdpFrameGraph> {
     await this.ensureAttached(tabId);
-    await this.enableFrameDiscovery({ tabId }).catch(() => {});
+    // Ordinary configuration failures leave the graph to the root tree. A
+    // timed-out read means the renderer is not answering: stop here instead of
+    // queueing the tree, owner and snapshot reads behind the stuck command.
+    await this.enableFrameDiscovery({ tabId }).catch(rethrowReadTimeout);
+    this.retryChildFrameDiscovery(tabId);
     await this.drainFrameAttachTasks(tabId);
 
     const sources: CdpFrameTreeSource[] = [];
@@ -366,7 +370,8 @@ export class ChromiumCdp {
             {},
           );
           return reply.frameTree ? { target, tree: reply.frameTree } : null;
-        } catch {
+        } catch (err) {
+          rethrowReadTimeout(err);
           return null;
         }
       }),
@@ -390,8 +395,9 @@ export class ChromiumCdp {
             { frameId: frame.frameId },
           );
           if (owner.backendNodeId !== undefined) frame.ownerBackendNodeId = owner.backendNodeId;
-        } catch {
+        } catch (err) {
           // The frame may have navigated between tree capture and owner lookup.
+          rethrowReadTimeout(err);
         }
       }),
     );
@@ -750,10 +756,33 @@ export class ChromiumCdp {
     };
   }
 
+  /** Child sessions stay attached in Chrome after their configuration timed
+   * out. Only the configuration needs another attempt, and it joins the same
+   * bounded drain as newly attached targets. */
+  private retryChildFrameDiscovery(tabId: number): void {
+    const state = this.frameDiscovery.get(tabId);
+    if (!state) return;
+    for (const sessionId of state.sessions) {
+      if (state.enabled.has(sessionId)) continue;
+      const task = this.initializeFrameTarget({ tabId, sessionId });
+      state.pending.add(task);
+      void task.finally(() => {
+        state.pending.delete(task);
+      });
+    }
+  }
+
   private async initializeFrameTarget(target: CdpTarget): Promise<void> {
     try {
       await this.enableFrameDiscovery(target);
     } catch (err) {
+      if (err instanceof CdpReadTimeoutError) {
+        // The command is still in flight and Chrome keeps the child session
+        // attached. Keep it registered so the next observation retries the
+        // configuration instead of losing the frame until the next reattach.
+        console.debug("[bsk cdp] child frame discovery timed out", { target });
+        return;
+      }
       const state = this.frameDiscovery.get(target.tabId);
       if (state?.sessions.delete(target.sessionId as string)) state.generation += 1;
       console.debug("[bsk cdp] child frame target initialization failed", { target, err });
@@ -1356,6 +1385,10 @@ function projectNetworkEntry(entry: NetworkEntry, maxTextChars: number): Network
     truncated:
       entry.truncated || (projectedUrl?.truncated ?? false) || (projectedError?.truncated ?? false),
   };
+}
+
+function rethrowReadTimeout(err: unknown): void {
+  if (err instanceof CdpReadTimeoutError) throw err;
 }
 
 function normalizeError(err: unknown): Error {
