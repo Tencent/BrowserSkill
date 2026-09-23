@@ -9,6 +9,9 @@ bsk request-help --session <id> --prompt "Please complete sign-in" --target @e3
 
 Use a precise prompt and fresh targets; omit `--target` when no control fits.
 Use completion criteria only for a clear, stable success signal.
+For URL completion, `url_matches` accepts RE2-compatible regular expressions.
+Patterns using backtracking-only features such as backreferences are rejected;
+use `url_contains` when a substring is enough.
 
 | Result | Next step |
 | --- | --- |

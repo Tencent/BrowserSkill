@@ -1,5 +1,6 @@
 // `tool.request_help` — pause automation and let the human control a tab.
 
+import { RE2JS } from "re2js";
 import {
   HELP_ACK,
   HELP_CANCEL,
@@ -48,6 +49,7 @@ const HELP_REARM_RETRY_DELAY_MS = 400;
 const HELP_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_COMPLETION_STABLE_MS = 1_000;
 const COMPLETION_POLL_MS = 500;
+const MAX_URL_REGEX_LENGTH = 2_048;
 
 export interface RequestHelpNotifications {
   create(id: string, options: chrome.notifications.NotificationOptions<true>): Promise<string>;
@@ -83,6 +85,7 @@ interface ActiveHelpRequest {
   notificationId: string;
   resolvedTargets?: ResolvedTarget[];
   completionCriteria?: HelpCompletionCriteria;
+  urlMatchers: Map<string, RE2JS>;
   deps: RequestHelpDeps;
   settled: boolean;
   unsubscribePreferences?: () => void;
@@ -599,11 +602,7 @@ async function evaluateCompletionCondition(
     }
     if (condition.url_contains && !url.includes(condition.url_contains)) return false;
     if (condition.url_matches) {
-      try {
-        if (!new RegExp(condition.url_matches).test(url)) return false;
-      } catch {
-        return false;
-      }
+      if (!help.urlMatchers.get(condition.url_matches)?.test(url)) return false;
     }
   }
 
@@ -715,6 +714,27 @@ export async function handleRequestHelp(
   });
   if (helpDisabled()) return disabledResult(params.tab_id ?? 0);
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
+  const urlMatchers = new Map<string, RE2JS>();
+  for (const condition of [
+    ...(params.completion_criteria?.all ?? []),
+    ...(params.completion_criteria?.any ?? []),
+  ]) {
+    const pattern = condition.url_matches;
+    if (pattern === undefined) continue;
+    if (typeof pattern !== "string" || pattern.length > MAX_URL_REGEX_LENGTH) {
+      return {
+        code: "invalid_params",
+        message: "url_matches must be a string of at most 2048 characters",
+      };
+    }
+    if (urlMatchers.has(pattern)) continue;
+    try {
+      urlMatchers.set(pattern, RE2JS.compile(pattern));
+    } catch {
+      return { code: "invalid_params", message: "url_matches uses unsupported regex syntax" };
+    }
+  }
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
   const denied = enforceAgentWindow(ctx, target, "request_help");
@@ -765,6 +785,7 @@ export async function handleRequestHelp(
       notificationId,
       resolvedTargets,
       completionCriteria: params.completion_criteria,
+      urlMatchers,
       deps,
       settled: false,
       resolve,

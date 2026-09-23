@@ -544,6 +544,74 @@ describe("handleRequestHelp", () => {
     expect(res).toMatchObject({ outcome: "completed", completed_by: "system", tab_id: 5 });
   });
 
+  it("keeps responding after a backtracking-prone URL regex fails", async () => {
+    const url = `https://app.example/${"a".repeat(28)}!`;
+    const deps = baseDeps({
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      tabsApi: {
+        get: vi.fn(async () => ({ id: 5, windowId: 99, active: true, url })) as never,
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+    const started = performance.now();
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          any: [{ url_matches: "(a+)+$" }, { url_matches: "^https://app.example/a+!$" }],
+          stable_for_ms: 0,
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ outcome: "completed", completed_by: "system" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it("handles cancellation after checking a backtracking-prone URL regex", async () => {
+    const abort = new AbortController();
+    const tabsApi = {
+      get: vi.fn(async () => ({
+        id: 5,
+        windowId: 99,
+        active: true,
+        url: `https://app.example/${"a".repeat(28)}!`,
+      })) as never,
+      query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+    };
+    const deps = baseDeps({
+      signal: abort.signal,
+      tabsApi,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    const started = performance.now();
+    const pending = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [{ url_matches: "(a+)+$" }] } }),
+      deps,
+    );
+    await vi.waitFor(() => expect(tabsApi.get).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    abort.abort();
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it.each([
+    { label: "unsupported lookahead", pattern: "(?=a)" },
+    { label: "oversized pattern", pattern: "a".repeat(2_049) },
+  ])("rejects $label before starting help", async ({ pattern }) => {
+    const deps = baseDeps();
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [{ url_matches: pattern }] } }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.activateTab).not.toHaveBeenCalled();
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+  });
+
   it("keeps user control active on new tabs without moving completion off the primary tab", async () => {
     vi.useFakeTimers();
     const chromeEvents = installHelpLifecycleChrome();

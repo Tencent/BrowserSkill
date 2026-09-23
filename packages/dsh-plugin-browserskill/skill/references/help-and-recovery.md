@@ -3,6 +3,9 @@
 With help enabled, use `browser_assist` action `request-help` for login, CAPTCHA,
 OTP, payment confirmation, consent, or after two attempts without progress. Supply
 a precise prompt and fresh targets; completion criteria need a stable success signal.
+For URL completion, `urlMatches` accepts RE2-compatible regular expressions.
+Patterns using backtracking-only features such as backreferences are rejected;
+use `urlContains` when a substring is enough.
 Resume only on `continued` / `completed`, then observe. Cancellation/timeout blocks
 the step; do not repeat the request. Navigation alone is not success.
 

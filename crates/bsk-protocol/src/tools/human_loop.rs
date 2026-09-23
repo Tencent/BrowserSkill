@@ -70,6 +70,8 @@ pub struct HelpCompletionCondition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_contains: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 2048))]
+    /// RE2-compatible URL regex (maximum 2048 characters). Backtracking-only syntax is rejected.
     pub url_matches: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selector_exists: Option<String>,
