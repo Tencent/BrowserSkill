@@ -3,7 +3,7 @@
 // image/path-only/running/error rendering, the registration key, and the
 // session-bound attachment loader.
 
-import type { RunningToolCall, ToolResultNode } from "@deepseek-ai/dsh-client-runtime/client";
+import type { RunningToolCall, ToolResultNode } from "@deepseek-ai/dsh-client-ui-chat/client";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {

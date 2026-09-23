@@ -5,12 +5,16 @@
  * keep the floating card. The user may switch to floating for this page.
  */
 
+import type { Context as ClientContext } from "@deepseek-ai/cordis";
+import type { ISessions } from "@deepseek-ai/dsh-api-session-controller/client";
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
-// Development-only types for the injected services; newer hosts no longer ship this package.
-import type { ClientContext, ISessions, SessionId } from "@deepseek-ai/dsh-client-runtime/client";
 // Type-only: pulls the 'shell.overlay' SlotMap merge into scope.
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
+// Current renderer/session adapters own Context.slots and the session-scoped props.
+import type {} from "@deepseek-ai/dsh-client-ui-renderer/client";
+import type {} from "@deepseek-ai/dsh-client-ui-session/client";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
+import type { SessionId } from "@deepseek-ai/dsh-session";
 import { createElement, useCallback } from "react";
 // Scope-prefixed BSK design tokens and utility sheet (injected verbatim as
 // <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).

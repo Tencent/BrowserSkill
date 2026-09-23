@@ -33,7 +33,9 @@ interface ViewModel {
   readonly title: string;
 }
 
-const TERMINAL_LABELS: Partial<TerminalBlockLabels> = {
+const TERMINAL_LABELS: TerminalBlockLabels = {
+  signal: (signal) => `Signal ${signal}`,
+  exitCode: (exitCode) => `Exit code ${exitCode}`,
   running: "Running",
   failed: "Failed",
   done: "Done",
