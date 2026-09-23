@@ -417,12 +417,18 @@ describe("handleClick", () => {
   });
 
   it.each([
-    "begin",
-    "move",
-    "press",
-    "release",
-    "clear-slow",
-  ])("handles lease expiry during %s without retrying input", async (phase) => {
+    ["begin", INPUT_PASSTHROUGH_TTL_MS],
+    ["move", INPUT_PASSTHROUGH_TTL_MS],
+    ["press", INPUT_PASSTHROUGH_TTL_MS],
+    ["release", INPUT_PASSTHROUGH_TTL_MS],
+    ["clear-slow", INPUT_PASSTHROUGH_TTL_MS],
+    ["begin", 4_000],
+    ["move", 4_000],
+    ["probe", 4_000],
+    ["move", 3_999],
+    ["press", 4_500],
+    ["release", 4_500],
+  ] as const)("handles %s delayed by %i ms without retrying input", async (phase, elapsed) => {
     let now = Date.now();
     const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
     try {
@@ -433,7 +439,7 @@ describe("handleClick", () => {
       let passthrough = false;
       const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
         passthrough = message.phase === "begin";
-        if (passthrough && phase === "begin") now += INPUT_PASSTHROUGH_TTL_MS;
+        if (passthrough && phase === "begin") now += elapsed;
       });
       const bypassOverlay = vi.fn(async () => {});
       const fake = makeFakeCdp({
@@ -447,36 +453,40 @@ describe("handleClick", () => {
             (["press", "clear-slow"].includes(phase) && type === "mousePressed") ||
             (phase === "release" && type === "mouseReleased")
           )
-            now += INPUT_PASSTHROUGH_TTL_MS;
+            now += elapsed;
           return {};
         },
       });
       // Another concurrent lease may keep the point clear after ours has expired.
-      fake.overlayHit.mockImplementation(async () => ({
-        result: { value: passthrough || phase === "clear-slow" ? "clear" : "covered" },
-      }));
+      fake.overlayHit.mockImplementation(async () => {
+        if (phase === "probe" && mouse.length > 0) now += elapsed;
+        return { result: { value: passthrough || phase === "clear-slow" ? "clear" : "covered" } };
+      });
       const result = await handleClick(
         manager,
         { session_id: "expiry", ref: "e1" },
         { ...fake, bypassOverlay, sendInputPassthrough },
       );
-      if (phase === "clear-slow") {
+      const blockedBeforePress = ["begin", "move", "probe"].includes(phase) && elapsed >= 4_000;
+      if (phase === "clear-slow" || (!blockedBeforePress && elapsed < INPUT_PASSTHROUGH_TTL_MS)) {
         expect(result).not.toHaveProperty("code");
-        expect(sendInputPassthrough).not.toHaveBeenCalled();
       } else {
         expect(result).toMatchObject({
           data: {
-            reason: ["begin", "move"].includes(phase) ? "input_not_ready" : "input_outcome_unknown",
-            effect_state: ["begin", "move"].includes(phase) ? "none" : "unknown",
+            reason: blockedBeforePress ? "input_not_ready" : "input_outcome_unknown",
+            effect_state: blockedBeforePress ? "none" : "unknown",
           },
         });
+      }
+      if (phase === "clear-slow") expect(sendInputPassthrough).not.toHaveBeenCalled();
+      else {
         expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(["begin", "end"]);
         expect(bypassOverlay.mock.calls).toHaveLength(2);
       }
       expect(mouse).toEqual(
-        phase === "begin"
+        blockedBeforePress && phase === "begin"
           ? []
-          : phase === "move"
+          : blockedBeforePress
             ? ["mouseMoved"]
             : ["mouseMoved", "mousePressed", "mouseReleased"],
       );

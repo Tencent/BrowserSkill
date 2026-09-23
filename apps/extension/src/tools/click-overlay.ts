@@ -32,6 +32,8 @@ export async function withClickOverlay<T>(
   let passthroughId: string | undefined;
   let passthroughExpiresAt = Infinity;
   const expired = () => Date.now() >= passthroughExpiresAt;
+  // Reserve one second for input delivery; completed clicks still use the full lease.
+  const pressDeadlineReached = () => Date.now() >= passthroughExpiresAt - 1_000;
   const notReady = () =>
     rpcError(
       "cdp_failed",
@@ -99,12 +101,13 @@ export async function withClickOverlay<T>(
       hit = await probe();
     }
     if (deps.signal?.aborted) return cancelled();
-    if (expired() || hit === "covered" || (covered && hit === "unknown")) return notReady();
+    if (pressDeadlineReached() || hit === "covered" || (covered && hit === "unknown"))
+      return notReady();
     const result = await click(async () => {
-      if (expired()) return notReady();
+      if (pressDeadlineReached()) return notReady();
       const current = await probe();
       // Unknown probes preserve ordinary-page behavior, but cannot clear a known obstruction.
-      return expired() || current === "covered" || (covered && current === "unknown")
+      return pressDeadlineReached() || current === "covered" || (covered && current === "unknown")
         ? notReady()
         : null;
     });
