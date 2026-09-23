@@ -1,366 +1,311 @@
 # BrowserSkill
 
 <p align="center">
-  <img src="docs/assets/browserskill-readme-banner.png" alt="BrowserSkill banner" />
+  <img src="docs/assets/browserskill-readme-banner.png" alt="BrowserSkill — connect your AI agent to your browser" />
 </p>
 
 <p align="center">
-  <strong>Let AI agents use your browser without interrupting your work.</strong>
+  <strong>Let AI agents work in your logged-in browser while you keep working.</strong>
 </p>
 
 <p align="center">
   English · <a href="README.zh-CN.md">中文</a>
 </p>
 
-**BrowserSkill** connects Cursor, Claude Code, Codex, OpenClaw, CodeBuddy,
-WorkBuddy, Pi, Hermes Agent, DeepSeek Harness, and other AI agents to your already logged-in
-browser.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#website-debugging">Website debugging</a> ·
+  <a href="#deepseek-harness-plugin">DSH plugin</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="CHANGELOG.md">Changelog</a>
+</p>
 
-Need the agent to touch a tab you already have open? It must borrow that tab
-explicitly, return it when the task is done, and leave the rest of your browser
-alone.
+**BrowserSkill connects your AI agent to Chrome or Microsoft Edge, using the accounts you are already signed into.** Ask it to read pages, fill forms, work through a website, capture a long screenshot, or investigate a failing request. Tasks run in a separate, visible **Agent Window**; an existing tab can be explicitly borrowed and returned when the task ends.
+
+Use the `bsk` CLI with Cursor, Claude Code, Codex, OpenClaw, CodeBuddy, WorkBuddy, Pi, Hermes Agent, or another shell-capable agent. **DeepSeek Harness** has a dedicated plugin with native browser tools and task previews. You choose the agent and model; BrowserSkill provides the browser connection.
+
+## What you can do
+
+| Capability | What it gives you |
+| --- | --- |
+| **Work with your existing accounts** | Use the browser's current login state to read documents, search internal sites, fill forms, and complete web workflows. |
+| **Keep browser tasks visible** | Give the agent its own window, borrow an existing tab when needed, and take over for login, verification, or other human-only steps. |
+| **Read, interact, and capture** | Inspect page text and controls, click and type, manage tabs, capture viewport or full-page screenshots, and upload or download files in local mode. |
+| **Debug websites with evidence** | Connect actions to requests, response bodies, console messages, and page changes. Inspect performance, slow APIs, and suspected duplicate requests; use explicit HTTP rules or request replay to test a hypothesis. |
+| **Choose the right browser** | Name browser instances, bind a task to a specific profile, or pair an agent running on a server with a browser on your computer. |
+| **Review what happened** | Reopen browser-local debugging history, export evidence as JSON, or enable a separate operation audit to review task activity. |
+
+Watch a browser task in action:
 
 https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
 
-## BrowserSkill Advantages
-
-- **Reuse real login state**: Agents can work with sites you are already signed
-  into, without separate test accounts.
-- **Keep working uninterrupted**: browser tasks run in a separate, visible
-  Agent Window, so you can keep using your own browser.
-- **Support any Agent**: any Agent that can call a shell can use BrowserSkill
-  through the `bsk` CLI, with no lock-in to a specific model, Agent framework, or
-  harness.
-- **Built-in human-in-loop**: when a task hits captcha, login, confirmation
-  dialogs, or other human-only steps, the Agent can ask you to take over and
-  then continue afterwards.
-
-Capture a long image in **Quick actions → Full-page screenshot**, or let an Agent use
-`bsk screenshot --session <id> --full-page --out page.png`. See the
-[full-page screenshot guide](docs/long-screenshot.md) for page support, cancellation and export.
-
-## Runtime Environment
-
-BrowserSkill has two local runtime pieces: the `bsk` CLI/daemon and the browser
-extension.
-
-| Runtime | Support |
-| --- | --- |
-| Operating systems | macOS (Apple Silicon and Intel), Linux (x64 and ARM64), Windows x64 |
-| Browsers | Chrome and Microsoft Edge are supported; other Chromium-based browsers are expected to work when they support unpacked Chromium extensions; Firefox is planned |
-
 ## Quick Start
 
-Using an agent sandbox that reaps background processes after each command?
-Follow the [sandboxed agent setup](docs/sandboxed-agents.md) to keep the daemon
-in a persistent host environment and connect with a shared `BSK_HOME` plus
-`BSK_AUTO_START=0`. Ordinary local use keeps automatic startup by default.
+For local automation, you need **an AI agent + the `bsk` CLI + the browser extension**. The CLI includes the background daemon. The skill teaches your agent how to use it.
 
-<details open>
-<summary><b>Install with your Agent (recommended)</b></summary>
+| Component | Supported environments |
+| --- | --- |
+| CLI / daemon | macOS: Apple Silicon and Intel · Linux: x64 and ARM64 · Windows: x64 |
+| Extension | Chrome and Microsoft Edge, based on Chromium 125 or later. Other Chromium browsers may work; compatibility is not guaranteed. |
+| Agent integration | A shell-capable agent with the BrowserSkill skill, or DeepSeek Harness with the [DSH plugin](#deepseek-harness-plugin). |
 
-<br>
+### Let your agent set it up
 
-Already using Cursor, Claude Code, Codex, or another shell-capable agent? Just
-copy this one line and send it to your agent — it will install the CLI and skill
-for you, then walk you through loading the extension:
+Send this to your agent:
 
 ```text
 Set up browser-skill on this machine by following https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md
 ```
 
-</details>
+The guide covers CLI installation, the correct skill or DSH plugin, connection checks, and a first browser task. You will still need to install the extension in the browser you want to use:
+
+**[Install for Chrome](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)** · **[Install for Edge](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)**
 
 <details>
-<summary><b>Manual install</b></summary>
+<summary><b>Manual setup</b></summary>
 
-<br>
+#### 1. Install the CLI
 
-Install the CLI, then install the extension from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
-or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg).
+macOS / Linux:
 
-#### 1. Install the `bsk` CLI
-
-**macOS / Linux** (recommended — installs to `~/.local/bin`):
-
-```bash
+```sh
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
 export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 ```
 
-**Windows** (PowerShell — installs to `~/.local/bin`):
+Windows PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
 ```
 
-The export makes the CLI available in the current Unix shell. A running agent may
-need the same PATH setting in each shell call, or the installed binary's absolute
-path. Restart the agent if it retains an old PATH after installation.
+By default, the binary is installed under `~/.local/bin`. Check it in the terminal or agent environment that will use it:
 
-Verify the binary in the terminal or agent environment that will use it:
-
-```bash
+```sh
 bsk --version
 ```
 
-#### 2. Install the browser extension
+If an already-running agent cannot find `bsk`, restart it to pick up the new PATH, or configure the installed binary's absolute path.
 
-Install BrowserSkill from your browser's store:
+#### 2. Connect the extension
 
-| Browser | Store listing |
-| --- | --- |
-| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
-| Microsoft Edge | [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg). Open its popup, enable the local connection, and check its status after starting the CLI.
 
-On other Chromium-based browsers, install the Chrome Web Store build.
+#### 3. Install the skill for your agent
 
-#### 3. Install the skill
-
-BrowserSkill ships a skill that teaches your agent harness how to use `bsk`. For
-these harnesses, install it in one step:
-
-<p align="center">
-<table>
-  <tr>
-    <td align="center" width="108"><a href="https://cursor.com" title="Cursor"><img src="docs/assets/harnesses/cursor.svg" height="36" alt="Cursor" /></a><br /><sub><b>Cursor</b></sub></td>
-    <td align="center" width="108"><a href="https://docs.anthropic.com/en/docs/claude-code" title="Claude Code"><img src="docs/assets/harnesses/claude.svg" height="36" alt="Claude Code" /></a><br /><sub><b>Claude Code</b></sub></td>
-    <td align="center" width="108"><a href="https://developers.openai.com/codex" title="Codex"><img src="docs/assets/harnesses/codex.svg" height="36" alt="Codex" /></a><br /><sub><b>Codex</b></sub></td>
-    <td align="center" width="108"><a href="https://openclaw.ai" title="OpenClaw"><img src="docs/assets/harnesses/openclaw.svg" height="36" alt="OpenClaw" /></a><br /><sub><b>OpenClaw</b></sub></td>
-    <td align="center" width="108"><a href="https://www.codebuddy.ai" title="CodeBuddy"><img src="docs/assets/harnesses/codebuddy.svg" height="36" alt="CodeBuddy" /></a><br /><sub><b>CodeBuddy</b></sub></td>
-    <td align="center" width="108"><a href="https://www.workbuddy.ai" title="WorkBuddy"><img src="docs/assets/harnesses/workbuddy.svg" height="36" alt="WorkBuddy" /></a><br /><sub><b>WorkBuddy</b></sub></td>
-    <td align="center" width="108"><a href="https://github.com/badlogic/pi-mono" title="Pi"><img src="docs/assets/harnesses/pi.svg" height="36" alt="Pi" /></a><br /><sub><b>Pi</b></sub></td>
-    <td align="center" width="108"><a href="https://github.com/NousResearch/hermes-agent" title="Hermes Agent"><img src="docs/assets/harnesses/hermes.png" height="36" alt="Hermes Agent" /></a><br /><sub><b>Hermes Agent</b></sub></td>
-  </tr>
-</table>
-</p>
-
-```bash
+```sh
 bsk install-skill
 ```
 
-Use <kbd>Space</kbd> to select the Agent harness you want to install into, then
-press <kbd>Enter</kbd> to install the skill. Run `bsk install-skill --list` to see
-internal variants and install paths.
+Select your harness with **Space**, then press **Enter**. For non-interactive setup, choose it explicitly:
 
-For non-interactive installation, specify the intended harness, for example
-`bsk install-skill --harness cursor --json`. Explicit selection also works when
-the harness is not detected. `--yes` alone installs into every detected harness
-and fails when none are detected.
+```sh
+bsk install-skill --harness cursor --json
+```
 
-To install your own instructions, use `bsk install-skill --harness cursor --source ./SKILL.md`.
-An explicit `--source` stays custom even if its contents match the bundled skill.
-Existing installations are skipped unless you add `--force`.
+Use `bsk install-skill --list` to see supported targets and paths. Existing installations are skipped unless you explicitly replace them with `--force`. For another harness, copy the entire [`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) directory into its skills directory as `browser-skill/`, including `references/`.
 
-Daemon startup, `session start`, and `doctor` automatically update managed skills
-only when their contents still match the last installed version. Local edits are
-preserved and automatic updates pause. An older installation without a content
-baseline is enrolled automatically only if it exactly matches the current bundled
-skill; this writes the source marker without rewriting `SKILL.md`. Explicit custom
-installations stay custom even when their contents match.
+DSH users should install the [plugin](#deepseek-harness-plugin) instead; it includes the skill.
 
-For differing historical files, local edits, or an unrecognized source marker,
-`doctor` shows `WARN` with the reason and recovery options. These warnings do not
-make the health check fail (`--json` reports `status: "warn"` and `ok: true`).
-A concurrent install or sync is reported as deferred and retried on a later pass.
+#### 4. Check the connection
 
-To keep your current instructions as an explicit customization, run
-`bsk install-skill --harness cursor --source <existing-SKILL.md> --force`, replacing
-`<existing-SKILL.md>` with the path to your existing file. To restore the bundled
-skill and resume automatic updates, run `bsk install-skill --harness cursor --force`
-without `--source`. This second command overwrites the existing instructions.
+```sh
+bsk doctor
+```
 
-Other shell-capable agent harnesses are supported too. Copy
-[`skill/SKILL.md`](skill/SKILL.md) into your harness's skills directory as
-`browser-skill/SKILL.md` to install the skill manually. DeepSeek Harness uses a
-dedicated plugin instead — see [DeepSeek Harness plugin](#deepseek-harness-plugin).
-
-#### 4. Verify the connection
-
-Run `bsk doctor` and follow its hints. Open the extension popup and confirm it is
-connected. Explain any warnings and resolve failures before testing browser use.
-Doctor can pass with no skill installed (`N/A`); verify skill discovery separately.
+Resolve any failed checks and confirm that the extension shows **Connected**. Start a new agent session and check that it can discover `browser-skill`; a successful doctor check alone does not confirm skill discovery.
 
 </details>
 
-Start a new Agent session, confirm `browser-skill` is available in the harness,
-and ask it to open `https://example.com` and summarize the page. For harnesses
-with slash-command skill invocation, for example:
+### Try your first task
+
+Once connected, ask your agent:
 
 ```text
-/browser-skill open example.com and summarize what is on the page.
+Use browser-skill to open https://example.com, summarize the page, and end the browser session when finished.
 ```
 
-A successful first-use check reads the page and stops its BrowserSkill session.
-If the skill is missing, check the target harness and install path before retrying.
+The agent should open an Agent Window, read the page, return the summary, and stop its task. Harnesses that support skill slash commands can also use `/browser-skill`.
 
-### Updating
+<details>
+<summary><b>Try the CLI directly</b></summary>
 
-For the default local setup, finish active browser tasks before updating:
+Start a session and keep the returned `session_id`:
 
 ```sh
-bsk update --yes
+bsk session start --no-focus --json
 ```
 
-If Windows reports a staged update, wait for the replacement to finish before
-checking `bsk --version`.
+Replace `<id>` with that value in each command below. With multiple connected browsers, select one using `--browser <instance-id-or-name>` when starting the session.
 
-When it installs an update, this command restarts a running daemon with default
-startup settings. If you replaced the binary using the installer instead, restart
-the existing daemon with `bsk daemon restart` after tasks finish.
+```sh
+bsk navigate https://example.com --session <id>
+bsk observe --session <id>
+bsk screenshot --session <id> --out example.png
+bsk session stop <id>
+```
 
-For a custom port, host-managed sandbox daemon, or remote server, stop the daemon
-in its owning host or supervisor, run `bsk update --yes --no-restart-daemon`, and
-start it there with its original flags and `BSK_HOME`. Set `BSK_AUTO_START=0`
-in agent commands while managing it; see the [sandbox](docs/sandboxed-agents.md)
-and [remote](docs/remote-extension-connection.md) setup guides.
+Use `bsk --help` or `bsk <command> --help` for command options. Always stop your session when finished, including after a failed task; borrowed tabs are returned to their original window.
 
-Update the extension through its browser store; for an unpacked development build,
-rebuild and reload it. Store availability may lag the CLI release. Check the CLI,
-daemon and extension versions with `bsk --version` and `bsk status`, then run
-`bsk doctor`. New features such as full-page screenshots need matching builds.
-Update the [DSH plugin separately](#deepseek-harness-plugin) and restart its profile.
-Managed CLI skills synchronize on daemon startup, `session start`, or `doctor`;
-local edits and custom skills are preserved. Start a new agent session to load
-updated instructions.
+</details>
 
-**Upgrading to 0.3.0:** `--unattended`, `tab borrow --no-confirm`, and
-`BSK_REQUEST_HELP=off` no longer bypass confirmation or disable help. Choose the
-corresponding extension settings described below. See [what changed](CHANGELOG.md).
-
-### Automation settings
-
-The extension popup has two independent **Automation settings**, both enabled by default.
-The user's saved browser settings are authoritative for every session:
-
-| Confirm before borrowing tabs | Allow requests for human help | Behavior |
-| --- | --- | --- |
-| On | On | Borrowing requires approval; help requests show the existing UI. |
-| On | Off | Borrowing requires approval; help requests return `disabled`. |
-| Off | On | Borrowing skips confirmation; help requests show the existing UI. |
-| Off | Off | Borrowing skips confirmation; help requests return `disabled`. |
-
-Settings save automatically for the browser profile and apply to existing and new sessions.
-Turning confirmation off releases pending borrow confirmations; turning help off finishes pending
-help requests as `disabled`. Turning either back on restores its behavior for subsequent operations,
-including sessions created with the legacy `--unattended` flag. Completed borrows are not undone,
-and finished help requests are not reopened. Allowing help makes `request-help` available; it does
-not require every browser action to ask for permission. Task authorization and host approvals still apply.
-
-Start tasks with `bsk session start`; add `--no-focus` to avoid focusing the Agent Window.
-For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
-`tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
-deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;
-the daemon also logs a notice for its inherited environment setting. Scripts that relied on these
-inputs alone to avoid waiting must now use the browser settings. `session start --json` and
-`session list --json` report the browser's effective `interaction` policy.
-
-When help is disabled, `request-help` returns `disabled` without confirming any human action.
-The skill directs the agent to re-observe and make reasonable efforts to complete authorized steps
-using existing login state, authorized inputs, and available tools. Where task authorization and
-host rules allow, models with image understanding may attempt graphical verification. Phone-only
-QR scans, face verification, unavailable SMS codes, and image-only CAPTCHAs for text-only models
-may remain blocked. A disabled result neither completes the task nor grants additional permission.
-
-If preference loading fails, the runtime retains known values or defaults to both enabled when no
-valid value is available. It does not write fallback defaults or block session creation. Later reads
-and storage events can recover the settings. The popup reports read failures and prevents saving;
-failed writes are not treated as successful. A disconnected browser produces an error, not a local
-`disabled` result based on command-line flags or environment variables.
-
-`tab borrow --timeout 60s` controls the confirmation wait, not whether confirmation is required.
-Protocol 1.3 retains connection compatibility with protocols 1.0–1.2. Ordinary sessions and
-default tab borrowing remain available during staggered upgrades. The popup identifies older
-daemons, while `bsk status` reports protocol differences. Custom borrowing waits require both
-daemon and extension protocol 1.2 or later; only that operation returns an upgrade error when
-unsupported. Older daemons may still have shorter default borrowing waits.
-
-The current CLI requires daemon protocol 1.3 for `request-help`, because older daemons can answer
-locally without consulting the browser. This restriction does not disconnect the browser or stop
-other operations. Update the CLI, running daemon, and extension for full enforcement of the
-settings above. New extensions always enforce their saved settings on requests they receive.
-An older CLI may exit locally for `BSK_REQUEST_HELP=off` before contacting the daemon; mixed-version
-installations retain such legacy behavior, which updating only the extension cannot change.
-
-Run an Agent on a server and pair it with your local browser using the built-in authentication service, or a compatible gateway. See [remote browser connections](docs/remote-extension-connection.md).
+If your agent sandbox removes background processes after each command, use the [sandbox setup guide](docs/sandboxed-agents.md). It explains how to keep the daemon in a persistent host environment and connect with shared `BSK_HOME` and `BSK_AUTO_START=0`.
 
 ## DeepSeek Harness plugin
 
-Using [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`)?
-BrowserSkill ships a first-class dsh plugin on npm as
-[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin).
-It gives the agent native `browser_*` tools and a live view of its browser sessions
-in the Web UI. The plugin runs `bsk` on the agent's behalf.
+The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `browser_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
 
-Install the `bsk` CLI and connect the browser extension first. Then add the plugin
-to a dsh profile and start it (replace `web` with your profile name):
+With DeepSeek Harness, pnpm, and `bsk` installed and the extension connected, add the plugin to your profile:
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-The plugin includes the `browser-skill` skill, so `bsk install-skill` is not needed
-for dsh. Installed plugins do not update automatically. To upgrade this plugin:
+Replace `web` with your profile name. Make sure `bsk` is available on the PATH used to start DSH, or set the plugin's `bskPath`. In a conversation, invoke `/browser-skill` and describe the task. A separate `bsk install-skill` step is not needed.
+
+[Plugin usage and configuration](packages/dsh-plugin-browserskill/README.md) · [npm package](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+
+## Website debugging
+
+**Give your agent the browser evidence behind a bug.** Start capture before reproducing an issue on a website you are authorized to debug, then inspect the result in the extension or through the agent.
+
+- **Follow an operation:** see its requests, console output, form-field values, and immediate or delayed page changes. Capture includes supported manual actions as well as agent actions.
+- **Inspect a request:** read retained headers, submitted data, response bodies, timing, and errors. Filter traffic or inspect a specific JSON field.
+- **Investigate performance:** inspect page-load metrics, API timing summaries, and suspected duplicate requests. Missing or partial evidence is identified explicitly.
+- **Test and keep evidence:** configure task-local request modification, blocking, mock responses, or same-origin replay; save a JSON record to review or share later.
+
+Try a task such as:
+
+```text
+Use browser-skill to investigate why saving the form on http://localhost:3000 fails. Start website debugging before reproducing it, inspect the request, response and console, then export the evidence and end the session.
+```
+
+From the extension, open **Quick Actions → Website debugging** for an existing task. The evidence page connects the operation timeline, requests, Console, page context, Performance, and API analysis. Its history remains accessible after the task ends, even without a daemon connection. A new agent task needs a user-provided export to inspect an ended task's history.
+
+Request replay sends a new request using the page's current session and can change server data. Capture and redaction have limits; retained evidence may still contain sensitive information. See [website debugging](docs/website-debugging.md) for the workflow, CLI examples, and limits.
+
+## More workflows
+
+### Capture a full page
+
+Use **Quick Actions → Full-page screenshot** for automatic scrolling, a long image you scroll yourself, or the visible area. This extension feature also works without an agent or daemon connection.
+
+For a page in an agent session:
+
+```sh
+bsk screenshot --session <id> --full-page --out page.png
+```
+
+Agent capture supports background tabs without focusing the window and restores the original scroll position when the document remains available. Full-page capture follows the document's scroll area; nested scrolling panels and virtualized lists have limitations. [Screenshot guide](docs/long-screenshot.md)
+
+### Choose a browser profile
+
+Open the extension in the intended profile and choose **Copy profile instructions**, then send those instructions with your task. You can also assign a unique **Browser name** and select it explicitly:
+
+```sh
+bsk browsers
+bsk session start --browser "Work profile" --no-focus --json
+```
+
+The name is set in BrowserSkill; it is not automatically taken from Chrome's profile name. Each session stays bound to the selected instance. [Profile selection guide](docs/browser-profiles.md)
+
+### Run the agent on a server
+
+Keep the browser and its logins on your computer while the agent, CLI, and daemon run on a server. Pair the extension with that server over authenticated WSS; the browser initiates the connection, so your computer needs no inbound port.
+
+The built-in server supports device pairing, renewal, and revocation. Remote mode currently does not support file upload or download. [Remote connection guide](docs/remote-extension-connection.md)
+
+## Browser control and privacy
+
+An Agent Window shares the selected profile's login state; **it is not a separate account or security sandbox**. Agents can act with the permissions of the signed-in websites, so choose the tasks and agent you trust.
+
+The extension has two independent **Automation settings**, both enabled by default:
+
+| Setting | What it controls |
+| --- | --- |
+| **Confirm before borrowing tabs** | Ask before an agent takes control of one of your existing tabs. Turning it off permits borrowing without that prompt. |
+| **Allow requests for human help** | Let the agent ask you to handle login, verification, or another step that needs your participation. |
+
+These browser settings apply to existing and new sessions. Legacy `--unattended`, `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` inputs cannot override them. Disabling human help does not mean the requested step was completed. Close the Agent Window to stop its tasks.
+
+BrowserSkill does not operate a mandatory cloud service or collect product telemetry. Automation results go to your selected daemon or gateway and the agent using it; that agent or service may process or retain them under its own policies. The extension does not independently call an AI provider.
+
+| Optional history | Where it is saved | What to know |
+| --- | --- | --- |
+| **Website debugging** | The current browser profile, including in remote mode | Retains captured evidence, including available bodies and field values. Stopped records expire after 30 days, with a 50-record / 50 MiB retention budget and earlier eviction when necessary. Stop capture before deleting a record. |
+| **Operation audit** | The daemon's host, under `BSK_HOME/audit` | Off by default. Records task and operation metadata, excluding input values, page bodies, screenshots, and file contents. Ended tasks expire after 30 days. |
+
+Both offer export and deletion. Stopping a task or disconnecting does not delete saved history; expiration is applied during history access or cleanup. Exported copies and copies already received by an agent or gateway must be managed separately. Known secrets are filtered from debugging evidence, but redaction cannot guarantee that all sensitive data is removed.
+
+[Privacy policy](apps/extension/PRIVACY.md) · [Operation audit](docs/operation-audit.md) · [Debugging retention and limits](docs/website-debugging.md#history-and-export)
+
+## Updating
+
+Finish active browser tasks, then update the CLI:
+
+```sh
+bsk update --yes
+```
+
+For the default local setup, this restarts a running daemon when an update is installed. If Windows reports a staged update, wait for replacement to finish. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
+
+Update the extension through its browser store. Update the DSH plugin separately, then restart its profile:
 
 ```sh
 dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 ```
 
-Restart the profile after upgrading. See the
-[plugin README](packages/dsh-plugin-browserskill/README.md) for usage and configuration.
+Check `bsk --version`, `bsk status`, and `bsk doctor`. Keep the CLI, running daemon, extension, and optional DSH plugin on matching releases for new features. This README describes the current repository; store builds can lag during review. Check the [changelog](CHANGELOG.md) and [releases](https://github.com/Tencent/BrowserSkill/releases) for availability.
 
-## How It Works
+Managed CLI skills update on daemon startup, `session start`, or `doctor` while their files remain unchanged. Local edits and custom skills are preserved. Start a new agent session to load updated instructions; doctor reports any paused skill updates.
 
-BrowserSkill is a local bridge between your agent harness and your browser.
+<details>
+<summary><b>Custom ports, sandbox hosts, and remote servers</b></summary>
 
-```mermaid
-flowchart TB
-  subgraph Harness["Agent Harness"]
-    Agent["Cursor / Claude Code / Codex / OpenClaw"]
-  end
+Stop the daemon in its owning host or supervisor, update with `bsk update --yes --no-restart-daemon`, then start it there with its original flags and `BSK_HOME`. Use `BSK_AUTO_START=0` in agent commands during this process. Follow the [sandbox](docs/sandboxed-agents.md) or [remote](docs/remote-extension-connection.md) guide for your deployment.
 
-  subgraph Local["Your Machine"]
-    CLI["bsk CLI"]
-    Daemon["bsk daemon"]
-    Extension["BrowserSkill extension"]
-  end
+</details>
 
-  subgraph Browser["Browser Profile"]
-    AgentWindow["Agent Window"]
-    UserWindows["Your normal browser windows"]
-  end
+## Documentation
 
-  Agent -->|"shell: bsk ..."| CLI
-  CLI -->|"local IPC"| Daemon
-  Daemon -->|"WebSocket on 127.0.0.1"| Extension
-  Extension -->|"automates"| AgentWindow
-  Extension -.->|"borrow tab only when asked"| UserWindows
-
-  style AgentWindow fill:#fff4e6,stroke:#f59e0b,stroke-width:2px,color:#111827
-  style UserWindows fill:#f8fafc,stroke:#cbd5e1,color:#334155
-```
-
-The agent never talks to the browser directly. It asks the `bsk` CLI to perform a
-browser task; the local daemon routes that request to the extension; the
-extension runs it in an Agent Window. DeepSeek Harness takes the same path
-through the [plugin](#deepseek-harness-plugin): the agent calls injected
-`browser_*` tools, and the plugin invokes `bsk` on its behalf.
+| Goal | Guide |
+| --- | --- |
+| Install and verify with an agent | [Agent setup](AGENT_INSTALL.md) |
+| Investigate a website or API | [Website debugging](docs/website-debugging.md) |
+| Capture long pages | [Full-page screenshots](docs/long-screenshot.md) |
+| Use a specific account or profile | [Browser profiles](docs/browser-profiles.md) |
+| Connect a server-side agent | [Remote browser connections](docs/remote-extension-connection.md) |
+| Run in a sandbox | [Sandboxed agents](docs/sandboxed-agents.md) |
+| Review recorded task metadata | [Operation audit](docs/operation-audit.md) |
+| Integrate with DeepSeek Harness | [DSH plugin](packages/dsh-plugin-browserskill/README.md) |
+| Understand the implementation | [Architecture](docs/architecture.md) · [Protocol](crates/bsk-protocol/README.md) |
 
 ## For Developers
 
-The [scroll-to primitive reference](docs/scroll-to.md) covers its CLI, protocol
-and plugin entry points, visible bounds and interruption behavior.
+The repository is a Rust + pnpm workspace. For a source build, use Rust stable, Node.js 22, and the pnpm version declared in `package.json`:
 
-The repository is a Cargo + pnpm workspace:
+```sh
+pnpm install --frozen-lockfile
+cargo build --release --locked
+pnpm ext:build
+```
 
-- `crates/bsk-cli` — `bsk` CLI and local daemon
-- `crates/bsk-protocol` — shared wire types and JSON schemas
-- `apps/extension` — browser extension
-- `packages/ui` and [`packages/i18n`](packages/i18n/README.md) — shared extension UI support, including English, Simplified Chinese and Korean localization
-- `packages/dsh-plugin-browserskill` — DeepSeek Harness plugin (`@wxg-prc-cpg/browser-skill-dsh-plugin`)
-- [`evals/browser`](evals/browser/README.md) — deterministic local pages and agent-neutral browser capability evaluation
+The CLI is built under `target/release/`; load `apps/extension/dist/chrome-mv3/` as an unpacked extension. For extension development, use `pnpm ext:dev`.
+
+| Directory | Component |
+| --- | --- |
+| `crates/bsk-cli` | CLI, daemon, and bundled agent skill |
+| `crates/bsk-protocol` | Wire types and JSON schemas |
+| `apps/extension` | Browser automation, debugging workspace, and extension UI |
+| `packages/dsh-plugin-browserskill` | DeepSeek Harness integration |
+| `packages/ui`, `packages/i18n`, `packages/vom` | Shared UI, localization, and page observation |
+| `evals/browser` | Local test pages and browser capability evaluations |
+
+Run `cargo test --workspace --locked`, `pnpm ext:test`, and `pnpm lint` for the relevant checks. See the [browser evaluation guide](evals/browser/README.md) for reproducible browser cases. Bug reports and focused contributions are welcome through [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) and pull requests; remove sensitive data before attaching browser evidence.
+
+The extension interface supports English, Simplified and Traditional Chinese, Korean, Japanese, French, Italian, Spanish, German, and Brazilian Portuguese. See [localization](packages/i18n/README.md) to contribute translations.
 
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -184,8 +184,28 @@ browser-skill/
 ├── apps/extension/       # WXT Chromium extension
 ├── crates/
 │   ├── bsk-cli/           # `bsk` binary (CLI + daemon)
+│   │   └── skill/        # Canonical CLI SKILL.md + references/
 │   └── bsk-protocol/      # Wire types + schemas
 ├── install.sh            # CLI installer (GitHub Releases)
-├── skill/SKILL.md        # Agent harness instructions
+├── packages/dsh-plugin-browserskill/skill/  # DSH SKILL.md + references/
 └── docs/                 # architecture, guides
 ```
+
+
+The two skill directories above are the only authored skill sources. The CLI build
+embeds every file from its crate-local directory without copying or modifying sources.
+Installation writes the complete package. A versioned `.bsk-source` manifest tracks
+SHA-256 checksums per file; automatic updates verify all managed files and new-path
+collisions before replacing anything. Resources precede the entry point, and a pending
+manifest records expected old/new hashes so interrupted writes can be resumed safely.
+Known historical single-file checksums in `src/skill_install/legacy-digests.txt` are
+migration data, not a third instruction source. They recognize exact LF originals
+and CRLF copies; recorded per-file checksums remain byte-exact. Frozen pre-bundle
+snapshots under `tests/fixtures/legacy-skills/` cover adoption and edit protection
+without requiring Git history during CI. Explicit custom installations opt out.
+
+The DSH build embeds only its entry point. Its npm package ships the complete `skill/`
+directory, registered with a module-relative `resourceBase` so agents can read references
+on demand regardless of their working directory. CI validates local links, entry point
+budgets, Cargo contents and the actual npm archive, including resource resolution from
+the unpacked runtime.

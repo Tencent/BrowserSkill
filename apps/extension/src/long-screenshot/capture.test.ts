@@ -31,6 +31,22 @@ describe("long screenshot stitching", () => {
     const slice = sliceForFrame({ ...metrics, y: 1901, bottomOverlayHeight: 100 }, 2490, 2);
     expect(slice).toEqual({ sourceY: 1000, targetY: 4802, height: 200, end: 2501 });
   });
+  it("redraws the final footer when fractional metrics round to the document bottom", () => {
+    const y = 1797.199951171875;
+    const viewportHeight = 836.7999877929688;
+    expect(
+      sliceForFrame(
+        { ...metrics, height: 2634, y, viewportHeight, bottomOverlayHeight: 80 },
+        y + viewportHeight,
+        2.5,
+      ),
+    ).toEqual({
+      sourceY: 1892,
+      targetY: 6385,
+      height: 200,
+      end: y + viewportHeight,
+    });
+  });
   it.each([
     1, 1.25, 1.5, 2,
   ])("covers every output row once at scale %s, including a clamped final scroll", (scale) => {
@@ -59,7 +75,7 @@ describe("long screenshot stitching", () => {
 function harness() {
   const controller = new AbortController();
   const draw = vi.fn();
-  let current = { ...metrics, y: 401 };
+  let current = { ...metrics, dpr: 2, y: 401 };
   const commands: PageCommand[] = [];
   const page = vi.fn(async (command: PageCommand) => {
     commands.push(command);
@@ -90,6 +106,78 @@ function harness() {
 }
 
 describe("capture lifecycle", () => {
+  it.each([
+    {
+      dpr: 1.5,
+      viewportWidth: 1570.6666259765625,
+      viewportHeight: 1050,
+      innerWidth: 1586,
+      innerHeight: 1050,
+      bitmapWidth: 2379,
+      bitmapHeight: 1575,
+    },
+    {
+      dpr: 2.5,
+      viewportWidth: 1250.4000244140625,
+      viewportHeight: 836.7999877929688,
+      innerWidth: 1262,
+      innerHeight: 837,
+      bitmapWidth: 3156,
+      bitmapHeight: 2092,
+    },
+  ])("preserves every device row at DPR $dpr with fractional geometry", async ({
+    dpr,
+    viewportWidth,
+    viewportHeight,
+    innerWidth,
+    innerHeight,
+    bitmapWidth,
+    bitmapHeight,
+  }) => {
+    const h = harness();
+    const outputWidth = Math.round(viewportWidth * dpr);
+    let y = 0;
+    const height = 5001;
+    h.deps.page.mockImplementation(async (command) => {
+      h.commands.push(command);
+      if (command.action === "move")
+        y = Math.round(Math.min(command.y, height - viewportHeight) * dpr) / dpr;
+      return {
+        ...metrics,
+        y,
+        height,
+        dpr,
+        viewportWidth,
+        viewportHeight,
+        innerWidth,
+        innerHeight,
+      };
+    });
+    h.deps.screenshot.mockImplementation(
+      async () =>
+        ({
+          width: bitmapWidth,
+          height: bitmapHeight,
+          close: vi.fn(),
+          y,
+        }) as unknown as ImageBitmap,
+    );
+    const pixels: number[] = [];
+    h.draw.mockImplementation(async (bitmap, width, sourceY, targetY, count) => {
+      expect(width).toBe(outputWidth);
+      expect(sourceY).toBeGreaterThanOrEqual(0);
+      expect(sourceY + count).toBeLessThanOrEqual(bitmap.height);
+      for (let row = 0; row < count; row++)
+        pixels[targetY + row] = Math.round(bitmap.y * dpr) + sourceY + row;
+    });
+    expect(await capturePage(h.deps)).toEqual({
+      width: outputWidth,
+      height: Math.round(height * dpr),
+    });
+    expect(pixels).toEqual(Array.from({ length: Math.round(height * dpr) }, (_, i) => i));
+    expect(h.commands.at(-1)).toEqual({ action: "finish" });
+  });
+
   it("captures incrementally, crops scrollbars and releases every bitmap", async () => {
     const h = harness();
     const result = await capturePage(h.deps);
@@ -100,6 +188,25 @@ describe("capture lifecycle", () => {
     expect(last[3] + last[4]).toBe(5002);
     expect(h.commands.at(-1)).toEqual({ action: "finish" });
     expect(h.bitmaps.every((bitmap) => bitmap.close.mock.calls.length === 1)).toBe(true);
+  });
+
+  it.each([
+    { bitmapWidth: 1630, bitmapHeight: 1200, width: 1600, height: 5002 },
+    { bitmapWidth: 652, bitmapHeight: 481, width: 640, height: 2001 },
+  ])("retains scaled viewport captures at $bitmapWidth x $bitmapHeight", async ({
+    bitmapWidth,
+    bitmapHeight,
+    width,
+    height,
+  }) => {
+    const h = harness();
+    const page = h.deps.page.getMockImplementation()!;
+    h.deps.page.mockImplementation(async (command) => ({ ...(await page(command)), dpr: 3 }));
+    h.deps.screenshot.mockImplementation(
+      async () =>
+        ({ width: bitmapWidth, height: bitmapHeight, close: vi.fn() }) as unknown as ImageBitmap,
+    );
+    expect(await capturePage(h.deps)).toEqual({ width, height });
   });
 
   it("restores the page if begin mutates it but its response is lost", async () => {

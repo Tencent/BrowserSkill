@@ -7,6 +7,10 @@ import {
   ScreenshotError,
 } from "./types";
 
+function ariaToken(element: Element, name: string): string {
+  return (element.getAttribute(name) ?? "").trim().toLowerCase();
+}
+
 export function createPageCapture(onCancel: (id: string, reason: CaptureCancelReason) => void) {
   let task: ReturnType<typeof prepare> | undefined;
 
@@ -25,6 +29,12 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
       visibility: string;
       priority: string;
     }[] = [];
+    const root = document.documentElement;
+    // Overlay scrollbars paint over content and survive the tiler's gutter crop.
+    // Only suppress them when neither axis reserves space: removing a classic
+    // scrollbar would change wrapping and responsive layout during capture.
+    if (root.clientWidth === window.innerWidth && root.clientHeight === window.innerHeight)
+      setStyle(root, "scrollbar-width", "none");
     const style = document.createElement("style");
     style.textContent = `
       html, body, * { scroll-behavior: auto !important; scroll-snap-type: none !important;
@@ -64,8 +74,11 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
     const loadingText =
       /^(?:加载中|正在加载|载入中|loading(?:\s+(?:more|content|items|results))?)[\s.。…!！]*$/i;
     const trackLoading = (element: Element) => {
+      const role = ariaToken(element, "role");
       if (
-        element.matches('[aria-busy="true"], [role="progressbar"], [role="status"]') ||
+        ariaToken(element, "aria-busy") === "true" ||
+        role === "progressbar" ||
+        role === "status" ||
         (element.childElementCount === 0 &&
           !element.closest("pre, code") &&
           loadingText.test(element.textContent?.trim() ?? ""))
@@ -138,7 +151,7 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
       seen.add(element);
       trackLoading(element);
       if (
-        element.getAttribute("role") === "contentinfo" ||
+        ariaToken(element, "role") === "contentinfo" ||
         (element.tagName === "FOOTER" && !element.closest("article, aside, section"))
       )
         footers.add(element);
@@ -274,8 +287,8 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
         const style = getComputedStyle(element);
         if (style.visibility === "hidden" || style.display === "none") continue;
         if (
-          element.getAttribute("aria-busy") === "true" ||
-          (element.getAttribute("role") === "progressbar" &&
+          ariaToken(element, "aria-busy") === "true" ||
+          (ariaToken(element, "role") === "progressbar" &&
             !element.hasAttribute("aria-valuenow")) ||
           (!element.closest("pre, code") && loadingText.test(element.textContent?.trim() ?? ""))
         ) {
@@ -379,13 +392,21 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
   function measure(): PageMetrics {
     const root = document.documentElement;
     const scrolling = document.scrollingElement ?? root;
+    // client/inner dimensions are integers. At fractional browser zoom that can
+    // lose more than one image pixel; the unpinched visual viewport retains the
+    // CSS precision needed to match CDP and native screenshot surfaces.
+    const visual = window.visualViewport;
+    const viewportWidth = visual?.scale === 1 ? visual.width : root.clientWidth;
+    const viewportHeight = visual?.scale === 1 ? visual.height : root.clientHeight;
     return {
       x: window.scrollX,
       y: window.scrollY,
       width: scrolling.scrollWidth,
-      height: Math.max(scrolling.scrollHeight, root.clientHeight),
-      viewportWidth: root.clientWidth,
-      viewportHeight: root.clientHeight,
+      height: Math.max(scrolling.scrollHeight, viewportHeight),
+      viewportWidth,
+      viewportHeight,
+      // Do not add an integer scrollbar gutter to a fractional visual viewport.
+      // inner/client dimensions are rounded independently.
       innerWidth: window.innerWidth,
       innerHeight: window.innerHeight,
       dpr: window.devicePixelRatio,

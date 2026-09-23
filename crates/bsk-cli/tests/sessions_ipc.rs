@@ -1505,3 +1505,510 @@ async fn borrow_reports_unknown_outcome_when_cancel_cleanup_never_finishes() {
     drop(ws);
     handle.shutdown().await;
 }
+
+mod recoverable_starts {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn token() -> String {
+        let expires = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            + 60_000;
+        format!("{expires}:{}", uuid::Uuid::new_v4())
+    }
+
+    async fn request(sock: &PathBuf, id: &str, action: &str) -> Value {
+        IpcClient::connect(sock)
+            .await
+            .unwrap()
+            .call(
+                "request",
+                Method::SessionRequest,
+                Some(json!({"request_id": id, "action": action})),
+                Duration::from_secs(15),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn successful_start(ws: &mut TestWs) -> String {
+        let start = next_extension_request(ws).await;
+        assert_eq!(start.method, Method::ToolSessionStart);
+        let params: SessionStartParams = serde_json::from_value(start.params.unwrap()).unwrap();
+        send_extension_response(
+            ws,
+            ResponseFrame {
+                id: start.id,
+                body: ResponseBody::Ok(
+                    json!({"session_id": params.session_id, "agent_window_id": 101}),
+                ),
+            },
+        )
+        .await;
+        params.session_id
+    }
+
+    async fn successful_stop(ws: &mut TestWs, expected: &str) {
+        let stop = next_extension_request(ws).await;
+        assert_eq!(stop.method, Method::ToolSessionStop);
+        assert_eq!(stop.params.as_ref().unwrap()["session_id"], expected);
+        send_extension_response(
+            ws,
+            ResponseFrame {
+                id: stop.id,
+                body: ResponseBody::Ok(serde_json::to_value(SessionStopResult::default()).unwrap()),
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_start_is_a_tombstone() {
+        let (daemon, sock) = spawn_daemon().await;
+        let id = token();
+        assert_eq!(request(&sock, &id, "prepare").await["state"], "prepared");
+        assert_eq!(request(&sock, &id, "cancel").await["state"], "closed");
+        let mut client = IpcClient::connect(&sock).await.unwrap();
+        let outcome = client
+            .call_with_id::<_, Value>(
+                "late-start".into(),
+                Method::SessionStartTracked,
+                Some(json!({"request_id": id})),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::Cancelled);
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_start_and_lost_reply_are_recoverable_without_touching_foreign_session() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        assert_eq!(request(&sock, &id, "prepare").await["state"], "prepared");
+        let start_sock = sock.clone();
+        let start_id = id.clone();
+        let original = tokio::spawn(async move {
+            IpcClient::connect(start_sock)
+                .await
+                .unwrap()
+                .call::<_, Value>(
+                    "lost",
+                    Method::SessionStartTracked,
+                    Some(json!({"request_id": start_id})),
+                    Duration::from_secs(10),
+                )
+                .await
+        });
+        let sid = successful_start(&mut ws).await;
+        // Drop the original receiving process/connection after the remote side effect.
+        original.abort();
+        let mut retry = IpcClient::connect(&sock).await.unwrap();
+        let reply: Value = retry
+            .call(
+                "retry",
+                Method::SessionStartTracked,
+                Some(json!({"request_id": id})),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reply["session_id"], sid);
+        assert_eq!(daemon.state().sessions.len(), 1);
+        assert_eq!(request(&sock, &id, "status").await["state"], "ready");
+        assert_eq!(request(&sock, &id, "claim").await["state"], "active");
+        let conflicting = retry
+            .call_with_id::<_, Value>(
+                "conflict".into(),
+                Method::SessionStartTracked,
+                Some(json!({"request_id": id, "width": 900, "height": 700})),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflicting.unwrap_err().code, ErrorCode::InvalidParams);
+        let foreign = bsk::daemon::sessions::Session {
+            id: bsk::daemon::sessions::SessionId("foreign".into()),
+            browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
+            agent_window_id: Some(999),
+            created_at_ms: 1,
+            interaction: None,
+        };
+        daemon.state().sessions.insert(foreign.clone());
+        let transfer = daemon.state().transfers.begin_download(&sid).unwrap();
+        let cancelling = request(&sock, &id, "cancel");
+        let (_, cancelled) = tokio::join!(successful_stop(&mut ws, &sid), cancelling);
+        assert_eq!(cancelled["state"], "closed");
+        assert_eq!(daemon.state().sessions.len(), 1);
+        assert!(daemon.state().sessions.get(&foreign.id).is_some());
+        assert!(
+            !daemon
+                .state()
+                .transfers
+                .release(bsk_protocol::tools::TransferIdParams {
+                    transfer_id: transfer.transfer_id,
+                })
+                .released,
+            "managed stop must also release the session's transfer resources"
+        );
+        assert_eq!(request(&sock, &id, "cancel").await["state"], "closed");
+        daemon.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn cancel_during_start_rolls_back_late_success() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        assert_eq!(request(&sock, &id, "prepare").await["state"], "prepared");
+        let caller_sock = sock.clone();
+        let caller_id = id.clone();
+        let start = tokio::spawn(async move {
+            IpcClient::connect(caller_sock)
+                .await
+                .unwrap()
+                .call_with_id::<_, Value>(
+                    "start".into(),
+                    Method::SessionStartTracked,
+                    Some(json!({"request_id": caller_id})),
+                    Duration::from_secs(15),
+                )
+                .await
+                .unwrap()
+        });
+        let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+        let extension = tokio::spawn(async move {
+            respond_to_aborted_start(&mut ws, Some(seen_tx), 77).await;
+            ws
+        });
+        seen_rx.await.unwrap();
+        assert_eq!(request(&sock, &id, "cancel").await["state"], "closed");
+        assert_eq!(start.await.unwrap().unwrap_err().code, ErrorCode::Cancelled);
+        let _ws = extension.await.unwrap();
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn failed_cleanup_retains_ownership_for_retry() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        assert_eq!(request(&sock, &id, "prepare").await["state"], "prepared");
+        let mut client = IpcClient::connect(&sock).await.unwrap();
+        let (sid, start) = tokio::join!(
+            successful_start(&mut ws),
+            client.call::<_, Value>(
+                "start",
+                Method::SessionStartTracked,
+                Some(json!({"request_id": id})),
+                Duration::from_secs(5)
+            )
+        );
+        start.unwrap().unwrap();
+        let fail_stop = async {
+            let stop = next_extension_request(&mut ws).await;
+            assert_eq!(stop.method, Method::ToolSessionStop);
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: stop.id,
+                    body: ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "injected close failure".into(),
+                        data: None,
+                    }),
+                },
+            )
+            .await;
+        };
+        let (_, status) = tokio::join!(fail_stop, request(&sock, &id, "cancel"));
+        assert_eq!(status["state"], "cleanup_failed");
+        assert_eq!(status["session"]["session_id"], sid);
+        assert_eq!(daemon.state().sessions.len(), 1);
+        let (_, status) = tokio::join!(
+            successful_stop(&mut ws, &sid),
+            request(&sock, &id, "cancel")
+        );
+        assert_eq!(status["state"], "closed");
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+    #[tokio::test]
+    async fn failed_startup_compensation_retains_the_window_for_retry() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        request(&sock, &id, "prepare").await;
+        let start_sock = sock.clone();
+        let start_id = id.clone();
+        let start = tokio::spawn(async move {
+            IpcClient::connect(start_sock)
+                .await
+                .unwrap()
+                .call::<_, Value>(
+                    "start",
+                    Method::SessionStartTracked,
+                    Some(json!({"request_id": start_id})),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+        });
+        let create = next_extension_request(&mut ws).await;
+        let sid = create.params.as_ref().unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: create.id,
+                body: ResponseBody::Err(RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: "initialization and window rollback failed".into(),
+                    data: Some(json!({"reason": "cleanup_failed", "resource_id": 123})),
+                }),
+            },
+        )
+        .await;
+        assert_eq!(
+            start.await.unwrap().unwrap_err().data.unwrap()["session_id"],
+            sid
+        );
+        let stop = next_extension_request(&mut ws).await;
+        assert_eq!(stop.method, Method::ToolSessionStop);
+        assert_eq!(stop.params.unwrap()["session_id"], sid);
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: stop.id,
+                body: ResponseBody::Err(RpcError {
+                    code: ErrorCode::ProtocolError,
+                    message: "window still cannot close".into(),
+                    data: None,
+                }),
+            },
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let status = request(&sock, &id, "status").await;
+                if status["state"] == "cleanup_failed" {
+                    assert_eq!(status["session"]["agent_window_id"], 123);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(daemon.state().sessions.len(), 1);
+        let (_, status) = tokio::join!(
+            successful_stop(&mut ws, &sid),
+            request(&sock, &id, "cancel")
+        );
+        assert_eq!(status["state"], "closed");
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn real_cli_can_cancel_a_start_after_its_process_is_killed() {
+        let (daemon, sock) = spawn_daemon().await;
+        let home = tempfile::tempdir().unwrap();
+        bsk::daemon::info::write_to_path(
+            &bsk::daemon::info::DaemonInfo::now(
+                std::process::id(),
+                sock.clone(),
+                daemon.ws_addr().port(),
+                env!("CARGO_PKG_VERSION"),
+            ),
+            &home.path().join("daemon.json"),
+        )
+        .unwrap();
+        let command = |args: Vec<String>| {
+            let mut cmd = tokio::process::Command::new(env!("CARGO_BIN_EXE_bsk"));
+            cmd.args(args)
+                .arg("--json")
+                .env("BSK_HOME", home.path())
+                .env("BSK_AUTO_START", "0")
+                .env("BSK_AUTO_UPDATE", "off")
+                .env_remove("BSK_CANCEL_ON_STDIN_CLOSE")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            cmd
+        };
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        let prepare = command(vec![
+            "session".into(),
+            "request".into(),
+            id.clone(),
+            "--prepare".into(),
+        ])
+        .output()
+        .await
+        .unwrap();
+        assert!(
+            prepare.status.success(),
+            "{}",
+            String::from_utf8_lossy(&prepare.stderr)
+        );
+        let mut child = command(vec![
+            "session".into(),
+            "start".into(),
+            "--request-id".into(),
+            id.clone(),
+        ])
+        .spawn()
+        .unwrap();
+        let start = next_extension_request(&mut ws).await;
+        let sid = start.params.as_ref().unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        // Kill the receiving CLI after dispatch but before any successful reply.
+        child.kill().await.unwrap();
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: start.id,
+                body: ResponseBody::Ok(json!({"agent_window_id": 88})),
+            },
+        )
+        .await;
+        let mut cancel = command(vec![
+            "session".into(),
+            "request".into(),
+            id,
+            "--cancel".into(),
+        ]);
+        let (_, output) = tokio::join!(successful_stop(&mut ws, &sid), cancel.output());
+        let output = output.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["state"],
+            "closed"
+        );
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+    #[tokio::test]
+    async fn cancellation_waits_for_slow_creation_before_confirming_cleanup() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        request(&sock, &id, "prepare").await;
+        let start_sock = sock.clone();
+        let start_id = id.clone();
+        let start_task = tokio::spawn(async move {
+            IpcClient::connect(start_sock)
+                .await
+                .unwrap()
+                .call::<_, Value>(
+                    "start",
+                    Method::SessionStartTracked,
+                    Some(json!({"request_id": start_id})),
+                    Duration::from_secs(15),
+                )
+                .await
+                .unwrap()
+        });
+        let start = next_extension_request(&mut ws).await;
+        let sid = start.params.as_ref().unwrap()["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let cancel_sock = sock.clone();
+        let cancel_id = id.clone();
+        let cancellation =
+            tokio::spawn(async move { request(&cancel_sock, &cancel_id, "cancel").await });
+        let cancel = next_extension_request(&mut ws).await;
+        acknowledge_extension_cancel(&mut ws, cancel, &start.id).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(2200), next_extension_request(&mut ws))
+                .await
+                .is_err(),
+            "must not issue stop before the original create settles"
+        );
+        assert!(!cancellation.is_finished());
+        assert!(
+            daemon
+                .state()
+                .sessions
+                .idle_ids_at(Duration::ZERO, std::time::Instant::now())
+                .is_empty()
+        );
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: start.id,
+                body: ResponseBody::Ok(json!({"agent_window_id": 777})),
+            },
+        )
+        .await;
+        successful_stop(&mut ws, &sid).await;
+        assert_eq!(cancellation.await.unwrap()["state"], "closed");
+        assert_eq!(
+            start_task.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        assert!(daemon.state().sessions.is_empty());
+        daemon.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_retries_create_exactly_one_window() {
+        let (daemon, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(daemon.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let id = token();
+        request(&sock, &id, "prepare").await;
+        let mut a = IpcClient::connect(&sock).await.unwrap();
+        let mut b = IpcClient::connect(&sock).await.unwrap();
+        let (sid, first, retry) = tokio::join!(
+            successful_start(&mut ws),
+            a.call::<_, Value>(
+                "first",
+                Method::SessionStartTracked,
+                Some(json!({"request_id":id})),
+                Duration::from_secs(5)
+            ),
+            b.call::<_, Value>(
+                "retry",
+                Method::SessionStartTracked,
+                Some(json!({"request_id":id})),
+                Duration::from_secs(5)
+            )
+        );
+        assert_eq!(first.unwrap().unwrap()["session_id"], sid);
+        assert_eq!(retry.unwrap().unwrap()["session_id"], sid);
+        assert_eq!(daemon.state().sessions.len(), 1);
+        // The next extension operation must be the single corresponding stop.
+        let (_, status) = tokio::join!(
+            successful_stop(&mut ws, &sid),
+            request(&sock, &id, "cancel")
+        );
+        assert_eq!(status["state"], "closed");
+        daemon.shutdown().await;
+    }
+}

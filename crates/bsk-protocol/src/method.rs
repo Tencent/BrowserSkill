@@ -33,6 +33,11 @@ pub enum Method {
 
     #[serde(rename = "session.start")]
     SessionStart,
+    /// Recoverable CLI start; distinct method prevents unsafe fallback on old daemons.
+    #[serde(rename = "session.start_tracked")]
+    SessionStartTracked,
+    #[serde(rename = "session.request")]
+    SessionRequest,
     #[serde(rename = "session.stop")]
     SessionStop,
     #[serde(rename = "session.stop_all")]
@@ -109,6 +114,8 @@ pub enum Method {
     ToolScreenshotRelease,
     #[serde(rename = "tool.console")]
     ToolConsole,
+    #[serde(rename = "tool.debug")]
+    ToolDebug,
     #[serde(rename = "tool.network")]
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
@@ -222,6 +229,8 @@ impl Method {
 
             // Session lifecycle — not gated.
             Method::SessionStart
+            | Method::SessionStartTracked
+            | Method::SessionRequest
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
@@ -229,7 +238,8 @@ impl Method {
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
             // System / control — not gated.
-            Method::AuditRequest
+            Method::ToolDebug
+            | Method::AuditRequest
             | Method::SystemHandshake
             | Method::SystemPing
             | Method::SystemStatus
@@ -242,6 +252,17 @@ impl Method {
             | Method::ToolScreenshotRelease
             | Method::Cancel => MethodEffect::ControlPlane,
         }
+    }
+
+    /// Debug reads/teardown remain available after interruption, while explicit
+    /// network interventions and replay are gated like other browser writes.
+    pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
+        self.requires_interrupt_gate()
+            || (matches!(self, Method::ToolDebug)
+                && matches!(
+                    params.get("action").and_then(|value| value.as_str()),
+                    Some("rule_add" | "rule_enable" | "replay")
+                ))
     }
 
     /// Whether this RPC drives browser/page state in the traditional sense.
@@ -313,6 +334,29 @@ mod tests {
         assert!(!Method::ToolScreenshot.requires_interrupt_gate());
         assert!(!Method::ToolScreenshotRead.requires_interrupt_gate());
         assert!(!Method::ToolScreenshotRelease.requires_interrupt_gate());
+    }
+
+    #[test]
+    fn debug_network_writes_respect_interrupts_without_blocking_teardown() {
+        for action in ["rule_add", "rule_enable", "replay"] {
+            assert!(
+                Method::ToolDebug
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
+        for action in [
+            "request",
+            "rules",
+            "export",
+            "stop",
+            "rule_disable",
+            "rule_remove",
+        ] {
+            assert!(
+                !Method::ToolDebug
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
     }
 
     #[test]

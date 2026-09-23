@@ -5,13 +5,17 @@
  * keep the floating card. The user may switch to floating for this page.
  */
 
+import type { Context as ClientContext } from "@deepseek-ai/cordis";
+import type { ISessions } from "@deepseek-ai/dsh-api-session-controller/client";
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
-// Development-only types for the injected services; newer hosts no longer ship this package.
-import type { ClientContext, ISessions, SessionId } from "@deepseek-ai/dsh-client-runtime/client";
 // Type-only: pulls the 'shell.overlay' SlotMap merge into scope.
 import type {} from "@deepseek-ai/dsh-client-ui-layout/client";
+// Current renderer/session adapters own Context.slots and the session-scoped props.
+import type {} from "@deepseek-ai/dsh-client-ui-renderer/client";
+import type {} from "@deepseek-ai/dsh-client-ui-session/client";
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
-import { createElement } from "react";
+import type { SessionId } from "@deepseek-ai/dsh-session";
+import { createElement, useCallback } from "react";
 // Scope-prefixed BSK design tokens and utility sheet (injected verbatim as
 // <style> tags; selectors stay unhashed so `cn(..., "bsk-obs")` roots match).
 import "./bsk-tokens.nomodule.css";
@@ -24,7 +28,7 @@ import { type EventSourceLike, ObservationClientStore } from "./observation-stor
 /** Required services: slots, session-scoped attachment reads, and the overlay seat. */
 export const inject = ["slots", "sessions"];
 
-/** Resolve one durable image attachment into a browser blob URL. */
+/** Return a fresh component-owned URL; the host's loadImage may return shared cached URLs. */
 async function loadSessionImage(
   sessions: ISessions,
   sessionId: SessionId,
@@ -66,12 +70,17 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject("tool.call.toolview", () =>
     ctx.slots.register(
       { name: "tool.call.toolview", key: "browser_inspect" },
-      (props: ToolCallViewProps) =>
-        createElement(BrowserInspectToolView, {
-          ...props,
-          loadImage: (attachment: ImageAttachmentRef) =>
+      function BrowserInspectSessionView(props: ToolCallViewProps) {
+        const loadImage = useCallback(
+          (attachment: ImageAttachmentRef) =>
             loadSessionImage(sessions, props.sessionId, attachment),
-        }),
+          [props.sessionId],
+        );
+        return createElement(BrowserInspectToolView, {
+          ...props,
+          loadImage,
+        });
+      },
     ),
   );
   const store = new ObservationClientStore({

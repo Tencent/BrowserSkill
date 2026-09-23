@@ -44,7 +44,7 @@ use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
     AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
-    start_session, stop_session,
+    stop_session,
 };
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
@@ -62,9 +62,12 @@ pub type RpcHandler = Arc<
 >;
 
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(15);
-// The upload transaction owns its operation deadline and may need a bounded
-// cleanup before it can return a useful structured error. Keep only that
-// transport alive slightly longer so it does not replace the result.
+// Some tools own their operation deadline and answer exactly at it: the file
+// transfers need a bounded cleanup before they can return a useful structured
+// error, request-help settles its own wait, and the navigation waits report
+// `reached: "timeout"` with the URL the page actually reached. Keep those
+// transports alive slightly longer so the transport deadline cannot replace a
+// result the extension has already produced.
 const EXTENSION_RESPONSE_GRACE: Duration = Duration::from_secs(2);
 /// Upper bound on `wait_for_browser_ms` accepted over IPC.
 const MAX_BROWSER_WAIT: Duration = Duration::from_secs(60);
@@ -236,10 +239,16 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
                 },
-                Method::SessionStart => match handle_session_start(&state, rpc_id, params).await {
-                    Ok(v) => ResponseBody::Ok(v),
-                    Err(e) => ResponseBody::Err(e),
-                },
+                Method::SessionStartTracked => {
+                    super::session_requests::start(&state, rpc_id, params).await
+                }
+                Method::SessionRequest => super::session_requests::operate(&state, params).await,
+                Method::SessionStart => {
+                    match handle_session_start(&state, rpc_id, params, false).await {
+                        Ok(v) => ResponseBody::Ok(v),
+                        Err(e) => ResponseBody::Err(e),
+                    }
+                }
                 Method::SessionStop => match handle_session_stop(&state, rpc_id, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -271,6 +280,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolScreenshotRead
                 | Method::ToolScreenshotRelease
                 | Method::ToolConsole
+                | Method::ToolDebug
                 | Method::ToolNetwork
                 | Method::ToolSnapshot
                 | Method::ToolObserve
@@ -362,7 +372,9 @@ async fn handle_tool_dispatch(
     // page state before asking the user, or from cleanly tearing down the
     // session. Classification lives on `Method::effect()` so adding a new
     // tool variant requires an explicit classification call.
-    if method.requires_interrupt_gate() && state.session_interrupts.try_consume(&session_id) {
+    if method.requires_interrupt_gate_with_params(&params)
+        && state.session_interrupts.try_consume(&session_id)
+    {
         return ResponseBody::Err(RpcError {
             code: ErrorCode::UserAborted,
             message: "tool dispatch rejected: pending user interrupt. The user explicitly requested to stop. Ask the user how to proceed before issuing further actions.".into(),
@@ -383,6 +395,43 @@ async fn handle_tool_dispatch(
             });
         }
     };
+    if method == Method::ToolDebug
+        && matches!(
+            params.get("action").and_then(Value::as_str),
+            Some("activity" | "wait")
+        )
+    {
+        let p: bsk_protocol::tools::DebugParams = match serde_json::from_value(params) {
+            Ok(value) => value,
+            Err(error) => return ResponseBody::Err(invalid_params(error.to_string())),
+        };
+        if p.wait_ms.is_some_and(|ms| ms > 60000)
+            || p.command_id.as_ref().is_some_and(|id| id.len() > 200)
+        {
+            return ResponseBody::Err(invalid_params(
+                "wait_ms must be 0..60000; command_id up to 200 characters",
+            ));
+        }
+        let activity = if p.action == bsk_protocol::tools::DebugAction::Activity {
+            state.tool_queues.activity(&session_id)
+        } else {
+            state
+                .tool_queues
+                .wait_idle(
+                    &session_id,
+                    p.command_id.as_deref(),
+                    p.wait_ms.unwrap_or(10000),
+                    inflight_guard.entry().cancel_token(),
+                )
+                .await
+        };
+        return match activity {
+            Ok(activity) => ResponseBody::Ok(
+                serde_json::json!({"session_id": session_id.0, "activity":activity}),
+            ),
+            Err(error) => ResponseBody::Err(error.into_rpc()),
+        };
+    }
     let audit_id = params.get("_audit_id").cloned();
     let mut params = params;
     if method == Method::ToolTabBorrow {
@@ -522,7 +571,17 @@ async fn handle_tool_dispatch(
                     .transfers
                     .release(TransferIdParams { transfer_id: id });
             }
-            ResponseBody::Err(err.into_rpc())
+            let busy = matches!(err, DispatchError::SessionBusy);
+            let mut error = err.into_rpc();
+            if busy {
+                error.data = Some(serde_json::json!({
+                    "reason": crate::rpc_reason::SESSION_BUSY,
+                    "dispatched": false,
+                    "activity": state.tool_queues.activity(&session_id).ok(),
+                    "wait": { "action": "wait", "session_id": session_id.0, "wait_ms": 10000 },
+                }));
+            }
+            ResponseBody::Err(error)
         }
     }
 }
@@ -793,7 +852,14 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
     timeout.map(|timeout| {
         if matches!(
             method,
-            Method::ToolUpload | Method::ToolDownload | Method::ToolRequestHelp
+            Method::ToolUpload
+                | Method::ToolDownload
+                | Method::ToolRequestHelp
+                | Method::ToolNavigate
+                | Method::ToolNavigateBack
+                | Method::ToolNavigateForward
+                | Method::ToolReload
+                | Method::ToolWaitForNavigation
         ) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
@@ -906,10 +972,11 @@ fn clamp_browser_wait(wait_ms: Option<u64>) -> Option<Duration> {
     ))
 }
 
-async fn handle_session_start(
+pub(super) async fn handle_session_start(
     state: &Arc<DaemonState>,
     rpc_id: RpcId,
     params: Value,
+    recoverable: bool,
 ) -> Result<Value, RpcError> {
     let task_name = params
         .get("task_name")
@@ -951,7 +1018,7 @@ async fn handle_session_start(
             });
         }
     };
-    match start_session(
+    match super::sessions::start_session_recoverable(
         &state.browsers,
         &state.sessions,
         &state.tool_queues,
@@ -963,6 +1030,7 @@ async fn handle_session_start(
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
         Some(cancel),
+        recoverable,
     )
     .await
     {
@@ -978,7 +1046,12 @@ async fn handle_session_start(
             };
             Ok(serde_json::to_value(result).unwrap_or(Value::Null))
         }
-        Err(err) => Err(map_start_error(err)),
+        Err(err) => {
+            if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
+                state.tool_queues.spawn(session_id.clone());
+            }
+            Err(map_start_error(err))
+        }
     }
 }
 
@@ -1820,9 +1893,30 @@ mod tests {
             Method::ToolUpload,
             Method::ToolDownload,
             Method::ToolRequestHelp,
+            Method::ToolNavigate,
+            Method::ToolNavigateBack,
+            Method::ToolNavigateForward,
+            Method::ToolReload,
+            Method::ToolWaitForNavigation,
         ] {
             let dispatch_timeout = tool_dispatch_transport_timeout(&method, &params).unwrap();
             assert_eq!(dispatch_timeout, Duration::from_secs(62));
+        }
+    }
+
+    #[test]
+    fn default_navigation_deadline_allows_extension_timeout_response() {
+        for method in [
+            Method::ToolNavigate,
+            Method::ToolNavigateBack,
+            Method::ToolNavigateForward,
+            Method::ToolReload,
+            Method::ToolWaitForNavigation,
+        ] {
+            assert_eq!(
+                tool_dispatch_transport_timeout(&method, &serde_json::json!({})).unwrap(),
+                DEFAULT_TOOL_TIMEOUT + EXTENSION_RESPONSE_GRACE,
+            );
         }
     }
 

@@ -399,6 +399,127 @@ describe("handleRequestHelp", () => {
     }
   });
 
+  it("does not keep the RPC pending when cleanup hangs after content finishes", async () => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const sendToTab = vi.fn(async (_tabId: number, message: { type?: string }) => {
+      if (message.type === "bsk-help-request") return { type: "bsk-help-ack", ok: true };
+      return new Promise<never>(() => {});
+    });
+    const deps = baseDeps({ autoAttachLifecycle: undefined, sendToTab });
+
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+        deps,
+      );
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-request" }),
+        ),
+      );
+
+      const request = sendToTab.mock.calls[0]?.[1] as { requestId: string };
+      chromeEvents.runtimeOnMessage.emit(
+        {
+          type: "bsk-help-finish",
+          requestId: request.requestId,
+          outcome: "continued",
+        },
+        { tab: { id: 5 } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+        vi.fn(),
+      );
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-cancel" }),
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(1_100);
+      await expect(pending).resolves.toMatchObject({ outcome: "continued", tab_id: 5 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    "content",
+    "timeout",
+    "abort",
+  ] as const)("cancels all help overlays when notification cleanup hangs (%s)", async (finishPath) => {
+    vi.useFakeTimers();
+    const chromeEvents = installHelpLifecycleChrome();
+    const abort = new AbortController();
+    const sendToTab = vi.fn(async (_tabId: number, _message: { requestId: string }) => ({
+      type: "bsk-help-ack",
+      ok: true,
+    }));
+    const notifications = {
+      create: vi.fn(async (id: string) => id),
+      clear: vi.fn(() => new Promise<boolean>(() => {})),
+    };
+    const deps = baseDeps({
+      autoAttachLifecycle: undefined,
+      sendToTab,
+      notifications,
+      signal: abort.signal,
+      tabsApi: {
+        get: vi.fn(async (id: number) => ({ id, windowId: 99, active: id === 5 }) as never),
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ tab_id: 5, timeout_ms: 60_000 }),
+        deps,
+      );
+      await vi.waitFor(() =>
+        expect(sendToTab).toHaveBeenCalledWith(
+          5,
+          expect.objectContaining({ type: "bsk-help-request" }),
+        ),
+      );
+      const { requestId } = sendToTab.mock.calls[0][1];
+      chromeEvents.tabsOnCreated.emit({ id: 6, windowId: 99 } as chrome.tabs.Tab);
+      await vi.advanceTimersByTimeAsync(200);
+      expect(sendToTab).toHaveBeenCalledWith(
+        6,
+        expect.objectContaining({ type: "bsk-help-request", requestId }),
+      );
+
+      if (finishPath === "content") {
+        chromeEvents.runtimeOnMessage.emit(
+          { type: "bsk-help-finish", requestId, outcome: "continued" },
+          { tab: { id: 5 } as chrome.tabs.Tab } as chrome.runtime.MessageSender,
+          vi.fn(),
+        );
+      } else if (finishPath === "abort") {
+        abort.abort();
+      } else {
+        await vi.advanceTimersByTimeAsync(60_000);
+      }
+
+      await vi.advanceTimersByTimeAsync(1_100);
+      const expected = {
+        content: { outcome: "continued" },
+        timeout: { outcome: "timed_out" },
+        abort: { code: "cancelled" },
+      }[finishPath];
+      await expect(pending).resolves.toMatchObject(expected);
+      expect(notifications.clear).toHaveBeenCalledWith(`bsk-help:${requestId}`);
+      for (const tabId of [5, 6]) {
+        expect(sendToTab).toHaveBeenCalledWith(tabId, { type: "bsk-help-cancel", requestId });
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns completed when explicit completion criteria match", async () => {
     const deps = baseDeps({
       sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),

@@ -35,6 +35,7 @@ import type {
   SelectParams,
   SelectResult,
 } from "@/transport/types";
+import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
@@ -52,14 +53,11 @@ import {
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
-export interface InteractionDeps {
-  cdp: CdpRunner;
+export interface InteractionDeps extends ClickOverlayDeps {
+  /** Arm short popup observation immediately before native input dispatch. */
+  onInputSent?: (tabId: number) => void;
   tabsApi: ChromeTabsApi;
-  /** Abort hook (full chain wired in M10.2). */
-  signal?: AbortSignal;
   defaultTimeoutMs?: number;
-  /** Temporarily disable overlay click blocker during CDP automation. */
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   /** Keep hover hit-testing active for the caller's next observation/action. */
   keepOverlayBypassAfterHover?: boolean;
 }
@@ -515,36 +513,10 @@ export async function clickResolvedTarget(
   if (clickCount < 1) {
     return { code: "invalid_params", message: "click_count must be greater than zero" };
   }
-  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
-  let automationBypassEnabled = false;
-  if (overlayBlocking && deps.bypassOverlay) {
-    try {
-      await deps.bypassOverlay(target.tabId, true);
-      automationBypassEnabled = true;
-    } catch (err) {
-      console.debug("[bsk interaction] overlay bypass enable failed", err);
-    }
-  }
-
-  try {
-    const error = await dispatchClickAtPoint(
-      target.tabId,
-      centre,
-      params,
-      deps,
-      undefined,
-      markSent,
-    );
-    if (error) return error;
-  } finally {
-    if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch (err) {
-        console.debug("[bsk interaction] overlay bypass disable failed", err);
-      }
-    }
-  }
+  const error = await withClickOverlay(target.tabId, centre, deps, (verifyOverlay) =>
+    dispatchClickAtPoint(target.tabId, centre, params, deps, verifyOverlay, undefined, markSent),
+  );
+  if (error) return error;
 
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
@@ -561,6 +533,7 @@ async function dispatchClickAtPoint(
   point: { x: number; y: number },
   params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
   deps: InteractionDeps,
+  verifyOverlay: () => Promise<RpcError | null>,
   beforePress?: () => Promise<RpcError | null>,
   markSent?: () => void,
 ): Promise<RpcError | null> {
@@ -579,7 +552,7 @@ async function dispatchClickAtPoint(
       modifiers,
     });
   const failure = (error: RpcError): RpcError =>
-    beforePress
+    beforePress || error.data?.reason === "input_not_ready"
       ? {
           ...error,
           data: {
@@ -610,6 +583,10 @@ async function dispatchClickAtPoint(
         if (error) return failure(error);
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      const blocked = await verifyOverlay();
+      if (blocked) return failure(blocked);
+      if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      deps.onInputSent?.(tabId);
       markSent?.();
       attempted = true;
       releaseNeeded = true;
@@ -620,6 +597,7 @@ async function dispatchClickAtPoint(
         clickCount: count,
         modifiers,
       });
+      deps.onInputSent?.(tabId);
       await release();
       releaseNeeded = false;
     }
@@ -679,40 +657,42 @@ async function clickVisualPoint(
       return changed();
     return null;
   };
-  let bypass = false;
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    if (deps.bypassOverlay) {
-      await deps.bypassOverlay(target.tabId, true);
-      bypass = true;
-    }
-    const invalid = await validate();
-    if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
-    const error = await dispatchClickAtPoint(
+    return await withClickOverlay<ClickResult | RpcError>(
       target.tabId,
       point,
-      params,
       deps,
-      async () => {
-        await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
-        return validate();
+      async (verifyOverlay) => {
+        const invalid = await validate();
+        if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
+        const error = await dispatchClickAtPoint(
+          target.tabId,
+          point,
+          params,
+          deps,
+          verifyOverlay,
+          async () => {
+            await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
+            return validate();
+          },
+          markSent,
+        );
+        if (error) return error;
+        return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+          tab_id: target.tabId,
+          used_ref: capture.ref,
+          ...point,
+        });
       },
-      markSent,
+      true, // Visual target validation also needs the page blocker bypassed.
     );
-    if (error) return error;
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: capture.ref,
-      ...point,
-    });
   } catch (error) {
     return {
       code: deps.signal?.aborted || isAbortError(error) ? "cancelled" : "cdp_failed",
       message: error instanceof Error ? error.message : String(error),
       data: { effect_state: "none" },
     };
-  } finally {
-    if (bypass) await deps.bypassOverlay!(target.tabId, false).catch(() => {});
   }
 }
 
@@ -820,8 +800,51 @@ interface OverlayHitInspection {
 }
 
 /**
- * Returns true when the control overlay shadow root has a visible layer
- * with pointer-events blocking the click point (mirrors intern execClick).
+ * Page-world hit test for the control overlay. The host itself is the
+ * full-viewport blocker (`:host([data-bsk-overlay-blocking])`), and WXT
+ * mounts it with a closed shadow root, so page JS cannot see the inner
+ * layers. Checking only shadow children therefore missed every real
+ * click. Keep this function self-contained: CDP evals `fn.toString()`.
+ */
+export function inspectOverlayHitAtPoint(x: number, y: number): OverlayHitInspection {
+  const blocks = (node: HTMLElement): boolean => {
+    const style = window.getComputedStyle(node);
+    const rect = node.getBoundingClientRect();
+    return (
+      node.isConnected &&
+      style.display !== "none" &&
+      style.pointerEvents !== "none" &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      x >= rect.x &&
+      x <= rect.x + rect.width &&
+      y >= rect.y &&
+      y <= rect.y + rect.height
+    );
+  };
+  const overlayHost = document.querySelector("[data-bsk-overlay]");
+  if (!(overlayHost instanceof HTMLElement) || !overlayHost.isConnected) {
+    return {
+      overlayHostPresent: !!overlayHost,
+      overlayHostConnected: false,
+      hitIndex: -1,
+    };
+  }
+  if (blocks(overlayHost)) {
+    return { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 };
+  }
+  const overlays = Array.from(overlayHost.shadowRoot?.querySelectorAll("*") ?? []);
+  const hitIndex = overlays.findIndex((node) => node instanceof HTMLElement && blocks(node));
+  return {
+    overlayHostPresent: true,
+    overlayHostConnected: true,
+    hitIndex,
+  };
+}
+
+/**
+ * Returns true when the control overlay has a visible layer with
+ * pointer-events blocking the click point.
  */
 async function checkOverlayAtPoint(
   cdp: CdpRunner,
@@ -856,43 +879,7 @@ async function checkOverlayAtPoint(
     const inspection = await cdp.send<{
       result?: { value?: OverlayHitInspection | null };
     }>(tabId, "Runtime.evaluate", {
-      expression: `(function() {
-        const overlayHost = document.querySelector("[data-bsk-overlay]");
-        const shadowRoot = overlayHost instanceof HTMLElement ? overlayHost.shadowRoot : null;
-        const overlays = Array.from(shadowRoot?.querySelectorAll("*") ?? []);
-        const overlayDetails = overlays
-          .map((node) => {
-            if (!(node instanceof HTMLElement)) return null;
-            const style = window.getComputedStyle(node);
-            const rect = node.getBoundingClientRect();
-            return {
-              display: style.display,
-              pointerEvents: style.pointerEvents,
-              connected: node.isConnected,
-              rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
-            };
-          })
-          .filter((node) => {
-            if (!node) return false;
-            return (
-              node.connected &&
-              node.display !== "none" &&
-              node.pointerEvents !== "none" &&
-              node.rect.width > 0 &&
-              node.rect.height > 0
-            );
-          });
-        const hitIndex = overlayDetails.findIndex((node) => {
-          const withinX = ${x} >= node.rect.x && ${x} <= node.rect.x + node.rect.width;
-          const withinY = ${y} >= node.rect.y && ${y} <= node.rect.y + node.rect.height;
-          return withinX && withinY;
-        });
-        return {
-          overlayHostPresent: true,
-          overlayHostConnected: true,
-          hitIndex,
-        };
-      })()`,
+      expression: `(${inspectOverlayHitAtPoint.toString()})(${x},${y})`,
       returnByValue: true,
     });
 
@@ -1400,6 +1387,13 @@ for (let i = 1; i <= 12; i++) {
 export function resolveKeyDescriptor(key: string): KeyDescriptor | null {
   if (key.length === 0) return null;
   if (SPECIAL_KEYMAP[key]) return SPECIAL_KEYMAP[key];
+  if (key.length > 1) {
+    const lower = key.toLowerCase();
+    for (const [name, descriptor] of Object.entries(SPECIAL_KEYMAP)) {
+      if (name.toLowerCase() === lower) return descriptor;
+    }
+    return null;
+  }
   if (key.length === 1) {
     const ch = key;
     const upper = ch.toUpperCase();
@@ -1523,6 +1517,7 @@ export async function handlePress(
     try {
       let cancelled = false;
       deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+      deps.onInputSent?.(target.tabId);
       input.markSent();
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "rawKeyDown",
@@ -1555,6 +1550,7 @@ export async function handlePress(
           cancelled = true;
         }
       }
+      deps.onInputSent?.(target.tabId);
       await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
         type: "keyUp",
         key: descriptor.key,
@@ -1694,7 +1690,7 @@ export async function handleSelect(
           ok: true,
           multiple,
           selected_values: selected.map((o) => o.value),
-          selected_labels: selected.map((o) => o.text),
+          selected_labels: selected.map((o) => o.getAttribute('label') || o.text),
         };
       }`,
       arguments: [{ value: params.values }],

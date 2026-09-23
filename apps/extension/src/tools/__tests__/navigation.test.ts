@@ -18,7 +18,7 @@ function fakeAgentWindow(ids: number[]) {
     create: vi.fn(async () => {
       const id = ids[i++];
       if (id === undefined) throw new Error("ran out of fake ids");
-      return id;
+      return { windowId: id, initialTabIds: [] };
     }),
     remove: vi.fn(async () => {}),
     ensureActiveTab: vi.fn(async () => 1),
@@ -64,6 +64,7 @@ function makeFakeCdp(opts?: {
   const sent: Array<{ tabId: number; method: string; params?: object }> = [];
   const methodHandlers: Record<string, (tabId: number, params?: object) => object> = {
     "Page.enable": () => ({}),
+    "Network.enable": () => ({}),
     "Page.setLifecycleEventsEnabled": () => ({}),
     "Page.navigate": () => {
       if (opts?.fireLifecycleDuringNavigate) {
@@ -643,4 +644,240 @@ describe("handleReload", () => {
     const reloadCall = fake.sent.find((c) => c.method === "Page.reload");
     expect(reloadCall?.params).toEqual({ ignoreCache: true });
   });
+});
+
+it.each([
+  "load",
+  "networkidle",
+] as const)("follows client document succession for %s instead of the initial loader", async (phase) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await manager.start("aa11");
+  const fake = makeFakeCdp();
+  let settled = false;
+  const work = handleNavigate(
+    manager,
+    { session_id: "aa11", url: "https://example.com/", wait_until: phase },
+    { cdp: fake.cdp, tabsApi: fake.tabsApi },
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(fake.sent.some((s) => s.method === "Page.navigate")).toBe(true));
+  fake.fireFrameNavigated();
+  for (const listener of [...fake.listeners])
+    listener({ tabId: 4 }, "Page.frameRequestedNavigation", {
+      frameId: "frame-1",
+      disposition: "currentTab",
+    });
+  fake.fireLifecycle(phase === "load" ? "load" : "networkIdle");
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  fake.fireFrameNavigated("frame-1", "second-loader");
+  fake.fireLifecycle(phase === "load" ? "load" : "networkIdle", "frame-1", "loader-after");
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  fake.fireLifecycle(phase === "load" ? "load" : "networkIdle", "frame-1", "second-loader");
+  expect(await work).toMatchObject({ reached: phase });
+  expect(fake.listeners).toHaveLength(0);
+});
+
+it("does not overwrite a successor observed before Page.navigate resolves with its initial loader", async () => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await manager.start("aa11");
+  const fake = makeFakeCdp();
+  const send = fake.cdp.send.bind(fake.cdp);
+  fake.cdp.send = (async (tabId, method, params) => {
+    const result = await send(tabId, method, params);
+    if (method === "Page.navigate") {
+      fake.fireFrameNavigated();
+      for (const listener of [...fake.listeners])
+        listener({ tabId: 4 }, "Page.frameRequestedNavigation", {
+          frameId: "frame-1",
+          disposition: "currentTab",
+        });
+      fake.fireLifecycle("load");
+      expect(fake.listeners.length).toBeGreaterThan(0);
+      fake.fireFrameNavigated("frame-1", "second-loader");
+      fake.fireLifecycle("load", "frame-1", "second-loader");
+    }
+    return result;
+  }) as CdpRunner["send"];
+  expect(
+    await handleNavigate(
+      manager,
+      { session_id: "aa11", url: "https://example.com/", timeout_ms: 100 },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    ),
+  ).toMatchObject({ reached: "load" });
+  expect(fake.listeners).toHaveLength(0);
+});
+
+it.each([
+  false,
+  true,
+])("resumes a cancelled successor without retiring the current loader (request=%s)", async (networkRequest) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await manager.start("aa11");
+  const fake = makeFakeCdp();
+  const send = fake.cdp.send.bind(fake.cdp);
+  let current = "loader-before";
+  fake.cdp.send = (async (tabId, method, params) => {
+    if (method === "Page.getFrameTree")
+      return { frameTree: { frame: { id: "frame-1", loaderId: current } } };
+    return send(tabId, method, params);
+  }) as CdpRunner["send"];
+  const fire = (method: string, params: Record<string, unknown>) => {
+    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+  };
+  let settled = false;
+  const work = handleNavigate(
+    manager,
+    { session_id: "aa11", url: "https://example.com/", wait_until: "load", timeout_ms: 1000 },
+    { cdp: fake.cdp, tabsApi: fake.tabsApi },
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(fake.sent.some((s) => s.method === "Page.navigate")).toBe(true));
+  current = "loader-after";
+  fake.fireFrameNavigated();
+  fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+  if (networkRequest)
+    fire("Network.requestWillBeSent", {
+      frameId: "frame-1",
+      type: "Document",
+      loaderId: "attempt-loader",
+      requestId: "attempt",
+    });
+  fake.fireLifecycle("load");
+  if (networkRequest) {
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    fire("Network.loadingFailed", {
+      requestId: "attempt",
+      canceled: true,
+      errorText: "net::ERR_ABORTED",
+    });
+  }
+  expect(await work).toMatchObject({ reached: "load" });
+  expect(fake.listeners).toHaveLength(0);
+});
+
+it.each([
+  ["domcontentloaded", "DOMContentLoaded"],
+  ["load", "load"],
+  ["networkidle", "networkIdle"],
+] as const)("preserves buffered %s through unrelated lifecycle events and cancellation", async (phase, lifecycle) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await manager.start("aa11");
+  const fake = makeFakeCdp();
+  const send = fake.cdp.send.bind(fake.cdp);
+  let current = "loader-before";
+  fake.cdp.send = (async (tabId, method, params) => {
+    if (method === "Page.getFrameTree")
+      return { frameTree: { frame: { id: "frame-1", loaderId: current } } };
+    return send(tabId, method, params);
+  }) as CdpRunner["send"];
+  const fire = (method: string, params: Record<string, unknown>) => {
+    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+  };
+  let settled = false;
+  const work = handleNavigate(
+    manager,
+    { session_id: "aa11", url: "https://example.com/", wait_until: phase, timeout_ms: 1000 },
+    { cdp: fake.cdp, tabsApi: fake.tabsApi },
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(fake.sent.some((s) => s.method === "Page.navigate")).toBe(true));
+  current = "loader-after";
+  fake.fireFrameNavigated();
+  fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+  fire("Network.requestWillBeSent", {
+    frameId: "frame-1",
+    type: "Document",
+    loaderId: "attempt-loader",
+    requestId: "attempt",
+  });
+  fake.fireLifecycle(lifecycle);
+  for (const name of ["networkAlmostIdle", "firstMeaningfulPaint", "InteractiveTime"])
+    fake.fireLifecycle(name);
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  fire("Network.loadingFailed", {
+    requestId: "attempt",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+  expect(await work).toMatchObject({ reached: phase });
+  expect(fake.listeners).toHaveLength(0);
+});
+
+it.each([
+  ["load", "DOMContentLoaded", "load"],
+  ["networkidle", "load", "networkIdle"],
+] as const)("does not reuse a predecessor's buffered %s after the successor commits", async (phase, earlierLifecycle, lifecycle) => {
+  const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+  await manager.start("aa11");
+  const fake = makeFakeCdp();
+  const send = fake.cdp.send.bind(fake.cdp);
+  let current = "loader-before";
+  let frameReads = 0;
+  fake.cdp.send = (async (tabId, method, params) => {
+    if (method === "Page.getFrameTree") {
+      frameReads += 1;
+      return { frameTree: { frame: { id: "frame-1", loaderId: current } } };
+    }
+    return send(tabId, method, params);
+  }) as CdpRunner["send"];
+  const fire = (method: string, params: Record<string, unknown>) => {
+    for (const listener of [...fake.listeners]) listener({ tabId: 4 }, method, params);
+  };
+  const begin = (loaderId: string) => {
+    fire("Page.frameRequestedNavigation", { frameId: "frame-1", disposition: "currentTab" });
+    fire("Network.requestWillBeSent", {
+      frameId: "frame-1",
+      type: "Document",
+      loaderId,
+      requestId: loaderId,
+    });
+  };
+  let settled = false;
+  const work = handleNavigate(
+    manager,
+    { session_id: "aa11", url: "https://example.com/", wait_until: phase, timeout_ms: 1000 },
+    { cdp: fake.cdp, tabsApi: fake.tabsApi },
+  ).then((result) => {
+    settled = true;
+    return result;
+  });
+  await vi.waitFor(() => expect(fake.sent.some((s) => s.method === "Page.navigate")).toBe(true));
+  current = "loader-after";
+  fake.fireFrameNavigated();
+  begin("second-loader");
+  fake.fireLifecycle(lifecycle);
+  fake.fireLifecycle("firstMeaningfulPaint");
+
+  current = "second-loader";
+  fake.fireFrameNavigated("frame-1", current);
+  begin("third-loader");
+  fake.fireLifecycle(earlierLifecycle, "frame-1", current);
+  fake.fireLifecycle("firstMeaningfulPaint", "frame-1", current);
+  const beforeCancellation = frameReads;
+  fire("Network.loadingFailed", {
+    requestId: "third-loader",
+    canceled: true,
+    errorText: "net::ERR_ABORTED",
+  });
+  await vi.waitFor(() => expect(frameReads).toBeGreaterThan(beforeCancellation));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(settled).toBe(false);
+
+  fake.fireLifecycle(lifecycle, "frame-1", "loader-after");
+  await Promise.resolve();
+  expect(settled).toBe(false);
+  fake.fireLifecycle(lifecycle, "frame-1", current);
+  expect(await work).toMatchObject({ reached: phase });
+  expect(fake.listeners).toHaveLength(0);
 });

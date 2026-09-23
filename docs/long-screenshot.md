@@ -67,14 +67,17 @@ page contact. Keeping the tab selected is necessary; hiding it can stop capture.
 Individual browser operations retain their own shorter deadlines.
 
 The default viewport screenshot and `--ref` crop are unchanged. `--full-page` is exclusive
-with `--ref`. An optional `--tab-id` must identify the selected tab in the session's Agent
-Window; the tab must have been created or borrowed by that session. Automatic document
+with `--ref`. An optional `--tab-id` identifies a tab in the session's Agent Window;
+the tab must have been created or borrowed by that session. Background targets are supported
+without selecting the tab or focusing the window. Agent capture uses target-scoped CDP
+for every viewport, with no fallback to the window's selected tab. Automatic document
 scrolling is transient page input and obeys the existing user-interrupt gate. It supports
 scriptable HTTP(S) pages, not restricted browser pages or nested/virtualized scrollers.
 
 Agent capture restores scroll and temporary styles on completion, failure, timeout or
-cancellation. Ctrl-C cancels capture or transfer; a page navigation or tab switch stops the
-capture. Unlike interactive Quick Actions, an Agent failure never returns partial success.
+cancellation while the original document remains responsive. Ctrl-C cancels capture or transfer.
+Navigation, loss of control or a debugger connection change stops capture; selecting another
+tab does not. All tiles must belong to the same document and debugger connection. Unlike interactive Quick Actions, an Agent failure never returns partial success.
 The capture/encoding deadline is two minutes by default and can be changed with `--timeout`.
 No fixed page-height or full-image canvas limit is added. Infinite scrolling may reach the
 deadline. The popup and any existing user previews are independent of Agent captures.

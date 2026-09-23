@@ -218,7 +218,7 @@ fn check_home_writable() -> CheckResult {
 }
 
 fn check_skill_up_to_date() -> CheckResult {
-    let name = "agent skill up to date";
+    let name = "agent skill matches bundled CLI";
     let home = match crate::skill_install::harness::home_dir() {
         Ok(home) => home,
         Err(err) => {
@@ -235,11 +235,11 @@ fn check_skill_up_to_date() -> CheckResult {
 }
 
 fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> CheckResult {
-    let name = "agent skill up to date";
+    let name = "agent skill matches bundled CLI";
     let mut details = Vec::new();
     for (label, harnesses) in [
-        ("synced", &report.updated),
-        ("up to date", &report.up_to_date),
+        ("synced to bundled CLI", &report.updated),
+        ("already matches bundled CLI", &report.up_to_date),
         (
             "custom skill preserved (automatic updates disabled) in",
             &report.protected,
@@ -262,12 +262,22 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             "automatic updates paused for {id}: {}; content preserved",
             reason.description()
         ));
+        for (_, conflicts) in report
+            .conflict_details
+            .iter()
+            .filter(|(id, _)| id == harness)
+        {
+            details.extend(conflicts.iter().cloned());
+        }
         hints.push(format!(
-            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-SKILL.md> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
         ));
     }
     for (harness, message) in &report.errors {
         details.push(format!("sync failed for {}: {message}", harness.cli_name()));
+    }
+    if !details.is_empty() {
+        details.insert(0, format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")));
     }
     let detail = details.join("; ");
 
@@ -576,11 +586,12 @@ mod m2_tests {
             busy: vec![HarnessId::Hermes],
             errors: vec![(HarnessId::Workbuddy, "permission denied".into())],
             paused: Vec::new(),
+            ..Default::default()
         });
         assert_eq!(check.status, CheckStatus::Fail);
         for text in [
-            "synced: claude-code",
-            "up to date: pi",
+            "synced to bundled CLI: claude-code",
+            "already matches bundled CLI: pi",
             "preserved (automatic updates disabled) in: cursor",
             "sync deferred in: hermes",
             "workbuddy: permission denied",
@@ -588,6 +599,23 @@ mod m2_tests {
             assert!(check.detail.contains(text), "{}", check.detail);
         }
         assert!(!check.hint.unwrap().contains("--force"));
+    }
+
+    #[test]
+    fn skill_check_scopes_its_claim_to_the_bundled_cli_version() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        let check = skill_check_from_report(&SyncReport {
+            up_to_date: vec![HarnessId::PiAgent],
+            ..Default::default()
+        });
+        assert_eq!(check.name, "agent skill matches bundled CLI");
+        assert!(
+            check
+                .detail
+                .contains(&format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")))
+        );
+        assert!(check.detail.contains("already matches bundled CLI: pi"));
+        assert!(!check.detail.contains("up to date"));
     }
 
     #[test]
@@ -601,6 +629,7 @@ mod m2_tests {
             PauseReason::MissingBaseline,
             PauseReason::LocalChanges,
             PauseReason::InvalidMarker,
+            PauseReason::InterruptedUpdate,
         ] {
             for updated in [false, true] {
                 let mut report = SyncReport {
@@ -615,14 +644,16 @@ mod m2_tests {
                 assert!(check.detail.contains("automatic updates paused for cursor"));
                 assert!(check.detail.contains(reason.description()));
                 if updated {
-                    assert!(check.detail.contains("synced: claude-code"));
+                    assert!(check.detail.contains("synced to bundled CLI: claude-code"));
                 }
                 assert!(!has_failures(std::slice::from_ref(&check)));
                 let json = serde_json::to_value(&check).unwrap();
                 assert_eq!(json["status"], "warn");
                 assert_eq!(json["ok"], true);
                 let hint = json["hint"].as_str().unwrap();
-                assert!(hint.contains("--harness cursor --source <existing-SKILL.md> --force"));
+                assert!(
+                    hint.contains("--harness cursor --source <existing-skill-directory> --force")
+                );
                 assert!(hint.contains("--harness cursor --force"));
                 assert!(hint.contains("overwrites existing instructions"));
                 // An I/O failure takes precedence without hiding paused installations.
@@ -639,6 +670,30 @@ mod m2_tests {
                 assert!(failed.hint.as_ref().unwrap().contains("--harness cursor"));
                 assert!(has_failures(&[failed]));
             }
+        }
+    }
+
+    #[test]
+    fn skill_check_includes_each_conflict_in_text_and_json() {
+        use crate::skill_install::{
+            HarnessId,
+            sync::{PauseReason, SyncReport},
+        };
+        let conflicts = vec![
+            "references/changed.md: modified".into(),
+            "references/missing.md: deleted".into(),
+            "references/new.md: new resource conflicts with an existing file".into(),
+        ];
+        let check = skill_check_from_report(&SyncReport {
+            paused: vec![(HarnessId::Cursor, PauseReason::LocalChanges)],
+            conflict_details: vec![(HarnessId::Cursor, conflicts.clone())],
+            ..Default::default()
+        });
+        assert_eq!(check.status, CheckStatus::Warning);
+        let json = serde_json::to_value(&check).unwrap();
+        for conflict in conflicts {
+            assert!(check.detail.contains(&conflict));
+            assert!(json["detail"].as_str().unwrap().contains(&conflict));
         }
     }
 

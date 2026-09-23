@@ -15,6 +15,15 @@
   pointer-events: auto !important;
 }
 
+/* Click passthrough changes only control hit targets, not visibility or other UI.
+   Keep this after the equally specific host blocking rule above. */
+:host([data-bsk-overlay-surface][data-bsk-input-passthrough]),
+:host([data-bsk-input-passthrough]) [data-slot="control-overlay-blocker"],
+:host([data-bsk-input-passthrough]) [data-slot="control-overlay-pill"],
+:host([data-bsk-input-passthrough]) [data-slot="control-overlay-pill"] * {
+  pointer-events: none !important;
+}
+
 /* Screenshot suppression: the host lives in the main DOM, so hiding it
    removes the whole shadow subtree from compositing and captured frames
    only contain page content. */

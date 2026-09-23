@@ -52,6 +52,31 @@ describe("renderVom single-layer page", () => {
     expect(out.text).toContain('@e1 checkbox "Subscribe"' + marker + ' ="on"');
     expect(out.refs).toHaveLength(1);
   });
+  it.each([100, 600, 2000])("bounds sibling-context reads for %i repeated actions", (count) => {
+    let nameReads = 0;
+    const nodes = [node({ id: 1, role: "RootWebArea" })];
+    for (let i = 0; i < count; i++) {
+      const label = node({ id: 2 + i * 2, parentId: 1, role: "StaticText" });
+      Object.defineProperty(label, "name", {
+        enumerable: true,
+        get() {
+          nameReads++;
+          return `Record ${i}`;
+        },
+      });
+      nodes.push(
+        label,
+        node({ id: 3 + i * 2, parentId: 1, tag: "button", role: "button", name: "Open" }),
+      );
+    }
+    const out = renderVom(scene(nodes));
+    expect(out.refs).toHaveLength(count);
+    expect(out.refs.map((ref) => ref.ctx)).toEqual(
+      Array.from({ length: count }, (_, index) => `Record ${Math.max(0, index - 2)}`),
+    );
+    // Count semantic reads rather than asserting a machine-dependent duration.
+    expect(nameReads).toBeLessThan(count * 10);
+  });
 
   it("does not derive handle context across frame scopes", () => {
     const out = renderVom(

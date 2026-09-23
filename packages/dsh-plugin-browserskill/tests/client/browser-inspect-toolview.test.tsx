@@ -3,7 +3,7 @@
 // image/path-only/running/error rendering, the registration key, and the
 // session-bound attachment loader.
 
-import type { RunningToolCall, ToolResultNode } from "@deepseek-ai/dsh-client-runtime/client";
+import type { RunningToolCall, ToolResultNode } from "@deepseek-ai/dsh-client-ui-chat/client";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -134,6 +134,7 @@ describe("BrowserInspectToolView", () => {
     renderView(block, loadImage);
     // Collapsed row shows the summary; expand to reach the image.
     expect(screen.getByText(IMAGE_TEXT)).toBeTruthy();
+    expect(loadImage).not.toHaveBeenCalled();
     const toggle = screen.getByRole("button", { name: /screenshot/i });
     toggle.click();
     await waitFor(() => expect(loadImage).toHaveBeenCalledWith(ATTACHMENT));

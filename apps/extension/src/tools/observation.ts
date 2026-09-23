@@ -29,12 +29,17 @@ import {
   type VomScene,
 } from "@browser-skill/vom";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { readTimeoutDetails } from "@/browser-driver/command-deadline";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import {
   type CaptureSuppressSendToTab,
   withExtensionOverlayHidden,
 } from "@/lib/capture-suppress-bridge";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+} from "@/session-manager/manager";
 import type {
   GetHtmlParams,
   GetHtmlResult,
@@ -63,6 +68,7 @@ import {
   type ToolEffect,
 } from "./shared";
 import { lookupRefTarget, resolveSnapshotRef } from "./snapshot-ref";
+import { captureControlledViewport } from "./viewport-screenshot";
 import { type CapturedNode, type CapturedSurfaceProbe, probeHoverSurfaces } from "./vom/capture";
 import { captureObservationFacts, semanticCapture } from "./vom/capture-coordinator";
 import type { FrameDocument as CapturedFrameDocument } from "./vom/frame-document";
@@ -350,6 +356,39 @@ export async function handleScreenshot(
       format: "png",
       tab_id: target.tabId,
     });
+  }
+
+  // Pin controlled captures to their page, including when initially active:
+  // the user can select another tab while overlay suppression is pending.
+  if (isAgentControlledTab(ctx, target.tabId) && target.windowId === ctx.agentWindowId) {
+    const cdp = deps.cdp;
+    if (!cdp) {
+      return rpcError(
+        "cdp_failed",
+        "screenshot_capture_failed",
+        "Controlled viewport capture requires CDP",
+      );
+    }
+    cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
+    const captured = await captureControlledViewport(
+      cdp,
+      target.tabId,
+      async () => {
+        if (manager.get(ctx.sessionId) !== ctx || !isAgentControlledTab(ctx, target.tabId))
+          return false;
+        const tab = await deps.tabsApi.get(target.tabId);
+        return (
+          manager.get(ctx.sessionId) === ctx &&
+          isAgentControlledTab(ctx, target.tabId) &&
+          tab.id === target.tabId &&
+          tab.windowId === ctx.agentWindowId
+        );
+      },
+      signal,
+      deps.sendToTab,
+    );
+    if (isRpcError(captured)) return captured;
+    return withShotDialogs({ ...captured, format: "png", tab_id: target.tabId });
   }
 
   if (!target.active) {
@@ -869,7 +908,12 @@ async function runHoverProbes(
   staticSemantics: ReturnType<typeof resolveSemanticGraph>,
   options: CaptureVomObservationOptions,
 ): Promise<HoverProbeOutcome> {
-  if (!options.conditionalSurfaceProbe) return NO_HOVER_PROBES;
+  if (
+    !options.conditionalSurfaceProbe ||
+    captured.viewport.width <= 0 ||
+    captured.viewport.height <= 0
+  )
+    return NO_HOVER_PROBES;
 
   return withOverlayBypass(options.hoverProbeBypassOverlay, tabId, async () => {
     const surfaceProbes = await probeHoverSurfaces(cdp, tabId, captured.nodes, {
@@ -1174,6 +1218,7 @@ async function handleVomObservation(
     return {
       code: "cdp_failed",
       message: err instanceof Error ? err.message : String(err),
+      ...readTimeoutDetails(err),
     };
   }
 }

@@ -22,11 +22,6 @@ describe("plugin identity", () => {
   });
 
   it("declares client require()s so dsh arrives them before materialize", () => {
-    expect(pkg.dsh.client.external).toEqual(
-      expect.arrayContaining([
-        "@deepseek-ai/dsh-client-ui-attachment",
-        "@deepseek-ai/dsh-client-ui-primitives",
-      ]),
-    );
+    expect(pkg.dsh.client.external).toEqual(["@deepseek-ai/dsh-client-ui-primitives"]);
   });
 });

@@ -1,8 +1,8 @@
 import { i18n } from "@browser-skill/i18n";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SnapshotInfo } from "@/lib/connection-controller";
 import { STORAGE_KEYS } from "@/lib/instance-id";
+import type { PopupSnapshotInfo } from "@/lib/popup-bridge";
 import { DEFAULT_DAEMON_PORT } from "@/transport/daemon-endpoint";
 import { EXTENSION_VERSION, PROTOCOL_VERSION } from "@/transport/handshake";
 import { App } from "./App";
@@ -17,7 +17,7 @@ const mockUseConnectionState = vi.mocked(useConnectionState);
 /** Arbitrary peer fixture — only used to distinguish daemon vs extension in the UI. */
 const mockDaemonVersion = "daemon-fixture";
 
-const baseSnapshot: SnapshotInfo = {
+const baseSnapshot: PopupSnapshotInfo = {
   state: "disconnected",
   instanceId: "",
   label: "",
@@ -25,6 +25,7 @@ const baseSnapshot: SnapshotInfo = {
   handshake: null,
   lastError: null,
   connectionEnabled: true,
+  sessionCount: 0,
 };
 
 function openRecordView() {
@@ -64,6 +65,36 @@ describe("App", () => {
     await i18n.changeLanguage("zh-CN");
     vi.clearAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("adds only a current-task section and keeps existing home controls accessible", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connected" },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    const create = vi.fn();
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn().mockResolvedValue({
+          ok: true,
+          data: {
+            tasks: [{ session_id: "s1", created_at: 1000, tab_id: 7, title: "Save fails" }],
+          },
+        }),
+        getURL: (file: string) => `chrome-extension://own/${file}`,
+      },
+      tabs: { create },
+    });
+    render(<App />);
+    expect(await screen.findByText("当前任务")).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "BrowserSkill 连接" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "借用标签页前确认" })).toBeTruthy();
+    expect(screen.getByRole("switch", { name: "允许请求人工协助" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "快捷功能" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Save fails/ }));
+    expect(create).toHaveBeenCalledWith({ url: "chrome-extension://own/debug.html?session=s1" });
   });
 
   it("shows status label without helper subtitle", () => {

@@ -6,7 +6,15 @@
  */
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
-import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM, WAIT_UNTIL_PARAM } from "./tool-params";
+import { DEBUG_PARAMETERS } from "./debug-tool";
+import {
+  BROWSER_PARAM,
+  SESSION_PARAM,
+  SESSION_STOP_PARAMS,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+  WAIT_UNTIL_PARAM,
+} from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
 
 const DEVICE_PRESETS = [
@@ -98,20 +106,25 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_session",
     description:
       "Manage plugin-owned browser sessions. Actions: start opens an Agent Window; stop closes an " +
-      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus/browser " +
-      "are optional. For stop, session is optional and defaults to the current owned session.",
+      "owned session; list returns owned sessions. For start, url/device/width/height/noFocus are " +
+      "optional. When a specific profile is required, always set browser to its verified instance " +
+      "ID or unique label, even with one connected browser; stop if the target is unknown or " +
+      "unavailable instead of omitting or changing browser. For stop, specify session or requestId " +
+      "(not both), or omit both to retry an " +
+      "unacknowledged stop before selecting the current owned session. If several stops await " +
+      "acknowledgement, specify a target. Once accepted, cleanup continues if the call is aborted.",
     actions: {
       start: "session.start",
       stop: "session.stop",
       list: "session.list",
     },
     parameters: {
-      session: SESSION_PARAM,
+      ...SESSION_STOP_PARAMS,
       url: { type: "string", description: "Initial URL for start." },
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
       noFocus: { type: "boolean", description: "Start the Agent Window in the background." },
-      browser: { type: "string", description: "Browser instance id for start." },
+      browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
     },
   },
@@ -140,9 +153,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: "browser_inspect",
     description:
-      "Read page state without arbitrary script execution. Actions: observe, snapshot, html, " +
+      "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
       "screenshot, console, network. Prefer observe, then snapshot, then bounded html; use screenshot " +
-      "for visual evidence. console/network support cursor fields since/limit/maxTextChars.",
+      "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
+      "debug with debugAction starts/stops capture, reads/exports evidence, or explicitly controls network traffic. " +
+      "rule_add/rule_enable can block, modify or mock live requests; replay sends a new request and may change server data. Start capture before visiting the page.",
     actions: {
       observe: "inspect.observe",
       snapshot: "inspect.snapshot",
@@ -150,10 +165,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       screenshot: "inspect.screenshot",
       console: "inspect.console",
       network: "inspect.network",
+      debug: "inspect.debug",
     },
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
+      ...DEBUG_PARAMETERS,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
       cursor: {
@@ -163,7 +180,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       ref: { type: "string", description: "Fresh ref for scoped html or cropped screenshot." },
       maxBytes: { type: "integer", description: "HTML byte cap." },
       since: { type: "integer", description: "Console/network sequence cursor." },
-      limit: { type: "integer", description: "Console/network entry cap." },
+      limit: {
+        type: "integer",
+        description: "Console/network entry cap; debug lists: 1..100, default 30.",
+      },
       maxTextChars: { type: "integer", description: "Console/network per-entry text cap." },
       includeStack: { type: "boolean", description: "Include console stack frames." },
     },

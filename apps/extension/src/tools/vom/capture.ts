@@ -11,7 +11,7 @@ export type {
   CapturedSurfaceProbe,
 } from "./facts";
 
-import { isAbortError, throwIfAborted } from "./capture-abort";
+import { isCaptureTerminalError, throwIfAborted } from "./capture-abort";
 import { clearHover, ProbeBudget, waitForHover } from "./hover-perception";
 
 interface RuntimeEvaluateReply {
@@ -389,7 +389,7 @@ export async function probeHoverSurfaces(
           confidence: confidenceForHover(candidate, subItems),
         });
       } catch (error) {
-        if (isAbortError(error)) throw error;
+        if (isCaptureTerminalError(error)) throw error;
         continue;
       } finally {
         await clearHover(cdp, tabId);
@@ -397,7 +397,7 @@ export async function probeHoverSurfaces(
     }
     return results;
   } catch (err) {
-    if (isAbortError(err)) throw err;
+    if (isCaptureTerminalError(err)) throw err;
     console.debug("[bsk capture] hover surface probe failed", err);
     return [];
   }
@@ -438,7 +438,7 @@ export async function collectOverlayExcludedBackendIds(
     throwIfAborted(signal);
     collectBackendIdsFromDomNode(described.node, excluded);
   } catch (err) {
-    if (isAbortError(err)) throw err;
+    if (isCaptureTerminalError(err)) throw err;
     console.debug("[bsk capture] overlay exclusion fallback failed", err);
   }
   return excluded;

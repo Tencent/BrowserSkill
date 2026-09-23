@@ -4,11 +4,6 @@
 
 import type { ImageAttachmentRef } from "@deepseek-ai/dsh-attachment";
 import {
-  type ImageLoader,
-  MessageImage,
-  type MessageImageLabels,
-} from "@deepseek-ai/dsh-client-ui-attachment";
-import {
   DisclosureRow,
   StateDot,
   type StateDotState,
@@ -18,6 +13,7 @@ import {
 import type { ToolCallViewProps } from "@deepseek-ai/dsh-client-ui-tool/client";
 import { useState } from "react";
 import css from "./BrowserInspectToolView.module.css";
+import { ScreenshotImage } from "./ScreenshotImage";
 
 /** Resolved loader bound to the owning session at registration time. */
 export type BrowserInspectImageLoader = (attachment: ImageAttachmentRef) => Promise<string>;
@@ -37,7 +33,9 @@ interface ViewModel {
   readonly title: string;
 }
 
-const TERMINAL_LABELS: Partial<TerminalBlockLabels> = {
+const TERMINAL_LABELS: TerminalBlockLabels = {
+  signal: (signal) => `Signal ${signal}`,
+  exitCode: (exitCode) => `Exit code ${exitCode}`,
   running: "Running",
   failed: "Failed",
   done: "Done",
@@ -48,15 +46,6 @@ const TERMINAL_LABELS: Partial<TerminalBlockLabels> = {
   collapse: "Collapse",
   expandAria: (hidden) => `Expand the remaining ${hidden} output lines`,
   expand: (hidden) => `… ${hidden} more lines`,
-};
-
-const IMAGE_LABELS: MessageImageLabels = {
-  image: "screenshot",
-  open: "Open the original screenshot",
-  openNamed: (label) => `Open screenshot ${label}`,
-  loading: "Loading…",
-  loadFailed: "Load failed — retry",
-  lightbox: { dialog: "Screenshot preview", close: "Close preview" },
 };
 
 function firstLine(text: string): string {
@@ -201,11 +190,10 @@ export function BrowserInspectToolView({
           />
           {model.image !== null ? (
             <div className={css["image-wrap"]}>
-              <MessageImage
+              <ScreenshotImage
+                key={model.image.attachmentId}
                 attachment={model.image}
                 load={loadImage}
-                variant="single"
-                labels={IMAGE_LABELS}
               />
             </div>
           ) : null}

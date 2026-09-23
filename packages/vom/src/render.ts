@@ -1,4 +1,4 @@
-import { coverage, detectBlockingLayer } from "./layers";
+import { coverage, detectBlockingLayer, spansViewport } from "./layers";
 import type {
   ActiveScopeBlock,
   BlockingLayer,
@@ -614,11 +614,32 @@ function collectSameContainerContext(
   let guard = 0;
   while (parentId !== null && guard <= state.parentMap.size) {
     const siblings = state.children.get(parentId) ?? [];
-    for (const sibling of siblings) {
-      if (sibling.id === childId) break;
-      collectWeakLabelsFromSubtree(sibling, node, nodeName, state, labels);
-      while (labels.length > MAX_HANDLE_CONTEXT_ITEMS) labels.shift();
+    const end = state.siblingIndex.get(childId) ?? siblings.length;
+    let cache = state.siblingContextCache.get(parentId);
+    if (!cache) {
+      cache = new Map();
+      state.siblingContextCache.set(parentId, cache);
     }
+    // The subtree collector depends on scope, target name and incoming labels.
+    // Include all three so descendants arriving from different containers retain
+    // the original context semantics. DFS visits sibling prefixes in order.
+    const key = JSON.stringify([node.contextScopeId, nodeName, labels]);
+    let prefix = cache.get(key);
+    if (!prefix || prefix.nextIndex > end) prefix = { nextIndex: 0, labels: [...labels] };
+    for (; prefix.nextIndex < end; prefix.nextIndex++) {
+      collectWeakLabelsFromSubtree(
+        siblings[prefix.nextIndex],
+        node,
+        nodeName,
+        state,
+        prefix.labels,
+      );
+      while (prefix.labels.length > MAX_HANDLE_CONTEXT_ITEMS) prefix.labels.shift();
+    }
+    labels.splice(0, labels.length, ...prefix.labels);
+    // Bound retained variants on pages with many distinct action names.
+    if (!cache.has(key) && cache.size >= 64) cache.delete(cache.keys().next().value!);
+    cache.set(key, prefix);
 
     const parent = state.nodesById.get(parentId);
     if (!parent || !sharesContextScope(node, parent) || isContextBoundary(parent)) break;
@@ -791,6 +812,8 @@ interface RenderState {
   redactValues: boolean;
   truncated: boolean;
   children: Map<number | null, VomNode[]>;
+  siblingIndex: Map<number, number>;
+  siblingContextCache: Map<number, Map<string, { nextIndex: number; labels: string[] }>>;
   parentMap: Map<number, number | null>;
   nodesById: Map<number, VomNode>;
   domContextIndex: DomContextIndex;
@@ -907,8 +930,15 @@ function createRenderState(
   activeScopeBlocks: ActiveScopeBlock[],
 ): RenderState {
   const children = buildChildren(nodes);
+  const siblingIndex = new Map<number, number>();
+  for (const siblings of children.values()) {
+    for (let index = 0; index < siblings.length; index++)
+      siblingIndex.set(siblings[index].id, index);
+  }
   const state: RenderState = {
     visualAncestors: new Set(),
+    siblingIndex,
+    siblingContextCache: new Map(),
     lines: [...initialLines],
     refs: [],
     nextRef: 1,
@@ -994,19 +1024,6 @@ function interactionPoints(rect: Rect): Array<[number, number]> {
   ];
 }
 
-function isModalLike(node: VomNode): boolean {
-  const role = normalizedRole(node);
-  const tag = normalizedTag(node);
-  return node.modal === true || tag === "dialog" || role === "dialog" || role === "alertdialog";
-}
-
-function activeRegionCandidatePriority(node: VomNode, viewportCoverage: number): number {
-  if (isModalLike(node)) return 4;
-  if (viewportCoverage >= 0.9) return 3;
-  if (viewportCoverage >= 0.15) return 2;
-  return 1;
-}
-
 function paintLineageByFrame(
   node: VomNode,
   parentMap: Map<number, number | null>,
@@ -1060,7 +1077,7 @@ function isBlockedByRegion(
   blocker: VomNode,
   parentMap: Map<number, number | null>,
   nodesById: Map<number, VomNode>,
-  viewportCoverage: number,
+  fullCover: boolean,
   lineageCache: Map<number, Map<string | undefined, VomNode>>,
 ): boolean {
   if (target.id === blocker.id) return false;
@@ -1073,7 +1090,7 @@ function isBlockedByRegion(
   const points = interactionPoints(target.rect);
 
   if (
-    viewportCoverage < 0.9 &&
+    !fullCover &&
     paintNodes.target.paintOrder >= paintNodes.blocker.paintOrder &&
     points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y))
   ) {
@@ -1087,8 +1104,7 @@ function isBlockedByRegion(
   ) {
     return false;
   }
-  if (viewportCoverage >= 0.9) return true;
-
+  // Even a near-full region must overlap the target to occlude it.
   return points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y));
 }
 
@@ -1123,15 +1139,12 @@ function applyActiveRegionPolicy(
   const lineageCache = new Map<number, Map<string | undefined, VomNode>>();
   const candidates = nodes
     .filter(isPositionedRegionCandidate)
-    .map((node) => {
-      const viewportCoverage = coverage(node.rect, scene.viewport);
-      return {
-        node,
-        viewportCoverage,
-        priority: activeRegionCandidatePriority(node, viewportCoverage),
-      };
-    })
-    .filter((candidate) => candidate.priority > 1 || candidate.viewportCoverage > 0);
+    .map((node) => ({
+      node,
+      viewportCoverage: coverage(node.rect, scene.viewport),
+      fullCover: spansViewport(node.rect, scene.viewport),
+    }))
+    .filter((candidate) => candidate.viewportCoverage > 0 || candidate.node.modal === true);
 
   const blockedRoots = new Set<number>();
   for (const target of nodes) {
@@ -1142,7 +1155,7 @@ function applyActiveRegionPolicy(
         candidate.node,
         parentMap,
         nodesById,
-        candidate.viewportCoverage,
+        candidate.fullCover,
         lineageCache,
       ),
     );

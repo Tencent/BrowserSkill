@@ -25,7 +25,9 @@ dsh --profile web
 ```
 
 Replace `web` with your profile name if you use a different profile. The plugin
-includes the `browser-skill` skill; no separate `bsk install-skill` step is needed.
+includes the complete `browser-skill` package; no separate `bsk install-skill` step is needed.
+Its compact entry point loads first; references ship with the plugin and are read only
+when needed. Relative paths resolve from the packaged skill directory, not your project.
 
 In a conversation, try:
 
@@ -77,6 +79,19 @@ One agent conversation can drive several browser sessions at once:
 - The number of concurrent sessions started through the plugin is capped (`maxSessions`, default 5).
 - Unloading the plugin stops every session it started and kills in-flight bsk processes.
 
+Starts are journaled before creating a window. Lost replies and failed cleanup remain
+recoverable on reload; `browser_session action=list` reports `pendingCleanup`, and stop
+can retry it even when there is no current session. This requires a CLI and daemon
+that support recoverable starts. See [the lifecycle contract](../../docs/recoverable-session-starts.md).
+
+Stops also retain their target and cleanup intent. A failed or interrupted stop can be
+retried without accidentally stopping the next current session. Once the intent is saved,
+cancelling the call only stops waiting; cleanup continues in the background. If it finishes
+before a retry, that retry acknowledges the original result. With several unacknowledged
+stops, pass `session` or the owned `requestId` explicitly (not both). List exposes request
+IDs; stop results include `requestId` and `alreadyClosed`. Completed receipts survive reload
+until acknowledged and do not occupy browser capacity.
+
 **Ownership boundary**: the bsk daemon may be shared with other agents, terminals, or dsh
 instances. The plugin therefore only ever sees and operates on sessions it created itself —
 an explicit `session` argument naming a foreign or unknown id is rejected, the `list` action on
@@ -121,7 +136,8 @@ All fields are optional; omitted fields use the defaults below:
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `bskPath` | `bsk` | Path to the CLI binary. |
-| `defaultTimeoutMs` | `120000` | Default command timeout in milliseconds. |
+| `sessionStateDirectory` | Scoped under `$BSK_HOME/dsh-starts` (or `~/.bsk/dsh-starts`) | Durable recovery records; optionally isolate by host/profile. |
+| `defaultTimeoutMs` | `120000` | Default command execution timeout in milliseconds; output collection after exit has a separate 2-second limit. |
 | `maxSessions` | `5` | Maximum concurrent sessions started by this plugin. |
 | `observationEnabled` | `true` | Enable live browser observation. |
 | `thumbnailIntervalMs` | `1500` | Screenshot interval for active sessions, in milliseconds. |
@@ -132,6 +148,11 @@ With `lazyTools: true`, only the skill's catalog entry is initially advertised t
 the model. The six `browser_*` tool schemas are added to the system prompt after
 the `browser-skill` skill is successfully invoked, either by the model or through
 `/browser-skill`. Set `lazyTools: false` to make the tools available immediately.
+
+After a plugin reload, a live or resumed conversation's successful skill invocation
+restores the tools from its stored history. If an older plugin reports
+`unknown tool "browser_session"`, invoke `skill browser-skill` again, or set
+`lazyTools: false` in the profile patch as a temporary workaround.
 
 ## Live browser view
 

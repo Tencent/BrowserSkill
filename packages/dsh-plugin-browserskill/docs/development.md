@@ -16,12 +16,18 @@ Keep these identifiers aligned so dsh can load both halves of the plugin.
 Beyond the tools, the plugin publishes the **`browser-skill` agent skill** through the harness's
 official skill seam (`ctx.skills.register`): the catalog entry (name + routing description) is
 resident in `<available_skills>`, and the body is loaded only when the model invokes the `skill`
-tool. Its single source is the DSH-specific `skill/SKILL.md`, which documents only structured
-`browser_*` calls and their plugin semantics. The repository-root CLI skill is intentionally not
+tool. Its source is the DSH-specific `skill/` directory: a compact `SKILL.md` plus
+conditional details in `references/`. Both document only structured `browser_*` calls
+and their plugin semantics. The crate-local CLI skill is intentionally not
 concatenated: its command examples belong to a different execution interface and would bypass
 the plugin's ownership, live observation UI, cancellation, and cleanup path if followed directly.
 The build rejects internal CLI-name leakage, command-line code blocks, unknown browser tools, and
-missing supported browser tools before embedding the Markdown. Registration and every pre-step
+missing supported browser tools across the entire package, and checks local links and the
+entry point budget before embedding only `SKILL.md`. The npm package includes `skill/`
+and registration supplies its module-relative `resourceBase`; the harness renders this
+base directory when loading the skill, so references resolve independently of `cwd`.
+`node scripts/check-dsh-package.mjs` from the repository root verifies the built npm
+archive and resource resolution from an unrelated working directory. Registration and every pre-step
 catalog snapshot are pure in-memory reads (no disk/process/daemon); compositions without the skill
 seam degrade silently.
 
@@ -30,6 +36,18 @@ the skill is successfully invoked. Registration happens once and lasts until the
 plugin is unloaded. Repeated invocations do not register duplicate tools. Entering
 a resumed conversation whose history contains a successful skill invocation also
 registers the tools. Setting `lazyTools: false` registers them at plugin startup.
+
+Reload recovery recognizes both current DSH tool-result messages (a tool source
+and a matching `tool-result` content block) and older flat `callId`/`isError`
+messages. It scans each session object's existing append-only history once per
+plugin lifetime, using `snapshotEvents()` on newer hosts or the legacy `events`
+getter. It then folds new events without reading or copying the full log on
+streaming updates. Pending call IDs are isolated by session and removed when their
+results arrive. A failed history read is retried on a later event; sessions missed
+at startup are discovered through service readiness or their first later event.
+Failed registration retains the invocation proof and retries on the next turn,
+session entry, service discovery, or successful skill invocation. Streaming
+events continue to fold without repeated registration attempts or warnings.
 
 ## Observation subscriptions and routes
 
@@ -98,11 +116,29 @@ registers the tools. Setting `lazyTools: false` registers them at plugin startup
   `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `browser_inspect`. The
   custom view keeps a terminal block for every inspect action and, when a screenshot result carries
   an image block, resolves the durable attachment through the client session's authorized
-  `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
+  `readAttachment` RPC and renders it with the plugin-owned `ScreenshotImage` thumbnail and
+  native dialog preview. The loader stays stable within a session so host rerenders preserve
+  the open preview. Attachment dimensions reserve thumbnail space during loading; retries,
+  attachment/session changes, and unmounts release the component-owned blob URLs.
   The other five tools keep the stock terminal card. The bundle follows the dsh client
-  contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, platform modules
-  (`react`, `dsh-client-ui-*`) external, everything else inlined, CSS Modules compiled by
-  lightningcss.
+  contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, with
+  explicitly shared platform modules (React and `dsh-client-ui-primitives`) external,
+  everything else inlined, CSS Modules compiled by lightningcss.
+- **Host compatibility**: development dependencies are pinned to the DSH `0.1.5-rc.3`
+  SDK shipped with DSH `0.1.5-rc.2`, including the current renderer, Session Controller,
+  and chat type contracts. Previously, tests used `0.1.0-rc.6`, which exported `MessageImage`
+  from the attachment client; the current attachment client exposes only plugin hooks.
+  Importing the old component caused the screenshot-card expansion crash. Keep service
+  contracts type-only and restrict runtime imports to the host's shared module table.
+  `tests/client/client-bundle.test.tsx` builds the
+  actual client once, rejects unexpected externals, and exercises screenshot rendering with
+  an attachment module that exposes only `apply`/`inject`. When adding host runtime imports,
+  verify their exports against the supported host and extend that contract test; passing
+  source-level tests against the development packages alone is insufficient.
+  Update the SDK packages and their peer resolutions together when changing the supported
+  host baseline. The version-scoped `packageExtensions` entry in `pnpm-workspace.yaml`
+  supplies the runtime dependencies that the published primitives package lists only as
+  development dependencies; remove this correction when the upstream manifest is fixed.
 - **Errors**: non-zero bsk exits surface the CLI's JSON error envelope (`code`, `message`, `hint`)
   so the model gets the daemon's actionable guidance.
 - **Long-running work** (e.g. `bsk record`) is not backgrounded via `ctx.jobs` yet — tracked as a

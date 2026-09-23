@@ -42,6 +42,7 @@ export interface ResolvedTargetTab {
   windowId: number;
   active: boolean;
   url?: string;
+  pendingUrl?: string;
 }
 
 export type { DialogCursor };
@@ -61,6 +62,7 @@ export interface CdpRunner {
   getFrameGraph?(tabId: number): Promise<CdpFrameGraph>;
   getAttachmentId?(tabId: number): string | undefined;
   ensureAttachedToUrl?(tabId: number, expectedUrl: string | undefined): Promise<void>;
+  acquireBackgroundExecution?(sessionId: string, tabId: number): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
   releaseSessionTab?(sessionId: string, tabId: number): Promise<void>;
   onEvent?(handler: (source: CdpDebuggee, method: string, params: unknown) => void): {
@@ -229,7 +231,13 @@ async function resolveVisibleTargetTab(
         message: `tab ${tabId} not found in session scope`,
       };
     }
-    return { tabId: tab.id, windowId: tab.windowId, active: tab.active === true, url: tab.url };
+    return {
+      tabId: tab.id,
+      windowId: tab.windowId,
+      active: tab.active === true,
+      url: tab.url,
+      pendingUrl: tab.pendingUrl,
+    };
   }
   const tabs = await api.query({ active: true, windowId: ctx.agentWindowId });
   const first = tabs.find((t) => typeof t.id === "number");
@@ -244,6 +252,7 @@ async function resolveVisibleTargetTab(
     windowId: ctx.agentWindowId,
     active: first.active === true,
     url: first.url,
+    pendingUrl: first.pendingUrl,
   };
 }
 

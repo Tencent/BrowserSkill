@@ -3,13 +3,14 @@ import {
   type InteractionPreferenceStore,
   interactionPolicy,
 } from "@/lib/interaction-preferences";
+import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
-import { returnBorrowedTab, type TabManagementDeps } from "./tabs";
+import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -197,6 +198,14 @@ export async function handleSessionStop(
   params: SessionStopParams,
   deps: SessionStopDeps = {},
 ): Promise<SessionStopResult | RpcError> {
+  return withTaskPreviewStop(manager, params?.session_id, () => stopSession(manager, params, deps));
+}
+
+async function stopSession(
+  manager: SessionManager,
+  params: SessionStopParams,
+  deps: SessionStopDeps,
+): Promise<SessionStopResult | RpcError> {
   if (!params?.session_id) {
     return {
       code: "invalid_params",
@@ -325,7 +334,7 @@ export async function handleSessionStop(
     }
 
     // Step 5: decide whether to release (keep) the window or close it.
-    let shouldRelease = false;
+    let shouldRelease = (ctx.observedTabs?.size ?? 0) > 0;
     if (queryApi) {
       try {
         const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
@@ -341,6 +350,19 @@ export async function handleSessionStop(
         const leakedAgentTabs = liveWindowTabs.filter(
           (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (leakedAgentTabs.length > 0 && userTabs.length > 0) {
+          // Neither releasing ownership nor closing this mixed window is safe.
+          // Keep the binding so a later stop can retry only the agent tabs.
+          return rpcError(
+            "protocol_error",
+            "cleanup_failed",
+            "Agent tabs could not be closed; user tabs were preserved and cleanup can be retried",
+            {
+              resource_type: "agent_window",
+              resource_id: ctx.agentWindowId,
+            },
+          );
+        }
         if (leakedAgentTabs.length > 0) {
           console.warn(
             `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
@@ -349,14 +371,24 @@ export async function handleSessionStop(
         }
         shouldRelease = userTabs.length > 0;
       } catch {
-        // Query failed (e.g. window already gone) — conservatively close it.
-        shouldRelease = false;
+        // A failed query does not prove the window is gone. Preserve the
+        // release decision when observed tabs are known to require protection.
       }
     }
 
     if (shouldRelease) {
       // Keep the window + its user tabs; only drop the session binding.
+      const observedTabIds = Array.from(ctx.observedTabs ?? []);
       await manager.stop(params.session_id, { dropOnly: true });
+      // Closing an agent tab may have reactivated an observed tab. Reset only
+      // after dropping the session so subsequent overlay refreshes stay hidden.
+      const overlayReset = deps.tabManagement?.agentOverlayReset ?? chromeAgentOverlayResetApi;
+      for (const tabId of observedTabIds) {
+        // Match tab_return: content-script replies must not delay session cleanup.
+        void overlayReset.resetAgentOverlays(tabId, ctx.sessionId).catch(() => {
+          // Restricted pages and unloaded content scripts cannot receive messages.
+        });
+      }
       result.window_released = true;
     } else {
       // Window is empty (or we couldn't verify state) — close it.

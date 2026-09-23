@@ -5,6 +5,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [0.3.1] - 2026-09-23
+
+### Added
+
+- [Task-scoped website debugging](docs/website-debugging.md): bounded request/body
+  capture, operation-linked console and page context, browser-local history and JSON export,
+  CLI and DSH entry points, and an extension evidence workspace. Existing popup
+  controls are preserved, with an additive current-task card.
+- Debug operation cards now include manual inputs, field-change chains, delayed
+  evidence, source-aware noise filtering and explicit capture gaps.
+- Website debugging: task-scoped HTTP rules and request replay, native performance
+  metrics, request aggregation and duplicate-request analysis.
+- Remote gateway task previews and attribution of agent-opened popups and tabs
+  to the task that opened them.
+- Browser instance naming in the extension popup and explicit
+  [browser profile selection](docs/browser-profiles.md) across CLI, DSH and skill guidance.
+- Seven additional interface languages: Traditional Chinese, Japanese, French,
+  Italian, Spanish, German and Brazilian Portuguese.
+- CLI and DSH skill reference bundles with resource-path validation, safe upgrades
+  and migration of existing managed installations.
+
+### Changed
+
+- Extension privacy policies now describe website debugging data, browser-local
+  history retention and deletion, requested sharing, and redaction limits.
+- DSH Plugin: align SDK dependencies with `0.1.5-rc.3`, Cordis `4.0.2` and
+  Schemastery `3.18.2`.
+- Reduce repeated observation work by reusing sibling context for repeated action labels.
+- Skill guidance clarifies installation prerequisites, browser readiness, profile
+  selection and the treatment of page content as untrusted data.
+
+### Fixed
+
+- Recoverable browser session startup and stop handling, including pending cleanup
+  and protection of shared daemons after launcher timeouts.
+- Windows daemon startup isolation from caller job objects.
+- Background navigation and viewport/full-page screenshots without activating
+  controlled tabs; full-page capture at fractional DPI and with overlay scrollbars.
+- Bounded renderer and frame reads, preserving usable observations when optional
+  layout reads time out and preventing overlapping reads after a timeout.
+- Keep page actions visible beside nonmodal sidebars and honor accessibility modality.
+- Prevent control overlays from swallowing clicks and clear stale overlays when
+  observed tabs are released.
+- Accept lowercase special keys, match ARIA loading states case-insensitively,
+  return visible option labels from selection, and retain same-URL reloads in recordings.
+- Deliver navigation timeout results before transport expiry and bound human-help cleanup.
+- Enforce remote device capacity across pending connections and preserve active
+  sessions while renaming browser instances.
+- DSH Plugin: settle commands when child processes exit without closing their
+  streams, bound cancellation and output draining, and preserve completed results.
+- DSH Plugin: restore lazy tool registration after plugin reloads and resumed
+  conversations without repeatedly scanning streaming history.
+- DSH Plugin: render screenshot cards independently of host attachment UI components,
+  preserve previews across host rerenders, and keep extreme-aspect-ratio thumbnails usable.
+- Preserve managed skill source links and handle CRLF metadata and incomplete installations.
+
 ## [0.3.0] - 2026-09-16
 
 ### Added
