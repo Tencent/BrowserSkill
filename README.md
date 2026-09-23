@@ -255,7 +255,26 @@ For local sessions, `--in-window` creates a controlled tab in the last-focused n
 user window and preserves that host during session cleanup. It requires daemon and
 extension protocol 1.4 and cannot be combined with window dimensions or remote mode.
 `--in-window --no-focus` creates an inactive tab; background input remains subject to
-the limitations in #242. `record start` continues to use a dedicated window.
+the limitations in #242. Protocol 1.5 also supports `--current-tab` and `--tab-id ID`:
+these reuse an existing user tab in place after the normal borrow confirmation, and
+session cleanup releases the tab without moving or closing it. `record start` continues
+to use a dedicated window.
+
+`session start --ephemeral` attaches an expiring owner lease to a session so the daemon
+stops it when the client no longer renews ownership. Integrations can use the hidden
+owner options plus `session lease` to renew or release all sessions for one client;
+the DSH plugin does this automatically and also stops sessions when its agent is disposed.
+The ordinary session-idle timeout remains an upper bound even while a lease is renewed,
+so a forgotten but inactive session is still reaped. The standalone CLI does not renew
+an ephemeral lease; it prints the generated owner token to stderr (and includes it in
+JSON output) if a caller needs to renew it explicitly. Supplying `--lease-ttl-ms` alone
+also enables ephemeral mode.
+`session list` includes owner, lifecycle, activity, lease-expiry, and cleanup-failure
+diagnostics in JSON (with a compact owner/lifecycle summary in human output). The
+extension journals physical window/tab ownership so a restarted service worker can
+finish cleanup from an interrupted start or connection. The Chrome-id epoch is held in
+`storage.session`: browser restart or extension reload/update makes older records stale,
+so cleanup never dereferences numeric window/tab ids whose ownership is uncertain.
 For unattended operation, turn off the corresponding settings in the extension. `--unattended`,
 `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` remain accepted for compatibility but are
 deprecated and cannot override the switches. The CLI logs a notice when these inputs are used;

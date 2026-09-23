@@ -50,7 +50,7 @@ describe("registerBskSkill", () => {
     // Keep the lazily injected instructions inside a bounded prompt budget,
     // while the lower bound catches accidental truncation of the guidance.
     expect(content.length).toBeGreaterThan(3_000);
-    expect(content.length).toBeLessThan(8_000);
+    expect(content.length).toBeLessThan(9_000);
     expect(content).toContain(
       'browser_session({ action: "start", browser: "<verified-instance-id>" })',
     );

@@ -1,4 +1,4 @@
-import { sessionWindowId } from "@/session-manager/manager";
+import { isSharedSession, sessionWindowId } from "@/session-manager/manager";
 // Tab-tool handlers. M6 wired `tool.tab_list`; M8 adds the rest of
 // the tab namespace: `tab_create`, `tab_close`, `tab_select`,
 // `tab_borrow`, `tab_return`. The dispatcher routes each method to a
@@ -10,6 +10,7 @@ import {
 } from "@/lib/overlay-bridge";
 import {
   isAgentControlledTab,
+  isMissingChromeResourceError,
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
@@ -265,7 +266,7 @@ export async function handleTabList(
     const owner = manager.findByTabId(t.id);
     if (owner && owner !== ctx) continue;
     const tabScope: "user" | "agent" = (
-      ctx.container.mode === "in_window"
+      isSharedSession(ctx)
         ? isAgentControlledTab(ctx, t.id)
         : winId === myAgentWindowId
     )
@@ -400,7 +401,7 @@ async function createTabAndCleanup(
   if (typeof tab.id !== "number") {
     return { code: "protocol_error", message: "chrome.tabs.create returned no tab id" };
   }
-  if (ctx.container.mode === "in_window") {
+  if (isSharedSession(ctx)) {
     ctx.agentCreatedTabs.add(tab.id);
     try {
       const live = await getTabsApi(deps).get(tab.id);
@@ -420,7 +421,7 @@ async function createTabAndCleanup(
   // Claim the concrete id returned by Chrome. Ownership never depends on
   // matching this request to an asynchronous onCreated event.
   ctx.agentCreatedTabs.add(tab.id);
-  if (ctx.container.mode === "in_window" && (createProps.active || ctx.activeTabId === undefined))
+  if (isSharedSession(ctx) && (createProps.active || ctx.activeTabId === undefined))
     ctx.activeTabId = tab.id;
   if (aborted(deps.signal, "tab_create")) {
     try {
@@ -476,7 +477,39 @@ export async function handleTabCreate(
       prepare ? { ...props, url: "about:blank" } : props,
     ),
   );
-  if (isRpcError(tab)) return tab;
+  if (isRpcError(tab)) {
+    // A failed abort cleanup deliberately leaves the tab claimed so a later
+    // session stop (or worker restart) can retry closing it. Checkpoint that
+    // claim before returning the error; otherwise an MV3 worker suspension at
+    // this point would turn the tab into an untracked orphan.
+    if (tab.data?.reason === "cleanup_failed") {
+      try {
+        await manager.persist(ctx);
+      } catch (error) {
+        return rpcError(
+          "protocol_error",
+          "cleanup_failed",
+          `${tab.message}; resource journal update failed: ${describeError(error)}`,
+          tab.data,
+        );
+      }
+    }
+    return tab;
+  }
+  try {
+    await manager.persist(ctx);
+  } catch (error) {
+    try {
+      await getTabsApi(deps).remove(tab.id);
+      ctx.agentCreatedTabs.delete(tab.id);
+    } catch {
+      // Keep ownership in memory so an explicit stop can still retry cleanup.
+    }
+    return {
+      code: "protocol_error",
+      message: `tab_create ownership could not be persisted: ${describeError(error)}`,
+    };
+  }
   if (prepare) {
     try {
       await deps.cdp!.acquireBackgroundExecution!(ctx.sessionId, tab.id);
@@ -501,6 +534,7 @@ export async function handleTabCreate(
       try {
         await getTabsApi(deps).remove(tab.id);
         ctx.agentCreatedTabs.delete(tab.id);
+        await manager.persist(ctx);
       } catch (cleanupError) {
         // Keep the claim only when closing fails, so session cleanup can retry.
         cleanupErrors.push(`close: ${describeError(cleanupError)}`);
@@ -560,7 +594,7 @@ async function authoriseAgentTab(
   const owner = manager.findByTabId(tabId);
   if (owner && owner !== ctx && !owner.borrowedTabs.has(tabId))
     return { code: "not_found", message: "Tab is outside session scope" };
-  if ((ctx.remote || ctx.container.mode === "in_window") && !isAgentControlledTab(ctx, tabId)) {
+  if ((ctx.remote || isSharedSession(ctx)) && !isAgentControlledTab(ctx, tabId)) {
     return {
       code: "permission_denied",
       message: `${toolName}: borrow this tab before controlling it in this session`,
@@ -626,6 +660,7 @@ export async function handleTabClose(
     // Keep the tracking set accurate so session_stop won't try to close a
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);
+    await manager.persist(ctx);
   } catch (err) {
     return {
       code: "protocol_error",
@@ -665,7 +700,7 @@ export async function handleTabSelect(
   }
   try {
     await getTabsApi(deps).update(params.tab_id, { active: true });
-    if (ctx.container.mode === "in_window") ctx.activeTabId = params.tab_id;
+    if (isSharedSession(ctx)) ctx.activeTabId = params.tab_id;
   } catch (err) {
     return {
       code: "protocol_error",
@@ -969,13 +1004,14 @@ async function handleTabBorrowCore(
         tabId: params.tab_id,
         originalWindowId: coreResult.originalWindowId,
         originalIndex: coreResult.originalIndex,
-        ...(ctx.container.mode === "in_window" &&
+        ...(isSharedSession(ctx) &&
         coreResult.originalWindowId === sessionWindowId(ctx)
           ? { stationary: true }
           : {}),
       });
+      await manager.persist(ctx);
       committed = true;
-      if (ctx.container.mode === "in_window") ctx.activeTabId = params.tab_id;
+      if (isSharedSession(ctx)) ctx.activeTabId = params.tab_id;
     } catch (err) {
       try {
         if (coreResult.originalWindowId !== sessionWindowId(ctx))
@@ -984,12 +1020,31 @@ async function handleTabBorrowCore(
             index: coreResult.originalIndex,
           });
       } catch (rollbackError) {
+        // The tab's location is uncertain, so retain and retry-persist the
+        // ownership claim. A later session cleanup must still be able to find
+        // it even though the first journal write failed.
+        try {
+          await manager.persist(ctx);
+        } catch {
+          // The response below already reports an unknown effect. Keep the
+          // in-memory claim so an explicit stop can still retry cleanup.
+        }
         return rpcError(
           "protocol_error",
           "borrow_outcome_unknown",
           `tab_borrow commit failed and rollback could not be confirmed: ${describeError(rollbackError)}`,
           { effect_state: "unknown", tab_id: params.tab_id },
         );
+      }
+      // The physical move was rolled back, so release the in-memory claim as
+      // well. This matters when commit succeeded but its journal write failed.
+      ctx.borrowedTabs.delete(params.tab_id);
+      try {
+        await manager.persist(ctx);
+      } catch {
+        // The failed commit write normally left the previous (unborrowed)
+        // journal state intact. Do not turn a successful rollback into an
+        // unknown physical outcome solely because this best-effort sync failed.
       }
       return {
         code: "cancelled",
@@ -1019,6 +1074,7 @@ async function handleTabBorrowCore(
       });
       if (isRpcError(rollback)) return rollback;
       ctx.borrowedTabs.delete(params.tab_id);
+      await manager.persist(ctx);
       return {
         code: deps.signal?.aborted ? "cancelled" : "cdp_failed",
         message: describeError(error),
@@ -1087,7 +1143,7 @@ async function chooseFallbackWindow(
     // stops and closes its window.
     if (
       lastId !== null &&
-      (ctx.container.mode === "in_window" || lastId !== sessionWindowId(ctx)) &&
+      (isSharedSession(ctx) || lastId !== sessionWindowId(ctx)) &&
       !isAgentWindowId(lastId)
     ) {
       return { windowId: lastId, index: -1, created: false };
@@ -1172,6 +1228,25 @@ async function releaseReturnedTabState(
   }
 }
 
+async function finishMissingBorrowedTabReturn(
+  ctx: SessionContext,
+  tabId: number,
+  originalWindowId: number,
+  originalIndex: number,
+  deps: TabManagementDeps,
+): Promise<ReturnOutcome> {
+  // The borrow record outlived its Chrome tab (for example while the MV3
+  // worker was asleep). There is no user resource left to move, so release
+  // the logical/CDP claim and let the caller remove the journal entry.
+  await releaseReturnedTabState(ctx, tabId, deps);
+  return {
+    tabId,
+    toWindowId: originalWindowId,
+    toIndex: originalIndex,
+    fallback: false,
+  };
+}
+
 /**
  * Move a single borrowed tab back to its original window (or a
  * fallback normal window when the original is gone). Used both by
@@ -1208,6 +1283,27 @@ export async function returnBorrowedTab(
       toIndex: entry.originalIndex,
       fallback: false,
     };
+  }
+
+  // Recovery may not receive the onRemoved event that would normally delete
+  // a borrow. Probe before choosing/creating a fallback window so a tab that
+  // is already gone converges without producing an unnecessary empty window.
+  try {
+    await tabsApi.get(tabId);
+  } catch (err) {
+    if (!isMissingChromeResourceError(err)) {
+      return {
+        code: "cdp_failed",
+        message: `tab_return: chrome.tabs.get failed: ${describeError(err)}`,
+      };
+    }
+    return finishMissingBorrowedTabReturn(
+      ctx,
+      tabId,
+      entry.originalWindowId,
+      entry.originalIndex,
+      deps,
+    );
   }
 
   let targetWindowId = entry.originalWindowId;
@@ -1262,6 +1358,7 @@ export async function returnBorrowedTab(
       fallback,
     };
   } catch (err) {
+    const tabMissing = isMissingChromeResourceError(err);
     if (fallbackTarget) {
       const cleanupError = await cleanupUnusedFallbackWindow(
         windowsApi,
@@ -1269,6 +1366,15 @@ export async function returnBorrowedTab(
         `tab_return could not move tab ${tabId}`,
       );
       if (cleanupError) return cleanupError;
+    }
+    if (tabMissing) {
+      return finishMissingBorrowedTabReturn(
+        ctx,
+        tabId,
+        entry.originalWindowId,
+        entry.originalIndex,
+        deps,
+      );
     }
     const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
     if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
@@ -1304,12 +1410,22 @@ export async function returnBorrowedTab(
           fallback: true,
         };
       } catch (fallbackErr) {
+        const tabMissingDuringFallback = isMissingChromeResourceError(fallbackErr);
         const cleanupError = await cleanupUnusedFallbackWindow(
           windowsApi,
           target,
           `tab_return fallback move for tab ${tabId} failed`,
         );
         if (cleanupError) return cleanupError;
+        if (tabMissingDuringFallback) {
+          return finishMissingBorrowedTabReturn(
+            ctx,
+            tabId,
+            entry.originalWindowId,
+            entry.originalIndex,
+            deps,
+          );
+        }
         return {
           code: "cdp_failed",
           message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,
@@ -1350,6 +1466,7 @@ async function handleTabReturnCore(
   });
   if (isRpcError(outcome)) return outcome;
   ctx.borrowedTabs.delete(params.tab_id);
+  await manager.persist(ctx);
   manager.checkEmpty(ctx);
   const result: TabReturnResult = {
     tab_id: outcome.tabId,

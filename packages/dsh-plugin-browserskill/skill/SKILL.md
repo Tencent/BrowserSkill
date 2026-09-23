@@ -43,8 +43,11 @@ target is unavailable, stop and ask the user to confirm or reconnect it. Never o
    browser_inspect({ action: "observe", session: "<id>" })
    ```
 
-2. For an existing user tab, borrow it instead. Replace example IDs/refs with actual
-   results. Pass `session` when more than one exists; never use foreign IDs.
+2. To work directly in the active user tab without moving it or opening another tab,
+   start with `currentTab: true` (or use `tabId` for a known tab). The user must approve
+   this control handoff. Use `inWindow: true` when a fresh agent-owned tab in the current
+   window is preferable. Borrowing remains available for adding another user tab to an
+   existing session. Pass `session` when more than one exists; never use foreign IDs.
 3. Observe after page changes; check ambiguous results once. Stop acting when success
    is visible. On success or failure, call
    `browser_session({ action: "stop", session: "<id>" })` unless keeping the session

@@ -59,6 +59,8 @@ export interface ToolDeps {
   observation: ObservationService;
   /** Per-session FIFO: the daemon rejects a second command while one is unfinished. */
   queue: KeyedExecutor;
+  /** Process-scoped daemon lease owner used to reap sessions after a client crash. */
+  leaseOwnerId?: string;
   starts?: SessionStarts;
 }
 
@@ -176,7 +178,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
     defineTool({
       name: "session.start",
       description:
-        "Start a new browser session: opens an Agent Window in the connected browser and returns " +
+        "Start a browser session in a new window, the current window, or an existing tab and return " +
         "its session id. The new session becomes the current session for subsequent browser_* calls. " +
         "Optionally navigate to an initial URL and/or apply a mobile device emulation preset.",
       parameters: {
@@ -195,6 +197,18 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         noFocus: {
           type: "boolean",
           description: "Open the Agent Window in the background without stealing focus.",
+        },
+        inWindow: {
+          type: "boolean",
+          description: "Create a new agent-owned tab in the current browser window.",
+        },
+        currentTab: {
+          type: "boolean",
+          description: "Reuse the active tab in the current browser window without moving it.",
+        },
+        tabId: {
+          type: "integer",
+          description: "Reuse this existing browser tab without moving or closing it.",
         },
         browser: BROWSER_PARAM,
         device: {
@@ -231,12 +245,39 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         if ((args.width === undefined) !== (args.height === undefined)) {
           throw new Error("width and height must be given together");
         }
+        const placementCount =
+          Number(args.inWindow === true) +
+          Number(args.currentTab === true) +
+          Number(args.tabId !== undefined);
+        if (placementCount > 1) {
+          throw new Error("inWindow, currentTab, and tabId are mutually exclusive");
+        }
+        if (
+          placementCount > 0 &&
+          (args.width !== undefined || args.height !== undefined || args.noFocus === true)
+        ) {
+          throw new Error("shared and existing-tab sessions cannot use dimensions or noFocus");
+        }
         // Reserve the slot BEFORE spawning: check-and-reserve is synchronous,
         // so concurrent starts can never both pass the cap and leak a session.
         const starts = (deps.starts ??= new SessionStarts(deps));
         await starts.reconcile();
         const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
         const startArgs = ["session", "start", "--request-id", record.requestId];
+        if (deps.leaseOwnerId) {
+          startArgs.push(
+            "--ephemeral",
+            "--owner-id",
+            deps.leaseOwnerId,
+            "--owner-kind",
+            "dsh",
+            "--lease-ttl-ms",
+            "60000",
+          );
+        }
+        if (args.inWindow === true) startArgs.push("--in-window");
+        if (args.currentTab === true) startArgs.push("--current-tab");
+        if (args.tabId !== undefined) startArgs.push("--tab-id", String(args.tabId));
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }

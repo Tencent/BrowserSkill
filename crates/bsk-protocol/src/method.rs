@@ -44,6 +44,10 @@ pub enum Method {
     SessionStopAll,
     #[serde(rename = "session.list")]
     SessionList,
+    #[serde(rename = "session.lease_renew")]
+    SessionLeaseRenew,
+    #[serde(rename = "session.owner_release")]
+    SessionOwnerRelease,
 
     #[serde(rename = "browser.list")]
     BrowserList,
@@ -232,6 +236,8 @@ impl Method {
             | Method::SessionStop
             | Method::SessionStopAll
             | Method::SessionList
+            | Method::SessionLeaseRenew
+            | Method::SessionOwnerRelease
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 

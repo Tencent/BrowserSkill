@@ -199,7 +199,7 @@ export async function handleFullPageScreenshot(
               async close() {}, // The session retains ownership of its debugger.
             };
           },
-          ctx.container.mode === "in_window",
+          ctx.container.mode !== "window",
         );
         phase = "capturing";
         await capturePage({

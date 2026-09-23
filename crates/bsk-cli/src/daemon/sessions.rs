@@ -64,8 +64,24 @@ impl Session {
             browser_instance_id: self.browser_id.0.clone(),
             agent_window_id: self.agent_window_id,
             created_at_ms: self.created_at_ms,
+            owner_id: None,
+            owner_kind: None,
+            lifecycle_mode: Some("persistent".into()),
+            lifecycle_state: Some("active".into()),
+            last_activity_at_ms: None,
+            lease_expires_at_ms: None,
+            cleanup_error: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct SessionLifecycle {
+    owner_id: String,
+    owner_kind: String,
+    ttl: Duration,
+    lease_expires_at: Instant,
+    lease_expires_at_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -75,6 +91,9 @@ pub struct SessionRegistry {
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
     last_activity: Mutex<HashMap<SessionId, Instant>>,
+    last_activity_ms: Mutex<HashMap<SessionId, i64>>,
+    lifecycle: Mutex<HashMap<SessionId, SessionLifecycle>>,
+    cleanup_errors: Mutex<HashMap<SessionId, String>>,
     /// Managed creates whose original extension operation has not settled.
     starting: Mutex<HashSet<SessionId>>,
 }
@@ -97,6 +116,40 @@ impl SessionRegistry {
             .values()
             .cloned()
             .collect()
+    }
+
+    pub fn status_entry(&self, session: &Session) -> SessionStatusEntry {
+        let mut entry = session.status_entry();
+        entry.last_activity_at_ms = self
+            .last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned")
+            .get(&session.id)
+            .copied();
+        if self.starting.lock().unwrap().contains(&session.id) {
+            entry.lifecycle_state = Some("starting".into());
+        }
+        if let Some(lifecycle) = self
+            .lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .get(&session.id)
+        {
+            entry.owner_id = Some(lifecycle.owner_id.clone());
+            entry.owner_kind = Some(lifecycle.owner_kind.clone());
+            entry.lifecycle_mode = Some("lease".into());
+            entry.lease_expires_at_ms = Some(lifecycle.lease_expires_at_ms);
+        }
+        if let Some(message) = self
+            .cleanup_errors
+            .lock()
+            .expect("session cleanup registry poisoned")
+            .get(&session.id)
+        {
+            entry.cleanup_error = Some(message.clone());
+            entry.lifecycle_state = Some("cleanup_failed".into());
+        }
+        entry
     }
 
     pub fn len(&self) -> usize {
@@ -123,7 +176,11 @@ impl SessionRegistry {
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
-            .insert(session_id, Instant::now());
+            .insert(session_id.clone(), Instant::now());
+        self.last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned")
+            .insert(session_id, now_ms());
     }
 
     /// Reserve a fresh, collision-free [`SessionId`] under the registry
@@ -167,6 +224,10 @@ impl SessionRegistry {
                 .lock()
                 .expect("session activity registry poisoned")
                 .insert(candidate.clone(), Instant::now());
+            self.last_activity_ms
+                .lock()
+                .expect("session activity registry poisoned")
+                .insert(candidate.clone(), now_ms());
             return Some(candidate);
         }
         None
@@ -187,6 +248,16 @@ impl SessionRegistry {
         let session = session.clone();
         self.starting.lock().unwrap().remove(session_id);
         drop(guard);
+        if let Some(lifecycle) = self
+            .lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .get_mut(session_id)
+        {
+            lifecycle.lease_expires_at = Instant::now() + lifecycle.ttl;
+            lifecycle.lease_expires_at_ms =
+                now_ms().saturating_add(lifecycle.ttl.as_millis().min(i64::MAX as u128) as i64);
+        }
         if let Some(audit) = &self.audit {
             audit.session_started(&session);
         }
@@ -205,6 +276,18 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .remove(session_id);
+        self.last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned")
+            .remove(session_id);
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .remove(session_id);
+        self.cleanup_errors
+            .lock()
+            .expect("session cleanup registry poisoned")
+            .remove(session_id);
     }
 
     pub fn remove(&self, id: &SessionId) -> Option<Session> {
@@ -217,6 +300,18 @@ impl SessionRegistry {
         self.last_activity
             .lock()
             .expect("session activity registry poisoned")
+            .remove(id);
+        self.last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned")
+            .remove(id);
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .remove(id);
+        self.cleanup_errors
+            .lock()
+            .expect("session cleanup registry poisoned")
             .remove(id);
         if removed.is_some()
             && let Some(audit) = &self.audit
@@ -261,7 +356,97 @@ impl SessionRegistry {
             .lock()
             .expect("session activity registry poisoned")
             .insert(id.clone(), Instant::now());
+        self.last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned")
+            .insert(id.clone(), now_ms());
         true
+    }
+
+    pub fn configure_lease(
+        &self,
+        id: &SessionId,
+        owner_id: String,
+        owner_kind: String,
+        ttl: Duration,
+    ) -> bool {
+        if !self
+            .inner
+            .lock()
+            .expect("session registry poisoned")
+            .contains_key(id)
+        {
+            return false;
+        }
+        let ttl_ms = ttl.as_millis().min(i64::MAX as u128) as i64;
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .insert(
+                id.clone(),
+                SessionLifecycle {
+                    owner_id,
+                    owner_kind,
+                    ttl,
+                    lease_expires_at: Instant::now() + ttl,
+                    lease_expires_at_ms: now_ms().saturating_add(ttl_ms),
+                },
+            );
+        true
+    }
+
+    pub fn renew_owner(&self, owner_id: &str, ttl: Duration) -> Vec<SessionId> {
+        let now = Instant::now();
+        let expires_ms = now_ms().saturating_add(ttl.as_millis().min(i64::MAX as u128) as i64);
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .iter_mut()
+            .filter_map(|(id, value)| {
+                if value.owner_id != owner_id {
+                    return None;
+                }
+                value.lease_expires_at = now + ttl;
+                value.lease_expires_at_ms = expires_ms;
+                value.ttl = ttl;
+                Some(id.clone())
+            })
+            .collect()
+    }
+
+    pub fn ids_for_owner(&self, owner_id: &str) -> Vec<SessionId> {
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .iter()
+            .filter(|(_, value)| value.owner_id == owner_id)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn expired_lease_ids_at(&self, now: Instant) -> Vec<SessionId> {
+        let starting = self.starting.lock().unwrap();
+        self.lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned")
+            .iter()
+            .filter(|(id, value)| !starting.contains(*id) && value.lease_expires_at <= now)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    pub fn mark_cleanup_failed(&self, id: &SessionId, message: String) {
+        if self
+            .inner
+            .lock()
+            .expect("session registry poisoned")
+            .contains_key(id)
+        {
+            self.cleanup_errors
+                .lock()
+                .expect("session cleanup registry poisoned")
+                .insert(id.clone(), message);
+        }
     }
 
     /// Return sessions whose last tool activity is at least `idle_for`
@@ -304,6 +489,26 @@ impl SessionRegistry {
         for session in &drained {
             activity.remove(&session.id);
         }
+        let mut activity_ms = self
+            .last_activity_ms
+            .lock()
+            .expect("session activity registry poisoned");
+        let mut lifecycle = self
+            .lifecycle
+            .lock()
+            .expect("session lifecycle registry poisoned");
+        let mut cleanup_errors = self
+            .cleanup_errors
+            .lock()
+            .expect("session cleanup registry poisoned");
+        for session in &drained {
+            activity_ms.remove(&session.id);
+            lifecycle.remove(&session.id);
+            cleanup_errors.remove(&session.id);
+        }
+        drop(cleanup_errors);
+        drop(lifecycle);
+        drop(activity_ms);
         drop(activity);
         drop(guard);
         if let Some(audit) = &self.audit {
@@ -451,17 +656,28 @@ pub enum StopSessionError {
 /// false `IdExhausted` failure at well below 10⁻¹⁵ even with thousands
 /// of live sessions.
 const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
+pub const MIN_SESSION_LEASE_TTL: Duration = Duration::from_secs(10);
 
 /// Agent Window creation hints forwarded to the extension on
 /// `tool.session_start`. `None` fields keep the extension-side defaults
 /// (focused window, browser-chosen size).
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct AgentWindowOptions {
     pub in_window: bool,
+    pub current_tab: bool,
+    pub tab_id: Option<i64>,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: focused).
     pub focused: Option<bool>,
+    pub lifecycle: Option<SessionLeaseOptions>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionLeaseOptions {
+    pub owner_id: String,
+    pub owner_kind: String,
+    pub ttl: Duration,
 }
 
 /// Ask the chosen browser to create a fresh Agent Window for a brand-new
@@ -540,21 +756,67 @@ pub(crate) async fn start_session_recoverable(
             data: None,
         }));
     }
-    if window.in_window && window.size.is_some() {
+    let existing_tab = window.current_tab || window.tab_id.is_some();
+    if window.current_tab && window.tab_id.is_some() {
         return Err(StartSessionError::ExtensionError(RpcError {
             code: ErrorCode::InvalidParams,
-            message: "Shared sessions do not accept window dimensions".into(),
+            message: "current_tab and tab_id are mutually exclusive".into(),
+            data: None,
+        }));
+    }
+    if window.tab_id.is_some_and(|id| id <= 0) {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "tab_id must be a positive integer".into(),
+            data: None,
+        }));
+    }
+    if existing_tab
+        && !bsk_protocol::tools::session::supports_existing_tab(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "Existing-tab sessions require extension protocol 1.5".into(),
+            data: None,
+        }));
+    }
+    if window.in_window && existing_tab {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "in_window cannot be combined with an existing tab".into(),
+            data: None,
+        }));
+    }
+    if (window.in_window || existing_tab) && window.size.is_some() {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "Shared and existing-tab sessions do not accept window dimensions".into(),
             data: None,
         }));
     }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
-    if preserve_cleanup {
-        sessions.starting.lock().unwrap().insert(session_id.clone());
+    if let Some(lease) = &window.lifecycle {
+        if !sessions.configure_lease(
+            &session_id,
+            lease.owner_id.clone(),
+            lease.owner_kind.clone(),
+            lease.ttl,
+        ) {
+            sessions.cancel_reservation(&session_id);
+            return Err(StartSessionError::ExtensionError(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "session lease could not be attached to its reservation".into(),
+                data: None,
+            }));
+        }
     }
+    sessions.starting.lock().unwrap().insert(session_id.clone());
     let params = SessionStartParams {
         in_window: window.in_window,
+        current_tab: window.current_tab,
+        tab_id: window.tab_id,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),
@@ -614,10 +876,13 @@ pub(crate) async fn start_session_recoverable(
         StartWaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
             if preserve_cleanup {
+                let message = "browser disconnected during start".to_string();
+                sessions.commit_reservation(&session_id, None);
+                sessions.mark_cleanup_failed(&session_id, message.clone());
                 return Err(StartSessionError::CleanupFailed {
                     session_id,
                     agent_window_id: None,
-                    message: "browser disconnected during start".into(),
+                    message,
                 });
             }
             sessions.cancel_reservation(&session_id);
@@ -654,6 +919,10 @@ pub(crate) async fn start_session_recoverable(
             Err(_) => {
                 if preserve_cleanup {
                     sessions.commit_reservation(&session_id, None);
+                    sessions.mark_cleanup_failed(
+                        &session_id,
+                        "invalid tool.session_start payload; cleanup required".into(),
+                    );
                     return Err(StartSessionError::CleanupFailed {
                         session_id,
                         agent_window_id: None,
@@ -680,6 +949,7 @@ pub(crate) async fn start_session_recoverable(
                     .and_then(|d| d.get("resource_id"))
                     .and_then(serde_json::Value::as_i64);
                 sessions.commit_reservation(&session_id, agent_window_id);
+                sessions.mark_cleanup_failed(&session_id, err.message.clone());
                 return Err(StartSessionError::CleanupFailed {
                     session_id,
                     agent_window_id,
@@ -692,17 +962,37 @@ pub(crate) async fn start_session_recoverable(
     };
     if window.in_window && start_result.container_mode.as_deref() != Some("in_window") {
         let cleanup = rollback_extension_session(&client, &session_id).await;
-        sessions.cancel_reservation(&session_id);
         if let Err(message) = cleanup {
+            sessions.commit_reservation(&session_id, start_result.agent_window_id);
+            sessions.mark_cleanup_failed(&session_id, message.clone());
             return Err(StartSessionError::CleanupFailed {
                 session_id,
                 agent_window_id: start_result.agent_window_id,
                 message,
             });
         }
+        sessions.cancel_reservation(&session_id);
         return Err(StartSessionError::ExtensionError(RpcError {
             code: ErrorCode::ProtocolError,
             message: "Extension did not confirm in_window mode".into(),
+            data: None,
+        }));
+    }
+    if existing_tab && start_result.container_mode.as_deref() != Some("existing_tab") {
+        let cleanup = rollback_extension_session(&client, &session_id).await;
+        if let Err(message) = cleanup {
+            sessions.commit_reservation(&session_id, start_result.agent_window_id);
+            sessions.mark_cleanup_failed(&session_id, message.clone());
+            return Err(StartSessionError::CleanupFailed {
+                session_id,
+                agent_window_id: start_result.agent_window_id,
+                message,
+            });
+        }
+        sessions.cancel_reservation(&session_id);
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "Extension did not confirm existing_tab mode".into(),
             data: None,
         }));
     }
@@ -835,9 +1125,12 @@ async fn finish_aborted_start(
                 sessions.cancel_reservation(session_id);
             }
             StartSessionError::CleanupFailed {
-                agent_window_id, ..
+                agent_window_id,
+                message,
+                ..
             } => {
                 sessions.commit_reservation(session_id, *agent_window_id);
+                sessions.mark_cleanup_failed(session_id, message.clone());
             }
             _ => {}
         }
@@ -1020,4 +1313,70 @@ fn drop_session_local(
 ) {
     queues.remove(session_id);
     interrupts.drop_session(session_id);
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    fn session(id: &str) -> Session {
+        Session {
+            container_mode: Some("window".into()),
+            interaction: None,
+            id: SessionId(id.into()),
+            browser_id: BrowserId("browser".into()),
+            agent_window_id: Some(7),
+            created_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn owner_lease_is_visible_renewable_and_expires() {
+        let registry = SessionRegistry::new();
+        registry.insert(session("test"));
+        let id = SessionId("test".into());
+        assert!(registry.configure_lease(
+            &id,
+            "owner-a".into(),
+            "dsh".into(),
+            Duration::from_secs(10),
+        ));
+
+        let entry = registry.status_entry(&registry.get(&id).unwrap());
+        assert_eq!(entry.owner_id.as_deref(), Some("owner-a"));
+        assert_eq!(entry.owner_kind.as_deref(), Some("dsh"));
+        assert_eq!(entry.lifecycle_mode.as_deref(), Some("lease"));
+        assert!(entry.lease_expires_at_ms.is_some());
+        assert!(
+            registry
+                .idle_ids_at(Duration::ZERO, Instant::now())
+                .contains(&id),
+            "an owner lease must not disable the ordinary idle safety net"
+        );
+        assert!(
+            registry
+                .expired_lease_ids_at(Instant::now() + Duration::from_secs(11))
+                .contains(&id)
+        );
+
+        assert_eq!(
+            registry.renew_owner("owner-a", Duration::from_secs(30)),
+            vec![id.clone()]
+        );
+        assert!(
+            registry
+                .expired_lease_ids_at(Instant::now() + Duration::from_secs(11))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn removal_drops_owner_metadata() {
+        let registry = SessionRegistry::new();
+        registry.insert(session("test"));
+        let id = SessionId("test".into());
+        registry.configure_lease(&id, "owner-a".into(), "dsh".into(), Duration::from_secs(10));
+        registry.remove(&id);
+        assert!(registry.ids_for_owner("owner-a").is_empty());
+    }
 }

@@ -43,8 +43,8 @@ use tracing::{debug, warn};
 use super::abort::AbortRegistry;
 use super::queue::{DEFAULT_TOOL_TIMEOUT, DispatchError};
 use super::sessions::{
-    AgentWindowOptions, SessionId, StartSessionError, StopSessionError, snapshot_status_entries,
-    stop_session,
+    AgentWindowOptions, SessionId, SessionLeaseOptions, StartSessionError, StopSessionError,
+    snapshot_status_entries, stop_session,
 };
 use super::state::{DAEMON_VERSION, DaemonState, PROTOCOL_VERSION};
 
@@ -132,7 +132,7 @@ impl DaemonStatus {
             .sessions
             .snapshot()
             .into_iter()
-            .map(|s| s.status_entry())
+            .map(|s| state.sessions.status_entry(&s))
             .collect();
         StatusResult {
             daemon_version: self.daemon_version.to_string(),
@@ -255,6 +255,13 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                     Err(e) => ResponseBody::Err(e),
                 },
                 Method::SessionList => handle_session_list(&state),
+                Method::SessionLeaseRenew => handle_session_lease_renew(&state, params),
+                Method::SessionOwnerRelease => {
+                    match handle_session_owner_release(&state, params).await {
+                        Ok(v) => ResponseBody::Ok(v),
+                        Err(e) => ResponseBody::Err(e),
+                    }
+                }
                 Method::BrowserList => match handle_browser_list(&state, params).await {
                     Ok(v) => ResponseBody::Ok(v),
                     Err(e) => ResponseBody::Err(e),
@@ -818,6 +825,10 @@ struct CliSessionStartParams {
     #[serde(default)]
     pub in_window: bool,
     #[serde(default)]
+    pub current_tab: bool,
+    #[serde(default)]
+    pub tab_id: Option<i64>,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -825,6 +836,12 @@ struct CliSessionStartParams {
     pub height: Option<u32>,
     #[serde(default)]
     pub focused: Option<bool>,
+    #[serde(default)]
+    pub owner_id: Option<String>,
+    #[serde(default)]
+    pub owner_kind: Option<String>,
+    #[serde(default)]
+    pub lease_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -868,6 +885,22 @@ struct CliSessionStopFailure {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SessionListResult {
     pub sessions: Vec<SessionStatusEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionLeaseParams {
+    owner_id: String,
+    #[serde(default = "default_lease_ttl_ms")]
+    lease_ttl_ms: u64,
+}
+
+fn default_lease_ttl_ms() -> u64 {
+    60_000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionLeaseResult {
+    session_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -938,10 +971,15 @@ pub(super) async fn handle_session_start(
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
             in_window: false,
+            current_tab: false,
+            tab_id: None,
             browser_instance_id: None,
             width: None,
             height: None,
             focused: None,
+            owner_id: None,
+            owner_kind: None,
+            lease_ttl_ms: None,
         }
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
@@ -963,6 +1001,27 @@ pub(super) async fn handle_session_start(
             });
         }
     };
+    let lifecycle = match (&params.owner_id, &params.owner_kind, params.lease_ttl_ms) {
+        (None, None, None) => None,
+        (Some(owner_id), Some(owner_kind), Some(ttl_ms))
+            if !owner_id.trim().is_empty()
+                && !owner_kind.trim().is_empty()
+                && (10_000..=600_000).contains(&ttl_ms) =>
+        {
+            Some(SessionLeaseOptions {
+                owner_id: owner_id.clone(),
+                owner_kind: owner_kind.clone(),
+                ttl: Duration::from_millis(ttl_ms),
+            })
+        }
+        _ => {
+            return Err(RpcError {
+                code: ErrorCode::InvalidParams,
+                message: "owner_id, owner_kind, and lease_ttl_ms (10000..=600000) must be supplied together".into(),
+                data: None,
+            });
+        }
+    };
     match super::sessions::start_session_recoverable(
         &state.browsers,
         &state.sessions,
@@ -970,8 +1029,11 @@ pub(super) async fn handle_session_start(
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
             in_window: params.in_window,
+            current_tab: params.current_tab,
+            tab_id: params.tab_id,
             size: window_size,
             focused: params.focused,
+            lifecycle,
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,
@@ -1253,9 +1315,106 @@ fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
         .sessions
         .snapshot()
         .into_iter()
-        .map(|s| s.status_entry())
+        .map(|s| state.sessions.status_entry(&s))
         .collect();
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
+}
+
+fn parse_lease_params(params: Value) -> Result<SessionLeaseParams, RpcError> {
+    let parsed: SessionLeaseParams = serde_json::from_value(params).map_err(|err| RpcError {
+        code: ErrorCode::InvalidParams,
+        message: err.to_string(),
+        data: None,
+    })?;
+    if parsed.owner_id.trim().is_empty() || !(10_000..=600_000).contains(&parsed.lease_ttl_ms) {
+        return Err(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "owner_id must be non-empty and lease_ttl_ms must be 10000..=600000".into(),
+            data: None,
+        });
+    }
+    Ok(parsed)
+}
+
+fn handle_session_lease_renew(state: &Arc<DaemonState>, params: Value) -> ResponseBody {
+    match parse_lease_params(params) {
+        Ok(params) => {
+            let ids = state
+                .sessions
+                .renew_owner(&params.owner_id, Duration::from_millis(params.lease_ttl_ms))
+                .into_iter()
+                .map(|id| id.0)
+                .collect();
+            ResponseBody::Ok(
+                serde_json::to_value(SessionLeaseResult { session_ids: ids })
+                    .unwrap_or(Value::Null),
+            )
+        }
+        Err(error) => ResponseBody::Err(error),
+    }
+}
+
+async fn handle_session_owner_release(
+    state: &Arc<DaemonState>,
+    params: Value,
+) -> Result<Value, RpcError> {
+    let params = parse_lease_params(params)?;
+    let ids = state.sessions.ids_for_owner(&params.owner_id);
+    let mut stopped = Vec::new();
+    let mut failed = Vec::new();
+    let mut returned_tab_ids = Vec::new();
+    let mut return_failures = Vec::new();
+    for id in ids {
+        match stop_session(
+            &state.browsers,
+            &state.sessions,
+            &state.tool_queues,
+            &state.session_interrupts,
+            &id,
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+        {
+            Ok(stop) => {
+                state.transfers.release_session(&id.0);
+                returned_tab_ids.extend(stop.returned_tab_ids);
+                return_failures.extend(stop.return_failures);
+                stopped.push(id.0);
+            }
+            Err(StopSessionError::ReturnFailures(stop)) => {
+                let failure_count = stop.return_failures.len();
+                returned_tab_ids.extend(stop.returned_tab_ids);
+                return_failures.extend(stop.return_failures);
+                let message = format!(
+                    "failed to return borrowed tabs during owner release ({} failure(s)); session left running",
+                    failure_count
+                );
+                state.sessions.mark_cleanup_failed(&id, message.clone());
+                failed.push(CliSessionStopFailure {
+                    session_id: id.0,
+                    code: ErrorCode::CdpFailed,
+                    message,
+                });
+            }
+            Err(error) => {
+                let rpc = map_stop_error(error);
+                state.sessions.mark_cleanup_failed(&id, rpc.message.clone());
+                failed.push(CliSessionStopFailure {
+                    session_id: id.0,
+                    code: rpc.code,
+                    message: rpc.message,
+                });
+            }
+        }
+    }
+    Ok(serde_json::to_value(CliSessionStopResult {
+        stopped,
+        failed,
+        returned_tab_ids,
+        return_failures,
+    })
+    .unwrap_or(Value::Null))
 }
 
 async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {

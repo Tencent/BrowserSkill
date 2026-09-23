@@ -1,6 +1,6 @@
 import type { Transport } from "@/transport/transport";
 import type { EventFrame } from "@/transport/types";
-import type { SessionManager } from "./manager";
+import { isSharedSession, type SessionManager } from "./manager";
 
 /**
  * Listener interface that mirrors `chrome.windows.onRemoved` so vitest
@@ -54,7 +54,7 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
       // the window itself. Capture the cause before asynchronous cleanup so the
       // normal stop response, rather than a user-close event, ends the audit.
       const expectedClose = manager.isWindowCloseExpected(ctx);
-      if (ctx.container.mode === "in_window") ctx.stopping = true;
+      if (isSharedSession(ctx)) ctx.stopping = true;
       const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
         tab_id: tabId,
         code: "cdp_failed",

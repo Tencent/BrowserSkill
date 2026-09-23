@@ -295,6 +295,36 @@ describe("handleTabCreate", () => {
     expect(ctx.agentCreatedTabs.has(10)).toBe(true);
     expect(ctx.agentCreatedTabs.has(99)).toBe(false);
   });
+
+  it("persists a retained claim when aborted creation cleanup fails", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = { tabs: new Map(), nextTabId: 10, windowsClosed: new Set() };
+    const { api, spies } = makeTabMutationApi(state);
+    const controller = new AbortController();
+    spies.create.mockImplementationOnce(async (props: chrome.tabs.CreateProperties) => {
+      const tab = {
+        id: 10,
+        windowId: props.windowId ?? 1,
+        active: props.active ?? true,
+      } as chrome.tabs.Tab;
+      state.tabs.set(10, tab);
+      controller.abort();
+      return tab;
+    });
+    spies.remove.mockRejectedValueOnce(new Error("close denied"));
+    const persist = vi.spyOn(sm, "persist");
+
+    await expect(
+      handleTabCreate(sm, { session_id: "aa11" }, { tabs: api, signal: controller.signal }),
+    ).resolves.toMatchObject({
+      code: "protocol_error",
+      data: { reason: "cleanup_failed", resource_type: "tab", resource_id: 10 },
+    });
+
+    expect(ctx.agentCreatedTabs.has(10)).toBe(true);
+    expect(persist).toHaveBeenCalledWith(ctx);
+  });
 });
 
 describe("handleTabClose", () => {
@@ -439,6 +469,30 @@ describe("handleTabSelect", () => {
 });
 
 describe("handleTabBorrow", () => {
+  it("releases the claim after a journal failure when the physical rollback succeeds", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    const ctx = await sm.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map([[7, { id: 7, windowId: 200, index: 4 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api, spies } = makeTabMutationApi(state);
+    vi.spyOn(sm, "persist").mockRejectedValueOnce(new Error("storage unavailable"));
+
+    await expect(
+      handleTabBorrow(
+        sm,
+        { session_id: "aa11", tab_id: 7, confirm: false },
+        { tabs: api, approveBorrow: async () => true },
+      ),
+    ).resolves.toMatchObject({ code: "cancelled" });
+
+    expect(spies.move).toHaveBeenNthCalledWith(1, 7, { windowId: 100, index: -1 });
+    expect(spies.move).toHaveBeenNthCalledWith(2, 7, { windowId: 200, index: 4 });
+    expect(ctx.borrowedTabs.has(7)).toBe(false);
+  });
+
   it("reports an unknown effect when cancellation rollback fails", async () => {
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     await sm.start("aa11");

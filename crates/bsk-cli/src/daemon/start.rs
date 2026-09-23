@@ -27,7 +27,7 @@ use crate::daemon::{
     browsers::{BROWSER_LIVENESS_TICK, BROWSER_LIVENESS_TIMEOUT, EXTENSION_CONNECT_WAIT},
     info as daemon_info, ipc, lockfile, paths,
     probe::{self, PROBE_TIMEOUT, Probe},
-    sessions::{StopSessionError, forget_session, stop_session},
+    sessions::{MIN_SESSION_LEASE_TTL, StopSessionError, forget_session, stop_session},
     state::{DaemonState, PROTOCOL_VERSION},
     ws,
 };
@@ -599,7 +599,8 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
         let session_idle = state.config.session_idle;
         let tick = (session_idle / 4)
             .max(Duration::from_millis(100))
-            .min(Duration::from_secs(30));
+            .min(Duration::from_secs(30))
+            .min(MIN_SESSION_LEASE_TTL / 2);
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // `interval`'s first tick is immediate. Consume it so a zero/very
@@ -609,8 +610,16 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
         loop {
             ticker.tick().await;
             super::session_requests::reap(&state);
-            let idle_ids = state.sessions.idle_ids_at(session_idle, Instant::now());
-            for session_id in idle_ids {
+            let now = Instant::now();
+            let expired_lease_ids = state.sessions.expired_lease_ids_at(now);
+            let mut reap_ids = expired_lease_ids.clone();
+            for session_id in state.sessions.idle_ids_at(session_idle, now) {
+                if !reap_ids.contains(&session_id) {
+                    reap_ids.push(session_id);
+                }
+            }
+            for session_id in reap_ids {
+                let lease_expired = expired_lease_ids.contains(&session_id);
                 match stop_session(
                     &state.browsers,
                     &state.sessions,
@@ -624,7 +633,7 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                 {
                     Ok(_) => {
                         state.transfers.release_session(&session_id.0);
-                        info!(session = %session_id, "idle session stopped");
+                        info!(session = %session_id, lease_expired, "inactive session stopped");
                     }
                     Err(StopSessionError::SessionBusy | StopSessionError::Stopping) => {
                         debug!(session = %session_id, "idle session still active; retrying later");
@@ -639,6 +648,9 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
                         state.transfers.release_session(&session_id.0);
                     }
                     Err(err) => {
+                        state
+                            .sessions
+                            .mark_cleanup_failed(&session_id, err.to_string());
                         warn!(session = %session_id, error = %err, "failed to stop idle session");
                     }
                 }

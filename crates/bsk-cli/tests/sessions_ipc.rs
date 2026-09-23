@@ -477,6 +477,100 @@ async fn session_start_stop_round_trip_via_ipc() {
 }
 
 #[tokio::test]
+async fn owner_lease_is_listed_renewed_and_released_via_ipc() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let responder = tokio::spawn(async move {
+        for _ in 0..2 {
+            let req = next_extension_request(&mut ws).await;
+            let body = match req.method {
+                Method::ToolSessionStart => ResponseBody::Ok(serde_json::json!({
+                    "agent_window_id": 4242
+                })),
+                Method::ToolSessionStop => ResponseBody::Ok(serde_json::json!({
+                    "returned_tab_ids": [77]
+                })),
+                method => panic!("unexpected extension request: {method:?}"),
+            };
+            send_extension_response(&mut ws, ResponseFrame { id: req.id, body }).await;
+        }
+    });
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let started: serde_json::Value = ipc
+        .call(
+            "lease-start",
+            Method::SessionStart,
+            Some(serde_json::json!({
+                "owner_id": "dsh-owner",
+                "owner_kind": "dsh",
+                "lease_ttl_ms": 30000
+            })),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let session_id = started["session_id"].as_str().unwrap();
+
+    let status: StatusResult = ipc
+        .call::<(), _>(
+            "lease-status",
+            Method::SystemStatus,
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let entry = &status.sessions[0];
+    assert_eq!(entry.session_id, session_id);
+    assert_eq!(entry.owner_id.as_deref(), Some("dsh-owner"));
+    assert_eq!(entry.owner_kind.as_deref(), Some("dsh"));
+    assert_eq!(entry.lifecycle_mode.as_deref(), Some("lease"));
+    assert_eq!(entry.lifecycle_state.as_deref(), Some("active"));
+    let before = entry.lease_expires_at_ms.unwrap();
+
+    let renewed: serde_json::Value = ipc
+        .call(
+            "lease-renew",
+            Method::SessionLeaseRenew,
+            Some(serde_json::json!({"owner_id":"dsh-owner","lease_ttl_ms":60000})),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(renewed["session_ids"], serde_json::json!([session_id]));
+    let status: StatusResult = ipc
+        .call::<(), _>(
+            "lease-status-2",
+            Method::SystemStatus,
+            None,
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(status.sessions[0].lease_expires_at_ms.unwrap() > before);
+
+    let released: serde_json::Value = ipc
+        .call(
+            "lease-release",
+            Method::SessionOwnerRelease,
+            Some(serde_json::json!({"owner_id":"dsh-owner"})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released["stopped"], serde_json::json!([session_id]));
+    assert_eq!(released["returned_tab_ids"], serde_json::json!([77]));
+    responder.await.unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn cancelling_session_start_rolls_back_a_late_extension_success() {
     const START_RPC_ID: &str = "session-start-cancel";
 
@@ -711,7 +805,7 @@ async fn timing_out_session_stop_cancels_extension_teardown_and_keeps_session() 
 }
 
 #[tokio::test]
-async fn session_idle_timeout_stops_and_unregisters_session() {
+async fn session_idle_timeout_stops_even_a_still_leased_session() {
     let (handle, _sock) = spawn_daemon_with_session_idle(Duration::from_millis(50)).await;
     let mut ws = connect_ext(handle.ws_addr()).await;
     let _ = handshake_as_ext(&mut ws).await;
@@ -726,6 +820,12 @@ async fn session_idle_timeout_stops_and_unregisters_session() {
         agent_window_id: Some(7),
         created_at_ms: 0,
     });
+    assert!(state.sessions.configure_lease(
+        &session_id,
+        "still-renewed-owner".into(),
+        "dsh".into(),
+        Duration::from_secs(60),
+    ));
     state.tool_queues.spawn(session_id);
 
     let request = tokio::time::timeout(Duration::from_secs(1), ws.next())

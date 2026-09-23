@@ -142,6 +142,28 @@ describe("SessionManager", () => {
     expect(sm.findByWindowId(sessionWindowId(ctx))).toBeNull();
   });
 
+  it("stop() converges when the Agent Window was already closed", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+    await sm.start("aa11");
+    aw.removeMock.mockRejectedValueOnce(new Error("No window with id: 100."));
+
+    await expect(sm.stop("aa11")).resolves.toMatchObject({ sessionId: "aa11" });
+    expect(sm.has("aa11")).toBe(false);
+    expect(sm.findByWindowId(100)).toBeNull();
+  });
+
+  it("stop() keeps retryable ownership for a real Agent Window removal failure", async () => {
+    const aw = fakeAgentWindow();
+    const sm = new SessionManager({ agentWindow: aw });
+    await sm.start("aa11");
+    aw.removeMock.mockRejectedValueOnce(new Error("window removal denied"));
+
+    await expect(sm.stop("aa11")).rejects.toThrow("window removal denied");
+    expect(sm.has("aa11")).toBe(true);
+    expect(sm.findByWindowId(100)?.sessionId).toBe("aa11");
+  });
+
   it("stop({ dropOnly: true }) skips the chrome.windows.remove call", async () => {
     const aw = fakeAgentWindow();
     const sm = new SessionManager({ agentWindow: aw });

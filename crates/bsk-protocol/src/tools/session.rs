@@ -42,6 +42,10 @@ pub struct InteractionPolicy {
 pub struct SessionStartParams {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_window: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub current_tab: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
@@ -128,6 +132,8 @@ mod tests {
         let legacy: SessionStartParams =
             serde_json::from_value(json!({"session_id": "abcd"})).unwrap();
         assert!(!legacy.unattended);
+        assert!(!legacy.current_tab);
+        assert_eq!(legacy.tab_id, None);
     }
 
     #[test]
@@ -175,6 +181,20 @@ pub fn supports_shared_window(protocol: &str) -> bool {
         )
 }
 
+/// Direct reuse of an existing user tab is optional within protocol major 1.
+pub fn supports_existing_tab(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, "1.5"),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
+/// Owner leases and lifecycle diagnostics are available from protocol 1.5.
+pub fn supports_session_lease(protocol: &str) -> bool {
+    supports_existing_tab(protocol)
+}
+
 #[cfg(test)]
 mod shared_window_tests {
     use super::*;
@@ -199,5 +219,15 @@ mod shared_window_tests {
             serde_json::from_value(serde_json::json!({"session_id":"test", "in_window":true}))
                 .unwrap();
         assert!(shared.in_window);
+    }
+
+    #[test]
+    fn existing_tab_support_starts_at_protocol_1_5() {
+        for version in ["1.0", "1.4", "2.0", "invalid"] {
+            assert!(!supports_existing_tab(version));
+        }
+        for version in ["1.5", "1.6"] {
+            assert!(supports_existing_tab(version));
+        }
     }
 }

@@ -102,14 +102,22 @@ mutation for session queueing and user-interruption gating.
 - **Session** = opaque ID + window container + session-scoped ref-store and tab ownership.
   The default container is a dedicated **Agent Window**. Local `session start --in-window`
   creates a controlled tab in the last-focused normal user window (protocol 1.4).
+  Protocol 1.5 adds `--current-tab` / `--tab-id`, which claim an approved existing tab
+  without moving it or creating another window or tab.
 - **Write scope**: dedicated sessions use their Agent Window. Shared sessions require
   both explicit tab ownership (created or borrowed) and location in their host window.
   Sharing a host never grants control of user pages or another session's pages.
-- **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
-  (default 5 min) is a safety net only.
+- **Lifecycle**: persistent sessions still use explicit `bsk session stop` with the idle
+  timeout as a safety net. Ephemeral sessions carry a renewable owner lease and are
+  stopped after owner disconnect/lease expiry; lease renewal does not disable the same
+  idle safety net. Physical ownership is also journaled in extension storage so an MV3
+  worker restart can recover interrupted cleanup. A browser restart or extension
+  reload/update clears the authoritative `storage.session` epoch, so older numeric
+  Chrome ids are diagnosed and pruned without being dereferenced.
 - Multiple sessions may use separate Agent Windows or share a local user window;
   controlled pages remain isolated by session. Shared cleanup returns borrowed pages
-  and removes its created pages without actively closing the host window.
+  and removes its created pages without actively closing the host window. An
+  existing-tab session releases its stationary root tab without moving or closing it.
 - Remote content reads and actions require task-created or explicitly borrowed tabs.
   A page-opened popup or a user tab moved into the Agent Window does not become
   controlled automatically; see [remote tab ownership](remote-extension-connection.md#browser-permissions-and-task-lifetime).

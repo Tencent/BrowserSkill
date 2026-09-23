@@ -10,6 +10,7 @@
  * @module dsh-plugin-browserskill
  */
 
+import { randomUUID } from "node:crypto";
 import type { Context } from "@deepseek-ai/cordis";
 import Schema from "@deepseek-ai/schemastery";
 import { armArchiveCleanup } from "./archive-cleanup";
@@ -18,7 +19,7 @@ import { armLazyTools } from "./lazy-tools";
 import { ObservationService } from "./observation";
 import { registerObservationRoutes } from "./observation-http";
 import { KeyedExecutor } from "./queue";
-import { type BskRunner, createBskRunner } from "./runner";
+import { type BskRunner, createBskRunner, parseBskJson } from "./runner";
 import { SessionStarts } from "./session-starts";
 import { SessionRegistry } from "./sessions";
 import { armAgentScopedBskSkill, registerBskSkill } from "./skill";
@@ -67,6 +68,32 @@ export interface ApplyOptions {
   startJournal?: StartJournal;
 }
 
+/** Renew this plugin instance's daemon leases and invalidate stale local handles. */
+export async function renewSessionLeases(
+  runner: BskRunner,
+  registry: SessionRegistry,
+  ownerId: string,
+): Promise<string[]> {
+  const result = await runner.run(["session", "lease", "--owner", ownerId, "--ttl-ms", "60000"], {
+    timeoutMs: 10_000,
+  });
+  const reply = parseBskJson(result, "session lease");
+  const sessionIds =
+    typeof reply === "object" &&
+    reply !== null &&
+    "session_ids" in reply &&
+    Array.isArray(reply.session_ids) &&
+    reply.session_ids.every((id) => typeof id === "string")
+      ? reply.session_ids
+      : null;
+  if (sessionIds === null) throw new Error("bsk session lease returned invalid session_ids");
+
+  const renewed = new Set(sessionIds);
+  const missing = registry.ownedIds().filter((sessionId) => !renewed.has(sessionId));
+  for (const sessionId of missing) registry.markForCleanup(sessionId);
+  return missing;
+}
+
 export function apply(
   ctx: Context,
   config: Partial<PluginConfig> = {},
@@ -97,7 +124,16 @@ export function apply(
     },
   });
 
-  const deps: ToolDeps = { ctx, runner, registry, config: resolved, observation, queue };
+  const leaseOwnerId = `dsh:${process.pid}:${randomUUID()}`;
+  const deps: ToolDeps = {
+    ctx,
+    runner,
+    registry,
+    config: resolved,
+    observation,
+    queue,
+    leaseOwnerId,
+  };
   const journal =
     options.startJournal ??
     new DiskStartJournal(
@@ -106,6 +142,42 @@ export function apply(
   if (journal instanceof DiskStartJournal) journal.recover();
   const starts = (deps.starts = new SessionStarts(deps, journal));
   void starts.reconcile().catch((error) => console.warn("Browser start recovery failed", error));
+  let leaseRenewalWarningActive = false;
+  const leaseTimer = setInterval(() => {
+    if (registry.size() === 0) {
+      leaseRenewalWarningActive = false;
+      return;
+    }
+    void renewSessionLeases(runner, registry, leaseOwnerId)
+      .then((missing) => {
+        if (missing.length > 0) {
+          if (!leaseRenewalWarningActive) {
+            console.warn(
+              `Browser session lease renewal no longer recognizes ${missing.join(", ")}; ` +
+                "marked unavailable until cleanup",
+            );
+          }
+          leaseRenewalWarningActive = true;
+          return;
+        }
+        leaseRenewalWarningActive = false;
+      })
+      .catch((error) => {
+        // Avoid a warning storm while still leaving a diagnostic breadcrumb.
+        // A successful retry clears the guard and makes a later outage visible.
+        if (!leaseRenewalWarningActive) {
+          leaseRenewalWarningActive = true;
+          console.warn("Browser session lease renewal failed; retrying in 20s", error);
+        }
+      });
+  }, 20_000);
+  leaseTimer.unref();
+  const stopDisposed =
+    typeof ctx.on === "function"
+      ? ctx.on("agent/disposed", ({ agent }) => {
+          starts.archive(agent.id);
+        })
+      : () => {};
 
   // Progressive disclosure of the BSK agent skill (catalog entry resident,
   // body on demand) through the official skill seam; silent no-op when the
@@ -155,6 +227,8 @@ export function apply(
   ctx.effect(() => {
     return () => {
       removeSuite();
+      clearInterval(leaseTimer);
+      stopDisposed();
       disarmAgentSkill();
       unregisterSkill();
       removeRoutes();
