@@ -341,7 +341,7 @@ describe("ToolDispatcher", () => {
     });
   });
 
-  it("bypasses and restores the control overlay for an upload trigger click", async () => {
+  it("leaves overlay state alone for an unobstructed upload trigger click", async () => {
     const sendMessage = vi.fn(async () => undefined);
     vi.stubGlobal("chrome", {
       tabs: {
@@ -383,15 +383,8 @@ describe("ToolDispatcher", () => {
       }
       if (method === "Runtime.evaluate") {
         const expression = (params as { expression?: string }).expression ?? "";
-        if (expression.includes("hitIndex")) {
-          return { result: { value: { hitIndex: 0 } } } as T;
-        }
-        if (expression.includes("overlayHostPresent")) {
-          return {
-            result: {
-              value: { overlayHostPresent: true, overlayHostConnected: true },
-            },
-          } as T;
+        if (expression.includes('return "absent"')) {
+          return { result: { value: "clear" } } as T;
         }
         if (expression.includes("count:")) {
           return { result: { value: { count: 1, multiple: false } } } as T;
@@ -432,14 +425,7 @@ describe("ToolDispatcher", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
 
     expect(sent[0]).toMatchObject({ result: { tab_id: 7, file_names: ["test.png"] } });
-    expect(sendMessage).toHaveBeenNthCalledWith(1, 7, {
-      type: "bh-automation-bypass",
-      enabled: true,
-    });
-    expect(sendMessage).toHaveBeenNthCalledWith(2, 7, {
-      type: "bh-automation-bypass",
-      enabled: false,
-    });
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it("detaches CDP state before stopping a session", async () => {

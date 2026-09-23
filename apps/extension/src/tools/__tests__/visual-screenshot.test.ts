@@ -524,21 +524,29 @@ async function pointFixture(child = false, oopif = false) {
   ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
   const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
   const tabsApi = { get: async () => tab, query: async () => [tab] };
+  const sendInputPassthrough = vi.fn(async (_tab: number, _message: { phase: string }) => ({}));
   const bypassOverlay = vi.fn(async (_tab: number, _enabled: boolean) => {});
   const original = f.send.getMockImplementation()!;
   const input: Record<string, unknown>[] = [];
   const hitPoints: number[][] = [];
   const control = {
     hit: true,
+    overlayCovered: false,
     onMove: () => {},
     failPress: false,
     visibility: "visible",
     onFocus: () => {},
     focusCommands: [] as boolean[],
   };
+  sendInputPassthrough.mockImplementation(async (_tab, message) => {
+    control.overlayCovered = message.phase !== "begin";
+    return {};
+  });
   f.send.mockImplementation(async (target, method, params = {}) => {
     if (method === "Runtime.evaluate" && params.expression === "document.visibilityState")
       return { result: { value: control.visibility } };
+    if (method === "Runtime.evaluate" && String(params.expression).includes('return "absent"'))
+      return { result: { value: control.overlayCovered ? "covered" : "clear" } };
     if (method === "Runtime.evaluate" && params.awaitPromise) return { result: { value: true } };
     if (method === "Emulation.setFocusEmulationEnabled") {
       control.focusCommands.push(params.enabled as boolean);
@@ -550,7 +558,7 @@ async function pointFixture(child = false, oopif = false) {
       String(params.functionDeclaration).includes("elementFromPoint")
     ) {
       hitPoints.push((params.arguments as { value: number }[]).map((a) => a.value));
-      return { result: { value: control.hit } };
+      return { result: { value: control.hit && !control.overlayCovered } };
     }
     if (method === "Input.dispatchMouseEvent") {
       input.push(params);
@@ -586,7 +594,7 @@ async function pointFixture(child = false, oopif = false) {
     input,
     hitPoints,
     pointControl: control,
-    deps: { cdp: f.cdp, tabsApi, bypassOverlay },
+    deps: { cdp: f.cdp, tabsApi, sendInputPassthrough, bypassOverlay },
     shot,
   };
 }
@@ -608,10 +616,50 @@ it.each([
     "visual_capture_stale",
   );
   expect(f.input).toHaveLength(count);
+  expect(f.deps.sendInputPassthrough).not.toHaveBeenCalled();
   expect(f.deps.bypassOverlay.mock.calls).toEqual([
     [4, true],
     [4, false],
   ]);
+});
+
+it.each([
+  "success",
+  "press-fails",
+  "cancel",
+  "still-covered",
+  "appears-during-bypass",
+])("scopes visual click passthrough: %s", async (mode) => {
+  const f = await pointFixture();
+  const abort = new AbortController();
+  f.pointControl.overlayCovered = mode !== "appears-during-bypass";
+  if (mode === "appears-during-bypass")
+    f.deps.bypassOverlay.mockImplementation(async (_tab, enabled) => {
+      if (enabled) f.pointControl.overlayCovered = true;
+    });
+  f.pointControl.failPress = mode === "press-fails";
+  if (mode === "cancel") f.pointControl.onMove = () => abort.abort();
+  if (mode === "still-covered") f.deps.sendInputPassthrough.mockImplementation(async () => ({}));
+  const result = await handleClick(f.manager, f.params, { ...f.deps, signal: abort.signal });
+  if (mode === "success" || mode === "appears-during-bypass")
+    expect(result).not.toHaveProperty("code");
+  else expect(result).toHaveProperty("code", mode === "cancel" ? "cancelled" : "cdp_failed");
+  expect(f.input.map((e) => e.type)).toEqual(
+    mode === "still-covered"
+      ? []
+      : mode === "cancel"
+        ? ["mouseMoved"]
+        : ["mouseMoved", "mousePressed", "mouseReleased"],
+  );
+  expect(f.deps.sendInputPassthrough.mock.calls.map(([, message]) => message.phase)).toEqual([
+    "begin",
+    "end",
+  ]);
+  expect(f.deps.bypassOverlay.mock.calls).toEqual([
+    [4, true],
+    [4, false],
+  ]);
+  if (mode === "still-covered") expect(result).toHaveProperty("data.effect_state", "none");
 });
 
 it.each([

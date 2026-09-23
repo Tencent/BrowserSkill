@@ -1,4 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import {
+  INPUT_PASSTHROUGH,
+  INPUT_PASSTHROUGH_TTL_MS,
+  type InputPassthroughMessage,
+} from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
@@ -34,6 +39,7 @@ function makeFakeCdp(
   rendered: () => boolean | Promise<boolean> = () => true,
 ) {
   const sent: Array<{ tabId: number; method: string; params?: object }> = [];
+  const overlayHit = vi.fn(async () => ({ result: { value: "clear" } }));
   const sendImpl = async (tabId: number, method: string, params?: object) => {
     sent.push({ tabId, method, params });
     if (
@@ -42,6 +48,11 @@ function makeFakeCdp(
     )
       return { result: { value: visibility() } };
     if (method === "Page.captureScreenshot") return { data: (await rendered()) ? "pixel" : "" };
+    if (
+      method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression).includes('return "absent"')
+    )
+      return overlayHit();
     const h = handlers[method];
     if (!h && method === "Accessibility.getPartialAXTree") return { nodes: [] };
     if (!h && method === "Page.getLayoutMetrics") {
@@ -65,7 +76,7 @@ function makeFakeCdp(
     ),
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
-  return { cdp, tabsApi, sent };
+  return { cdp, tabsApi, sent, overlayHit };
 }
 
 describe("modifiersBitfield", () => {
@@ -241,10 +252,41 @@ describe("handleClick", () => {
     expect(fake.sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(3);
   });
 
-  it("enables overlay bypass before mouse events when overlay blocks the click point", async () => {
+  it.each([
+    "clear",
+    "absent",
+    "bypass-only",
+    "covered",
+    "press-fails",
+    "cancel-after-move",
+    "cancel-during-begin",
+    "still-covered",
+    "begin-fails",
+    "lost-ack",
+    "restore-fails",
+    "probe-throws",
+    "probe-invalid",
+    "verify-throws",
+    "late-covered",
+    "late-unknown",
+    "known-late-unknown",
+  ])("scopes click passthrough without changing a retained hover bypass: %s", async (mode) => {
     const order: string[] = [];
-    const bypassOverlay = vi.fn(async (_tabId: number, enabled: boolean) => {
-      order.push(enabled ? "bypass-on" : "bypass-off");
+    const controller = new AbortController();
+    let bypassCount = 1; // A hover owns this reference throughout the click helper.
+    const bypassOverlay = vi.fn(async (_tab: number, enabled: boolean) => {
+      order.push(enabled ? "bypass-begin" : "bypass-end");
+      bypassCount += enabled ? 1 : -1;
+    });
+    let passthrough = false;
+    const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
+      order.push(message.phase);
+      if (message.phase === "begin" && mode === "begin-fails") throw new Error("No receiver");
+      passthrough = message.phase === "begin";
+      if (passthrough && mode === "cancel-during-begin") controller.abort();
+      if (passthrough && mode === "lost-ack") throw new Error("Response lost after application");
+      if (!passthrough && mode === "restore-fails") throw new Error("Tab closed");
+      return { type: INPUT_PASSTHROUGH, ok: true };
     });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -252,146 +294,205 @@ describe("handleClick", () => {
     const fake = makeFakeCdp({
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: true, overlayHostConnected: true } } };
-        }
-        if (expr.includes("hitIndex")) {
-          return {
-            result: {
-              value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
-            },
-          };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => {
-        order.push("mouse");
+      "Input.dispatchMouseEvent": (params) => {
+        const { type } = params as { type: string };
+        order.push(type);
+        if (type === "mouseMoved" && mode === "cancel-after-move") controller.abort();
+        if (type === "mousePressed" && mode === "press-fails") throw new Error("Input failed");
         return {};
       },
     });
-    const res = await handleClick(
+    const initiallyClear = [
+      "clear",
+      "absent",
+      "probe-throws",
+      "probe-invalid",
+      "late-covered",
+      "late-unknown",
+    ].includes(mode);
+    fake.overlayHit.mockImplementation(async () => {
+      order.push("probe");
+      if (mode === "probe-throws" || (mode === "verify-throws" && passthrough))
+        throw new Error("Renderer unavailable");
+      if (mode === "probe-invalid") return { exceptionDetails: {} } as never;
+      if (order.includes("mouseMoved") && ["late-unknown", "known-late-unknown"].includes(mode))
+        return {} as never;
+      const hit =
+        mode === "absent"
+          ? "absent"
+          : mode === "late-covered" && order.includes("mouseMoved")
+            ? "covered"
+            : mode === "bypass-only" && bypassCount === 2
+              ? "clear"
+              : initiallyClear || (passthrough && mode !== "still-covered")
+                ? "clear"
+                : "covered";
+      return { result: { value: hit } };
+    });
+    const result = await handleClick(
       sm,
       { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+      {
+        ...fake,
+        sendInputPassthrough,
+        bypassOverlay,
+        signal: controller.signal,
+      },
     );
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-    expect(order.indexOf("bypass-on")).toBeLessThan(order.indexOf("mouse"));
-    expect(order.lastIndexOf("bypass-off")).toBeGreaterThan(order.lastIndexOf("mouse"));
-  });
-
-  it("disables overlay bypass when mouse dispatch throws", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    let mouseCalls = 0;
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: true, overlayHostConnected: true } } };
-        }
-        if (expr.includes("hitIndex")) {
-          return {
-            result: {
-              value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
-            },
-          };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => {
-        mouseCalls += 1;
-        if (mouseCalls === 2) throw new Error("mousePressed failed");
-        return {};
-      },
-    });
-    const res = await handleClick(
-      sm,
-      { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+    const beforeMoveFailure = [
+      "still-covered",
+      "begin-fails",
+      "verify-throws",
+      "cancel-during-begin",
+    ].includes(mode);
+    const noPress =
+      beforeMoveFailure ||
+      ["cancel-after-move", "late-covered", "known-late-unknown"].includes(mode);
+    const mouse = order.filter((step) => step.startsWith("mouse"));
+    expect(mouse).toEqual(
+      beforeMoveFailure
+        ? []
+        : noPress
+          ? ["mouseMoved"]
+          : ["mouseMoved", "mousePressed", "mouseReleased"],
     );
-    expect(res).toMatchObject({ code: "cdp_failed" });
-    expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-  });
-
-  it("enables overlay bypass when the overlay host itself captures the point", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const host = document.createElement("browser-skill-overlay");
-    host.setAttribute("data-bsk-overlay", "");
-    host.style.cssText =
-      "position:fixed;inset:0;width:100vw;height:100vh;pointer-events:auto;display:block";
-    host.attachShadow({ mode: "closed" });
-    document.body.append(host);
-    Object.defineProperty(host, "getBoundingClientRect", {
-      value: () => ({
-        x: 0,
-        y: 0,
-        width: 1280,
-        height: 720,
-        top: 0,
-        left: 0,
-        right: 1280,
-        bottom: 720,
-      }),
-    });
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        const value = new Function(`return (${expr})`)();
-        return { result: { value } };
-      },
-      "Input.dispatchMouseEvent": () => ({}),
-    });
-    try {
-      const res = await handleClick(
-        sm,
-        { session_id: "aa11", ref: "@e3" },
-        { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+    if (noPress || mode === "press-fails") {
+      expect(result).toHaveProperty(
+        "code",
+        mode.startsWith("cancel-") ? "cancelled" : "cdp_failed",
       );
-      if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-      expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-      expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-    } finally {
-      host.remove();
+      if (
+        [
+          "still-covered",
+          "begin-fails",
+          "verify-throws",
+          "late-covered",
+          "known-late-unknown",
+        ].includes(mode)
+      )
+        expect(result).toMatchObject({
+          data: {
+            reason: "input_not_ready",
+            effect_state: "none",
+            pointer_moved: ["late-covered", "known-late-unknown"].includes(mode),
+          },
+        });
+    } else expect(result).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
+    if (initiallyClear || mode === "bypass-only") {
+      expect(sendInputPassthrough).not.toHaveBeenCalled();
+    } else {
+      const messages = sendInputPassthrough.mock.calls.map(([, message]) => message);
+      expect(messages).toEqual([
+        { type: INPUT_PASSTHROUGH, phase: "begin", id: expect.any(String) },
+        { type: INPUT_PASSTHROUGH, phase: "end", id: messages[0].id },
+      ]);
+      if (mouse.length) expect(order.indexOf("begin")).toBeLessThan(order.indexOf("mouseMoved"));
+      if (mouse.includes("mouseReleased"))
+        expect(order.indexOf("end")).toBeGreaterThan(order.indexOf("mouseReleased"));
+      expect(order.slice(-2)).toEqual(["end", "bypass-end"]);
     }
+    if (mode === "clear" || mode === "absent")
+      expect(order).toEqual(["probe", "mouseMoved", "probe", "mousePressed", "mouseReleased"]);
+    if (mode === "covered")
+      expect(order).toEqual([
+        "probe",
+        "bypass-begin",
+        "probe",
+        "begin",
+        "probe",
+        "mouseMoved",
+        "probe",
+        "mousePressed",
+        "mouseReleased",
+        "end",
+        "bypass-end",
+      ]);
+    expect(bypassCount).toBe(1);
+    if (initiallyClear) expect(bypassOverlay).not.toHaveBeenCalled();
+    else
+      expect(bypassOverlay.mock.calls).toEqual([
+        [4, true],
+        [4, false],
+      ]);
   });
 
-  it("skips overlay bypass when overlay does not block the click point", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: false, overlayHostConnected: false } } };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => ({}),
-    });
-    await handleClick(
-      sm,
-      { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
-    );
-    expect(bypassOverlay).not.toHaveBeenCalled();
+  it.each([
+    ["begin", INPUT_PASSTHROUGH_TTL_MS],
+    ["move", INPUT_PASSTHROUGH_TTL_MS],
+    ["press", INPUT_PASSTHROUGH_TTL_MS],
+    ["release", INPUT_PASSTHROUGH_TTL_MS],
+    ["clear-slow", INPUT_PASSTHROUGH_TTL_MS],
+    ["begin", 4_000],
+    ["move", 4_000],
+    ["probe", 4_000],
+    ["move", 3_999],
+    ["press", 4_500],
+    ["release", 4_500],
+  ] as const)("handles %s delayed by %i ms without retrying input", async (phase, elapsed) => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("expiry");
+      ctx.refStore.set("e1", 100, { tabId: 4 });
+      const mouse: string[] = [];
+      let passthrough = false;
+      const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
+        passthrough = message.phase === "begin";
+        if (passthrough && phase === "begin") now += elapsed;
+      });
+      const bypassOverlay = vi.fn(async () => {});
+      const fake = makeFakeCdp({
+        "DOM.scrollIntoViewIfNeeded": () => ({}),
+        "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+        "Input.dispatchMouseEvent": (params) => {
+          const type = (params as { type: string }).type;
+          mouse.push(type);
+          if (
+            (phase === "move" && type === "mouseMoved") ||
+            (["press", "clear-slow"].includes(phase) && type === "mousePressed") ||
+            (phase === "release" && type === "mouseReleased")
+          )
+            now += elapsed;
+          return {};
+        },
+      });
+      // Another concurrent lease may keep the point clear after ours has expired.
+      fake.overlayHit.mockImplementation(async () => {
+        if (phase === "probe" && mouse.length > 0) now += elapsed;
+        return { result: { value: passthrough || phase === "clear-slow" ? "clear" : "covered" } };
+      });
+      const result = await handleClick(
+        manager,
+        { session_id: "expiry", ref: "e1" },
+        { ...fake, bypassOverlay, sendInputPassthrough },
+      );
+      const blockedBeforePress = ["begin", "move", "probe"].includes(phase) && elapsed >= 4_000;
+      if (phase === "clear-slow" || (!blockedBeforePress && elapsed < INPUT_PASSTHROUGH_TTL_MS)) {
+        expect(result).not.toHaveProperty("code");
+      } else {
+        expect(result).toMatchObject({
+          data: {
+            reason: blockedBeforePress ? "input_not_ready" : "input_outcome_unknown",
+            effect_state: blockedBeforePress ? "none" : "unknown",
+          },
+        });
+      }
+      if (phase === "clear-slow") expect(sendInputPassthrough).not.toHaveBeenCalled();
+      else {
+        expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(["begin", "end"]);
+        expect(bypassOverlay.mock.calls).toHaveLength(2);
+      }
+      expect(mouse).toEqual(
+        blockedBeforePress && phase === "begin"
+          ? []
+          : blockedBeforePress
+            ? ["mouseMoved"]
+            : ["mouseMoved", "mousePressed", "mouseReleased"],
+      );
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("leaves disabled click behavior to the browser without an AX preflight", async () => {
