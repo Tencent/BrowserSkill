@@ -106,8 +106,11 @@ export async function handleFullPageScreenshot(
       if (frame?.documentId !== client.documentId) throw new ScreenshotError("changed");
     }
     checkOwnership();
+    return current;
   };
-  const client = createPageClient(target.tabId, id, controller.signal, checkTab);
+  const client = createPageClient(target.tabId, id, controller.signal, async () => {
+    await checkTab();
+  });
   const changed = () => controller.abort(new ScreenshotError("changed"));
   const navigated = (info: { tabId: number; frameId: number }) => {
     if (info.tabId === target.tabId && info.frameId === 0)
@@ -152,6 +155,18 @@ export async function handleFullPageScreenshot(
   chrome.runtime.onMessage.addListener(cancelled);
   const writer = new TileWriter(id, new URL(target.url).hostname);
   let retained = false;
+  let rendering = false;
+  let renderingEvents: { dispose(): void } | undefined;
+  const stopRendering = async () => {
+    if (!rendering) return;
+    rendering = false;
+    renderingEvents?.dispose();
+    // Cleanup must never attach to a replacement debugger connection.
+    if (deps.cdp.getAttachmentId?.(target.tabId) !== attachmentId) return;
+    await waitForReply(deps.cdp.send(target.tabId, "Page.stopScreencast"), undefined, 1000).catch(
+      () => {},
+    );
+  };
   let phase = "preparing";
   let frames = 0;
   let progress = 0;
@@ -167,6 +182,38 @@ export async function handleFullPageScreenshot(
     if (!attachmentId) throw new ScreenshotError("changed");
     const platform = await waitForReply(chrome.runtime.getPlatformInfo(), controller.signal);
     await client.prepare();
+    const ensureRendering = async (active: boolean) => {
+      if (platform.os !== "win" || active || rendering) return;
+      // Focus emulation keeps script execution alive, but Windows can stop
+      // producing compositor frames on an unselected tab after the first read.
+      // A tiny screencast holds the renderer awake without selecting/resizing it.
+      // Its pixels are unused; each tile still comes from captureScreenshot.
+      checkOwnership();
+      rendering = true;
+      renderingEvents = deps.cdp.onEvent?.((source, method, params) => {
+        if (
+          source.tabId !== target.tabId ||
+          source.sessionId ||
+          method !== "Page.screencastFrame" ||
+          deps.cdp.getAttachmentId?.(target.tabId) !== attachmentId
+        )
+          return;
+        const frame = params as { sessionId: number };
+        void deps.cdp
+          .send(target.tabId, "Page.screencastFrameAck", { sessionId: frame.sessionId })
+          .catch(() => {});
+      });
+      if (!renderingEvents) throw new ScreenshotError("captureFailed");
+      await waitForReply(
+        deps.cdp.send(target.tabId, "Page.startScreencast", {
+          format: "png",
+          maxWidth: 32,
+          maxHeight: 32,
+        }),
+        controller.signal,
+      );
+    };
+    await ensureRendering((await checkTab()).active);
     await withScreenshotOverlayHidden(
       target.tabId,
       client.documentId!,
@@ -181,7 +228,8 @@ export async function handleFullPageScreenshot(
           signal: controller.signal,
           screenshot: async () => {
             phase = "reading viewport pixels";
-            await checkTab();
+            const current = await checkTab();
+            await ensureRendering(current.active);
             checkOwnership();
             const shot = await waitForReply(
               deps.cdp.send<{ data?: string }>(target.tabId, "Page.captureScreenshot", {
@@ -211,6 +259,7 @@ export async function handleFullPageScreenshot(
         });
       },
     );
+    await stopRendering();
     controller.signal.throwIfAborted();
     await writer.finish();
     phase = "encoding";
@@ -285,6 +334,7 @@ export async function handleFullPageScreenshot(
       reason instanceof Error ? reason.message : String(reason),
     );
   } finally {
+    await stopRendering();
     clearTimeout(deadline);
     signal?.removeEventListener("abort", abort);
     chrome.webNavigation.onBeforeNavigate.removeListener(navigated);

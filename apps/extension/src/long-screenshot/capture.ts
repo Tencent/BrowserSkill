@@ -12,14 +12,16 @@ import {
 export function sliceForFrame(metrics: PageMetrics, covered: number, scale: number) {
   if (metrics.y > covered + 0.5) throw new ScreenshotError("changed");
   const end = Math.min(metrics.y + metrics.viewportHeight, metrics.height);
+  const bottomPx = Math.round(end * scale);
   // A tiny final scroll must still include the whole fixed footer. Redraw its
   // overlap rather than chopping it down to the last few uncovered rows.
   const footerStart =
     metrics.height - Math.min(metrics.viewportHeight, metrics.bottomOverlayHeight ?? 0);
   const start =
-    end === metrics.height ? Math.min(covered, Math.max(metrics.y, footerStart)) : covered;
+    bottomPx === Math.round(metrics.height * scale)
+      ? Math.min(covered, Math.max(metrics.y, footerStart))
+      : covered;
   const topPx = Math.round(start * scale);
-  const bottomPx = Math.round(end * scale);
   return {
     sourceY: topPx - Math.round(metrics.y * scale),
     targetY: topPx,
@@ -145,12 +147,22 @@ export async function capturePage(deps: CaptureDeps) {
         }
         layoutFailures = 0;
         if (!frames) {
-          scale = bitmap.width / metrics.innerWidth;
+          // Prefer native DPR when it matches the rounded inner dimensions. A
+          // ratio inferred from those integers accumulates drift at fractional
+          // zoom. Retain the image ratio for scaled mobile/pinched viewports.
+          const rounding = (metrics.dpr + 1) / 2;
+          scale =
+            Math.abs(bitmap.width - metrics.innerWidth * metrics.dpr) <= rounding &&
+            Math.abs(bitmap.height - metrics.innerHeight * metrics.dpr) <= rounding
+              ? metrics.dpr
+              : bitmap.width / metrics.innerWidth;
           width = Math.round(metrics.viewportWidth * scale);
         }
+        // inner dimensions round to CSS pixels; the bitmap rounds to device pixels.
+        const rounding = Math.max(1, (scale + 1) / 2);
         if (
-          Math.abs(bitmap.width - metrics.innerWidth * scale) > 1 ||
-          Math.abs(bitmap.height - metrics.innerHeight * scale) > 1
+          Math.abs(bitmap.width - metrics.innerWidth * scale) > rounding ||
+          Math.abs(bitmap.height - metrics.innerHeight * scale) > rounding
         )
           throw new ScreenshotError("changed");
         const pixels = deps.checkFreshness ? frameSignature(bitmap) : undefined;
