@@ -116,11 +116,24 @@ events continue to fold without repeated registration attempts or warnings.
   `lib/client.cjs`, which registers a keyed `tool.call.toolview` view for `browser_inspect`. The
   custom view keeps a terminal block for every inspect action and, when a screenshot result carries
   an image block, resolves the durable attachment through the client session's authorized
-  `readAttachment` RPC and renders it with the shared `MessageImage` thumbnail/lightbox atoms.
+  `readAttachment` RPC and renders it with the plugin-owned `ScreenshotImage` thumbnail and
+  native dialog preview. The loader stays stable within a session so host rerenders preserve
+  the open preview. Attachment dimensions reserve thumbnail space during loading; retries,
+  attachment/session changes, and unmounts release the component-owned blob URLs.
   The other five tools keep the stock terminal card. The bundle follows the dsh client
   contract: a CJS closure factory handed to `window.__ModuleLoader__.load`, platform modules
-  (`react`, `dsh-client-ui-*`) external, everything else inlined, CSS Modules compiled by
-  lightningcss.
+  explicitly shared platform modules (React and `dsh-client-ui-primitives`) external,
+  everything else inlined, CSS Modules compiled by lightningcss.
+- **Host compatibility**: development dependencies still resolve to DSH `0.1.0-rc.6` and
+  do not prove compatibility with newer hosts. In particular, that version exports
+  `MessageImage` from the attachment client, while the `0.1.5-rc.3` attachment client shipped
+  with DSH `0.1.5-rc.2` exposes only plugin hooks. Importing the old component caused the
+  screenshot-card expansion crash. Keep service contracts type-only and restrict runtime
+  imports to the host's shared module table. `tests/client/client-bundle.test.tsx` builds the
+  actual client once, rejects unexpected externals, and exercises screenshot rendering with
+  an attachment module that exposes only `apply`/`inject`. When adding host runtime imports,
+  verify their exports against the supported host and extend that contract test; passing
+  source-level tests against the development packages alone is insufficient.
 - **Errors**: non-zero bsk exits surface the CLI's JSON error envelope (`code`, `message`, `hint`)
   so the model gets the daemon's actionable guidance.
 - **Long-running work** (e.g. `bsk record`) is not backgrounded via `ctx.jobs` yet — tracked as a

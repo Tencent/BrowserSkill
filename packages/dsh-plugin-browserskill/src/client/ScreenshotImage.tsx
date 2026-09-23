@@ -40,26 +40,46 @@ export function ScreenshotImage({
     };
   }, [attachment, load, attempt]);
 
-  if (image.status === "loading") return <span role="status">Loading…</span>;
-  if (image.status === "error")
-    return (
-      <button type="button" className={css.retry} onClick={() => setAttempt((value) => value + 1)}>
-        Load failed — retry
-      </button>
-    );
-
   return (
     <>
-      <button
-        type="button"
-        className={css.thumbnail}
-        title="Open the original screenshot"
-        aria-label={`Open screenshot ${label}`}
-        onClick={() => setOpen(true)}
+      <div
+        className={css.frame}
+        style={{
+          width: Math.min(attachment.width, 240, (240 * attachment.width) / attachment.height),
+          aspectRatio: `${attachment.width} / ${attachment.height}`,
+        }}
       >
-        <img src={image.url} alt={label} onError={() => setImage({ status: "error" })} />
-      </button>
-      {open && <ScreenshotPreview src={image.url} label={label} onClose={() => setOpen(false)} />}
+        {image.status === "loading" ? (
+          <span role="status">Loading…</span>
+        ) : image.status === "error" ? (
+          <button
+            type="button"
+            className={css.retry}
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            Load failed — retry
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={css.thumbnail}
+            title="Open the original screenshot"
+            aria-label={`Open screenshot ${label}`}
+            onClick={() => setOpen(true)}
+          >
+            <img
+              src={image.url}
+              alt={label}
+              width={attachment.width}
+              height={attachment.height}
+              onError={() => setImage({ status: "error" })}
+            />
+          </button>
+        )}
+      </div>
+      {open && image.status === "ready" && (
+        <ScreenshotPreview src={image.url} label={label} onClose={() => setOpen(false)} />
+      )}
     </>
   );
 }

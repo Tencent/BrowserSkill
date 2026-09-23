@@ -1,42 +1,51 @@
 // @vitest-environment happy-dom
 // Exercise the shipped module-loader boundary: current DSH attachment clients
 // export plugin hooks, not the React components exposed by the old dev package.
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import * as primitives from "@deepseek-ai/dsh-client-ui-primitives";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import * as jsxRuntime from "react/jsx-runtime";
 import * as ReactDOM from "react-dom";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
+
+let source: string;
+
+// Share one client-only build across these host-contract cases. Resolve the
+// public CLI entry from this file so neither cwd nor tsdown's layout matters.
+beforeAll(async () => {
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const output = mkdtempSync(join(tmpdir(), "bsk-client-bundle-"));
+  try {
+    await promisify(execFile)(
+      process.execPath,
+      [
+        createRequire(import.meta.url).resolve("tsdown/run"),
+        "--filter",
+        "@wxg-prc-cpg/browser-skill-dsh-plugin/client",
+        "--out-dir",
+        output,
+      ],
+      { cwd: root },
+    );
+    source = readFileSync(join(output, "client.cjs"), "utf8");
+  } finally {
+    rmSync(output, { recursive: true, force: true });
+  }
+}, 30_000);
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
-it("expands a bundled screenshot card without host attachment components", async () => {
-  const root = process.cwd();
-  const output = mkdtempSync(join(tmpdir(), "bsk-client-bundle-"));
-  let source: string;
-  try {
-    execFileSync(
-      process.execPath,
-      [
-        join(root, "node_modules/tsdown/dist/run.mjs"),
-        "--filter",
-        "@wxg-prc-cpg/browser-skill-dsh-plugin/client",
-        "--out-dir",
-        output,
-      ],
-      { cwd: root, stdio: "pipe" },
-    );
-    source = readFileSync(join(output, "client.cjs"), "utf8");
-  } finally {
-    rmSync(output, { recursive: true, force: true });
-  }
+function setupClient() {
   const host: Record<string, unknown> = {
     react: React,
     "react/jsx-runtime": jsxRuntime,
@@ -69,8 +78,8 @@ it("expands a bundled screenshot card without host attachment components", async
     value: { attachment, data: [137, 80, 78, 71] },
   }));
   const binding = vi.fn(() => ({ session: { readAttachment } }));
-  const url = "blob:bundled-screenshot";
-  vi.spyOn(URL, "createObjectURL").mockReturnValue(url);
+  let nextURL = 0;
+  vi.spyOn(URL, "createObjectURL").mockImplementation(() => `blob:screenshot-${++nextURL}`);
   const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
   let ToolView!: React.ComponentType<Record<string, unknown>>;
   client.apply({
@@ -98,12 +107,17 @@ it("expands a bundled screenshot card without host attachment components", async
       ],
     },
   };
+  return { ToolView, props, attachment, readAttachment, binding, revoke };
+}
+
+it("expands a bundled screenshot card without host attachment components", async () => {
+  const { ToolView, props, attachment, readAttachment, binding, revoke } = setupClient();
   // Replay/remount must resolve the durable attachment through its owning session.
   for (let attempt = 0; attempt < 2; attempt++) {
     const view = render(<ToolView {...props} />);
     fireEvent.click(screen.getByRole("button", { name: /screenshot/i }));
     expect((await screen.findByRole("img", { name: "screenshot.png" })).getAttribute("src")).toBe(
-      url,
+      `blob:screenshot-${attempt + 1}`,
     );
     expect(screen.getByText("Screenshot captured")).toBeTruthy();
     view.unmount();
@@ -111,4 +125,29 @@ it("expands a bundled screenshot card without host attachment components", async
   expect(binding).toHaveBeenCalledWith("owning-session");
   expect(readAttachment.mock.calls).toEqual([[attachment.attachmentId], [attachment.attachmentId]]);
   expect(revoke).toHaveBeenCalledTimes(2);
-}, 30_000);
+});
+
+it("preserves the preview on host rerenders and reloads only when its session changes", async () => {
+  const { ToolView, props, readAttachment, binding, revoke } = setupClient();
+  const view = render(<ToolView {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: /screenshot/i }));
+  await screen.findByRole("img", { name: "screenshot.png" });
+  fireEvent.click(screen.getByRole("button", { name: "Open screenshot screenshot.png" }));
+  const preview = screen.getByRole("dialog", { name: "Screenshot preview" });
+  expect(preview.hasAttribute("open")).toBe(true);
+
+  await act(async () => view.rerender(<ToolView {...props} openFile={() => {}} />));
+  expect(screen.getByRole("dialog", { name: "Screenshot preview" })).toBe(preview);
+  expect(preview.hasAttribute("open")).toBe(true);
+  expect(readAttachment).toHaveBeenCalledTimes(1);
+  expect(revoke).not.toHaveBeenCalled();
+
+  view.rerender(<ToolView {...props} sessionId="next-session" />);
+  await waitFor(() =>
+    expect(screen.getByRole("img").getAttribute("src")).toBe("blob:screenshot-2"),
+  );
+  expect(binding).toHaveBeenLastCalledWith("next-session");
+  expect(readAttachment).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(revoke).toHaveBeenCalledExactlyOnceWith("blob:screenshot-1");
+});
