@@ -1,11 +1,12 @@
 import { Context } from "@deepseek-ai/cordis";
-import { CallId, createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { createToolResultMessage, createUserMessage } from "@deepseek-ai/dsh-llm";
+import { ToolCallId } from "@deepseek-ai/dsh-llm/brand";
 import { SessionId, SessionStore } from "@deepseek-ai/dsh-session";
 import { describe, expect, it, vi } from "vitest";
 import { armLazyTools } from "../src/lazy-tools";
 
 describe("lazy tools with the DSH session lifecycle", () => {
-  it("retries a failed reveal on a real turn boundary instead of each streamed chunk", async () => {
+  it("retries a failed reveal on a real turn boundary instead of each session event", async () => {
     const root = new Context();
     const sessions = root.plugin(SessionStore);
     await sessions;
@@ -32,11 +33,7 @@ describe("lazy tools with the DSH session lifecycle", () => {
         { surfaceOp: "append" },
       );
       for (let i = 0; i < 20_000; i++) {
-        session.append("assistant/chunk", {
-          turn: 0,
-          step: 0,
-          chunk: { type: "text-delta", index: 0, text: "x" },
-        });
+        session.append("step/end", { turn: 0, step: i });
       }
       expect(registerSuite).toHaveBeenCalledTimes(1);
       expect(warning).toHaveBeenCalledTimes(1);
@@ -72,7 +69,7 @@ describe("lazy tools with the DSH session lifecycle", () => {
       session.append("tool/call", {
         turn: 0,
         step: 0,
-        callId: CallId("skill"),
+        callId: ToolCallId("skill"),
         name: "skill",
         arguments: '{"name":"browser-skill"}',
       });
@@ -82,7 +79,7 @@ describe("lazy tools with the DSH session lifecycle", () => {
           turn: 0,
           step: 0,
           message: createToolResultMessage({
-            callId: CallId("skill"),
+            callId: ToolCallId("skill"),
             isError: false,
             content: [],
           }),
@@ -100,14 +97,16 @@ describe("lazy tools with the DSH session lifecycle", () => {
       await mounted.dispose();
       expect(registered).toBe(false);
 
-      const readHistory = vi.spyOn(session, "events", "get");
+      const readHistory = vi.spyOn(session, "snapshotEvents");
       mounted = root.plugin(plugin);
       await mounted;
       expect(registered).toBe(true);
       expect(registerSuite).toHaveBeenCalledTimes(2);
       expect(readHistory).toHaveBeenCalledTimes(1);
       // The restarted plugin needs no second skill call or new event to restore.
-      expect(session.events.filter((event) => event.type === "tool/call")).toHaveLength(1);
+      expect(session.snapshotEvents().filter((event) => event.type === "tool/call")).toHaveLength(
+        1,
+      );
       readHistory.mockRestore();
     } finally {
       await mounted.dispose();
@@ -140,11 +139,7 @@ describe("lazy tools with the DSH session lifecycle", () => {
     );
     try {
       expect(registerSuite).not.toHaveBeenCalled();
-      session.append("assistant/chunk", {
-        turn: 0,
-        step: 0,
-        chunk: { type: "text-delta", index: 0, text: "x" },
-      });
+      session.append("step/start", { turn: 0, step: 0 });
       expect(registerSuite).toHaveBeenCalledTimes(1);
     } finally {
       disarm();
@@ -167,7 +162,7 @@ describe("lazy tools with the DSH session lifecycle", () => {
       session.append("tool/call", {
         turn: 0,
         step: 0,
-        callId: CallId("c"),
+        callId: ToolCallId("c"),
         name: "skill",
         arguments: '{"name":"browser-skill"}',
       });
@@ -176,7 +171,11 @@ describe("lazy tools with the DSH session lifecycle", () => {
         {
           turn: 0,
           step: 0,
-          message: createToolResultMessage({ callId: CallId("c"), isError: false, content: [] }),
+          message: createToolResultMessage({
+            callId: ToolCallId("c"),
+            isError: false,
+            content: [],
+          }),
         },
         { surfaceOp: "append" },
       );

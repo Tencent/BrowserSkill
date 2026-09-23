@@ -294,16 +294,12 @@ describe("armLazyTools", () => {
 
   it("scans a long uninvoked session once and then consumes live call/results", () => {
     const session = Session.create(SessionId("streaming"));
-    const readHistory = vi.spyOn(session, "events", "get");
+    const readHistory = vi.spyOn(session, "snapshotEvents");
     const { ctx, listeners } = fakeEventCtx({ list: () => [session] });
     const registerSuite = vi.fn(() => () => {});
     armLazyTools(ctx, registerSuite);
     for (let i = 0; i < 20_000; i++) {
-      const event = session.append("assistant/chunk", {
-        turn: 0,
-        step: 0,
-        chunk: { type: "text-delta", index: 0, text: "x" },
-      });
+      const event = session.append("step/end", { turn: 0, step: i });
       callListeners(listeners, "session/event", session, event);
     }
     callListeners(listeners, "session/created", session);
