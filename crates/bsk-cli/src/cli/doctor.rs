@@ -218,7 +218,7 @@ fn check_home_writable() -> CheckResult {
 }
 
 fn check_skill_up_to_date() -> CheckResult {
-    let name = "agent skill up to date";
+    let name = "agent skill matches bundled CLI";
     let home = match crate::skill_install::harness::home_dir() {
         Ok(home) => home,
         Err(err) => {
@@ -235,11 +235,11 @@ fn check_skill_up_to_date() -> CheckResult {
 }
 
 fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> CheckResult {
-    let name = "agent skill up to date";
+    let name = "agent skill matches bundled CLI";
     let mut details = Vec::new();
     for (label, harnesses) in [
-        ("synced", &report.updated),
-        ("up to date", &report.up_to_date),
+        ("synced to bundled CLI", &report.updated),
+        ("already matches bundled CLI", &report.up_to_date),
         (
             "custom skill preserved (automatic updates disabled) in",
             &report.protected,
@@ -275,6 +275,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
     }
     for (harness, message) in &report.errors {
         details.push(format!("sync failed for {}: {message}", harness.cli_name()));
+    }
+    if !details.is_empty() {
+        details.insert(0, format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")));
     }
     let detail = details.join("; ");
 
@@ -587,8 +590,8 @@ mod m2_tests {
         });
         assert_eq!(check.status, CheckStatus::Fail);
         for text in [
-            "synced: claude-code",
-            "up to date: pi",
+            "synced to bundled CLI: claude-code",
+            "already matches bundled CLI: pi",
             "preserved (automatic updates disabled) in: cursor",
             "sync deferred in: hermes",
             "workbuddy: permission denied",
@@ -596,6 +599,23 @@ mod m2_tests {
             assert!(check.detail.contains(text), "{}", check.detail);
         }
         assert!(!check.hint.unwrap().contains("--force"));
+    }
+
+    #[test]
+    fn skill_check_scopes_its_claim_to_the_bundled_cli_version() {
+        use crate::skill_install::{HarnessId, sync::SyncReport};
+        let check = skill_check_from_report(&SyncReport {
+            up_to_date: vec![HarnessId::PiAgent],
+            ..Default::default()
+        });
+        assert_eq!(check.name, "agent skill matches bundled CLI");
+        assert!(
+            check
+                .detail
+                .contains(&format!("bundled bsk v{}", env!("CARGO_PKG_VERSION")))
+        );
+        assert!(check.detail.contains("already matches bundled CLI: pi"));
+        assert!(!check.detail.contains("up to date"));
     }
 
     #[test]
@@ -624,7 +644,7 @@ mod m2_tests {
                 assert!(check.detail.contains("automatic updates paused for cursor"));
                 assert!(check.detail.contains(reason.description()));
                 if updated {
-                    assert!(check.detail.contains("synced: claude-code"));
+                    assert!(check.detail.contains("synced to bundled CLI: claude-code"));
                 }
                 assert!(!has_failures(std::slice::from_ref(&check)));
                 let json = serde_json::to_value(&check).unwrap();
