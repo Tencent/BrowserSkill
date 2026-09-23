@@ -1,328 +1,311 @@
 # BrowserSkill
 
 <p align="center">
-  <img src="docs/assets/browserskill-readme-banner.png" alt="BrowserSkill 横幅" />
+  <img src="docs/assets/browserskill-readme-banner.png" alt="BrowserSkill — 将 AI Agent 连接到你的浏览器" />
 </p>
 
 <p align="center">
-  <strong>让 AI Agent 操作你的浏览器，而不打断你的工作。</strong>
+  <strong>让 AI Agent 在你已登录的浏览器里工作，你继续做自己的事。</strong>
 </p>
 
 <p align="center">
   <a href="README.md">English</a> · 中文
 </p>
 
-**BrowserSkill** 把 Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent、DeepSeek Harness 等 AI Agent 连接到你已登录的浏览器。
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#网站调试">网站调试</a> ·
+  <a href="#deepseek-harness-插件">DSH 插件</a> ·
+  <a href="#文档导航">文档导航</a> ·
+  <a href="CHANGELOG.md">更新日志</a>
+</p>
 
-需要 Agent 操作你已打开的标签页？必须显式借用该标签，任务结束后归还，其余浏览器窗口不受影响。
+**BrowserSkill 把你的 AI Agent 连接到 Chrome 或 Microsoft Edge，直接使用你已有的登录状态。** 你可以让它读取页面、填写表单、完成网站操作、截取长图，也可以让它调查某个请求为什么失败。任务在独立、可见的 **Agent Window（代理窗口）** 中运行；需要操作已有标签页时，显式借用，任务结束后归还。
+
+Cursor、Claude Code、Codex、OpenClaw、CodeBuddy、WorkBuddy、Pi、Hermes Agent 等能调用 Shell 的 Agent，都可以通过 `bsk` CLI 使用。**DeepSeek Harness** 还提供专用插件，直接使用浏览器工具并查看任务预览。Agent 和模型由你选择，BrowserSkill 负责连接浏览器。
+
+## 能做什么
+
+| 能力 | 你可以用它做什么 |
+| --- | --- |
+| **使用已有账号工作** | 复用浏览器登录态，读取文档、搜索内部网站、填写表单，完成需要登录的网站流程。 |
+| **看得见的浏览器任务** | 给 Agent 一个独立窗口，需要时借用已有标签页；遇到登录、验证等步骤，可以由你接手。 |
+| **读取、操作与截图** | 读取页面文本和控件，点击、输入、管理标签页，截取可见区域或完整页面，在本地模式上传和下载文件。 |
+| **带着证据调试网站** | 把操作与请求、响应正文、控制台和页面变化关联起来，检查性能、慢接口与疑似重复请求，用明确配置的 HTTP 规则或请求重放验证问题。 |
+| **选对浏览器和账号** | 为浏览器实例命名，让任务绑定指定 Profile；也可以让服务器上的 Agent 连接你电脑上的浏览器。 |
+| **回看任务过程** | 重新打开浏览器本地的调试历史、导出 JSON，或单独开启操作审计，查看任务执行记录。 |
+
+看看 Agent 如何完成一次浏览器任务：
 
 https://github.com/user-attachments/assets/db782c92-b1d4-4aae-a255-039675937a90
 
-## BrowserSkill 的优势
-
-- **复用真实登录态**：Agent 可以操作你已经登录的网站，不需要额外测试账号。
-- **不中断你的工作**：浏览器任务在独立可见的 Agent Window 中运行，不影响你继续使用自己的浏览器。
-- **支持任意 Agent**：只要 Agent 能调用 Shell，就可以通过 `bsk` CLI 使用 BrowserSkill，不绑定特定模型、Agent 框架或 harness。
-- **内置 human-in-loop**：遇到 captcha、登录、确认弹窗等必须由人处理的步骤时，Agent 可以主动请求你接管，完成后再继续任务。
-
-可以在插件的 **快捷功能 → 长截图** 中截取长图，也可以让 Agent 调用
-`bsk screenshot --session <id> --full-page --out page.png`。
-默认采集与编码超时为两分钟，长页面可加 `--timeout 5m`；支持 Ctrl-C 取消，结束后恢复原始滚动位置。
-需要使用同一版本的 CLI 和扩展，详见[长截图说明](docs/long-screenshot.md)。
-
-## 运行环境
-
-BrowserSkill 由两个本地运行组件组成：`bsk` CLI/daemon 和浏览器扩展。
-
-| 运行项 | 支持情况 |
-| --- | --- |
-| 操作系统 | macOS（Apple Silicon 和 Intel）、Linux（x64 和 ARM64）、Windows x64 |
-| 浏览器 | 已支持 Chrome 和 Microsoft Edge；其他支持加载 Chromium 扩展的浏览器通常可用；Firefox 计划中 |
-
 ## 快速开始
 
-如果 Agent 沙盒会在每条命令结束后回收后台进程，请先阅读
-[沙盒环境配置说明](docs/sandboxed-agents.md)：在宿主侧保持 daemon 存活，
-沙盒内通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。
-普通本地环境仍默认自动启动，无需额外配置。
+本地自动化需要 **AI Agent + `bsk` CLI + 浏览器扩展**。CLI 自带后台守护进程（daemon），skill 则负责告诉 Agent 如何使用这些工具。
 
-<details open>
-<summary><b>让 Agent 帮你安装（推荐）</b></summary>
+| 组件 | 支持环境 |
+| --- | --- |
+| CLI / daemon | macOS：Apple Silicon、Intel；Linux：x64、ARM64；Windows：x64 |
+| 浏览器扩展 | 基于 Chromium 125 或更新版本的 Chrome、Microsoft Edge。其他 Chromium 浏览器可能可用，但不保证兼容。 |
+| Agent 接入 | 能调用 Shell 的 Agent 配合 BrowserSkill skill，或 DeepSeek Harness 配合 [DSH 插件](#deepseek-harness-插件)。 |
 
-<br>
+### 让 Agent 帮你安装
 
-已经在用 Cursor、Claude Code、Codex 或其他支持 Shell 的 Agent？只需复制下面这句话发给 Agent，它会帮你安装 CLI 和 skill，并引导你加载浏览器扩展：
+把下面这句话发给 Agent：
 
 ```text
-按照 https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md 的说明，在本机安装并配置 browser-skill
+按照 https://raw.githubusercontent.com/Tencent/BrowserSkill/main/AGENT_INSTALL.md 的说明，在本机安装并配置 browser-skill。
 ```
 
-</details>
+安装指南会引导 Agent 安装 CLI、选择对应的 skill 或 DSH 插件、检查连接，并完成第一次浏览器任务。你仍需在想使用的浏览器中安装扩展：
+
+**[安装 Chrome 扩展](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)** · **[安装 Edge 扩展](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)**
 
 <details>
-<summary><b>手动安装</b></summary>
+<summary><b>手动安装步骤</b></summary>
 
-<br>
+#### 1. 安装 CLI
 
-先安装 CLI，再从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi)
-或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装浏览器扩展。
+macOS / Linux：
 
-#### 1. 安装 `bsk` CLI
-
-**macOS / Linux**（推荐，安装到 `~/.local/bin`）：
-
-```bash
+```sh
 curl -fsSL https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.sh | sh
 export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 ```
 
-**Windows**（PowerShell，安装到 `~/.local/bin`）：
+Windows PowerShell：
 
 ```powershell
 irm https://raw.githubusercontent.com/Tencent/BrowserSkill/main/install.ps1 | iex
 ```
 
-上面的 export 让当前 Unix shell 能找到 CLI。正在运行的 Agent 可能需要在每次 Shell
-调用中设置同样的 PATH，或使用安装后二进制的绝对路径。如果 Agent 安装后仍沿用旧 PATH，请重启 Agent。
+默认安装到 `~/.local/bin`。在实际使用工具的终端或 Agent 环境中检查：
 
-在实际使用工具的终端或 Agent 环境中验证二进制：
-
-```bash
+```sh
 bsk --version
 ```
 
-#### 2. 安装浏览器扩展
+如果已启动的 Agent 找不到 `bsk`，重启 Agent 以加载新的 PATH，或配置安装后二进制的绝对路径。
 
-在对应浏览器的商店安装 BrowserSkill：
+#### 2. 连接扩展
 
-| 浏览器 | 商店页面 |
-| --- | --- |
-| Chrome | [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) |
-| Microsoft Edge | [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) |
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展。打开弹窗，开启本地连接，在 CLI 启动后检查连接状态。
 
-其他基于 Chromium 的浏览器，安装 Chrome Web Store 版本即可。
+#### 3. 给 Agent 安装 skill
 
-#### 3. 安装 skill
-
-BrowserSkill 自带 skill，用于教 Agent harness 如何使用 `bsk`。以下 harness 可一键安装：
-
-<p align="center">
-<table>
-  <tr>
-    <td align="center" width="108"><a href="https://cursor.com" title="Cursor"><img src="docs/assets/harnesses/cursor.svg" height="36" alt="Cursor" /></a><br /><sub><b>Cursor</b></sub></td>
-    <td align="center" width="108"><a href="https://docs.anthropic.com/en/docs/claude-code" title="Claude Code"><img src="docs/assets/harnesses/claude.svg" height="36" alt="Claude Code" /></a><br /><sub><b>Claude Code</b></sub></td>
-    <td align="center" width="108"><a href="https://developers.openai.com/codex" title="Codex"><img src="docs/assets/harnesses/codex.svg" height="36" alt="Codex" /></a><br /><sub><b>Codex</b></sub></td>
-    <td align="center" width="108"><a href="https://openclaw.ai" title="OpenClaw"><img src="docs/assets/harnesses/openclaw.svg" height="36" alt="OpenClaw" /></a><br /><sub><b>OpenClaw</b></sub></td>
-    <td align="center" width="108"><a href="https://www.codebuddy.ai" title="CodeBuddy"><img src="docs/assets/harnesses/codebuddy.svg" height="36" alt="CodeBuddy" /></a><br /><sub><b>CodeBuddy</b></sub></td>
-    <td align="center" width="108"><a href="https://www.workbuddy.ai" title="WorkBuddy"><img src="docs/assets/harnesses/workbuddy.svg" height="36" alt="WorkBuddy" /></a><br /><sub><b>WorkBuddy</b></sub></td>
-    <td align="center" width="108"><a href="https://github.com/badlogic/pi-mono" title="Pi"><img src="docs/assets/harnesses/pi.svg" height="36" alt="Pi" /></a><br /><sub><b>Pi</b></sub></td>
-    <td align="center" width="108"><a href="https://github.com/NousResearch/hermes-agent" title="Hermes Agent"><img src="docs/assets/harnesses/hermes.png" height="36" alt="Hermes Agent" /></a><br /><sub><b>Hermes Agent</b></sub></td>
-  </tr>
-</table>
-</p>
-
-```bash
+```sh
 bsk install-skill
 ```
 
-用 <kbd>Space</kbd> 选择需要安装的 Agent harness，然后按 <kbd>Enter</kbd> 安装 skill。运行 `bsk install-skill --list` 可查看 internal 变体及安装路径。
+按 **空格** 选择使用的 Agent，按 **Enter** 安装。非交互安装时显式指定目标，例如：
 
-非交互安装时显式指定目标 harness，例如 `bsk install-skill --harness cursor --json`。
-即使未检测到该 harness，也可显式选择。单独使用 `--yes` 会安装到所有检测到的 harness，
-一个也未检测到时会报错。
+```sh
+bsk install-skill --harness cursor --json
+```
 
-安装器会复制完整技能包：`SKILL.md` 和 `references/`。入口保留核心流程与安全规则，
-Agent 只在任务需要时读取对应参考文件。
+用 `bsk install-skill --list` 查看支持的目标和安装路径。已有安装默认跳过，只有显式使用 `--force` 才会覆盖。其他 Agent 可将完整的 [`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) 目录复制到其 skill 目录下，命名为 `browser-skill/`，保留其中的 `references/`。
 
-安装自定义技能包可运行 `bsk install-skill --harness cursor --source ./my-skill`，
-目录中必须包含 `SKILL.md`；原来的单文件 `--source ./SKILL.md` 方式仍可使用。
-显式指定的来源路径可以是符号链接；目录包内部和安装目标的资源路径仍拒绝符号链接。
-显式指定 `--source` 始终视为自定义，即使内容与内置技能包相同。
-已有安装默认跳过，添加 `--force` 才会覆盖。
-
-daemon 启动、`session start` 和 `doctor` 会检查已安装的技能包：所有受管理文件仍与
-记录的校验值一致，才会自动更新。修改或删除 `SKILL.md`、任一 reference 都会暂停整个
-技能包的更新。用户额外添加的文件会保留；新增资源遇到同名且内容不同的文件时，也会
-暂停更新。已废弃且未被修改的受管理资源会删除。更新中断后，使用同一版本技能包且未
-发现本地修改时，会继续完成更新。
-
-带有效校验值的旧单文件安装会自动迁移；更早没有校验值的安装，内容与已知官方历史版本
-（LF 或 CRLF 行尾）或当前入口完全一致时也会迁移。显式自定义安装始终保持自定义。无法识别的历史内容、
-本地修改、无效标记或其他版本未完成的更新，会让 `doctor` 显示 `WARN` 并给出恢复方法，
-但不会使健康检查失败（`--json` 中为 `status: "warn"`、`ok: true`）。其他安装或同步正在
-进行时，本次同步会推迟到后续再试。
-
-如需将当前技能包保留为明确的自定义安装，运行
-`bsk install-skill --harness cursor --source <existing-skill-directory> --force`。
-如需恢复内置技能包并重新启用自动更新，运行
-`bsk install-skill --harness cursor --force`，不带 `--source`。后一条命令会覆盖内置技能包
-提供的文件，包括 references。采用上一版校验值机制的 CLI 无法识别新的包标记，因此会保留这些安装，不会覆盖。
-
-其他支持 Shell 的 Agent harness 可手动将整个
-[`crates/bsk-cli/skill/`](crates/bsk-cli/skill/) 目录复制到对应 skills 目录，命名为
-`browser-skill/`，保留 `references/`。通用版只维护这一套源文件。
-DeepSeek Harness 使用插件内独立的技能包，见 [DeepSeek Harness 插件](#deepseek-harness-插件)。
+DSH 用户安装 [插件](#deepseek-harness-插件) 即可，插件已包含 skill。
 
 #### 4. 验证连接
 
-运行 `bsk doctor` 并按提示处理，打开扩展弹窗确认已连接。测试浏览器操作前，说明警告并解决失败项。
-未安装任何 skill 时，doctor 仍可能通过（该项为 `N/A`）；skill 是否被发现需要单独验证。
+```sh
+bsk doctor
+```
+
+解决失败项，确认扩展显示**已连接**。再开启一个新的 Agent 会话，确认能发现 `browser-skill`；doctor 通过并不代表 Agent 已加载 skill。
 
 </details>
 
-启动一个新的 Agent 会话，确认 harness 中可用 `browser-skill`，再让它打开
-`https://example.com` 并总结页面。对于支持斜杠命令调用 skill 的 harness，例如：
+### 试一个任务
+
+连接成功后，对 Agent 说：
 
 ```text
-/browser-skill open example.com and summarize what is on the page.
+使用 browser-skill 打开 https://example.com，总结页面内容，完成后结束浏览器会话。
 ```
 
-首次使用验证应成功读取页面，并停止本次 BrowserSkill session。
-如果找不到 skill，先检查目标 harness 和安装路径，再重试。
+Agent 应打开代理窗口、读取页面、返回总结，并结束任务。支持 skill 斜杠命令的 Agent，也可以通过 `/browser-skill` 调用。
 
-### 升级
+<details>
+<summary><b>直接试用 CLI</b></summary>
 
-默认本地配置下，先结束正在执行的浏览器任务，再更新：
+先创建会话，记下返回的 `session_id`：
 
 ```sh
-bsk update --yes
+bsk session start --no-focus --json
 ```
 
-如果 Windows 提示更新已暂存（staged），请等待替换完成后再检查 `bsk --version`。
+将下面每条命令中的 `<id>` 替换为该值。有多个浏览器连接时，在创建会话时用 `--browser <实例 ID 或名称>` 选择目标。
 
-该命令安装新版本时，会以默认启动配置重启正在运行的 daemon。
-如果通过安装脚本替换了二进制，则在任务结束后运行 `bsk daemon restart`，重启已有 daemon。
+```sh
+bsk navigate https://example.com --session <id>
+bsk observe --session <id>
+bsk screenshot --session <id> --out example.png
+bsk session stop <id>
+```
 
-对于自定义端口、宿主管理的沙盒 daemon 或远程服务器，先在所属宿主环境或进程管理器中停止 daemon，
-运行 `bsk update --yes --no-restart-daemon`，再以原有参数和 `BSK_HOME` 在那里启动。
-维护期间，在 Agent 命令中设置 `BSK_AUTO_START=0`；详见[沙盒](docs/sandboxed-agents.md)和
-[远程连接](docs/remote-extension-connection.md)配置说明。
+通过 `bsk --help` 或 `bsk <命令> --help` 查看参数。完成或失败后都应结束会话；借用的标签页会归还到原窗口。
 
-通过浏览器商店更新扩展；开发时加载的解压版本需要重新构建并重新加载。
-商店版本可能晚于 CLI 上线。使用 `bsk --version` 和 `bsk status` 核对 CLI、daemon 和扩展版本，
-再运行 `bsk doctor`。长截图等新功能需要匹配的版本。
-[DSH 插件需要单独更新](#deepseek-harness-插件)，并重启对应 profile。
-受管理的 CLI skill 会在 daemon 启动、`session start` 或 `doctor` 时同步；本地编辑和自定义 skill 会保留。
-启动新的 Agent 会话以加载更新后的指令。
+</details>
 
-**升级到 0.3.0：** `--unattended`、`tab borrow --no-confirm` 和 `BSK_REQUEST_HELP=off`
-不再跳过确认或关闭人工协助。请在扩展中选择下文说明的对应设置。版本变化见[更新日志](CHANGELOG.md)。
-
-### 自动化设置与无人值守
-
-插件弹窗提供两个默认开启的独立设置。**用户在插件中保存的设置对所有会话具有最终决定权：**
-
-| 借用标签页前确认 | 允许请求人工协助 | 实际行为 |
-| --- | --- | --- |
-| 开 | 开 | 借用需要确认；求助正常弹窗。 |
-| 开 | 关 | 借用需要确认；求助返回 `disabled`。 |
-| 关 | 开 | 借用免确认；求助正常弹窗。 |
-| 关 | 关 | 借用免确认；求助返回 `disabled`。 |
-
-设置自动保存到当前浏览器配置，对已有和新建会话生效。关闭借用确认会放行待确认请求；
-关闭人工协助会将等待中的求助结束为 `disabled`。重新打开开关后，后续操作恢复对应行为，
-包括通过旧参数 `--unattended` 创建的会话。已完成的借用不会撤销，已结束的求助不会重新弹出。
-允许人工协助意味着 `request-help` 可用，不代表每个浏览器操作都必须先请求许可；任务授权和宿主审批仍然有效。
-
-正常使用 `bsk session start`；需要后台打开 Agent Window 时添加 `--no-focus`。
-需要指定 Chrome Profile 时，在目标 Profile 的扩展弹窗中点击“复制此 Profile 的指令”，
-再发给 Agent。指令通过 `--browser` 为每个新会话固定实例，即使只有一个浏览器在线也不省略。
-详见[浏览器 Profile 选择](docs/browser-profiles.md)。
-需要长期使用时，可以在同一弹窗中设置唯一的“浏览器名称”，并通过
-`--browser "工作账号"` 选择。保存名称会短暂重连 BrowserSkill，使 Daemon 立即使用新名称；
-当前浏览器有任务运行时，名称编辑会暂时禁用，避免中断任务。
-无人值守由用户在插件中关闭相应开关。`--unattended`、`tab borrow --no-confirm`、
-`BSK_REQUEST_HELP=off` 保留兼容识别，但已弃用，不能覆盖插件开关。CLI 使用这些输入时会输出说明，
-Daemon 也会为自身继承的旧环境设置记录说明。原先只依靠这些输入避免等待的脚本，现在需要遵循浏览器设置。
-`session start --json` 和 `session list --json` 返回浏览器实际的 `interaction` 策略。
-
-关闭人工协助后，`request-help` 返回 `disabled`，不代表用户已完成操作。技能会引导 Agent
-重新观察页面，利用现有登录态、已授权输入和可用工具尽力完成已授权的步骤。
-任务授权和宿主规则允许时，具备视觉能力的模型可以尝试图形验证。手机扫码、人脸验证、
-无法获取的短信验证码，以及纯文本模型无法识别的图形验证码可以报告受阻。
-关闭协助不增加授权，也不能仅因求助不可用就将任务判为完成或受阻。
-
-偏好读取失败时，后台保留已有有效值；尚无有效值时按两项开启处理，不写回默认值，也不阻止新建会话。
-后续请求会重试读取，存储变更也能恢复策略。弹窗保留读取错误提示并禁止保存；写入失败不会被当作成功。
-浏览器未连接时返回连接错误，不会根据命令行参数或环境变量在本地伪造 `disabled`。
-
-`tab borrow --timeout 60s` 只设置确认等待时间，不决定是否需要确认。
-协议 1.3 保持与协议 1.0–1.2 的连接兼容，分步升级时仍可创建普通会话、使用默认等待时间借用标签页。
-插件会提示旧 Daemon 的兼容限制，`bsk status` 也会显示协议差异。自定义借用等待时间要求 Daemon 和扩展
-都支持协议 1.2 或更高版本；不支持时只限制这次操作，并提示升级。旧 Daemon 的默认借用等待预算可能仍较短。
-
-新版 CLI 的 `request-help` 要求 Daemon 协议 1.3，因为旧 Daemon 可能在本地返回而不询问浏览器。
-该限制不会断开浏览器连接，也不影响其他操作。CLI、实际运行的 Daemon 和扩展都更新后，完整执行上述设置优先级。
-新版扩展始终按保存的开关处理它收到的请求。旧 CLI 可能在连接 Daemon 前就因 `BSK_REQUEST_HELP=off` 本地返回；
-混用版本时保留这类历史行为，只升级扩展无法改变旧可执行文件的行为。
-
-在服务器运行 Agent，通过内置鉴权服务与本地浏览器配对，也可选择兼容的第三方网关。详见[远程浏览器连接](docs/remote-extension-connection.md)。
+如果 Agent 沙盒会在每条命令后回收后台进程，请使用[沙盒配置指南](docs/sandboxed-agents.md)：在宿主环境保持 daemon 运行，Agent 通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。
 
 ## DeepSeek Harness 插件
 
-在用 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）？BrowserSkill 提供了官方 dsh 插件，已发布到 npm：[`@wxg-prc-cpg/browser-skill-dsh-plugin`](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)。它为 Agent 提供原生 `browser_*` 工具，由插件代为调用 `bsk`，并在 Web UI 中实时展示浏览器会话。
+[DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `browser_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
 
-先安装 `bsk` CLI 并连接浏览器扩展，再将插件装进 dsh profile 并启动（将 `web` 替换为你的 profile 名称）：
+安装好 DeepSeek Harness、pnpm 和 `bsk`，连接扩展后，将插件加入你的 profile：
 
 ```sh
 dsh plugin --profile web add @wxg-prc-cpg/browser-skill-dsh-plugin
 dsh --profile web
 ```
 
-插件自带 `browser-skill` skill，所以在 dsh 下无需执行 `bsk install-skill`。已安装的插件不会自动更新；升级此插件请运行：
+将 `web` 替换为自己的 profile 名称。确保启动 DSH 的环境能通过 PATH 找到 `bsk`，或配置插件的 `bskPath`。在对话中调用 `/browser-skill` 并描述任务即可，无需再执行 `bsk install-skill`。
+
+[插件使用与配置](packages/dsh-plugin-browserskill/README.md) · [npm 包](https://www.npmjs.com/package/@wxg-prc-cpg/browser-skill-dsh-plugin)
+
+## 网站调试
+
+**让 Agent 看到问题发生时的浏览器证据。** 在你有权调试的网站上，先开启采集，再复现问题，随后在扩展中查看，或交给 Agent 分析。
+
+- **沿着操作找原因**：查看一次操作关联的请求、控制台输出、表单字段值，以及即时或延后的页面变化；既记录 Agent 操作，也记录受支持的手动操作。
+- **展开请求看细节**：读取已保留的请求头、提交数据、响应正文、耗时与错误，筛选流量或直接查看某个 JSON 字段。
+- **检查性能和接口**：查看页面加载指标、接口耗时统计和疑似重复请求；缺失或不完整的数据会明确标记。
+- **验证并保留证据**：配置任务内的请求修改、拦截、模拟响应或同源请求重放，导出 JSON，供后续复查和分享。
+
+例如可以这样交代任务：
+
+```text
+使用 browser-skill 排查 http://localhost:3000 的表单保存失败问题。复现前开启网站调试，检查请求、响应和控制台，最后导出调试证据并结束会话。
+```
+
+也可以在扩展中打开**快捷功能 → 网站调试**，对已有任务启动采集。调试页将操作时间线、请求、控制台、页面状态、性能和 API 分析放在一起。任务结束后，即使没有连接 daemon，仍可打开历史查看记录；新的 Agent 任务需要你提供导出的文件，才能分析已结束任务的历史。
+
+请求重放会使用页面当前会话发送一次新请求，可能改变服务端数据。采集和脱敏均有限制，保存的证据仍可能包含敏感信息。完整流程、CLI 示例及限制见[网站调试指南](docs/website-debugging.md)。
+
+## 更多用法
+
+### 截取完整页面
+
+打开**快捷功能 → 长截图**，选择自动滚动、手动滚动拼接长图或截取可见区域。这个扩展功能无需连接 Agent 或 daemon，也可以独立使用。
+
+对 Agent 会话中的页面，可以执行：
+
+```sh
+bsk screenshot --session <id> --full-page --out page.png
+```
+
+Agent 截图支持后台标签页，无需将窗口切到前台；原文档仍可访问时，完成后会恢复滚动位置。长截图沿页面文档滚动，嵌套滚动面板和虚拟列表存在支持限制。详见[长截图指南](docs/long-screenshot.md)。
+
+### 使用指定浏览器 Profile
+
+在目标 Profile 的扩展弹窗中点击**复制此 Profile 的指令**，将指令和任务一起发给 Agent。也可以设置唯一的**浏览器名称**，再显式选择：
+
+```sh
+bsk browsers
+bsk session start --browser "工作账号" --no-focus --json
+```
+
+这个名称由你在 BrowserSkill 中设置，不会自动读取 Chrome 的 Profile 名称。每个会话固定使用选定的实例。详见[Profile 选择指南](docs/browser-profiles.md)。
+
+### Agent 在服务器，浏览器在本机
+
+保留本机浏览器和登录态，让 Agent、CLI 与 daemon 在服务器运行。扩展通过经过鉴权的 WSS 与服务器配对，由浏览器主动建立连接，本机无需开放入站端口。
+
+内置服务端支持设备配对、续期和撤销授权。远程模式目前不支持文件上传和下载。详见[远程连接指南](docs/remote-extension-connection.md)。
+
+## 浏览器控制与隐私
+
+代理窗口共享所选 Profile 的登录态，**它不是独立账号，也不是安全沙盒**。Agent 可以使用已登录网站授予的权限执行操作，请选择你信任的 Agent 和任务。
+
+扩展提供两个默认开启、相互独立的**自动化设置**：
+
+| 设置 | 控制什么 |
+| --- | --- |
+| **借用标签页前确认** | Agent 接管你已有的标签页之前，先请求确认。关闭后允许免确认借用。 |
+| **允许请求人工协助** | 允许 Agent 请你处理登录、验证或其他需要本人参与的步骤。 |
+
+浏览器中保存的设置对已有和新建会话生效。旧的 `--unattended`、`tab borrow --no-confirm`、`BSK_REQUEST_HELP=off` 不能覆盖这些设置。关闭人工协助不代表待处理步骤已经完成。关闭代理窗口可以停止其中的任务。
+
+BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动化结果交给你选定的 daemon 或网关，以及使用它的 Agent；对应 Agent 或服务可能按自身政策处理或保留数据。扩展不会自行调用 AI 提供商。
+
+| 可选历史记录 | 保存位置 | 需要知道的事 |
+| --- | --- | --- |
+| **网站调试** | 当前浏览器配置中，远程模式也一样 | 保存采集到的数据，包括可获取的正文和字段值。已停止记录 30 天后过期，保留预算为 50 条／50 MiB，达到限制时可能提前清理。删除记录前需先停止采集。 |
+| **操作审计** | daemon 所在主机的 `BSK_HOME/audit` | 默认关闭。记录任务与操作元数据，不记录输入值、页面正文、截图或文件内容。已结束任务 30 天后过期。 |
+
+两者均可导出和删除。结束任务或断开连接不会删除已保存的历史，过期记录会在访问历史或执行清理时处理。导出的文件、Agent 或网关已经收到的副本需要另行管理。调试数据会过滤已知敏感信息，但不能保证完全脱敏。
+
+[隐私政策](apps/extension/PRIVACY.zh-CN.md) · [操作审计](docs/operation-audit.md) · [调试历史与保留限制](docs/website-debugging.md#history-and-export)
+
+## 升级
+
+先结束正在执行的浏览器任务，再更新 CLI：
+
+```sh
+bsk update --yes
+```
+
+默认本地配置下，安装更新后会重启正在运行的 daemon。Windows 如果提示更新已暂存，请等待替换完成。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+
+扩展通过浏览器商店更新。DSH 插件需要单独更新，完成后重启对应 profile：
 
 ```sh
 dsh plugin --profile web update @wxg-prc-cpg/browser-skill-dsh-plugin --latest
 ```
 
-升级后重启该 profile。用法与配置见[插件 README](packages/dsh-plugin-browserskill/README.md)。
+通过 `bsk --version`、`bsk status` 和 `bsk doctor` 检查版本与连接。使用新功能时，保持 CLI、正在运行的 daemon、扩展和可选 DSH 插件版本匹配。本 README 介绍当前仓库的能力，商店版本可能因审核而滞后；已发布内容以[更新日志](CHANGELOG.md)和 [Releases](https://github.com/Tencent/BrowserSkill/releases) 为准。
 
-## 工作原理
+受管理的 CLI skill 在文件未被修改时，会随 daemon 启动、`session start` 或 `doctor` 自动同步；本地修改和自定义 skill 会保留。开启新的 Agent 会话以加载更新后的指令，doctor 会提示暂停同步的安装。
 
-BrowserSkill 是 Agent 运行时与浏览器之间的本地桥接层。
+<details>
+<summary><b>自定义端口、沙盒宿主和远程服务器</b></summary>
 
-```mermaid
-flowchart TB
-  subgraph Harness["Agent 运行时"]
-    Agent["Cursor / Claude Code / Codex / OpenClaw"]
-  end
+在 daemon 所属宿主或进程管理器中停止服务，执行 `bsk update --yes --no-restart-daemon`，再使用原参数与 `BSK_HOME` 启动。管理期间，在 Agent 命令中设置 `BSK_AUTO_START=0`。具体步骤见[沙盒](docs/sandboxed-agents.md)或[远程连接](docs/remote-extension-connection.md)指南。
 
-  subgraph Local["本机"]
-    CLI["bsk CLI"]
-    Daemon["bsk daemon"]
-    Extension["BrowserSkill 扩展"]
-  end
+</details>
 
-  subgraph Browser["浏览器配置文件"]
-    AgentWindow["Agent Window"]
-    UserWindows["你的常规浏览器窗口"]
-  end
+## 文档导航
 
-  Agent -->|"shell: bsk ..."| CLI
-  CLI -->|"本地 IPC"| Daemon
-  Daemon -->|"127.0.0.1 WebSocket"| Extension
-  Extension -->|"自动化"| AgentWindow
-  Extension -.->|"仅在请求时借用标签"| UserWindows
-
-  style AgentWindow fill:#fff4e6,stroke:#f59e0b,stroke-width:2px,color:#111827
-  style UserWindows fill:#f8fafc,stroke:#cbd5e1,color:#334155
-```
-
-Agent 不直接与浏览器通信。它通过 `bsk` CLI 下发浏览器任务；本地 daemon 把请求路由到扩展；扩展在 Agent Window 中执行。DeepSeek Harness 走同一条链路，只是经由 [插件](#deepseek-harness-插件)：Agent 调用注入的 `browser_*` 工具，由插件代为执行 `bsk`。
+| 你想做什么 | 文档 |
+| --- | --- |
+| 让 Agent 安装并验证连接 | [安装指南](AGENT_INSTALL.md) |
+| 排查网站或接口问题 | [网站调试](docs/website-debugging.md) |
+| 截取长页面 | [长截图](docs/long-screenshot.md) |
+| 使用指定账号或 Profile | [浏览器 Profile](docs/browser-profiles.md) |
+| 连接服务器上的 Agent | [远程浏览器连接](docs/remote-extension-connection.md) |
+| 在沙盒中使用 | [沙盒环境配置](docs/sandboxed-agents.md) |
+| 回看任务操作元数据 | [操作审计](docs/operation-audit.md) |
+| 接入 DeepSeek Harness | [DSH 插件](packages/dsh-plugin-browserskill/README.md) |
+| 了解项目实现 | [架构](docs/architecture.md) · [协议](crates/bsk-protocol/README.md) |
 
 ## 面向开发者
 
-[scroll-to 原语说明](docs/scroll-to.md)介绍 CLI、协议和插件入口，以及可见区域、错误和中断语义。
+项目使用 Rust + pnpm workspace。源码构建需要 Rust stable、Node.js 22，以及 `package.json` 声明的 pnpm 版本：
 
-本仓库是 Cargo + pnpm workspace：
+```sh
+pnpm install --frozen-lockfile
+cargo build --release --locked
+pnpm ext:build
+```
 
-- `crates/bsk-cli` — `bsk` CLI 与本地 daemon
-- `crates/bsk-protocol` — 共享协议类型与 JSON Schema
-- `apps/extension` — 浏览器扩展
-- `packages/ui` 和 [`packages/i18n`](packages/i18n/README.md) — 扩展 UI 共享支持，包含英文、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语本地化
-- `packages/dsh-plugin-browserskill` — DeepSeek Harness 插件（`@wxg-prc-cpg/browser-skill-dsh-plugin`）
-- [`evals/browser`](evals/browser/README.zh-CN.md) — 确定性本地页面与 Agent 无关的浏览器能力测试台
+CLI 产物位于 `target/release/`；将 `apps/extension/dist/chrome-mv3/` 作为解压后的扩展加载。开发扩展时使用 `pnpm ext:dev`。
+
+| 目录 | 内容 |
+| --- | --- |
+| `crates/bsk-cli` | CLI、daemon 和内置 Agent skill |
+| `crates/bsk-protocol` | 通信类型与 JSON Schema |
+| `apps/extension` | 浏览器自动化、调试工作区和扩展界面 |
+| `packages/dsh-plugin-browserskill` | DeepSeek Harness 集成 |
+| `packages/ui`、`packages/i18n`、`packages/vom` | 共享 UI、多语言和页面观察 |
+| `evals/browser` | 本地测试页面与浏览器能力评测 |
+
+相关检查包括 `cargo test --workspace --locked`、`pnpm ext:test` 和 `pnpm lint`。可复现的浏览器用例见[评测指南](evals/browser/README.zh-CN.md)。欢迎通过 [GitHub Issues](https://github.com/Tencent/BrowserSkill/issues) 报告问题，或提交聚焦的 PR；附上浏览器证据前，请移除敏感数据。
+
+扩展界面支持英语、简体中文、繁体中文、韩语、日语、法语、意大利语、西班牙语、德语和巴西葡萄牙语。翻译贡献见[多语言说明](packages/i18n/README.md)。
 
 ## 许可证
 
-MIT
+[MIT](LICENSE)
