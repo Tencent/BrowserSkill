@@ -1,0 +1,66 @@
+.thumbnail,
+.retry,
+.preview button {
+  font: inherit;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.thumbnail {
+  display: block;
+  max-width: min(100%, 240px);
+  padding: 0;
+  overflow: hidden;
+}
+
+.thumbnail img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  width: auto;
+  height: auto;
+}
+
+.retry,
+.preview button {
+  padding: 6px 10px;
+}
+
+.thumbnail:focus-visible,
+.retry:focus-visible,
+.preview button:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+}
+
+.preview {
+  box-sizing: border-box;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  padding: 16px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 12px;
+}
+
+.preview::backdrop {
+  background: var(--dsw-alias-bg-mask-photo);
+}
+
+.preview form {
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 0 12px;
+}
+
+.preview img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 112px);
+  width: auto;
+  height: auto;
+}

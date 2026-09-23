@@ -134,6 +134,7 @@ describe("BrowserInspectToolView", () => {
     renderView(block, loadImage);
     // Collapsed row shows the summary; expand to reach the image.
     expect(screen.getByText(IMAGE_TEXT)).toBeTruthy();
+    expect(loadImage).not.toHaveBeenCalled();
     const toggle = screen.getByRole("button", { name: /screenshot/i });
     toggle.click();
     await waitFor(() => expect(loadImage).toHaveBeenCalledWith(ATTACHMENT));
