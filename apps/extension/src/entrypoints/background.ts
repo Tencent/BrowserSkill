@@ -37,6 +37,11 @@ import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
 import {
+  attachAgentWindowTabGuard,
+  chromeTabGuardTabsApi,
+  chromeTabGuardWindowsApi,
+} from "@/session-manager/tab-guard";
+import {
   attachBorrowNotificationButtonHandler,
   attachBorrowNotificationClickHandler,
   type BorrowNotificationCopy,
@@ -387,6 +392,12 @@ export default defineBackground(() => {
     transport,
     cdp,
     onSessionsChanged: onOverlaySessionStateChanged,
+  });
+  attachAgentWindowTabGuard({
+    manager: sessions,
+    tabs: chromeTabGuardTabsApi,
+    windows: chromeTabGuardWindowsApi,
+    events: { onCreated: chrome.tabs.onCreated, onAttached: chrome.tabs.onAttached },
   });
 
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
