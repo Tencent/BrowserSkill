@@ -183,6 +183,7 @@ export async function handleFullPageScreenshot(
     attachmentId = deps.cdp.getAttachmentId?.(target.tabId);
     if (!attachmentId) throw new ScreenshotError("changed");
     await client.prepare();
+    const platform = await waitForReply(chrome.runtime.getPlatformInfo(), controller.signal);
     const ensureRendering = async (active: boolean) => {
       if (platform.os !== "win" || active || rendering) return;
       // Focus emulation keeps script execution alive, but Windows can stop
@@ -225,7 +226,9 @@ export async function handleFullPageScreenshot(
           target.tabId,
           target.windowId,
           controller.signal,
-          checkTab,
+          async () => {
+            await checkTab();
+          },
           true,
           async () => {
             deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -246,7 +249,7 @@ export async function handleFullPageScreenshot(
               async close() {}, // The session retains ownership of its debugger.
             };
           },
-          ctx.container.mode === "in_window",
+          ctx.container.mode !== "window",
         );
         phase = "capturing";
         await capturePage({

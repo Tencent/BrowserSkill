@@ -12,7 +12,7 @@ afterEach(() => {
 function fixture() {
   const task = {
     remote: true,
-    agentWindowId: 10,
+    container: { mode: "window" as const, agentWindowId: 10 },
     refStore: { documentRevision: () => 1 },
     agentCreatedTabs: new Set([5]),
     borrowedTabs: new Map(),

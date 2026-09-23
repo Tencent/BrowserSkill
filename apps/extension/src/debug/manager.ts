@@ -8,6 +8,7 @@ import {
   isAgentControlledTab,
   type SessionContext,
   type SessionManager,
+  sessionWindowId,
 } from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
@@ -143,6 +144,10 @@ export class DebugManager {
   private owned(sessionId: string, tabId: number): boolean {
     const context = this.sessions.get(sessionId);
     return context !== null && isAgentControlledTab(context, tabId);
+  }
+  private inSessionWindow(sessionId: string, windowId: number): boolean {
+    const context = this.sessions.get(sessionId);
+    return context !== null && sessionWindowId(context) === windowId;
   }
   private active(sessionId: string, tabId?: number): RunState | undefined {
     return [...this.runs.values()].find(
@@ -318,7 +323,7 @@ export class DebugManager {
         if (this.sessions.get(sessionId) !== owner)
           throw new Error("task ended during debug start");
         const tab = await wait(this.tabs.get(tabId));
-        if (tab.windowId !== this.sessions.get(sessionId)?.agentWindowId)
+        if (!this.inSessionWindow(sessionId, tab.windowId))
           throw new Error("debug tab must remain in its Agent Window");
         if (!this.runs.has(id) || state.run.state !== "capturing")
           throw new Error("capture stopped during debug start");
@@ -561,7 +566,7 @@ export class DebugManager {
       params.tab_id ??
       (
         await deadline(
-          this.tabs.query({ windowId: context.agentWindowId, active: true }),
+          this.tabs.query({ windowId: sessionWindowId(context), active: true }),
           OBSERVATION_TIMEOUT_MS,
           signal,
         )
@@ -841,7 +846,7 @@ export class DebugManager {
       );
       if (!this.owned(state.run.session_id, state.run.tab_id) || state.run.state !== "capturing")
         return { at, state: "unavailable" };
-      if (tab.windowId !== this.sessions.get(state.run.session_id)?.agentWindowId)
+      if (!this.inSessionWindow(state.run.session_id, tab.windowId))
         return { at, state: "unavailable" };
       const lines: string[] = [];
       let chars = 0;
@@ -988,7 +993,9 @@ export class DebugManager {
     this.sync();
     return Promise.all(
       this.sessions.list().map(async (context) => {
-        const tab = (await this.tabs.query({ windowId: context.agentWindowId, active: true }))[0];
+        const tab = (
+          await this.tabs.query({ windowId: sessionWindowId(context), active: true })
+        )[0];
         const latest = [...this.runs.values()]
           .filter(({ run, released }) => !released && run.session_id === context.sessionId)
           .at(-1);
@@ -1354,7 +1361,7 @@ export class DebugManager {
       const tab = await this.tabs.get(state.run.tab_id);
       if (
         !this.owned(params.session_id, state.run.tab_id) ||
-        tab.windowId !== this.sessions.get(params.session_id)?.agentWindowId
+        !this.inSessionWindow(params.session_id, tab.windowId)
       )
         throw new Error("debug tab must remain in its Agent Window");
       if (signal?.aborted) throw new Error("debug action cancelled");

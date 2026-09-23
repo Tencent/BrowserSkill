@@ -221,6 +221,7 @@ describe("ToolDispatcher", () => {
   });
 
   it("routes tool.session_stop and replies with empty result", async () => {
+    vi.stubGlobal("chrome", { tabs: { remove: vi.fn(async () => {}) } });
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
@@ -234,9 +235,8 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
-    await flushMicrotasks();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sessions.has("aa11")).toBe(false);
-    expect(sent).toHaveLength(1);
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
   });
 
@@ -278,7 +278,9 @@ describe("ToolDispatcher", () => {
     // ...and the window is released rather than closed, so the user's tab survives.
     expect(closeWindow).not.toHaveBeenCalled();
     expect(sessions.has("aa11")).toBe(false);
-    expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+    await vi.waitFor(() =>
+      expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } }),
+    );
   });
 
   it("routes tool.console through the CDP console buffer", async () => {
@@ -429,6 +431,7 @@ describe("ToolDispatcher", () => {
   });
 
   it("detaches CDP state before stopping a session", async () => {
+    vi.stubGlobal("chrome", { tabs: { remove: vi.fn(async () => {}) } });
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
@@ -457,7 +460,7 @@ describe("ToolDispatcher", () => {
     dispatcher.start();
 
     deliver(makeRequest("tool.session_stop", { session_id: "aa11" }));
-    await flushMicrotasks();
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(cdp.detachSession).toHaveBeenCalledWith("aa11");
     expect(sessions.has("aa11")).toBe(false);
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
@@ -591,6 +594,7 @@ describe("ToolDispatcher", () => {
   });
 
   it("invokes onSessionsChanged after session.start and session.stop", async () => {
+    vi.stubGlobal("chrome", { tabs: { remove: vi.fn(async () => {}) } });
     const { transport, deliver } = fakeTransport();
     const sessions = new SessionManager({
       agentWindow: {
@@ -608,8 +612,7 @@ describe("ToolDispatcher", () => {
     expect(onSessionsChanged).toHaveBeenCalledTimes(1);
 
     deliver({ ...makeRequest("tool.session_stop", { session_id: "aa11" }), id: "r-2" });
-    await flushMicrotasks();
-    expect(onSessionsChanged).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(onSessionsChanged).toHaveBeenCalledTimes(2));
   });
 
   it.each([
@@ -961,7 +964,11 @@ describe("ToolDispatcher", () => {
       return { id: 7, windowId: 200, index: 4 };
     });
     vi.stubGlobal("chrome", {
-      tabs: { sendMessage, move },
+      tabs: {
+        sendMessage,
+        get: vi.fn(async () => ({ id: 7, windowId: 100, index: 0 })),
+        move,
+      },
       windows: { get: vi.fn(async () => ({ id: 200 })) },
     });
     const { transport, sent, deliver } = fakeTransport();

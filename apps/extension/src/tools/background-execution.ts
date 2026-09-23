@@ -1,7 +1,7 @@
 import {
   isAgentControlledTab,
-  sessionWindowId,
   type SessionManager,
+  sessionWindowId,
 } from "@/session-manager/manager";
 import type { RequestFrame, RpcError } from "@/transport/types";
 import {

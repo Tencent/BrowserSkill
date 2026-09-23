@@ -1,5 +1,6 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
+import type { SessionResourceJournal, SessionResourceRecord } from "./resource-journal";
 import { chromeSharedWindowApi, type SharedWindowApi } from "./shared-window";
 
 export interface SessionContext {
@@ -8,7 +9,8 @@ export interface SessionContext {
   sessionId: string;
   container:
     | { mode: "window"; agentWindowId: number }
-    | { mode: "in_window"; hostWindowId: number };
+    | { mode: "in_window"; hostWindowId: number }
+    | { mode: "existing_tab"; hostWindowId: number };
   activeTabId?: number;
   pendingOperations?: number;
   stopping?: boolean;
@@ -30,7 +32,7 @@ export function sessionWindowId(ctx: SessionContext): number {
 }
 
 export function isSharedSession(ctx: SessionContext): boolean {
-  return ctx.container.mode === "in_window";
+  return ctx.container.mode !== "window";
 }
 
 /** Whether this session has explicitly claimed control of `tabId`. */
@@ -58,12 +60,18 @@ export interface SessionManagerOptions {
   remote?: () => boolean;
   agentWindow?: AgentWindowApi;
   sharedWindow?: SharedWindowApi;
+  journal?: SessionResourceJournal;
   now?: () => number;
 }
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
   inWindow?: boolean;
+  existingTab?: {
+    tabId?: number;
+    current?: boolean;
+    approve(tabId: number): Promise<void>;
+  };
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
@@ -115,6 +123,10 @@ function throwIfSessionStartAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw sessionStartAbortError();
 }
 
+export function isMissingChromeResourceError(error: unknown): boolean {
+  return /No (?:tab|window) with id|Invalid (?:tab|window) ID|not found/i.test(String(error));
+}
+
 /**
  * Owner of all live agent sessions inside the extension.
  *
@@ -134,6 +146,7 @@ export class SessionManager {
   private readonly borrowReservations = new Map<number, string>();
   private readonly expectedWindowClosures = new WeakSet<SessionContext>();
   private readonly agentWindow: AgentWindowApi;
+  private readonly journal?: SessionResourceJournal;
   private readonly now: () => number;
   private readonly sharedWindow: SharedWindowApi;
   private readonly starting = new Set<string>();
@@ -142,6 +155,7 @@ export class SessionManager {
   constructor(options: SessionManagerOptions = {}) {
     this.remote = options.remote ?? (() => false);
     this.agentWindow = options.agentWindow ?? chromeAgentWindowApi;
+    this.journal = options.journal;
     this.now = options.now ?? Date.now;
     this.sharedWindow = options.sharedWindow ?? chromeSharedWindowApi;
   }
@@ -177,6 +191,38 @@ export class SessionManager {
 
   list(): SessionContext[] {
     return Array.from(this.sessions.values());
+  }
+
+  /** Restore a context whose resources were journaled by an earlier MV3 worker. */
+  restore(record: SessionResourceRecord): SessionContext {
+    const existing = this.sessions.get(record.sessionId);
+    if (existing) return existing;
+    const ctx: SessionContext = {
+      sessionId: record.sessionId,
+      container: record.container,
+      ...(record.remote !== undefined ? { remote: record.remote } : {}),
+      ...(record.activeTabId !== undefined ? { activeTabId: record.activeTabId } : {}),
+      ...(record.phase !== "active" ? { stopping: true } : {}),
+      refStore: new RefStore(),
+      borrowedTabs: new Map(record.borrowedTabs.map((tab) => [tab.tabId, tab])),
+      agentCreatedTabs: new Set(record.agentCreatedTabIds),
+      createdAtMs: record.createdAtMs,
+    };
+    this.sessions.set(ctx.sessionId, ctx);
+    if (ctx.container.mode === "window") {
+      this.windowIndex.set(ctx.container.agentWindowId, ctx.sessionId);
+    }
+    return ctx;
+  }
+
+  persist(ctx: SessionContext): Promise<void> {
+    return this.journal?.save(ctx) ?? Promise.resolve();
+  }
+
+  schedulePersist(ctx: SessionContext): void {
+    void this.persist(ctx).catch((error) => {
+      console.warn(`[bh] failed to persist session ${ctx.sessionId} resources`, error);
+    });
   }
 
   isRemote(): boolean {
@@ -244,9 +290,10 @@ export class SessionManager {
     this.borrowReservations.delete(tabId);
     this.invalidateTabRefs(tabId);
     for (const ctx of this.sessions.values()) {
-      ctx.agentCreatedTabs.delete(tabId);
+      const agentChanged = ctx.agentCreatedTabs.delete(tabId);
       ctx.observedTabs?.delete(tabId);
-      if (!isWindowClosing) ctx.borrowedTabs.delete(tabId);
+      const borrowChanged = !isWindowClosing && ctx.borrowedTabs.delete(tabId);
+      if (agentChanged || borrowChanged) this.schedulePersist(ctx);
       if (!isWindowClosing) this.checkEmpty(ctx);
     }
   }
@@ -337,15 +384,32 @@ export class SessionManager {
     }
     throwIfSessionStartAborted(opts.signal);
 
+    if (opts.existingTab) return this.startExistingTab(sessionId, opts);
     if (opts.inWindow) return this.startShared(sessionId, opts);
 
+    this.starting.add(sessionId);
     let windowId: number | null = null;
     const agentCreatedTabs = new Set<number>();
+    let ctx: SessionContext | undefined;
     try {
       const { signal: _signal, ...createOptions } = opts;
       const created = await this.agentWindow.create(AGENT_WINDOW_HOME, createOptions);
       windowId = created.windowId;
       for (const tabId of created.initialTabIds) agentCreatedTabs.add(tabId);
+      ctx = {
+        ...(this.remote() ? { remote: true } : {}),
+        sessionId,
+        container: { mode: "window", agentWindowId: windowId },
+        refStore: new RefStore(),
+        borrowedTabs: new Map(),
+        agentCreatedTabs,
+        createdAtMs: this.now(),
+      };
+      // Checkpoint immediately after Chrome returns the physical window id.
+      // Any later MV3 worker restart can now recover and close this resource.
+      this.sessions.set(sessionId, ctx);
+      this.windowIndex.set(windowId, sessionId);
+      await this.persist(ctx);
       throwIfSessionStartAborted(opts.signal);
       const homeTabId = await this.agentWindow.ensureActiveTab(
         windowId,
@@ -353,22 +417,8 @@ export class SessionManager {
         agentCreatedTabs,
       );
       agentCreatedTabs.add(homeTabId);
+      await this.persist(ctx);
       throwIfSessionStartAborted(opts.signal);
-
-      const ctx: SessionContext = {
-        ...(this.remote() ? { remote: true } : {}),
-        sessionId,
-        container: { mode: "window", agentWindowId: windowId },
-        refStore: new RefStore(),
-        borrowedTabs: new Map(),
-        // Capture ownership at creation, before initialization can fail.
-        // Later tabs remain free until `tab_create` or `tab_borrow` identifies
-        // them by their concrete Chrome tab id.
-        agentCreatedTabs,
-        createdAtMs: this.now(),
-      };
-      this.sessions.set(sessionId, ctx);
-      this.windowIndex.set(windowId, sessionId);
       return ctx;
     } catch (startupError) {
       if (windowId !== null) {
@@ -377,7 +427,7 @@ export class SessionManager {
         } catch (cleanupError) {
           // The daemon may retry stop after a failed startup rollback. Retain
           // the exact window handle until closure is confirmed.
-          const pending: SessionContext = {
+          const pending: SessionContext = ctx ?? {
             ...(this.remote() ? { remote: true } : {}),
             sessionId,
             container: { mode: "window", agentWindowId: windowId },
@@ -388,10 +438,117 @@ export class SessionManager {
           };
           this.sessions.set(sessionId, pending);
           this.windowIndex.set(windowId, sessionId);
+          await this.journal?.save(pending, "cleanup_failed", String(cleanupError));
           throw new SessionStartCleanupError(windowId, startupError, cleanupError);
         }
+        this.sessions.delete(sessionId);
+        this.windowIndex.delete(windowId);
+        await this.journal?.remove(sessionId);
       }
       throw startupError;
+    } finally {
+      this.starting.delete(sessionId);
+    }
+  }
+
+  private async startExistingTab(
+    sessionId: string,
+    opts: SessionStartOptions,
+  ): Promise<SessionContext> {
+    if (this.remote()) throw new Error("Existing tabs are unsupported for remote connections");
+    if (opts.size) throw new Error("Window dimensions cannot be used with an existing tab");
+    const target = opts.existingTab;
+    if (!target || (target.current === true) === (target.tabId !== undefined)) {
+      throw new Error("Choose exactly one existing-tab target");
+    }
+    this.starting.add(sessionId);
+    let reservation: BorrowReservation | undefined;
+    let registered = false;
+    try {
+      let tab: chrome.tabs.Tab;
+      if (target.current) {
+        const host = await this.sharedWindow.host();
+        if (host.id === undefined || host.incognito || host.type !== "normal") {
+          throw new Error("Focus a normal user tab before starting an existing-tab session");
+        }
+        if (!this.sharedWindow.active) throw new Error("Active-tab lookup is unavailable");
+        tab = await this.sharedWindow.active(host.id);
+      } else {
+        tab = await this.sharedWindow.get(target.tabId!);
+      }
+      if (tab.id === undefined || tab.windowId === undefined || tab.incognito) {
+        throw new Error("The selected tab is unavailable or ineligible");
+      }
+      if (this.sharedWindow.window) {
+        const host = await this.sharedWindow.window(tab.windowId);
+        if (host.incognito || host.type !== "normal") {
+          throw new Error("The selected tab must belong to a normal user window");
+        }
+      }
+      if (
+        this.findByTabId(tab.id) ||
+        this.list().some(
+          (session) =>
+            session.container.mode === "window" && session.container.agentWindowId === tab.windowId,
+        )
+      ) {
+        throw new Error("The selected tab is already controlled by another session");
+      }
+      const claimed = this.tryReserveBorrow(tab.id, sessionId);
+      if ("borrowedBy" in claimed) {
+        throw new Error(`The selected tab is already controlled by session ${claimed.borrowedBy}`);
+      }
+      reservation = claimed;
+      throwIfSessionStartAborted(opts.signal);
+      await target.approve(tab.id);
+      throwIfSessionStartAborted(opts.signal);
+
+      const current = await this.sharedWindow.get(tab.id);
+      if (
+        current.id !== tab.id ||
+        current.windowId === undefined ||
+        current.incognito ||
+        this.findByTabId(tab.id)
+      ) {
+        throw new Error("The selected tab changed while approval was pending");
+      }
+      if (this.sharedWindow.window) {
+        const currentHost = await this.sharedWindow.window(current.windowId);
+        if (currentHost.incognito || currentHost.type !== "normal") {
+          throw new Error("The selected tab moved out of a normal user window");
+        }
+      }
+      const ctx: SessionContext = {
+        sessionId,
+        container: {
+          mode: "existing_tab",
+          hostWindowId: current.windowId,
+        },
+        activeTabId: tab.id,
+        refStore: new RefStore(),
+        borrowedTabs: new Map(),
+        agentCreatedTabs: new Set(),
+        createdAtMs: this.now(),
+      };
+      this.sessions.set(sessionId, ctx);
+      registered = true;
+      reservation.commit({
+        tabId: tab.id,
+        originalWindowId: current.windowId,
+        originalIndex: typeof current.index === "number" ? current.index : 0,
+        stationary: true,
+      });
+      await this.persist(ctx);
+      return ctx;
+    } catch (error) {
+      if (registered) {
+        this.sessions.delete(sessionId);
+        await this.journal?.remove(sessionId).catch(() => {});
+      }
+      throw error;
+    } finally {
+      reservation?.release();
+      this.starting.delete(sessionId);
     }
   }
 
@@ -423,6 +580,9 @@ export class SessionManager {
         agentCreatedTabs: new Set([tabId]),
         createdAtMs: this.now(),
       };
+      // Persist the concrete tab id before any post-create validation awaits.
+      this.sessions.set(sessionId, ctx);
+      await this.persist(ctx);
       throwIfSessionStartAborted(opts.signal);
       const tab = await this.sharedWindow.get(tabId);
       if (tab.windowId !== host.id) {
@@ -436,18 +596,25 @@ export class SessionManager {
         throw new Error("Session tab moved during startup");
       }
       throwIfSessionStartAborted(opts.signal);
-      this.sessions.set(sessionId, ctx);
       return ctx;
     } catch (error) {
       if (tabId !== undefined && !reclaimed) {
         try {
           await this.sharedWindow.remove(tabId);
         } catch (cleanup) {
-          if (/No tab with id|Invalid tab ID|not found/i.test(String(cleanup))) throw error;
+          if (isMissingChromeResourceError(cleanup)) throw error;
           // Keep a retryable claim, never use window removal as a fallback.
-          if (ctx) this.sessions.set(sessionId, ctx);
+          if (ctx) {
+            this.sessions.set(sessionId, ctx);
+            await this.journal?.save(ctx, "cleanup_failed", String(cleanup));
+          }
           throw new SharedSessionStartCleanupError(tabId, error, cleanup);
         }
+        this.sessions.delete(sessionId);
+        await this.journal?.remove(sessionId);
+      } else if (reclaimed) {
+        this.sessions.delete(sessionId);
+        await this.journal?.remove(sessionId);
       }
       throw error;
     } finally {
@@ -468,16 +635,29 @@ export class SessionManager {
   ): Promise<SessionContext | null> {
     const ctx = this.sessions.get(sessionId);
     if (!ctx) return null;
-    if (!options.dropOnly) {
-      if (ctx.container.mode === "window")
-        await this.agentWindow.remove(ctx.container.agentWindowId);
-      else {
-        if (ctx.pendingOperations) throw new Error("Session has pending tab operations");
-        // Borrowed pages must be returned by the tool-level teardown first.
-        if (ctx.borrowedTabs.size)
-          throw new Error("Return borrowed tabs before stopping this session");
+    if (!options.dropOnly && isSharedSession(ctx)) {
+      // These are normal refusal conditions, not attempted cleanup failures.
+      // Leave the journal in its healthy active phase so recovery does not
+      // resurrect a session as permanently stopping.
+      if (ctx.pendingOperations) throw new Error("Session has pending tab operations");
+      if (ctx.borrowedTabs.size)
+        throw new Error("Return borrowed tabs before stopping this session");
+    }
+    try {
+      if (!options.dropOnly) {
         ctx.stopping = true;
-        try {
+        await this.journal?.save(ctx, "stopping");
+        if (ctx.container.mode === "window") {
+          try {
+            await this.agentWindow.remove(ctx.container.agentWindowId);
+          } catch (err) {
+            // A user may close an Agent Window while the MV3 worker is asleep.
+            // Normal/recovery stop is idempotent: a confirmed-missing window
+            // is already cleaned. Transactional start rollback calls
+            // agentWindow.remove directly and deliberately stays strict.
+            if (!isMissingChromeResourceError(err)) throw err;
+          }
+        } else {
           for (const tabId of [...ctx.agentCreatedTabs]) {
             try {
               const tab = await this.sharedWindow.get(tabId);
@@ -486,15 +666,18 @@ export class SessionManager {
               if (tab.windowId === ctx.container.hostWindowId)
                 await this.sharedWindow.remove(tabId);
             } catch (err) {
-              if (!/No tab with id|Invalid tab ID|not found/i.test(String(err))) throw err;
+              if (!isMissingChromeResourceError(err)) throw err;
             }
             ctx.agentCreatedTabs.delete(tabId);
+            await this.persist(ctx);
           }
-        } catch (err) {
-          ctx.stopping = false;
-          throw err;
         }
       }
+      await this.journal?.remove(sessionId);
+    } catch (err) {
+      ctx.stopping = false;
+      await this.journal?.save(ctx, "cleanup_failed", String(err)).catch(() => {});
+      throw err;
     }
     this.sessions.delete(sessionId);
     if (ctx.container.mode === "window") this.windowIndex.delete(ctx.container.agentWindowId);

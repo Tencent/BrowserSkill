@@ -232,6 +232,12 @@ bsk session start --browser "工作账号" --no-focus --json
 此模式要求协议 1.4，不能与远程模式或窗口尺寸参数组合。添加 `--no-focus`
 会让标签页在后台创建；`record start` 仍使用独立窗口。
 
+协议 1.5 支持 `session start --current-tab` 或 `--tab-id ID`，经确认后原地复用用户标签页；
+停止会话时只释放控制权，不移动或关闭它。`--ephemeral` 为会话建立拥有者租约，调用方可通过
+`session lease` 续约或释放；DSH 插件连接期间会自动续约。闲置会话仍会超时，`session list`
+会显示拥有者、生命周期、租约到期时间和清理错误。扩展记录受控浏览器资源，让重启的服务工作进程
+继续完成被中断的清理。
+
 浏览器中保存的设置对已有和新建会话生效。旧的 `--unattended`、`tab borrow --no-confirm`、`BSK_REQUEST_HELP=off` 不能覆盖这些设置。关闭人工协助不代表待处理步骤已经完成。关闭代理窗口可以停止其中的任务。
 
 BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动化结果交给你选定的 daemon 或网关，以及使用它的 Agent；对应 Agent 或服务可能按自身政策处理或保留数据。扩展不会自行调用 AI 提供商。

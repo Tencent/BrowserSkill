@@ -1,5 +1,6 @@
 import {
   isAgentControlledTab,
+  isSharedSession,
   type SessionManager,
   sessionWindowId,
 } from "@/session-manager/manager";
@@ -18,7 +19,7 @@ export async function auditContext(
   const ref = typeof params.ref === "string" ? context.refStore.resolveEntry(params.ref) : null;
   const requestedTab = typeof params.tab_id === "number" ? params.tab_id : null;
   let tab: chrome.tabs.Tab | undefined;
-  if (context.container.mode === "in_window") {
+  if (isSharedSession(context)) {
     const target = await resolveTargetTab(
       sessions,
       context,

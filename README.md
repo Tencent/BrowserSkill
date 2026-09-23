@@ -234,6 +234,14 @@ This mode requires protocol 1.4 and cannot be combined with remote mode or windo
 dimensions. Adding `--no-focus` starts the tab inactive; `record start` continues
 to use a dedicated window.
 
+With protocol 1.5, `session start --current-tab` or `--tab-id ID` reuses an existing
+user tab in place after confirmation. Stopping the session releases the tab without
+moving or closing it. `--ephemeral` gives the session an owner lease; clients can
+renew or release it with `session lease`. The DSH plugin renews its leases while
+connected. Idle sessions still expire, and `session list` reports ownership,
+lifecycle, lease expiry, and cleanup failures. The extension records owned browser
+resources so a restarted service worker can finish interrupted cleanup.
+
 These browser settings apply to existing and new sessions. Legacy `--unattended`, `tab borrow --no-confirm`, and `BSK_REQUEST_HELP=off` inputs cannot override them. Disabling human help does not mean the requested step was completed. Close the Agent Window to stop its tasks.
 
 BrowserSkill does not operate a mandatory cloud service or collect product telemetry. Automation results go to your selected daemon or gateway and the agent using it; that agent or service may process or retain them under its own policies. The extension does not independently call an AI provider.

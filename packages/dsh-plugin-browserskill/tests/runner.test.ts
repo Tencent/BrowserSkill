@@ -164,7 +164,8 @@ describe("createBskRunner", () => {
     });
     await vi.advanceTimersByTimeAsync(100); // timeout fires -> SIGINT
     expect(result).toBeUndefined();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    // Windows allows a longer cancellation grace for IPC reconciliation.
+    await vi.runAllTimersAsync();
     expect(result).toMatchObject({ code: null, timedOut: true });
     expect(child.killedWith).toEqual(["SIGINT", "SIGKILL"]);
     // Settling is not enough: our ends of the pipes have to go too, or a process
@@ -315,7 +316,7 @@ describe("createBskRunner", () => {
     });
     expect(runner.killFor("s1")).toBe(1);
     runner.killAll();
-    await vi.advanceTimersByTimeAsync(4_000); // SIGKILL at +3s, settle at +4s
+    await vi.runAllTimersAsync(); // platform-specific kill grace, then settle
     expect(results[0]).toMatchObject({ code: null });
     expect(results[1]).toMatchObject({ code: null });
     expect(children.map((c) => c.stdout.destroyed)).toEqual([true, true]);

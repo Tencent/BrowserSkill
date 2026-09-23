@@ -48,7 +48,16 @@ function fixture() {
   };
   const manager = new SessionManager({
     agentWindow: windows,
-    sharedWindow: { host, get, create, remove },
+    sharedWindow: {
+      host,
+      window: async (windowId) =>
+        ({ id: windowId, type: "normal", incognito: false }) as chrome.windows.Window,
+      active: async (windowId) =>
+        [...pages.values()].find((tab) => tab.windowId === windowId && tab.active)!,
+      get,
+      create,
+      remove,
+    },
   });
   const query = vi.fn(async () => [...pages.values()]);
   return { manager, pages, host, get, create, remove, windows, query };
@@ -184,6 +193,41 @@ describe("shared user window sessions (#243)", () => {
     expect(f.create).not.toHaveBeenCalled();
   });
 
+  it("allows an unfocused shared tab but rejects unfocused existing-tab sessions", async () => {
+    const f = fixture();
+    expect(
+      await handleSessionStart(f.manager, {
+        session_id: "shared",
+        in_window: true,
+        focused: false,
+      }),
+    ).toMatchObject({ container_mode: "in_window" });
+    expect(f.create).toHaveBeenCalledWith(10, false);
+
+    for (const placement of [{ current_tab: true }, { tab_id: 1 }]) {
+      expect(
+        await handleSessionStart(f.manager, {
+          session_id: "rejected",
+          focused: false,
+          ...placement,
+        }),
+      ).toMatchObject({ code: "invalid_params" });
+    }
+    expect(f.manager.has("rejected")).toBe(false);
+    expect(f.windows.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-boolean focus hint at the extension boundary", async () => {
+    const f = fixture();
+    expect(
+      await handleSessionStart(f.manager, {
+        session_id: "rejected",
+        focused: "false" as unknown as boolean,
+      }),
+    ).toMatchObject({ code: "invalid_params" });
+    expect(f.windows.create).not.toHaveBeenCalled();
+  });
+
   it("reports failed cancellation cleanup as a tab resource and never closes the host", async () => {
     const f = fixture();
     const abort = new AbortController();
@@ -310,5 +354,57 @@ describe("shared user window sessions (#243)", () => {
       payload: { session_id: "a", reason: "no_controlled_tabs" },
     });
     handler.dispose();
+  });
+});
+
+describe("existing-tab sessions (#279)", () => {
+  it("reuses the current tab without creating, moving, or closing browser resources", async () => {
+    const f = fixture();
+    const approveBorrow = vi.fn(async () => true);
+    expect(
+      await handleSessionStart(
+        f.manager,
+        { session_id: "reuse", current_tab: true },
+        { approveBorrow },
+      ),
+    ).toMatchObject({ container_mode: "existing_tab", agent_window_id: 10 });
+
+    const ctx = f.manager.get("reuse")!;
+    expect(ctx.container).toEqual({ mode: "existing_tab", hostWindowId: 10 });
+    expect(ctx.borrowedTabs.get(1)).toMatchObject({ stationary: true });
+    expect(ctx.agentCreatedTabs.size).toBe(0);
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.windows.create).not.toHaveBeenCalled();
+
+    const releaseSessionTab = vi.fn(async () => {});
+    expect(
+      await handleSessionStop(
+        f.manager,
+        { session_id: "reuse" },
+        {
+          cdp: { releaseSessionTab, detachSession: vi.fn(async () => {}) },
+          tabManagement: {
+            agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+          },
+        },
+      ),
+    ).toEqual({ returned_tab_ids: [1] });
+    expect(releaseSessionTab).toHaveBeenCalledWith("reuse", 1);
+    expect(f.pages.get(1)).toMatchObject({ windowId: 10, index: 0 });
+    expect(f.remove).not.toHaveBeenCalled();
+    expect(f.windows.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not register a session when the user denies current-tab approval", async () => {
+    const f = fixture();
+    expect(
+      await handleSessionStart(
+        f.manager,
+        { session_id: "denied", current_tab: true },
+        { approveBorrow: async () => false },
+      ),
+    ).toMatchObject({ code: "cancelled", data: { reason: "user_denied" } });
+    expect(f.manager.has("denied")).toBe(false);
+    expect(f.create).not.toHaveBeenCalled();
   });
 });

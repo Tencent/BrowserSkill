@@ -37,9 +37,9 @@ import {
 } from "@/lib/capture-suppress-bridge";
 import {
   isAgentControlledTab,
-  sessionWindowId,
   type SessionContext,
   type SessionManager,
+  sessionWindowId,
 } from "@/session-manager/manager";
 import type {
   GetHtmlParams,

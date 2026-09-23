@@ -10,6 +10,7 @@ import type { CdpDebuggee, DialogCursor } from "@/browser-driver/chromium-cdp";
 import type { CdpFrameGraph, CdpTarget } from "@/browser-driver/frame-graph";
 import {
   isAgentControlledTab,
+  isSharedSession,
   type SessionContext,
   type SessionManager,
   sessionWindowId,
@@ -241,7 +242,7 @@ async function resolveVisibleTargetTab(
       pendingUrl: tab.pendingUrl,
     };
   }
-  if (ctx.container.mode === "in_window") {
+  if (isSharedSession(ctx)) {
     const tabs = await api.query({ windowId: sessionWindowId(ctx) });
     const owned = tabs.filter((tab) => tab.id !== undefined && isAgentControlledTab(ctx, tab.id));
     const tab =
@@ -359,7 +360,7 @@ export async function resolveCdpAccessibleTargetTab(
   const tabs = await api.query({ windowId: sessionWindowId(ctx) });
   for (const tab of tabs) {
     if (
-      (ctx.remote || ctx.container.mode === "in_window") &&
+      (ctx.remote || isSharedSession(ctx)) &&
       (tab.id === undefined || !isAgentControlledTab(ctx, tab.id))
     )
       continue;
@@ -388,7 +389,7 @@ export function enforceAgentWindow(
 ): RpcError | null {
   if (
     ctx.stopping ||
-    ((ctx.remote || ctx.container.mode === "in_window") && !isAgentControlledTab(ctx, target.tabId))
+    ((ctx.remote || isSharedSession(ctx)) && !isAgentControlledTab(ctx, target.tabId))
   ) {
     return {
       code: "permission_denied",

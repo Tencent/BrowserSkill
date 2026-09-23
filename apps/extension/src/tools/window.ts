@@ -1,4 +1,4 @@
-import { sessionWindowId } from "@/session-manager/manager";
+import { isSharedSession, sessionWindowId } from "@/session-manager/manager";
 // Window-tool handlers: `tool.window_resize` resizes the session's
 // Agent Window via `chrome.windows.update`.
 
@@ -54,7 +54,7 @@ export async function handleWindowResize(
   const ctxOrErr = lookupSession(manager, params, "window_resize");
   if (isRpcError(ctxOrErr)) return ctxOrErr;
   const ctx = ctxOrErr;
-  if (ctx.container.mode === "in_window")
+  if (isSharedSession(ctx))
     return { code: "unsupported", message: "Cannot resize a shared user window" };
 
   const sizeOrErr = validateWindowSize(params.width, params.height);

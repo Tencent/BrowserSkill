@@ -45,7 +45,7 @@ describe("registerBskSkill", () => {
     expect(content).not.toMatch(/\bbsk\b/i);
     expect(content).not.toMatch(/```(?:bash|sh|shell)\b/i);
     expect(content).not.toMatch(/--[a-z]/);
-    expect(content).toMatch(/All browser work\s+must use the injected tools directly/);
+    expect(content).toMatch(/Use only injected browser tools with the user's existing logins/);
     expect(content).toContain("Mandatory workflow");
     expect(content).toContain("Refs invalidate after navigation");
     expect(content).toContain("evaluation and interaction recording are intentionally unsupported");
@@ -149,7 +149,9 @@ describe("armAgentScopedBskSkill", () => {
     });
 
     const after = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
-    expect(after?.content).toMatch(/All browser work\s+must use the injected tools directly/);
+    expect(after?.content).toMatch(
+      /Use only injected browser tools with the user's existing logins/,
+    );
     expect(after?.content).not.toMatch(/\bbsk\b/i);
     expect(after?.source).toBe("bundled");
     expect(after?.resourceBase?.kind).toBe("directory");

@@ -35,7 +35,13 @@ import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
-import { isAgentControlledTab, SessionManager, sessionWindowId } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  isSharedSession,
+  SessionManager,
+  sessionWindowId,
+} from "@/session-manager/manager";
+import { SessionResourceJournal } from "@/session-manager/resource-journal";
 import {
   attachBorrowNotificationButtonHandler,
   attachBorrowNotificationClickHandler,
@@ -79,7 +85,11 @@ export default defineBackground(() => {
       return socket;
     },
   });
-  const sessions = new SessionManager({ remote: () => remoteEndpoint !== null });
+  const resourceJournal = new SessionResourceJournal();
+  const sessions = new SessionManager({
+    remote: () => remoteEndpoint !== null,
+    journal: resourceJournal,
+  });
   attachLongScreenshot({
     isTabBusy: (tabId) => sessions.list().some((session) => isAgentControlledTab(session, tabId)),
   });
@@ -225,7 +235,10 @@ export default defineBackground(() => {
   }
   chrome.tabs.onActivated.addListener((activeInfo) => {
     const ctx = sessions.findByTabId(activeInfo.tabId);
-    if (ctx?.container.mode === "in_window") ctx.activeTabId = activeInfo.tabId;
+    if (ctx && isSharedSession(ctx)) {
+      ctx.activeTabId = activeInfo.tabId;
+      sessions.schedulePersist(ctx);
+    }
     pushOverlayStateForAgentWindow(activeInfo.windowId);
   });
   chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
@@ -257,10 +270,10 @@ export default defineBackground(() => {
   });
   chrome.tabs.onAttached.addListener((tabId, info) => {
     const ctx = sessions.findByTabId(tabId);
-    if (!ctx || ctx.container.mode !== "in_window" || sessionWindowId(ctx) === info.newWindowId)
-      return;
+    if (!ctx || !isSharedSession(ctx) || sessionWindowId(ctx) === info.newWindowId) return;
     ctx.agentCreatedTabs.delete(tabId);
     ctx.borrowedTabs.delete(tabId);
+    sessions.schedulePersist(ctx);
     ctx.refStore.invalidateTab(tabId);
     void cdp.releaseSessionTab(ctx.sessionId, tabId).catch(console.warn);
     void pushOverlayStateForTab(tabId, info.newWindowId);
@@ -435,6 +448,24 @@ export default defineBackground(() => {
   }
 
   void (async () => {
+    const recoverable = await resourceJournal.recoverable();
+    for (const record of recoverable) sessions.restore(record);
+    if (recoverable.length > 0) {
+      const recovery = await cleanupAfterDisconnect();
+      if (recovery.failures.length > 0) {
+        console.warn("[browser-skill] recovered session cleanup incomplete", recovery.failures);
+      }
+    }
+    const stale = await resourceJournal.stale();
+    if (stale.length > 0) {
+      console.warn(
+        `[browser-skill] ${stale.length} stale session resource record(s) belong to an earlier browser/extension epoch`,
+      );
+      // Chrome window/tab ids cannot be dereferenced safely once the trusted
+      // storage.session epoch is gone. Report once, then prune them so stale
+      // diagnostics do not accumulate forever in storage.local.
+      await resourceJournal.pruneStale();
+    }
     const [connectionEnabled, , auditEnabled] = await Promise.all([
       getConnectionEnabled(),
       daemonPort.ready,
