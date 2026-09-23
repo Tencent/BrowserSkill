@@ -35,7 +35,7 @@ const action = { tag: "button", role: "button" };
 
 describe("page and region occlusion", () => {
   it.each([
-    0.36, 0.64, 0.95, 0.999,
+    0.36, 0.64, 0.95, 0.99,
   ])("retains uncovered refs beside a %s-width sidebar in both renderers", (fraction) => {
     const edge = viewport.width * (1 - fraction);
     for (const position of ["fixed", "absolute", "sticky"]) {
@@ -152,14 +152,76 @@ describe("page and region occlusion", () => {
     }
   });
 
-  it("continues to fold background refs under a full-viewport CSS mask", () => {
+  it("applies viewport rounding to child-frame region occlusion without folding the parent", () => {
+    const scene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { role: "RootWebArea" }),
+        node(2, 1, { tag: "iframe", role: "Iframe", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+        node(3, 2, {
+          ...action,
+          frameId: "child",
+          name: "Covered child",
+          rect: { x: 100, y: 20, w: 100, h: 30 },
+        }),
+        node(4, 2, {
+          frameId: "child",
+          position: "fixed",
+          rect: { x: 0.4, y: 0, w: 999.2, h: 799.7 },
+        }),
+        node(5, 1, {
+          ...action,
+          name: "Parent foreground",
+          paintOrder: 2,
+          rect: { x: 100, y: 20, w: 100, h: 30 },
+        }),
+      ],
+    };
+    for (const result of rendered(scene)) {
+      expect(result.text).toContain("L1 page");
+      expect(result.ids).toEqual([5]);
+    }
+  });
+
+  it.each([
+    false,
+    true,
+  ])("requires explicit modality for an offscreen region (modal=%s)", (modal) => {
+    const scene: VomScene = {
+      viewport,
+      rootFrameId: "root",
+      nodes: [
+        node(1, null, { role: "RootWebArea" }),
+        node(2, 1, { ...action, name: "Offscreen", rect: { x: 10, y: 1200, w: 100, h: 30 } }),
+        node(3, 1, {
+          tag: "dialog",
+          role: "dialog",
+          modal,
+          position: "absolute",
+          paintOrder: 10,
+          rect: { x: 0, y: 1100, w: 500, h: 200 },
+        }),
+      ],
+    };
+    for (const result of rendered(scene)) {
+      expect(result.text).toContain("L1 page");
+      expect(result.ids).toEqual(modal ? [] : [2]);
+    }
+  });
+
+  it.each([
+    { x: 0, y: 0, w: 1000, h: 800 },
+    { x: 0.4, y: 0, w: 999.2, h: 799.7 },
+  ])("folds viewport and offscreen background refs under a CSS mask: %j", (rect) => {
     const scene: VomScene = {
       viewport,
       rootFrameId: "root",
       nodes: [
         node(1, null, { role: "RootWebArea" }),
         node(2, 1, { ...action, name: "Background", rect: { x: 10, y: 10, w: 100, h: 30 } }),
-        node(3, 1, { position: "fixed", paintOrder: 10, rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+        node(3, 1, { position: "fixed", paintOrder: 10, rect }),
+        node(4, 1, { ...action, name: "Offscreen", rect: { x: 10, y: 1200, w: 100, h: 30 } }),
       ],
     };
     for (const result of rendered(scene)) {

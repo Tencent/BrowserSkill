@@ -47,16 +47,25 @@ describe("semantic VOM graph", () => {
     { tag: "dialog", role: "dialog", expected: false },
     { tag: "div", role: "dialog", expected: false },
     { tag: "div", role: "alertdialog", expected: false },
-    { tag: "div", role: "dialog", aria: "true", expected: true },
+    { tag: "div", role: "dialog", aria: "true", expected: false },
     { tag: "div", role: "dialog", aria: "false", expected: false },
-    { tag: "div", role: "alertdialog", aria: "TRUE", expected: true },
+    { tag: "div", role: "alertdialog", aria: "TRUE", axModal: true, expected: true },
+    { tag: "div", role: "dialog", aria: "true", axModal: false, expected: false },
+    { tag: "dialog", role: "dialog", aria: "false", axModal: true, expected: true },
     { tag: "dialog", role: "dialog", axModal: true, ignored: true, expected: false },
-  ])("resolves modality from state rather than dialog role/tag: %j", ({
+    { tag: "div", role: "dialog", aria: "true", ignored: true, expected: false },
+    { tag: "div", role: "dialog", aria: "true", axModal: true, ignored: true, expected: false },
+    { tag: "div", role: "dialog", aria: "true", missingAx: true, expected: true },
+    { tag: "div", role: "alertdialog", aria: "TRUE", missingAx: true, expected: true },
+    { tag: "dialog", role: "dialog", aria: "false", missingAx: true, expected: false },
+    { tag: "dialog", role: "dialog", missingAx: true, expected: false },
+  ])("uses AX modality when present, falling back to ARIA only without AX: %j", ({
     tag,
     role,
     axModal,
     aria,
     ignored,
+    missingAx,
     expected,
   }) => {
     const scene = buildSemanticVomScene({
@@ -65,18 +74,20 @@ describe("semantic VOM graph", () => {
       documents: [
         document(
           "main",
-          [
-            {
-              nodeId: "dialog",
-              backendDOMNodeId: 2,
-              ignored,
-              role: { type: "role", value: role },
-              name: { type: "computedString", value: "Panel" },
-              ...(axModal !== undefined
-                ? { properties: [{ name: "modal", value: { value: axModal } }] }
-                : {}),
-            },
-          ],
+          missingAx
+            ? []
+            : [
+                {
+                  nodeId: "dialog",
+                  backendDOMNodeId: 2,
+                  ignored,
+                  role: { type: "role", value: role },
+                  name: { type: "computedString", value: "Panel" },
+                  ...(axModal !== undefined
+                    ? { properties: [{ name: "modal", value: { value: axModal } }] }
+                    : {}),
+                },
+              ],
           [dom(2, null, tag, { role, ...(aria ? { "aria-modal": aria } : {}) })],
         ),
       ],

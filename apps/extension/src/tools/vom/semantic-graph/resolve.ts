@@ -505,9 +505,10 @@ export function resolveSemanticGraph(
       ...(nearbyText(node, graph, indexes) ? { nearbyText: nearbyText(node, graph, indexes) } : {}),
       inputState: inputState(node, role, sourceValue, isSensitive),
       sensitive: isSensitive,
-      modal:
-        (node.ax?.ignored !== true && axProperty(node.ax, "modal") === "true") ||
-        (attrs["aria-modal"] ?? "").toLowerCase() === "true",
+      // An available AX result is authoritative, including ignored/nonmodal nodes.
+      modal: node.ax
+        ? node.ax.ignored !== true && axProperty(node.ax, "modal") === "true"
+        : (attrs["aria-modal"] ?? "").toLowerCase() === "true",
       disabled:
         (node.ax?.ignored !== true && axProperty(node.ax, "disabled") === "true") ||
         Object.prototype.hasOwnProperty.call(attrs, "disabled") ||

@@ -93,6 +93,39 @@ describe("detectBlockingLayer", () => {
     expect(layer?.kind).toBe("mask");
   });
 
+  it("allows one CSS pixel of rounding at every viewport edge", () => {
+    const layer = detectBlockingLayer(
+      [
+        node({
+          id: 1,
+          position: "fixed",
+          rect: { x: 0.4, y: 0, w: 999.2, h: 799.7 },
+        }),
+      ],
+      VP,
+    );
+    expect(layer?.kind).toBe("mask");
+    expect(layer?.coverage).toBeLessThan(1);
+  });
+
+  it.each([
+    { x: 1.1, y: 0, w: 998.9, h: 800 },
+    { x: 0, y: 1.1, w: 1000, h: 798.9 },
+    { x: 0, y: 0, w: 998.9, h: 800 },
+    { x: 0, y: 0, w: 1000, h: 798.9 },
+  ])("does not fold a page with an edge beyond the rounding tolerance: %j", (rect) => {
+    expect(detectBlockingLayer([node({ id: 1, position: "fixed", rect })], VP)).toBeNull();
+  });
+
+  it("does not use an area ratio to forgive a sidebar's larger pixel gap", () => {
+    expect(
+      detectBlockingLayer(
+        [node({ id: 1, position: "fixed", rect: { x: 2, y: 0, w: 1998, h: 800 } })],
+        { width: 2000, height: 800 },
+      ),
+    ).toBeNull();
+  });
+
   it("treats explicit modal nodes as modal without requiring a viewport cover", () => {
     const layer = detectBlockingLayer(
       [
@@ -142,7 +175,7 @@ describe("detectBlockingLayer", () => {
     "absolute",
     "sticky",
   ])("does not treat a wide %s sidebar as a global blocker", (position) => {
-    for (const fraction of [0.36, 0.64, 0.95, 0.999]) {
+    for (const fraction of [0.36, 0.64, 0.95, 0.99]) {
       for (const role of [undefined, "dialog", "alertdialog"]) {
         expect(
           detectBlockingLayer(
