@@ -3,17 +3,23 @@
 
 import type { SessionManager } from "@/session-manager/manager";
 import type { DownloadParams, DownloadResult, RpcError } from "@/transport/types";
-import { captureBrowserDownload, chromeDownloadsApi, type DownloadsApi } from "./download-capture";
-import { resolveDownloadTriggerUrl } from "./download-trigger-intent";
+import {
+  captureBrowserDownload,
+  chromeDownloadsApi,
+  chromeNavigationTargetsApi,
+  type DownloadsApi,
+  type NavigationTargetsApi,
+} from "./download-capture";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
 let downloadActive = false;
 
-export type { DownloadsApi } from "./download-capture";
+export type { DownloadsApi, NavigationTargetsApi } from "./download-capture";
 
 export interface DownloadDeps extends InteractionDeps {
   downloads?: DownloadsApi;
+  navigationTargets?: NavigationTargetsApi;
 }
 
 export async function handleDownload(
@@ -36,25 +42,24 @@ export async function handleDownload(
     const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
-    const expectedUrl = await resolveDownloadTriggerUrl(deps.cdp, address);
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
       target: address.cdpTarget,
       downloads: deps.downloads ?? chromeDownloadsApi,
+      navigationTargets: deps.navigationTargets ?? chromeNavigationTargetsApi,
       browserRelativeDir: params.browser_relative_dir,
       maxByteSize: params.max_byte_size,
       timeoutMs: params.timeout_ms ?? 120_000,
       signal: deps.signal,
       expectedFrameId: address.frameId,
-      expectedUrl,
-      trigger: (observer) => clickResolvedTarget(ctx, address, {}, deps, undefined, observer),
+      trigger: (markDispatched) => clickResolvedTarget(ctx, address, {}, deps, markDispatched),
     });
     if (isRpcError(capture)) return capture;
-    const { item } = capture;
+    const { click, item } = capture;
     return {
       tab_id: target.tabId,
-      used_ref: address.usedRef,
-      used_selector: address.usedSelector,
+      used_ref: click.used_ref,
+      used_selector: click.used_selector,
       suggested_filename: item.filename.split(/[\\/]/).pop() ?? "download",
       byte_size: item.fileSize >= 0 ? item.fileSize : item.totalBytes,
       mime: item.mime || undefined,

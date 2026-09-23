@@ -73,11 +73,6 @@ export interface ResolvedActionTarget {
   usedSelector?: string;
 }
 
-export interface ClickDispatchObserver {
-  beforePressDispatch(): RpcError | null;
-  afterPressDispatch(): void;
-}
-
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_HOVER_SETTLE_MS = 200;
 
@@ -490,7 +485,6 @@ export async function clickResolvedTarget(
   params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
   deps: InteractionDeps,
   markSent?: () => void,
-  observer?: ClickDispatchObserver,
 ): Promise<ClickResult | RpcError> {
   const { tab: target } = resolved;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
@@ -540,7 +534,6 @@ export async function clickResolvedTarget(
       deps,
       undefined,
       markSent,
-      observer,
     );
     if (error) return error;
   } finally {
@@ -570,7 +563,6 @@ async function dispatchClickAtPoint(
   deps: InteractionDeps,
   beforePress?: () => Promise<RpcError | null>,
   markSent?: () => void,
-  observer?: ClickDispatchObserver,
 ): Promise<RpcError | null> {
   const button = params.button ?? "left",
     modifiers = modifiersBitfield(params.modifiers);
@@ -619,10 +611,6 @@ async function dispatchClickAtPoint(
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
       markSent?.();
-      if (observer) {
-        const error = observer.beforePressDispatch();
-        if (error) return failure(error);
-      }
       attempted = true;
       releaseNeeded = true;
       await deps.cdp.send(tabId, "Input.dispatchMouseEvent", {
@@ -632,7 +620,6 @@ async function dispatchClickAtPoint(
         clickCount: count,
         modifiers,
       });
-      observer?.afterPressDispatch();
       await release();
       releaseNeeded = false;
     }

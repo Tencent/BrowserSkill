@@ -38,6 +38,76 @@ function fakeEvent<T extends (...args: never[]) => unknown>() {
   };
 }
 
+function popupDownloadFakes() {
+  const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
+  const onDeterminingFilename =
+    fakeEvent<
+      (
+        item: chrome.downloads.DownloadItem,
+        suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
+      ) => void | true
+    >();
+  const onCreatedNavigationTarget =
+    fakeEvent<(details: chrome.webNavigation.WebNavigationSourceCallbackDetails) => void>();
+  const completed = new Map<number, chrome.downloads.DownloadItem>();
+  const downloads: DownloadsApi = {
+    onCreated,
+    onChanged: fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>(),
+    onDeterminingFilename,
+    search: vi.fn(async ({ id }: chrome.downloads.DownloadQuery) => {
+      const item = id === undefined ? undefined : completed.get(id);
+      return item ? [item] : [];
+    }),
+    cancel: vi.fn(async () => {}),
+    removeFile: vi.fn(async () => {}),
+  };
+  return {
+    downloads,
+    navigationTargets: { onCreatedNavigationTarget },
+    item: (id: number, url: string, finalUrl = url) =>
+      ({
+        id,
+        url,
+        finalUrl,
+        filename: `report-${id}.csv`,
+        state: "in_progress",
+        fileSize: -1,
+        totalBytes: 4,
+      }) as chrome.downloads.DownloadItem,
+    /** Resolves with the suggestion Chrome would receive for this candidate. */
+    offer: (item: chrome.downloads.DownloadItem) =>
+      new Promise<chrome.downloads.DownloadFilenameSuggestion | undefined>((resolve) => {
+        onDeterminingFilename.emit(item, resolve);
+      }),
+    finish: (item: chrome.downloads.DownloadItem) => {
+      const done = {
+        ...item,
+        filename: `/profile/Downloads/${item.filename}`,
+        state: "complete",
+        fileSize: 4,
+      } as chrome.downloads.DownloadItem;
+      completed.set(item.id, done);
+      onCreated.emit(done);
+    },
+    popup: (sourceTabId: number, url: string) =>
+      onCreatedNavigationTarget.emit({
+        sourceTabId,
+        sourceFrameId: 0,
+        sourceProcessId: 1,
+        tabId: 99,
+        url,
+        timeStamp: 0,
+      } as chrome.webNavigation.WebNavigationSourceCallbackDetails),
+  };
+}
+
+function silentCdp(): CdpRunner {
+  return {
+    send: vi.fn(async () => ({})) as CdpRunner["send"],
+    onEvent: () => ({ dispose: vi.fn() }),
+  };
+}
+
 function actionTarget(frameId?: string, sessionId?: string): ResolvedActionTarget {
   return {
     tab: { tabId: 4, windowId: 100, active: true },
@@ -630,6 +700,7 @@ describe("file transfer tools", () => {
         cdp,
         tabsApi: tabsApi(),
         downloads,
+        navigationTargets: popupDownloadFakes().navigationTargets,
       },
     );
 
@@ -686,9 +757,7 @@ describe("file transfer tools", () => {
       downloads,
       browserRelativeDir: "BrowserSkill/tr_1",
       timeoutMs: 5,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
+      trigger: async () => {
         cdpEvent?.({ tabId: 4, sessionId: "other-child" }, "Page.downloadWillBegin", {
           url: unrelated.url,
           suggestedFilename: unrelated.filename,
@@ -696,7 +765,6 @@ describe("file transfer tools", () => {
         onDeterminingFilename.emit(unrelated, (suggestion) => {
           defaultSuggestionCalled = suggestion === undefined;
         });
-        observer.afterPressDispatch();
         return { tab_id: 4, x: 10, y: 10 };
       },
     });
@@ -707,195 +775,6 @@ describe("file transfer tools", () => {
       code: "cdp_failed",
       data: { reason: "download_capture_failed" },
     });
-  });
-
-  it("captures a unique download matching a trigger-authorized URL", async () => {
-    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
-    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
-    const onDeterminingFilename =
-      fakeEvent<
-        (
-          item: chrome.downloads.DownloadItem,
-          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
-        ) => void | true
-      >();
-    const initial = {
-      id: 18,
-      url: "https://example.test/popup.bin",
-      finalUrl: "https://example.test/popup.bin",
-      filename: "popup.bin",
-      state: "in_progress",
-      fileSize: -1,
-      totalBytes: 4,
-      mime: "application/octet-stream",
-      danger: "safe",
-    } as chrome.downloads.DownloadItem;
-    const complete = {
-      ...initial,
-      filename: "/profile/Downloads/BrowserSkill/tr_2/popup.bin",
-      state: "complete",
-      fileSize: 4,
-    } as chrome.downloads.DownloadItem;
-    const downloads: DownloadsApi = {
-      onCreated,
-      onChanged,
-      onDeterminingFilename,
-      search: vi.fn(async () => [complete]),
-      cancel: vi.fn(async () => {}),
-      removeFile: vi.fn(async () => {}),
-    };
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({})) as unknown as CdpRunner["send"],
-      onEvent: () => ({ dispose: vi.fn() }),
-    };
-
-    const result = await captureBrowserDownload({
-      cdp,
-      target: { tabId: 4 },
-      expectedUrl: initial.url,
-      downloads,
-      browserRelativeDir: "BrowserSkill/tr_2",
-      timeoutMs: 200,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
-        await new Promise<void>((resolve) => {
-          onDeterminingFilename.emit(initial, () => resolve());
-        });
-        onCreated.emit(complete);
-        observer.afterPressDispatch();
-        return { tab_id: 4, x: 10, y: 10 };
-      },
-    });
-
-    expect(result).toMatchObject({
-      item: { id: 18, filename: complete.filename, state: "complete" },
-    });
-  });
-
-  it("does not expose URL attribution before mouse press dispatch", async () => {
-    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
-    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
-    const onDeterminingFilename =
-      fakeEvent<
-        (
-          item: chrome.downloads.DownloadItem,
-          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
-        ) => void | true
-      >();
-    const candidate = (id: number) =>
-      ({
-        id,
-        url: "https://example.test/popup.bin",
-        finalUrl: "https://example.test/popup.bin",
-        filename: "popup.bin",
-        state: "in_progress",
-        fileSize: -1,
-        totalBytes: 4,
-      }) as chrome.downloads.DownloadItem;
-    const completed = {
-      ...candidate(42),
-      filename: "/profile/Downloads/BrowserSkill/tr_42/popup.bin",
-      state: "complete",
-      fileSize: 4,
-    } as chrome.downloads.DownloadItem;
-    const downloads: DownloadsApi = {
-      onCreated,
-      onChanged,
-      onDeterminingFilename,
-      search: vi.fn(async () => [completed]),
-      cancel: vi.fn(async () => {}),
-      removeFile: vi.fn(async () => {}),
-    };
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: () => ({ dispose: vi.fn() }),
-    };
-    let prePressSuggestionCalled = false;
-
-    const result = await captureBrowserDownload({
-      cdp,
-      target: { tabId: 4 },
-      expectedUrl: completed.url,
-      downloads,
-      browserRelativeDir: "BrowserSkill/tr_42",
-      timeoutMs: 1_000,
-      trigger: async (observer) => {
-        onDeterminingFilename.emit(candidate(41), () => {
-          prePressSuggestionCalled = true;
-        });
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
-        onDeterminingFilename.emit(candidate(42), () => {});
-        onCreated.emit(completed);
-        observer.afterPressDispatch();
-        return { tab_id: 4, x: 10, y: 10 };
-      },
-    });
-
-    expect(prePressSuggestionCalled).toBe(false);
-    expect(result).toMatchObject({ item: { id: 42, state: "complete" } });
-    expect(downloads.cancel).not.toHaveBeenCalled();
-  });
-
-  it("finishes a URL-attributed download when mouse release fails", async () => {
-    const onCreated = fakeEvent<(item: chrome.downloads.DownloadItem) => void>();
-    const onChanged = fakeEvent<(delta: chrome.downloads.DownloadDelta) => void>();
-    const onDeterminingFilename =
-      fakeEvent<
-        (
-          item: chrome.downloads.DownloadItem,
-          suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void,
-        ) => void | true
-      >();
-    const initial = {
-      id: 43,
-      url: "https://example.test/release-race.bin",
-      finalUrl: "https://example.test/release-race.bin",
-      filename: "release-race.bin",
-      state: "in_progress",
-      fileSize: -1,
-      totalBytes: 4,
-    } as chrome.downloads.DownloadItem;
-    const completed = {
-      ...initial,
-      filename: "/profile/Downloads/BrowserSkill/tr_43/release-race.bin",
-      state: "complete",
-      fileSize: 4,
-    } as chrome.downloads.DownloadItem;
-    const downloads: DownloadsApi = {
-      onCreated,
-      onChanged,
-      onDeterminingFilename,
-      search: vi.fn(async () => [completed]),
-      cancel: vi.fn(async () => {}),
-      removeFile: vi.fn(async () => {}),
-    };
-    const cdp: CdpRunner = {
-      send: vi.fn(async () => ({})) as CdpRunner["send"],
-      onEvent: () => ({ dispose: vi.fn() }),
-    };
-
-    const result = await captureBrowserDownload({
-      cdp,
-      target: { tabId: 4 },
-      expectedUrl: initial.url,
-      downloads,
-      browserRelativeDir: "BrowserSkill/tr_43",
-      timeoutMs: 1_000,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
-        onDeterminingFilename.emit(initial, () => {});
-        onCreated.emit(completed);
-        observer.afterPressDispatch();
-        return { code: "cdp_failed", message: "mouseReleased failed" };
-      },
-    });
-
-    expect(result).toMatchObject({ item: { id: 43, state: "complete" } });
-    expect(downloads.cancel).not.toHaveBeenCalled();
-    expect(downloads.removeFile).not.toHaveBeenCalled();
   });
 
   it("correlates a filename candidate that arrives before the CDP intent", async () => {
@@ -947,9 +826,7 @@ describe("file transfer tools", () => {
       downloads,
       browserRelativeDir: "BrowserSkill/tr_21",
       timeoutMs: 1_000,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
+      trigger: async () => {
         const suggested = new Promise<void>((resolve) => {
           onDeterminingFilename.emit(initial, (value) => {
             suggestion = value;
@@ -962,7 +839,6 @@ describe("file transfer tools", () => {
         });
         await suggested;
         onCreated.emit(complete);
-        observer.afterPressDispatch();
         return { tab_id: 4, x: 10, y: 10 };
       },
     });
@@ -1026,9 +902,7 @@ describe("file transfer tools", () => {
       browserRelativeDir: "BrowserSkill/tr_22",
       maxByteSize: 4,
       timeoutMs: 1_000,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
+      trigger: async () => {
         cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: initial.filename,
@@ -1038,7 +912,6 @@ describe("file transfer tools", () => {
         });
         onCreated.emit(initial);
         onChanged.emit({ id: initial.id, state: { current: "complete" } });
-        observer.afterPressDispatch();
         return { tab_id: 4, x: 10, y: 10 };
       },
     });
@@ -1104,9 +977,7 @@ describe("file transfer tools", () => {
       downloads,
       browserRelativeDir: "BrowserSkill/tr_23",
       timeoutMs: 80,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
+      trigger: async () => {
         cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
           url: initial.url,
           suggestedFilename: initial.filename,
@@ -1115,7 +986,6 @@ describe("file transfer tools", () => {
           onDeterminingFilename.emit(initial, () => resolve());
         });
         onCreated.emit(initial);
-        observer.afterPressDispatch();
         return { tab_id: 4, x: 10, y: 10 };
       },
     });
@@ -1171,9 +1041,7 @@ describe("file transfer tools", () => {
       downloads,
       browserRelativeDir: "BrowserSkill/tr_ambiguous",
       timeoutMs: 100,
-      trigger: async (observer) => {
-        const armError = observer.beforePressDispatch();
-        if (armError) return armError;
+      trigger: async () => {
         cdpEvent?.({ tabId: 4 }, "Page.downloadWillBegin", {
           url: "https://example.test/same.bin",
           suggestedFilename: "same.bin",
@@ -1183,7 +1051,6 @@ describe("file transfer tools", () => {
             if (value === undefined) defaults.push(id);
           });
         }
-        observer.afterPressDispatch();
         return { tab_id: 4, x: 10, y: 10 };
       },
     });
@@ -1193,6 +1060,203 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({
       code: "cdp_failed",
       data: { effect_state: "unknown", phase: "attribution" },
+    });
+  });
+
+  it("routes an attachment that the clicked link opens in a new tab", async () => {
+    const manager = sessions();
+    const ctx = await manager.start("s1");
+    ctx.refStore.set("e3", 123, { tabId: 4 });
+    const fakes = popupDownloadFakes();
+    const download = fakes.item(50, "https://example.test/export?id=50");
+    let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+    const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (method === "Page.getLayoutMetrics")
+        return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
+      if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
+      if (
+        method === "Input.dispatchMouseEvent" &&
+        (params as { type?: string }).type === "mousePressed"
+      ) {
+        fakes.popup(4, download.url);
+        suggested = fakes.offer(download);
+        fakes.finish(download);
+      }
+      return {};
+    });
+
+    const result = await handleDownload(
+      manager,
+      {
+        session_id: "s1",
+        ref: "@e3",
+        browser_relative_dir: "BrowserSkill/tr_50",
+        timeout_ms: 1_000,
+      },
+      {
+        cdp: { ...silentCdp(), send: send as unknown as CdpRunner["send"] },
+        tabsApi: tabsApi(),
+        downloads: fakes.downloads,
+        navigationTargets: fakes.navigationTargets,
+      },
+    );
+
+    await expect(suggested).resolves.toEqual({
+      filename: "BrowserSkill/tr_50/report-50.csv",
+      conflictAction: "overwrite",
+    });
+    expect(result).toMatchObject({
+      tab_id: 4,
+      suggested_filename: "report-50.csv",
+      browser_path: "/profile/Downloads/report-50.csv",
+    });
+  });
+
+  it.each([
+    "navigation-first",
+    "candidate-first",
+  ])("correlates a new-tab download in either arrival order (%s)", async (order) => {
+    const fakes = popupDownloadFakes();
+    const download = fakes.item(
+      51,
+      "https://example.test/export?id=51",
+      "https://cdn.example.test/report.csv",
+    );
+    let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_51",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        if (order === "navigation-first") fakes.popup(4, download.url);
+        suggested = fakes.offer(download);
+        if (order === "candidate-first") fakes.popup(4, download.url);
+        fakes.finish(download);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    await expect(suggested).resolves.toEqual({
+      filename: "BrowserSkill/tr_51/report-51.csv",
+      conflictAction: "overwrite",
+    });
+    expect(result).toMatchObject({ item: { id: 51, state: "complete" } });
+  });
+
+  it("ignores new tabs opened before mouse press or by another tab", async () => {
+    const fakes = popupDownloadFakes();
+    const url = "https://example.test/export?id=52";
+    let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_52",
+      timeoutMs: 100,
+      trigger: async (markDispatched) => {
+        fakes.popup(4, url);
+        markDispatched();
+        fakes.popup(5, url);
+        suggested = fakes.offer(fakes.item(52, url));
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    await expect(suggested).resolves.toBeUndefined();
+    expect(fakes.downloads.cancel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "download_capture_failed", phase: "attribution" },
+    });
+  });
+
+  it("does not attribute a same-URL download observed before mouse press", async () => {
+    const fakes = popupDownloadFakes();
+    const url = "https://example.test/export?id=53";
+    const own = fakes.item(54, url);
+    let earlier: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+    let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_54",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        earlier = fakes.offer(fakes.item(53, url));
+        markDispatched();
+        fakes.popup(4, url);
+        suggested = fakes.offer(own);
+        fakes.finish(own);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({ item: { id: 54, state: "complete" } });
+    await expect(suggested).resolves.toMatchObject({
+      filename: "BrowserSkill/tr_54/report-54.csv",
+    });
+    await expect(earlier).resolves.toBeUndefined();
+    expect(fakes.downloads.cancel).not.toHaveBeenCalled();
+  });
+
+  it("rejects ambiguous new-tab attribution without cancelling either download", async () => {
+    const fakes = popupDownloadFakes();
+    const url = "https://example.test/export?id=55";
+    const suggestions: Array<Promise<chrome.downloads.DownloadFilenameSuggestion | undefined>> = [];
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_55",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        fakes.popup(4, url);
+        suggestions.push(fakes.offer(fakes.item(55, url)), fakes.offer(fakes.item(56, url)));
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    await expect(Promise.all(suggestions)).resolves.toEqual([undefined, undefined]);
+    expect(fakes.downloads.cancel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { effect_state: "unknown", phase: "attribution" },
+    });
+  });
+
+  it("reports an unknown effect when the click fails after opening a new tab", async () => {
+    const fakes = popupDownloadFakes();
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_57",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        fakes.popup(4, "https://example.test/export?id=57");
+        return { code: "cdp_failed", message: "mouseReleased failed" };
+      },
+    });
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { effect_state: "unknown", phase: "trigger" },
     });
   });
 });
