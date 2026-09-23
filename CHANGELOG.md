@@ -28,6 +28,8 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Changed
 
+- Extension privacy policies now describe website debugging data, browser-local
+  history retention and deletion, requested sharing, and redaction limits.
 - DSH Plugin: align SDK dependencies with `0.1.5-rc.3`, Cordis `4.0.2` and
   Schemastery `3.18.2`.
 - Reduce repeated observation work by reusing sibling context for repeated action labels.
