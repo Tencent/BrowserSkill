@@ -1,7 +1,5 @@
 import type { BlockingLayer, Rect, Viewport, VomNode } from "./types";
 
-/** Default fraction of the viewport an overlay must cover to block. */
-export const BLOCK_COVERAGE_THRESHOLD = 0.6;
 /** At/above this coverage with no inputs we call it an opaque mask. */
 export const MASK_COVERAGE_THRESHOLD = 0.9;
 
@@ -64,7 +62,9 @@ export function detectBlockingLayer(
     if (rootFrameId !== undefined && node.frameId !== rootFrameId) continue;
     if (!isBlockingCandidate(node)) continue;
     const cov = coverage(node.rect, vp);
-    const qualifies = cov >= BLOCK_COVERAGE_THRESHOLD || (hasModalFeature(node) && cov >= 0.15);
+    // A large sidebar can leave usable page content beside it. Only actual
+    // modality or a cover spanning the whole viewport can fold the base page.
+    const qualifies = cov === 1 || (node.modal === true && cov > 0);
     if (!qualifies) continue;
     if (
       blocker === null ||

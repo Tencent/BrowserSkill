@@ -506,8 +506,7 @@ export function resolveSemanticGraph(
       inputState: inputState(node, role, sourceValue, isSensitive),
       sensitive: isSensitive,
       modal:
-        ["dialog", "alertdialog"].includes(role?.toLowerCase() ?? "") ||
-        tag === "dialog" ||
+        (node.ax?.ignored !== true && axProperty(node.ax, "modal") === "true") ||
         (attrs["aria-modal"] ?? "").toLowerCase() === "true",
       disabled:
         (node.ax?.ignored !== true && axProperty(node.ax, "disabled") === "true") ||

@@ -1103,7 +1103,7 @@ function isBlockedByRegion(
   const points = interactionPoints(target.rect);
 
   if (
-    viewportCoverage < 0.9 &&
+    viewportCoverage < 1 &&
     paintNodes.target.paintOrder >= paintNodes.blocker.paintOrder &&
     points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y))
   ) {
@@ -1117,8 +1117,7 @@ function isBlockedByRegion(
   ) {
     return false;
   }
-  if (viewportCoverage >= 0.9) return true;
-
+  // Even a near-full region must overlap the target to occlude it.
   return points.some(([x, y]) => rectContains(blocker.rect as Rect, x, y));
 }
 

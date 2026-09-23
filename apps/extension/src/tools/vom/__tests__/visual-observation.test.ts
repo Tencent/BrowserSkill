@@ -608,6 +608,7 @@ it.each([
   f.scene.nodes.push(node(2, 1, kind === "frame" ? "iframe" : "canvas"));
   f.scene.nodes.push({
     ...node(10, 1, "dialog", "Login"),
+    modal: true,
     position: "fixed",
     rect: { x: 0, y: 0, w: 800, h: 600 },
   });
@@ -641,6 +642,7 @@ it("preserves modal Canvas with omitted semantics and admits proven foreground f
       node(1, null, "rootwebarea"),
       {
         ...node(10, 1, "dialog", "Login"),
+        modal: true,
         position: "fixed",
         rect: { x: 0, y: 0, w: 800, h: 600 },
       },
@@ -798,6 +800,7 @@ it("keeps excluded Canvas out of every continuation page", async () => {
   f.scene.rootFrameId = "top";
   f.scene.nodes.push({
     ...node(10, 1, "dialog", "Login"),
+    modal: true,
     position: "fixed",
     rect: { x: 0, y: 0, w: 800, h: 600 },
   });

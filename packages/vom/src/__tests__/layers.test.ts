@@ -75,7 +75,7 @@ describe("detectBlockingLayer", () => {
     expect([...(layer?.members ?? [])].sort((a, b) => a - b)).toEqual([2, 3, 4]);
   });
 
-  it("classifies a near-full blocker without modal signals or controls as a mask", () => {
+  it("classifies a full-viewport blocker without modal signals or controls as a mask", () => {
     const layer = detectBlockingLayer(
       [
         node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
@@ -93,7 +93,7 @@ describe("detectBlockingLayer", () => {
     expect(layer?.kind).toBe("mask");
   });
 
-  it("treats explicit modal nodes as modal even below the generic coverage threshold", () => {
+  it("treats explicit modal nodes as modal without requiring a viewport cover", () => {
     const layer = detectBlockingLayer(
       [
         node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
@@ -115,7 +115,7 @@ describe("detectBlockingLayer", () => {
     expect(layer?.kind).toBe("modal");
   });
 
-  it("detects modal features regardless of role or tag casing", () => {
+  it("classifies an explicit modal regardless of role or tag casing", () => {
     const layer = detectBlockingLayer(
       [
         node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
@@ -124,6 +124,7 @@ describe("detectBlockingLayer", () => {
           parentId: 1,
           tag: "DIV",
           role: "Dialog",
+          modal: true,
           rect: { x: 300, y: 200, w: 400, h: 300 },
           paintOrder: 90,
           position: "fixed",
@@ -134,6 +135,67 @@ describe("detectBlockingLayer", () => {
 
     expect(layer?.rootId).toBe(2);
     expect(layer?.kind).toBe("modal");
+  });
+
+  it.each([
+    "fixed",
+    "absolute",
+    "sticky",
+  ])("does not treat a wide %s sidebar as a global blocker", (position) => {
+    for (const fraction of [0.36, 0.64, 0.95, 0.999]) {
+      for (const role of [undefined, "dialog", "alertdialog"]) {
+        expect(
+          detectBlockingLayer(
+            [
+              node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+              node({
+                id: 2,
+                parentId: 1,
+                tag: role ? "dialog" : "aside",
+                role,
+                modal: false,
+                position,
+                paintOrder: 10,
+                rect: { x: 1000 * (1 - fraction), y: 0, w: 1000 * fraction, h: 800 },
+              }),
+            ],
+            VP,
+          ),
+        ).toBeNull();
+      }
+    }
+  });
+
+  it.each(["fixed", "absolute"])("recognizes a small explicit %s modal", (position) => {
+    const layer = detectBlockingLayer(
+      [
+        node({ id: 1, tag: "body", rect: { x: 0, y: 0, w: 1000, h: 800 } }),
+        node({
+          id: 2,
+          parentId: 1,
+          modal: true,
+          position,
+          paintOrder: 10,
+          rect: { x: 400, y: 300, w: 100, h: 60 },
+        }),
+      ],
+      VP,
+    );
+    expect(layer).toMatchObject({ rootId: 2, kind: "modal" });
+  });
+
+  it("keeps child-frame modality local and ignores offscreen modal nodes", () => {
+    const modal = node({
+      id: 2,
+      frameId: "child",
+      modal: true,
+      position: "fixed",
+      rect: { x: 0, y: 0, w: 1000, h: 800 },
+    });
+    expect(detectBlockingLayer([modal], VP, "root")).toBeNull();
+    expect(
+      detectBlockingLayer([{ ...modal, rect: { x: 1000, y: 0, w: 200, h: 100 } }], VP),
+    ).toBeNull();
   });
 
   it("ignores small toasts and pointer-events:none covers", () => {
