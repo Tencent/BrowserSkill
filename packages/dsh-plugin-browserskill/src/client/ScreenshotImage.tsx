@@ -4,6 +4,9 @@ import css from "./ScreenshotImage.module.css";
 
 type ImageState = { status: "loading" } | { status: "error" } | { status: "ready"; url: string };
 
+const MIN_EDGE = 60;
+const MAX_EDGE = 240;
+
 /** Plugin-owned presentation: DSH's attachment client no longer exports image components. */
 export function ScreenshotImage({
   attachment,
@@ -16,6 +19,13 @@ export function ScreenshotImage({
   const [attempt, setAttempt] = useState(0);
   const [open, setOpen] = useState(false);
   const label = attachment.name ?? "screenshot";
+  const naturalRatio = attachment.width / attachment.height;
+  const ratio = Math.min(4, Math.max(0.25, naturalRatio));
+  // Keep both axes usable for loading/retry, even for tiny element captures.
+  const width = Math.max(
+    MIN_EDGE * Math.max(1, ratio),
+    Math.min(MAX_EDGE, MAX_EDGE * ratio, attachment.width, attachment.height * ratio),
+  );
 
   useEffect(() => {
     let active = true;
@@ -45,19 +55,23 @@ export function ScreenshotImage({
       <div
         className={css.frame}
         style={{
-          width: Math.min(attachment.width, 240, (240 * attachment.width) / attachment.height),
-          aspectRatio: `${attachment.width} / ${attachment.height}`,
+          width,
+          aspectRatio: String(ratio),
         }}
       >
         {image.status === "loading" ? (
-          <span role="status">Loading…</span>
+          <span role="status" className={css.status}>
+            Loading…
+          </span>
         ) : image.status === "error" ? (
           <button
             type="button"
             className={css.retry}
+            aria-label="Load failed — retry"
+            title="Load failed — retry"
             onClick={() => setAttempt((value) => value + 1)}
           >
-            Load failed — retry
+            Retry
           </button>
         ) : (
           <button
@@ -72,6 +86,11 @@ export function ScreenshotImage({
               alt={label}
               width={attachment.width}
               height={attachment.height}
+              style={{
+                objectFit: naturalRatio === ratio ? "scale-down" : "cover",
+                objectPosition:
+                  naturalRatio < 0.25 ? "center top" : naturalRatio > 4 ? "left center" : "center",
+              }}
               onError={() => setImage({ status: "error" })}
             />
           </button>

@@ -19,6 +19,39 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it.each([
+  { width: 1280, height: 40, boxWidth: 240, ratio: 4, fit: "cover", position: "left center" },
+  { width: 300, height: 3000, boxWidth: 60, ratio: 0.25, fit: "cover", position: "center top" },
+  { width: 1, height: 10000, boxWidth: 60, ratio: 0.25, fit: "cover", position: "center top" },
+  { width: 16, height: 16, boxWidth: 60, ratio: 1, fit: "scale-down", position: "center" },
+  { width: 128, height: 96, boxWidth: 128, ratio: 4 / 3, fit: "scale-down", position: "center" },
+])("keeps a $width×$height capture usable without cropping its preview", async (size) => {
+  const imageAttachment = { ...attachment, width: size.width, height: size.height };
+  let finish!: (url: string) => void;
+  const load = vi.fn(
+    () =>
+      new Promise<string>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  render(<ScreenshotImage attachment={imageAttachment} load={load} />);
+  const frame = screen.getByRole("status").parentElement!;
+  expect(frame.style.width).toBe(`${size.boxWidth}px`);
+  const [horizontal, vertical = 1] = frame.style.aspectRatio.split("/").map(Number);
+  expect(horizontal / vertical).toBe(size.ratio);
+  await act(async () => finish("blob:thumbnail"));
+  const thumbnail = screen.getByRole("img");
+  expect(thumbnail.parentElement?.parentElement).toBe(frame);
+  expect(thumbnail.style.objectFit).toBe(size.fit);
+  expect(thumbnail.style.objectPosition).toBe(size.position);
+
+  fireEvent.click(screen.getByRole("button", { name: "Open screenshot screenshot.png" }));
+  const preview = screen.getByRole("dialog").querySelector("img")!;
+  expect(preview.getAttribute("src")).toBe("blob:thumbnail");
+  expect(preview.style.objectFit).toBe("");
+  expect(preview.style.objectPosition).toBe("");
+});
+
 it("retries an attachment read failure and releases the loaded URL on unmount", async () => {
   const load = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue("blob:retry");
   const view = render(<ScreenshotImage attachment={attachment} load={load} />);
