@@ -24,11 +24,14 @@ import { ChromiumCdp } from '@/browser-driver/chromium-cdp';
 import { SessionManager } from '@/session-manager/manager';
 import { ScreenshotExports } from '@/long-screenshot/exports';
 import { handleFullPageScreenshot } from '@/tools/screenshot-full-page';
-globalThis.run = async (url, overlay) => {
+globalThis.run = async (url, overlay, active) => {
   const cdp = new ChromiumCdp(chrome.debugger);
   const currentWindow = await chrome.windows.getCurrent();
+  // Establish the control window before recording any capture focus/selection events.
+  await chrome.windows.update(currentWindow.id,{focused:true});
+  await new Promise(r=>setTimeout(r,500));
   const [control] = await chrome.tabs.query({windowId:currentWindow.id,active:true});
-  const manager = new SessionManager({agentWindow:{create:async()=>currentWindow.id,remove:async()=>{},ensureActiveTab:async()=>control.id}});
+  const manager = new SessionManager({agentWindow:{create:async()=>({windowId:currentWindow.id,initialTabIds:[control.id]}),remove:async()=>{},ensureActiveTab:async()=>control.id}});
   const ctx = await manager.start('regression');
   const exports = new ScreenshotExports(id=>manager.has(id));
   const activated=[], focused=[], calls=[], trace=[];
@@ -45,7 +48,7 @@ globalThis.run = async (url, overlay) => {
   try {
     const results=[];
     for (const variant of ['rows','other']) {
-      const tab=await chrome.tabs.create({windowId:currentWindow.id,url:'about:blank',active:false});created.push(tab.id);
+      const tab=await chrome.tabs.create({windowId:currentWindow.id,url:'about:blank',active});created.push(tab.id);
       ctx.agentCreatedTabs.add(tab.id);
       await cdp.acquireBackgroundExecution(ctx.sessionId,tab.id);
       await chrome.tabs.update(tab.id,{url:url+'/'+variant});
@@ -70,7 +73,7 @@ globalThis.run = async (url, overlay) => {
         if(!overlayPixels)throw new Error('Overlay regression requires visible scrollbar pixels before capture');
       }
       const dpr=await evaluate(tab.id,'devicePixelRatio');
-      const result=await handleFullPageScreenshot(manager,{session_id:ctx.sessionId,tab_id:tab.id},{cdp,tabsApi:chrome.tabs,exports});
+      const result=await handleFullPageScreenshot(manager,{session_id:ctx.sessionId,tab_id:tab.id,timeout_ms:60_000},{cdp,tabsApi:chrome.tabs,exports});
       if(result.code)throw new Error(JSON.stringify({result,variant,trace,calls}));
       const parts=[];let offset=0;
       for(;;){const chunk=await exports.read({session_id:ctx.sessionId,capture_id:result.capture_id,offset});
@@ -100,7 +103,7 @@ globalThis.run = async (url, overlay) => {
       results.push({result,dpr,bad,edgeBad,overlayPixels,footer,original,restored:await state(tab.id),active:(await chrome.tabs.get(tab.id)).active});
       await exports.release({session_id:ctx.sessionId,capture_id:result.capture_id});
     }
-    return {results,activated,focused,calls,control:control.id,selected:(await chrome.tabs.query({windowId:currentWindow.id,active:true}))[0].id};
+    return {results,activated,focused,calls,created,control:control.id,selected:(await chrome.tabs.query({windowId:currentWindow.id,active:true}))[0].id};
   } finally {
     chrome.tabs.onActivated.removeListener(onActive);chrome.windows.onFocusChanged.removeListener(onFocus);
     await exports.dispose();await cdp.detachAll();cdp.dispose();
@@ -112,9 +115,15 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
   "background full-page browser regression",
   () => {
     it.each([
-      { scale: 1, zoom: 1 },
-      { scale: 2, zoom: 1.25 },
-    ])("stitches target pixels and restores the page at $scale/$zoom", async ({ scale, zoom }) => {
+      { scale: 1, zoom: 1, active: false },
+      { scale: 1.5, zoom: 1, active: false },
+      { scale: 2, zoom: 1.25, active: false },
+      { scale: 1.5, zoom: 1, active: true },
+    ])("stitches target pixels and restores the page at $scale/$zoom (active=$active)", async ({
+      scale,
+      zoom,
+      active,
+    }) => {
       const directory = await mkdtemp(path.join(tmpdir(), "bsk-full-page-extension-"));
       const server = createServer((req, res) => {
         res.setHeader("Content-Type", "text/html");
@@ -194,8 +203,8 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
             deviceScale: scale,
             zoom,
             extensionPath: directory,
-            softwareRendering: true,
-            headless: !process.env.BSK_OVERLAY_SCROLLBAR,
+            softwareRendering: !process.env.BSK_SCREENSHOT_HEADED,
+            headless: !process.env.BSK_OVERLAY_SCROLLBAR && !process.env.BSK_SCREENSHOT_HEADED,
           },
           async (send: Send) => {
             let origin = "";
@@ -232,9 +241,11 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
               if (reply.exceptionDetails) throw new Error(JSON.stringify(reply.exceptionDetails));
               return reply.result.value;
             };
-            await expect.poll(() => evaluate("typeof run==='function'")).toBe(true);
+            await expect
+              .poll(() => evaluate("typeof run==='function'"), { timeout: 10_000 })
+              .toBe(true);
             await evaluate(
-              `run(${JSON.stringify(url)},${!!process.env.BSK_OVERLAY_SCROLLBAR}).then(value=>globalThis.done={value},error=>globalThis.done={error:String(error)});true`,
+              `run(${JSON.stringify(url)},${!!process.env.BSK_OVERLAY_SCROLLBAR},${active}).then(value=>globalThis.done={value},error=>globalThis.done={error:String(error)});true`,
             );
             await expect.poll(() => evaluate("!!globalThis.done"), { timeout: 100_000 }).toBe(true);
             const done = await evaluate<{
@@ -254,6 +265,7 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
                 activated: number[];
                 focused: number[];
                 calls: string[];
+                created: number[];
                 control: number;
                 selected: number;
               };
@@ -270,12 +282,14 @@ describe.skipIf(!process.env.BSK_BACKGROUND_CHROME)(
               );
               expect(Math.abs(item.result.height - 2634 * item.dpr)).toBeLessThanOrEqual(1);
               expect(item.restored).toEqual(item.original);
-              expect(item.active).toBe(false);
+              expect(item.active).toBe(active);
             }
             if (process.env.BSK_OVERLAY_SCROLLBAR)
               expect(done.value.results[1].overlayPixels).toBeGreaterThan(0);
-            expect(done.value.selected).toBe(done.value.control);
-            expect(done.value.activated).toEqual([]);
+            expect(done.value.selected).toBe(
+              active ? done.value.created.at(-1) : done.value.control,
+            );
+            expect(done.value.activated).toEqual(active ? done.value.created : []);
             expect(done.value.focused).toEqual([]);
             expect(done.value.calls).not.toContain("Page.bringToFront");
           },

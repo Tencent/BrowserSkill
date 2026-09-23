@@ -405,8 +405,10 @@ export function createPageCapture(onCancel: (id: string, reason: CaptureCancelRe
       height: Math.max(scrolling.scrollHeight, viewportHeight),
       viewportWidth,
       viewportHeight,
-      innerWidth: viewportWidth + (window.innerWidth - root.clientWidth),
-      innerHeight: viewportHeight + (window.innerHeight - root.clientHeight),
+      // Do not add an integer scrollbar gutter to a fractional visual viewport.
+      // inner/client dimensions are rounded independently.
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
       dpr: window.devicePixelRatio,
       bottomOverlayHeight: task?.bottomOverlayHeight ?? 0,
     };
