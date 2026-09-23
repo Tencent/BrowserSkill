@@ -4,6 +4,17 @@
   max-width: 100%;
 }
 
+.status,
+.retry {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.status {
+  font-size: 12px;
+}
+
 .thumbnail,
 .retry,
 .preview button {
@@ -27,10 +38,12 @@
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
 }
 
-.retry,
+.retry {
+  padding: 6px 8px;
+}
+
 .preview button {
   padding: 6px 10px;
 }
