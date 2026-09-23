@@ -8,7 +8,11 @@ import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ControlOverlay } from "@/content/ControlOverlay";
-import { INPUT_PASSTHROUGH, type InputPassthroughSendToTab } from "@/lib/input-passthrough-bridge";
+import {
+  INPUT_PASSTHROUGH,
+  INPUT_PASSTHROUGH_TTL_MS,
+  type InputPassthroughSendToTab,
+} from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
@@ -610,6 +614,38 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           await sendInputPassthrough(4, { type: INPUT_PASSTHROUGH, phase: "end", id: "css-check" });
           expect(await evaluate("overlay.hasAttribute('data-bsk-input-passthrough')")).toBe(false);
         }
+        // Losing end must restore the user's Stop button without another background message.
+        const stopPoint = await evaluate<{ x: number; y: number }>(`(() => {
+          const stop=overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]');
+          stop.addEventListener('click',()=>stops++);
+          const r=stop.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+          Object.assign(document.querySelector('#target').style,{left:(x-40)+'px',top:(y-15)+'px'});
+          stops=0; clicks=[]; return {x,y};
+        })()`);
+        await sendInputPassthrough(4, { type: INPUT_PASSTHROUGH, phase: "begin", id: "lost-end" });
+        expect(await evaluate(`document.elementFromPoint(${stopPoint.x},${stopPoint.y}).id`)).toBe(
+          "target",
+        );
+        await expect
+          .poll(() => evaluate("overlay.hasAttribute('data-bsk-input-passthrough')"), {
+            timeout: INPUT_PASSTHROUGH_TTL_MS + 3_000,
+          })
+          .toBe(false);
+        expect(await evaluate("passthroughController.pendingCount")).toBe(0);
+        expect(
+          await evaluate(`document.elementFromPoint(${stopPoint.x},${stopPoint.y})===overlay`),
+        ).toBe(true);
+        for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+          await local("Input.dispatchMouseEvent", {
+            type,
+            ...stopPoint,
+            button: "left",
+            clickCount: 1,
+          });
+        }
+        expect(await evaluate("stops")).toBe(1);
+        expect(await evaluate("clicks")).toEqual([]);
+        expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
       },
     );
   }, 30_000);

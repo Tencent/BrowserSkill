@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { INPUT_PASSTHROUGH, type InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
+import {
+  INPUT_PASSTHROUGH,
+  INPUT_PASSTHROUGH_TTL_MS,
+  type InputPassthroughMessage,
+} from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
@@ -410,6 +414,75 @@ describe("handleClick", () => {
         [4, true],
         [4, false],
       ]);
+  });
+
+  it.each([
+    "begin",
+    "move",
+    "press",
+    "release",
+    "clear-slow",
+  ])("handles lease expiry during %s without retrying input", async (phase) => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+      const ctx = await manager.start("expiry");
+      ctx.refStore.set("e1", 100, { tabId: 4 });
+      const mouse: string[] = [];
+      let passthrough = false;
+      const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
+        passthrough = message.phase === "begin";
+        if (passthrough && phase === "begin") now += INPUT_PASSTHROUGH_TTL_MS;
+      });
+      const bypassOverlay = vi.fn(async () => {});
+      const fake = makeFakeCdp({
+        "DOM.scrollIntoViewIfNeeded": () => ({}),
+        "DOM.getContentQuads": () => ({ quads: [[0, 0, 40, 0, 40, 20, 0, 20]] }),
+        "Input.dispatchMouseEvent": (params) => {
+          const type = (params as { type: string }).type;
+          mouse.push(type);
+          if (
+            (phase === "move" && type === "mouseMoved") ||
+            (["press", "clear-slow"].includes(phase) && type === "mousePressed") ||
+            (phase === "release" && type === "mouseReleased")
+          )
+            now += INPUT_PASSTHROUGH_TTL_MS;
+          return {};
+        },
+      });
+      // Another concurrent lease may keep the point clear after ours has expired.
+      fake.overlayHit.mockImplementation(async () => ({
+        result: { value: passthrough || phase === "clear-slow" ? "clear" : "covered" },
+      }));
+      const result = await handleClick(
+        manager,
+        { session_id: "expiry", ref: "e1" },
+        { ...fake, bypassOverlay, sendInputPassthrough },
+      );
+      if (phase === "clear-slow") {
+        expect(result).not.toHaveProperty("code");
+        expect(sendInputPassthrough).not.toHaveBeenCalled();
+      } else {
+        expect(result).toMatchObject({
+          data: {
+            reason: ["begin", "move"].includes(phase) ? "input_not_ready" : "input_outcome_unknown",
+            effect_state: ["begin", "move"].includes(phase) ? "none" : "unknown",
+          },
+        });
+        expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(["begin", "end"]);
+        expect(bypassOverlay.mock.calls).toHaveLength(2);
+      }
+      expect(mouse).toEqual(
+        phase === "begin"
+          ? []
+          : phase === "move"
+            ? ["mouseMoved"]
+            : ["mouseMoved", "mousePressed", "mouseReleased"],
+      );
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("leaves disabled click behavior to the browser without an AX preflight", async () => {

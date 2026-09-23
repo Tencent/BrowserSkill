@@ -1,12 +1,13 @@
 import {
   INPUT_PASSTHROUGH,
+  INPUT_PASSTHROUGH_TTL_MS,
   type InputPassthroughSendToTab,
   sendInputPassthrough,
 } from "@/lib/input-passthrough-bridge";
 import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
-import type { CdpRunner } from "./shared";
+import { type CdpRunner, isRpcError } from "./shared";
 
 export interface ClickOverlayDeps {
   cdp: CdpRunner;
@@ -29,6 +30,8 @@ export async function withClickOverlay<T>(
   const send = deps.sendInputPassthrough ?? sendInputPassthrough;
   let bypass = false;
   let passthroughId: string | undefined;
+  let passthroughExpiresAt = Infinity;
+  const expired = () => Date.now() >= passthroughExpiresAt;
   const notReady = () =>
     rpcError(
       "cdp_failed",
@@ -86,6 +89,8 @@ export async function withClickOverlay<T>(
     if (deps.signal?.aborted) return cancelled();
     if (hit === "covered") {
       passthroughId = crypto.randomUUID();
+      // Start before sending, so our deadline cannot outlive the content-side lease.
+      passthroughExpiresAt = Date.now() + INPUT_PASSTHROUGH_TTL_MS;
       try {
         await send(tabId, { type: INPUT_PASSTHROUGH, phase: "begin", id: passthroughId });
       } catch (error) {
@@ -94,12 +99,29 @@ export async function withClickOverlay<T>(
       hit = await probe();
     }
     if (deps.signal?.aborted) return cancelled();
-    if (hit === "covered" || (covered && hit === "unknown")) return notReady();
-    return await click(async () => {
+    if (expired() || hit === "covered" || (covered && hit === "unknown")) return notReady();
+    const result = await click(async () => {
+      if (expired()) return notReady();
       const current = await probe();
       // Unknown probes preserve ordinary-page behavior, but cannot clear a known obstruction.
-      return current === "covered" || (covered && current === "unknown") ? notReady() : null;
+      return expired() || current === "covered" || (covered && current === "unknown")
+        ? notReady()
+        : null;
     });
+    // The lease can expire while a slow press/release is in flight. Always release
+    // the mouse, but do not claim success (or retry) when delivery is uncertain.
+    if (expired() && !isRpcError(result)) {
+      return rpcError(
+        "cdp_failed",
+        "input_outcome_unknown",
+        "Overlay passthrough expired during click",
+        {
+          effect_state: "unknown",
+          pointer_moved: true,
+        },
+      );
+    }
+    return result;
   } finally {
     // Release our lease even if begin's acknowledgement was lost.
     if (passthroughId) {

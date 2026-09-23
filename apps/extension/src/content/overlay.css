@@ -15,7 +15,8 @@
   pointer-events: auto !important;
 }
 
-/* Click passthrough changes only control hit targets, not visibility or other UI. */
+/* Click passthrough changes only control hit targets, not visibility or other UI.
+   Keep this after the equally specific host blocking rule above. */
 :host([data-bsk-overlay-surface][data-bsk-input-passthrough]),
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-blocker"],
 :host([data-bsk-input-passthrough]) [data-slot="control-overlay-pill"],

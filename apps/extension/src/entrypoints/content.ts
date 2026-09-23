@@ -174,6 +174,8 @@ export default defineContentScript({
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
       const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      // Leaving control (including help/record UI) must not retain click leases.
+      if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
@@ -226,12 +228,16 @@ export default defineContentScript({
     }
 
     function applyOverlayState(state: OverlayAgentStateMessage): void {
+      if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
       overlays.applyAgentControlMode(state.sessionId, state.mode);
       renderAll();
     }
 
     function resetAgentOverlayState(sessionId: string) {
+      const activeSessionId = overlays.snapshot().activeSessionId;
+      if (activeSessionId && activeSessionId !== sessionId) return;
+      inputPassthrough.reset();
       const previousHelp = overlays.resetAgentOverlays(sessionId);
       if (previousHelp) {
         void sendHelpFinish(previousHelp.id, "cancelled");
@@ -528,6 +534,7 @@ export default defineContentScript({
     hostObserver.observe(document.documentElement, { childList: true, subtree: false });
 
     ctx.onInvalidated(() => {
+      inputPassthrough.reset();
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
       chrome.storage.onChanged.removeListener(onStorageChange);

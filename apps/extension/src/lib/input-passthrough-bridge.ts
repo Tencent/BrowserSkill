@@ -1,6 +1,8 @@
 /** Click-only hit-test suppression; independent of screenshot visibility and hover bypass. */
 export const INPUT_PASSTHROUGH = "bsk/input-passthrough";
 export const INPUT_PASSTHROUGH_ATTR = "data-bsk-input-passthrough";
+/** Bound orphaned click leases even if the background never sends end. */
+export const INPUT_PASSTHROUGH_TTL_MS = 5_000;
 
 export interface InputPassthroughMessage {
   type: typeof INPUT_PASSTHROUGH;
