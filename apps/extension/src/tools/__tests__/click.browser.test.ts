@@ -1,8 +1,13 @@
 // @vitest-environment node
 // Opt in with BSK_CLICK_CHROME; each test owns its browser, profile and HTTP server.
+import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
+import { ControlOverlay } from "@/content/ControlOverlay";
+import { CAPTURE_SUPPRESS, type CaptureSuppressSendToTab } from "@/lib/capture-suppress-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
@@ -354,4 +359,165 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   }, 90_000);
+
+  it("clicks through the real control pill and fails if the closed shadow overlay still intercepts input", async () => {
+    const { withChrome } = await import(
+      new URL(
+        "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
+        import.meta.url,
+      ).href
+    );
+    const css = readFileSync(new URL("../../content/overlay.css", import.meta.url), "utf8");
+    await withChrome(
+      { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
+      async (send: Send) => {
+        const { targetId } = await send<{ targetId: string }>("Target.createTarget", {
+          url: "about:blank",
+        });
+        const { sessionId } = await send<{ sessionId: string }>("Target.attachToTarget", {
+          targetId,
+          flatten: true,
+        });
+        const local: Send = (method, params) => send(method, params, sessionId);
+        const evaluate = async <T>(expression: string) => {
+          const reply = await local<{ result: { value: T }; exceptionDetails?: unknown }>(
+            "Runtime.evaluate",
+            {
+              expression,
+              returnByValue: true,
+              awaitPromise: true,
+            },
+          );
+          expect(reply.exceptionDetails).toBeUndefined();
+          return reply.result.value;
+        };
+        await local("Page.bringToFront");
+        await local("Emulation.setDeviceMetricsOverride", {
+          width: 1280,
+          height: 757,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await evaluate(`document.body.innerHTML = '<button id="target" style="position:fixed;width:80px;height:30px">Page action</button>';
+          window.clicks=[]; window.stops=0;
+          document.querySelector('#target').onclick=e=>clicks.push(e.isTrusted);
+          window.overlay=document.createElement('browser-skill-overlay');
+          overlay.setAttribute('data-bsk-overlay',''); overlay.setAttribute('data-bsk-overlay-surface','');
+          document.documentElement.append(overlay);
+          window.overlayRoot=overlay.attachShadow({mode:'closed'});`);
+        const manager = new SessionManager({
+          agentWindow: {
+            create: async () => ({ windowId: 100, initialTabIds: [] }),
+            remove: async () => {},
+            ensureActiveTab: async () => 4,
+          },
+        });
+        const ctx = await manager.start("overlay-click");
+        const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
+        const tabsApi = { get: async () => tab, query: async () => [tab] };
+        const mouse: string[] = [];
+        const cdp: CdpRunner = {
+          send: async (_tabId, method, params) => {
+            if (method === "Input.dispatchMouseEvent")
+              mouse.push((params as { type: string }).type);
+            return (await local(method, params)) as never;
+          },
+        };
+        const sendToTab: CaptureSuppressSendToTab = async (_tabId, message) => {
+          // Transport adapter: use the production CSS suppression marker, as the content script does.
+          await evaluate(
+            `overlay.toggleAttribute('data-bsk-capture-hidden', ${message.phase === "begin"})`,
+          );
+          return { type: CAPTURE_SUPPRESS, ok: true };
+        };
+        // A retained hover bypass leaves the pill interactive even though the host is transparent.
+        for (const automationBypass of [false, true]) {
+          const markup = renderToStaticMarkup(
+            createElement(ControlOverlay, {
+              visible: true,
+              interrupting: false,
+              automationBypass,
+              onInterrupt: () => {},
+            }),
+          );
+          await evaluate(`overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
+            overlayRoot.innerHTML = ${JSON.stringify(`<style>${css}</style>`)} + ${JSON.stringify(markup)};
+            overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',()=>stops++);`);
+          for (const slot of ["control-overlay-pill", "control-overlay-stop-all"]) {
+            const point = await evaluate<{ x: number; y: number }>(`(() => {
+              const r=overlayRoot.querySelector('[data-slot="${slot}"]').getBoundingClientRect();
+              const x=${slot === "control-overlay-pill" ? "r.x+25" : "r.x+r.width/2"}, y=r.y+r.height/2;
+              Object.assign(document.querySelector('#target').style,{left:(x-40)+'px',top:(y-15)+'px'});
+              clicks=[]; stops=0; return {x,y};
+            })()`);
+            expect(
+              await evaluate(`document.elementFromPoint(${point.x},${point.y})===overlay`),
+            ).toBe(true);
+            const nativeClick = async () => {
+              for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+                await local("Input.dispatchMouseEvent", {
+                  type,
+                  ...point,
+                  button: "left",
+                  clickCount: 1,
+                });
+              }
+            };
+            await nativeClick(); // Reproduce the interception before using the fixed click path.
+            expect(await evaluate("clicks")).toEqual([]);
+            await evaluate("stops=0");
+            const { root } = await local<{ root: { nodeId: number } }>("DOM.getDocument");
+            const { nodeId } = await local<{ nodeId: number }>("DOM.querySelector", {
+              nodeId: root.nodeId,
+              selector: "#target",
+            });
+            const { node } = await local<{ node: { backendNodeId: number } }>("DOM.describeNode", {
+              nodeId,
+            });
+            ctx.refStore.set("e1", node.backendNodeId, { tabId: 4 });
+            mouse.length = 0;
+            const result = await handleClick(
+              manager,
+              {
+                session_id: ctx.sessionId,
+                ...(automationBypass ? { ref: "e1" } : { selector: "#target" }),
+              },
+              { cdp, tabsApi, sendToTab },
+            );
+            expect(result, JSON.stringify(result)).not.toHaveProperty("code");
+            expect(await evaluate("clicks")).toEqual([true]);
+            expect(await evaluate("stops")).toBe(0);
+            expect(mouse).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
+            expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
+            expect(
+              await evaluate(`document.elementFromPoint(${point.x},${point.y})===overlay`),
+            ).toBe(true);
+            if (slot === "control-overlay-stop-all") {
+              await nativeClick();
+              expect(await evaluate("stops")).toBe(1);
+              expect(await evaluate("clicks")).toEqual([true]);
+            }
+            mouse.length = 0;
+            const blocked = await handleClick(
+              manager,
+              { session_id: ctx.sessionId, selector: "#target" },
+              {
+                cdp,
+                tabsApi,
+                sendToTab: async () => {
+                  throw new Error("Content script unavailable");
+                },
+              },
+            );
+            expect(blocked).toMatchObject({
+              code: "cdp_failed",
+              data: { reason: "input_not_ready", effect_state: "none" },
+            });
+            expect(mouse).toEqual(["mouseMoved"]);
+            expect(await evaluate("clicks")).toEqual([true]);
+          }
+        }
+      },
+    );
+  }, 30_000);
 });

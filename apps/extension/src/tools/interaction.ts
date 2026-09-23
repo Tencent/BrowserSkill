@@ -15,6 +15,11 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
+import {
+  type CaptureSuppressSendToTab,
+  withExtensionOverlayHidden,
+} from "@/lib/capture-suppress-bridge";
+import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -60,6 +65,8 @@ export interface InteractionDeps {
   /** Abort hook (full chain wired in M10.2). */
   signal?: AbortSignal;
   defaultTimeoutMs?: number;
+  /** Hide the complete extension overlay for the bounded click operation. */
+  sendToTab?: CaptureSuppressSendToTab;
   /** Temporarily disable overlay click blocker during CDP automation. */
   bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   /** Keep hover hit-testing active for the caller's next observation/action. */
@@ -517,36 +524,12 @@ export async function clickResolvedTarget(
   if (clickCount < 1) {
     return { code: "invalid_params", message: "click_count must be greater than zero" };
   }
-  const overlayBlocking = await checkOverlayAtPoint(deps.cdp, target.tabId, centre.x, centre.y);
-  let automationBypassEnabled = false;
-  if (overlayBlocking && deps.bypassOverlay) {
-    try {
-      await deps.bypassOverlay(target.tabId, true);
-      automationBypassEnabled = true;
-    } catch (err) {
-      console.debug("[bsk interaction] overlay bypass enable failed", err);
-    }
-  }
-
-  try {
-    const error = await dispatchClickAtPoint(
-      target.tabId,
-      centre,
-      params,
-      deps,
-      undefined,
-      markSent,
-    );
-    if (error) return error;
-  } finally {
-    if (automationBypassEnabled && deps.bypassOverlay && !deps.keepOverlayBypassAfterHover) {
-      try {
-        await deps.bypassOverlay(target.tabId, false);
-      } catch (err) {
-        console.debug("[bsk interaction] overlay bypass disable failed", err);
-      }
-    }
-  }
+  const error = await withExtensionOverlayHidden(
+    target.tabId,
+    () => dispatchClickAtPoint(target.tabId, centre, params, deps, undefined, markSent),
+    deps.sendToTab,
+  );
+  if (error) return error;
 
   return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
     tab_id: target.tabId,
@@ -610,6 +593,28 @@ async function dispatchClickAtPoint(
       if (beforePress && count > 1) {
         const error = await beforePress();
         if (error) return failure(error);
+      }
+      if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
+      // A closed shadow root retargets its inner controls to the host here.
+      // Check the real hit after mouseMoved, including when suppression failed.
+      const hit = await deps.cdp.send<{
+        result?: { value?: boolean };
+        exceptionDetails?: unknown;
+      }>(tabId, "Runtime.evaluate", {
+        expression: `!!document.elementFromPoint(${point.x},${point.y})?.closest(${JSON.stringify(OVERLAY_HOST_SELECTOR)})`,
+        returnByValue: true,
+      });
+      if (hit.exceptionDetails || hit.result?.value !== false) {
+        return failure(
+          rpcError(
+            "cdp_failed",
+            "input_not_ready",
+            hit.result?.value === true
+              ? "Extension overlay intercepts the click point"
+              : "Could not verify that the click point is clear of the extension overlay",
+            { effect_state: attempted ? "unknown" : "none", pointer_moved: moved },
+          ),
+        );
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
       deps.onInputSent?.(tabId);
@@ -683,40 +688,39 @@ async function clickVisualPoint(
       return changed();
     return null;
   };
-  let bypass = false;
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    if (deps.bypassOverlay) {
-      await deps.bypassOverlay(target.tabId, true);
-      bypass = true;
-    }
-    const invalid = await validate();
-    if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
-    const error = await dispatchClickAtPoint(
+    return await withExtensionOverlayHidden(
       target.tabId,
-      point,
-      params,
-      deps,
       async () => {
-        await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
-        return validate();
+        const invalid = await validate();
+        if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
+        const error = await dispatchClickAtPoint(
+          target.tabId,
+          point,
+          params,
+          deps,
+          async () => {
+            await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
+            return validate();
+          },
+          markSent,
+        );
+        if (error) return error;
+        return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+          tab_id: target.tabId,
+          used_ref: capture.ref,
+          ...point,
+        });
       },
-      markSent,
+      deps.sendToTab,
     );
-    if (error) return error;
-    return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
-      tab_id: target.tabId,
-      used_ref: capture.ref,
-      ...point,
-    });
   } catch (error) {
     return {
       code: deps.signal?.aborted || isAbortError(error) ? "cancelled" : "cdp_failed",
       message: error instanceof Error ? error.message : String(error),
       data: { effect_state: "none" },
     };
-  } finally {
-    if (bypass) await deps.bypassOverlay!(target.tabId, false).catch(() => {});
   }
 }
 

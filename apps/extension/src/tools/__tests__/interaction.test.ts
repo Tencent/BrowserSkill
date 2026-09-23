@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
@@ -34,6 +35,7 @@ function makeFakeCdp(
   rendered: () => boolean | Promise<boolean> = () => true,
 ) {
   const sent: Array<{ tabId: number; method: string; params?: object }> = [];
+  const overlayHit = vi.fn(async () => ({ result: { value: false } }));
   const sendImpl = async (tabId: number, method: string, params?: object) => {
     sent.push({ tabId, method, params });
     if (
@@ -42,6 +44,13 @@ function makeFakeCdp(
     )
       return { result: { value: visibility() } };
     if (method === "Page.captureScreenshot") return { data: (await rendered()) ? "pixel" : "" };
+    if (
+      method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression).startsWith(
+        "!!document.elementFromPoint",
+      )
+    )
+      return overlayHit();
     const h = handlers[method];
     if (!h && method === "Accessibility.getPartialAXTree") return { nodes: [] };
     if (!h && method === "Page.getLayoutMetrics") {
@@ -65,7 +74,7 @@ function makeFakeCdp(
     ),
     query: vi.fn(async () => [{ id: 4, windowId: 100, active: true } as chrome.tabs.Tab]),
   };
-  return { cdp, tabsApi, sent };
+  return { cdp, tabsApi, sent, overlayHit };
 }
 
 describe("modifiersBitfield", () => {
@@ -241,10 +250,25 @@ describe("handleClick", () => {
     expect(fake.sent.filter((call) => call.method === "Input.dispatchMouseEvent")).toHaveLength(3);
   });
 
-  it("enables overlay bypass before mouse events when overlay blocks the click point", async () => {
+  it.each([
+    "success",
+    "dispatch-error",
+    "cancel",
+    "still-covered",
+    "suppression-failed",
+    "hit-test-error",
+    "invalid-hit-test",
+    "no-content-script",
+  ])("scopes complete overlay suppression and checks the click point: %s", async (mode) => {
     const order: string[] = [];
-    const bypassOverlay = vi.fn(async (_tabId: number, enabled: boolean) => {
-      order.push(enabled ? "bypass-on" : "bypass-off");
+    const controller = new AbortController();
+    const bypassOverlay = vi.fn();
+    const sendToTab = vi.fn(async (_tabId: number, message: CaptureSuppressMessage) => {
+      order.push(message.phase);
+      if (mode === "suppression-failed" || mode === "no-content-script") {
+        throw new Error("No receiving content script");
+      }
+      return { type: CAPTURE_SUPPRESS, ok: true };
     });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -252,146 +276,52 @@ describe("handleClick", () => {
     const fake = makeFakeCdp({
       "DOM.scrollIntoViewIfNeeded": () => ({}),
       "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: true, overlayHostConnected: true } } };
-        }
-        if (expr.includes("hitIndex")) {
-          return {
-            result: {
-              value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
-            },
-          };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => {
-        order.push("mouse");
+      "Input.dispatchMouseEvent": (params) => {
+        const { type } = params as { type: string };
+        order.push(type);
+        if (type === "mouseMoved" && mode === "cancel") controller.abort();
+        if (type === "mousePressed" && mode === "dispatch-error") throw new Error("Input failed");
         return {};
       },
     });
-    const res = await handleClick(
+    fake.overlayHit.mockImplementation(async () => {
+      order.push("hit-test");
+      if (mode === "hit-test-error") throw new Error("Renderer unavailable");
+      if (mode === "invalid-hit-test") return { exceptionDetails: {} } as never;
+      return { result: { value: mode === "still-covered" || mode === "suppression-failed" } };
+    });
+    const result = await handleClick(
       sm,
       { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
+      { ...fake, sendToTab, bypassOverlay, signal: controller.signal },
     );
-    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-    expect(order.indexOf("bypass-on")).toBeLessThan(order.indexOf("mouse"));
-    expect(order.lastIndexOf("bypass-off")).toBeGreaterThan(order.lastIndexOf("mouse"));
-  });
-
-  it("disables overlay bypass when mouse dispatch throws", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    let mouseCalls = 0;
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: true, overlayHostConnected: true } } };
-        }
-        if (expr.includes("hitIndex")) {
-          return {
-            result: {
-              value: { overlayHostPresent: true, overlayHostConnected: true, hitIndex: 0 },
-            },
-          };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => {
-        mouseCalls += 1;
-        if (mouseCalls === 2) throw new Error("mousePressed failed");
-        return {};
-      },
-    });
-    const res = await handleClick(
-      sm,
-      { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
-    );
-    expect(res).toMatchObject({ code: "cdp_failed" });
-    expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-    expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-  });
-
-  it("enables overlay bypass when the overlay host itself captures the point", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const host = document.createElement("browser-skill-overlay");
-    host.setAttribute("data-bsk-overlay", "");
-    host.style.cssText =
-      "position:fixed;inset:0;width:100vw;height:100vh;pointer-events:auto;display:block";
-    host.attachShadow({ mode: "closed" });
-    document.body.append(host);
-    Object.defineProperty(host, "getBoundingClientRect", {
-      value: () => ({
-        x: 0,
-        y: 0,
-        width: 1280,
-        height: 720,
-        top: 0,
-        left: 0,
-        right: 1280,
-        bottom: 720,
-      }),
-    });
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        const value = new Function(`return (${expr})`)();
-        return { result: { value } };
-      },
-      "Input.dispatchMouseEvent": () => ({}),
-    });
-    try {
-      const res = await handleClick(
-        sm,
-        { session_id: "aa11", ref: "@e3" },
-        { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
-      );
-      if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
-      expect(bypassOverlay).toHaveBeenCalledWith(4, true);
-      expect(bypassOverlay).toHaveBeenCalledWith(4, false);
-    } finally {
-      host.remove();
+    expect(order[0]).toBe("begin");
+    expect(bypassOverlay).not.toHaveBeenCalled(); // Do not change a retained hover bypass.
+    if (mode === "success" || mode === "no-content-script") {
+      expect(result).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
+      expect(order.slice(1, 5)).toEqual([
+        "mouseMoved",
+        "hit-test",
+        "mousePressed",
+        "mouseReleased",
+      ]);
+    } else {
+      expect(result).toHaveProperty("code", mode === "cancel" ? "cancelled" : "cdp_failed");
+      if (mode === "dispatch-error") {
+        expect(order).toContain("mouseReleased");
+      } else {
+        expect(order).not.toContain("mousePressed");
+      }
+      if (mode === "still-covered" || mode === "suppression-failed") {
+        expect(result).toMatchObject({ data: { reason: "input_not_ready", effect_state: "none" } });
+      }
     }
-  });
-
-  it("skips overlay bypass when overlay does not block the click point", async () => {
-    const bypassOverlay = vi.fn().mockResolvedValue(undefined);
-    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
-    const ctx = await sm.start("aa11");
-    ctx.refStore.set("e3", 1234, { tabId: 4 });
-    const fake = makeFakeCdp({
-      "DOM.scrollIntoViewIfNeeded": () => ({}),
-      "DOM.getContentQuads": () => ({ quads: [[10, 20, 110, 20, 110, 60, 10, 60]] }),
-      "Runtime.evaluate": (params: unknown) => {
-        const expr = String((params as { expression?: string })?.expression ?? "");
-        if (expr.includes("overlayHostPresent") && !expr.includes("hitIndex")) {
-          return { result: { value: { overlayHostPresent: false, overlayHostConnected: false } } };
-        }
-        throw new Error(`unexpected Runtime.evaluate: ${expr.slice(0, 80)}`);
-      },
-      "Input.dispatchMouseEvent": () => ({}),
-    });
-    await handleClick(
-      sm,
-      { session_id: "aa11", ref: "@e3" },
-      { cdp: fake.cdp, tabsApi: fake.tabsApi, bypassOverlay },
-    );
-    expect(bypassOverlay).not.toHaveBeenCalled();
+    if (mode === "suppression-failed" || mode === "no-content-script") {
+      expect(sendToTab).toHaveBeenCalledTimes(1);
+    } else {
+      expect(order.at(-1)).toBe("end");
+      expect(sendToTab.mock.calls.map((call) => call[1].phase)).toEqual(["begin", "end"]);
+    }
   });
 
   it("leaves disabled click behavior to the browser without an AX preflight", async () => {

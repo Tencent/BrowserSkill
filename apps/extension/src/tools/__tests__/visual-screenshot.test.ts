@@ -524,7 +524,7 @@ async function pointFixture(child = false, oopif = false) {
   ctx.refStore.replace([["e1", { kind: "visual-region", candidate: f.candidate }]]);
   const tab = { id: 4, windowId: 100, active: true } as chrome.tabs.Tab;
   const tabsApi = { get: async () => tab, query: async () => [tab] };
-  const bypassOverlay = vi.fn(async (_tab: number, _enabled: boolean) => {});
+  const sendToTab = vi.fn(async (_tab: number, _message: { phase: string }) => ({}));
   const original = f.send.getMockImplementation()!;
   const input: Record<string, unknown>[] = [];
   const hitPoints: number[][] = [];
@@ -539,6 +539,11 @@ async function pointFixture(child = false, oopif = false) {
   f.send.mockImplementation(async (target, method, params = {}) => {
     if (method === "Runtime.evaluate" && params.expression === "document.visibilityState")
       return { result: { value: control.visibility } };
+    if (
+      method === "Runtime.evaluate" &&
+      String(params.expression).startsWith("!!document.elementFromPoint")
+    )
+      return { result: { value: false } };
     if (method === "Runtime.evaluate" && params.awaitPromise) return { result: { value: true } };
     if (method === "Emulation.setFocusEmulationEnabled") {
       control.focusCommands.push(params.enabled as boolean);
@@ -586,7 +591,7 @@ async function pointFixture(child = false, oopif = false) {
     input,
     hitPoints,
     pointControl: control,
-    deps: { cdp: f.cdp, tabsApi, bypassOverlay },
+    deps: { cdp: f.cdp, tabsApi, sendToTab },
     shot,
   };
 }
@@ -608,9 +613,9 @@ it.each([
     "visual_capture_stale",
   );
   expect(f.input).toHaveLength(count);
-  expect(f.deps.bypassOverlay.mock.calls).toEqual([
-    [4, true],
-    [4, false],
+  expect(f.deps.sendToTab.mock.calls.map(([tab, message]) => [tab, message.phase])).toEqual([
+    [4, "begin"],
+    [4, "end"],
   ]);
 });
 

@@ -64,6 +64,13 @@ function uploadCdp(
   let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
   const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
     calls.push({ method, params });
+    if (
+      method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression).startsWith(
+        "!!document.elementFromPoint",
+      )
+    )
+      return { result: { value: false } };
     if (method === "DOM.scrollIntoViewIfNeeded") return {};
     if (method === "Page.setInterceptFileChooserDialog") return {};
     if (method === "Page.getLayoutMetrics")
@@ -594,6 +601,13 @@ describe("file transfer tools", () => {
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
     let suggested: chrome.downloads.DownloadFilenameSuggestion | undefined;
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
+      if (
+        method === "Runtime.evaluate" &&
+        String((params as { expression?: string })?.expression).startsWith(
+          "!!document.elementFromPoint",
+        )
+      )
+        return { result: { value: false } };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
