@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { type DownloadsApi, handleDownload } from "../download";
 import { captureBrowserDownload } from "../download-capture";
@@ -58,6 +59,7 @@ function uploadCdp(
     multiple?: boolean;
     chooser?: { frameId?: string; backendNodeId?: number; mode?: string };
     pendingResolve?: boolean;
+    overlayHit?: () => string;
   } = {},
 ) {
   const calls: Array<{ method: string; params?: object }> = [];
@@ -66,11 +68,9 @@ function uploadCdp(
     calls.push({ method, params });
     if (
       method === "Runtime.evaluate" &&
-      String((params as { expression?: string })?.expression).startsWith(
-        "!!document.elementFromPoint",
-      )
+      String((params as { expression?: string })?.expression).includes('return "absent"')
     )
-      return { result: { value: false } };
+      return { result: { value: options.overlayHit?.() ?? "clear" } };
     if (method === "DOM.scrollIntoViewIfNeeded") return {};
     if (method === "Page.setInterceptFileChooserDialog") return {};
     if (method === "Page.getLayoutMetrics")
@@ -168,11 +168,20 @@ function dropCdp(
 }
 
 describe("file transfer tools", () => {
-  it("captures the file input activated by the requested click and injects only staged paths", async () => {
+  it.each([
+    false,
+    true,
+  ])("uploads staged paths through the requested click (covered=%s)", async (covered) => {
     const manager = sessions();
     const ctx = await manager.start("s1");
     ctx.refStore.set("e3", 123, { tabId: 4 });
-    const { cdp, calls } = uploadCdp();
+    let passthrough = false;
+    const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
+      passthrough = message.phase === "begin";
+    });
+    const { cdp, calls } = uploadCdp({
+      overlayHit: () => (covered && !passthrough ? "covered" : "clear"),
+    });
 
     const result = await handleUpload(
       manager,
@@ -184,8 +193,12 @@ describe("file transfer tools", () => {
           { transfer_id: "tr_2", name: "two.png", staged_path: "/private/stage/two" },
         ],
       },
-      { cdp, tabsApi: tabsApi() },
+      { cdp, tabsApi: tabsApi(), sendInputPassthrough },
     );
+    expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(
+      covered ? ["begin", "end"] : [],
+    );
+    expect(passthrough).toBe(false);
 
     expect(result).toMatchObject({ tab_id: 4, file_names: ["one.png", "two.png"] });
     expect(calls[0]).toEqual({
@@ -560,7 +573,7 @@ describe("file transfer tools", () => {
     expect(detach).toHaveBeenCalledWith(4);
   });
 
-  it("routes one exact-target download through a browser-relative capability", async () => {
+  it.each([false, true])("routes an exact-target download (covered=%s)", async (covered) => {
     const manager = sessions();
     const ctx = await manager.start("s1");
     ctx.refStore.set("e3", 123, { tabId: 4 });
@@ -600,14 +613,16 @@ describe("file transfer tools", () => {
     };
     let cdpEvent: Parameters<NonNullable<CdpRunner["onEvent"]>>[0] | undefined;
     let suggested: chrome.downloads.DownloadFilenameSuggestion | undefined;
+    let passthrough = false;
+    const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
+      passthrough = message.phase === "begin";
+    });
     const send = vi.fn(async (_tabId: number, method: string, params?: object) => {
       if (
         method === "Runtime.evaluate" &&
-        String((params as { expression?: string })?.expression).startsWith(
-          "!!document.elementFromPoint",
-        )
+        String((params as { expression?: string })?.expression).includes('return "absent"')
       )
-        return { result: { value: false } };
+        return { result: { value: covered && !passthrough ? "covered" : "clear" } };
       if (method === "Page.getLayoutMetrics")
         return { cssLayoutViewport: { clientWidth: 1280, clientHeight: 720 } };
       if (method === "DOM.getContentQuads") return { quads: [[0, 0, 20, 0, 20, 20, 0, 20]] };
@@ -640,8 +655,12 @@ describe("file transfer tools", () => {
     const result = await handleDownload(
       manager,
       { session_id: "s1", ref: "@e3", browser_relative_dir: "BrowserSkill/tr_1" },
-      { cdp, tabsApi: tabsApi(), downloads },
+      { cdp, tabsApi: tabsApi(), downloads, sendInputPassthrough },
     );
+    expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(
+      covered ? ["begin", "end"] : [],
+    );
+    expect(passthrough).toBe(false);
 
     expect(suggested).toEqual({
       filename: "BrowserSkill/tr_1/result.zip",

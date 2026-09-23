@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CAPTURE_SUPPRESS, type CaptureSuppressMessage } from "@/lib/capture-suppress-bridge";
+import { INPUT_PASSTHROUGH, type InputPassthroughMessage } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { withInputReady } from "../input-readiness";
@@ -35,7 +35,7 @@ function makeFakeCdp(
   rendered: () => boolean | Promise<boolean> = () => true,
 ) {
   const sent: Array<{ tabId: number; method: string; params?: object }> = [];
-  const overlayHit = vi.fn(async () => ({ result: { value: false } }));
+  const overlayHit = vi.fn(async () => ({ result: { value: "clear" } }));
   const sendImpl = async (tabId: number, method: string, params?: object) => {
     sent.push({ tabId, method, params });
     if (
@@ -46,9 +46,7 @@ function makeFakeCdp(
     if (method === "Page.captureScreenshot") return { data: (await rendered()) ? "pixel" : "" };
     if (
       method === "Runtime.evaluate" &&
-      String((params as { expression?: string })?.expression).startsWith(
-        "!!document.elementFromPoint",
-      )
+      String((params as { expression?: string })?.expression).includes('return "absent"')
     )
       return overlayHit();
     const h = handlers[method];
@@ -251,24 +249,40 @@ describe("handleClick", () => {
   });
 
   it.each([
-    "success",
-    "dispatch-error",
-    "cancel",
+    "clear",
+    "absent",
+    "bypass-only",
+    "covered",
+    "press-fails",
+    "cancel-after-move",
+    "cancel-during-begin",
     "still-covered",
-    "suppression-failed",
-    "hit-test-error",
-    "invalid-hit-test",
-    "no-content-script",
-  ])("scopes complete overlay suppression and checks the click point: %s", async (mode) => {
+    "begin-fails",
+    "lost-ack",
+    "restore-fails",
+    "probe-throws",
+    "probe-invalid",
+    "verify-throws",
+    "late-covered",
+    "late-unknown",
+    "known-late-unknown",
+  ])("scopes click passthrough without changing a retained hover bypass: %s", async (mode) => {
     const order: string[] = [];
     const controller = new AbortController();
-    const bypassOverlay = vi.fn();
-    const sendToTab = vi.fn(async (_tabId: number, message: CaptureSuppressMessage) => {
+    let bypassCount = 1; // A hover owns this reference throughout the click helper.
+    const bypassOverlay = vi.fn(async (_tab: number, enabled: boolean) => {
+      order.push(enabled ? "bypass-begin" : "bypass-end");
+      bypassCount += enabled ? 1 : -1;
+    });
+    let passthrough = false;
+    const sendInputPassthrough = vi.fn(async (_tab: number, message: InputPassthroughMessage) => {
       order.push(message.phase);
-      if (mode === "suppression-failed" || mode === "no-content-script") {
-        throw new Error("No receiving content script");
-      }
-      return { type: CAPTURE_SUPPRESS, ok: true };
+      if (message.phase === "begin" && mode === "begin-fails") throw new Error("No receiver");
+      passthrough = message.phase === "begin";
+      if (passthrough && mode === "cancel-during-begin") controller.abort();
+      if (passthrough && mode === "lost-ack") throw new Error("Response lost after application");
+      if (!passthrough && mode === "restore-fails") throw new Error("Tab closed");
+      return { type: INPUT_PASSTHROUGH, ok: true };
     });
     const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
     const ctx = await sm.start("aa11");
@@ -279,49 +293,123 @@ describe("handleClick", () => {
       "Input.dispatchMouseEvent": (params) => {
         const { type } = params as { type: string };
         order.push(type);
-        if (type === "mouseMoved" && mode === "cancel") controller.abort();
-        if (type === "mousePressed" && mode === "dispatch-error") throw new Error("Input failed");
+        if (type === "mouseMoved" && mode === "cancel-after-move") controller.abort();
+        if (type === "mousePressed" && mode === "press-fails") throw new Error("Input failed");
         return {};
       },
     });
+    const initiallyClear = [
+      "clear",
+      "absent",
+      "probe-throws",
+      "probe-invalid",
+      "late-covered",
+      "late-unknown",
+    ].includes(mode);
     fake.overlayHit.mockImplementation(async () => {
-      order.push("hit-test");
-      if (mode === "hit-test-error") throw new Error("Renderer unavailable");
-      if (mode === "invalid-hit-test") return { exceptionDetails: {} } as never;
-      return { result: { value: mode === "still-covered" || mode === "suppression-failed" } };
+      order.push("probe");
+      if (mode === "probe-throws" || (mode === "verify-throws" && passthrough))
+        throw new Error("Renderer unavailable");
+      if (mode === "probe-invalid") return { exceptionDetails: {} } as never;
+      if (order.includes("mouseMoved") && ["late-unknown", "known-late-unknown"].includes(mode))
+        return {} as never;
+      const hit =
+        mode === "absent"
+          ? "absent"
+          : mode === "late-covered" && order.includes("mouseMoved")
+            ? "covered"
+            : mode === "bypass-only" && bypassCount === 2
+              ? "clear"
+              : initiallyClear || (passthrough && mode !== "still-covered")
+                ? "clear"
+                : "covered";
+      return { result: { value: hit } };
     });
     const result = await handleClick(
       sm,
       { session_id: "aa11", ref: "@e3" },
-      { ...fake, sendToTab, bypassOverlay, signal: controller.signal },
+      {
+        ...fake,
+        sendInputPassthrough,
+        bypassOverlay,
+        signal: controller.signal,
+      },
     );
-    expect(order[0]).toBe("begin");
-    expect(bypassOverlay).not.toHaveBeenCalled(); // Do not change a retained hover bypass.
-    if (mode === "success" || mode === "no-content-script") {
-      expect(result).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
-      expect(order.slice(1, 5)).toEqual([
+    const beforeMoveFailure = [
+      "still-covered",
+      "begin-fails",
+      "verify-throws",
+      "cancel-during-begin",
+    ].includes(mode);
+    const noPress =
+      beforeMoveFailure ||
+      ["cancel-after-move", "late-covered", "known-late-unknown"].includes(mode);
+    const mouse = order.filter((step) => step.startsWith("mouse"));
+    expect(mouse).toEqual(
+      beforeMoveFailure
+        ? []
+        : noPress
+          ? ["mouseMoved"]
+          : ["mouseMoved", "mousePressed", "mouseReleased"],
+    );
+    if (noPress || mode === "press-fails") {
+      expect(result).toHaveProperty(
+        "code",
+        mode.startsWith("cancel-") ? "cancelled" : "cdp_failed",
+      );
+      if (
+        [
+          "still-covered",
+          "begin-fails",
+          "verify-throws",
+          "late-covered",
+          "known-late-unknown",
+        ].includes(mode)
+      )
+        expect(result).toMatchObject({
+          data: {
+            reason: "input_not_ready",
+            effect_state: "none",
+            pointer_moved: ["late-covered", "known-late-unknown"].includes(mode),
+          },
+        });
+    } else expect(result).toMatchObject({ tab_id: 4, used_ref: "e3", x: 60, y: 40 });
+    if (initiallyClear || mode === "bypass-only") {
+      expect(sendInputPassthrough).not.toHaveBeenCalled();
+    } else {
+      const messages = sendInputPassthrough.mock.calls.map(([, message]) => message);
+      expect(messages).toEqual([
+        { type: INPUT_PASSTHROUGH, phase: "begin", id: expect.any(String) },
+        { type: INPUT_PASSTHROUGH, phase: "end", id: messages[0].id },
+      ]);
+      if (mouse.length) expect(order.indexOf("begin")).toBeLessThan(order.indexOf("mouseMoved"));
+      if (mouse.includes("mouseReleased"))
+        expect(order.indexOf("end")).toBeGreaterThan(order.indexOf("mouseReleased"));
+      expect(order.slice(-2)).toEqual(["end", "bypass-end"]);
+    }
+    if (mode === "clear" || mode === "absent")
+      expect(order).toEqual(["probe", "mouseMoved", "probe", "mousePressed", "mouseReleased"]);
+    if (mode === "covered")
+      expect(order).toEqual([
+        "probe",
+        "bypass-begin",
+        "probe",
+        "begin",
+        "probe",
         "mouseMoved",
-        "hit-test",
+        "probe",
         "mousePressed",
         "mouseReleased",
+        "end",
+        "bypass-end",
       ]);
-    } else {
-      expect(result).toHaveProperty("code", mode === "cancel" ? "cancelled" : "cdp_failed");
-      if (mode === "dispatch-error") {
-        expect(order).toContain("mouseReleased");
-      } else {
-        expect(order).not.toContain("mousePressed");
-      }
-      if (mode === "still-covered" || mode === "suppression-failed") {
-        expect(result).toMatchObject({ data: { reason: "input_not_ready", effect_state: "none" } });
-      }
-    }
-    if (mode === "suppression-failed" || mode === "no-content-script") {
-      expect(sendToTab).toHaveBeenCalledTimes(1);
-    } else {
-      expect(order.at(-1)).toBe("end");
-      expect(sendToTab.mock.calls.map((call) => call[1].phase)).toEqual(["begin", "end"]);
-    }
+    expect(bypassCount).toBe(1);
+    if (initiallyClear) expect(bypassOverlay).not.toHaveBeenCalled();
+    else
+      expect(bypassOverlay.mock.calls).toEqual([
+        [4, true],
+        [4, false],
+      ]);
   });
 
   it("leaves disabled click behavior to the browser without an AX preflight", async () => {

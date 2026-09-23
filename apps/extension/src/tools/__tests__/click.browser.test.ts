@@ -4,10 +4,11 @@ import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { type CdpDebuggee, type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { ControlOverlay } from "@/content/ControlOverlay";
-import { CAPTURE_SUPPRESS, type CaptureSuppressSendToTab } from "@/lib/capture-suppress-bridge";
+import { INPUT_PASSTHROUGH, type InputPassthroughSendToTab } from "@/lib/input-passthrough-bridge";
 import { SessionManager } from "@/session-manager/manager";
 import { prepareBackgroundExecution } from "../background-execution";
 import { handleClick, handlePress } from "../interaction";
@@ -360,7 +361,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
     }
   }, 90_000);
 
-  it("clicks through the real control pill and fails if the closed shadow overlay still intercepts input", async () => {
+  it("preserves hover and visible controls while scoped passthrough clears closed shadow click targets", async () => {
     const { withChrome } = await import(
       new URL(
         "../../../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
@@ -368,6 +369,22 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
       ).href
     );
     const css = readFileSync(new URL("../../content/overlay.css", import.meta.url), "utf8");
+    // Run the actual content-side controller in the browser, including its lease bookkeeping.
+    const moduleUrl = (source: string) =>
+      `data:text/javascript;base64,${Buffer.from(
+        ts.transpileModule(source, {
+          compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
+        }).outputText,
+      ).toString("base64")}`;
+    const bridgeUrl = moduleUrl(
+      readFileSync(new URL("../../lib/input-passthrough-bridge.ts", import.meta.url), "utf8"),
+    );
+    const controllerUrl = moduleUrl(
+      readFileSync(new URL("../../content/input-passthrough.ts", import.meta.url), "utf8").replace(
+        '"@/lib/input-passthrough-bridge"',
+        JSON.stringify(bridgeUrl),
+      ),
+    );
     await withChrome(
       { executable: process.env.BSK_CLICK_CHROME, deviceScale: 1, zoom: 1, startupTimeout: 30_000 },
       async (send: Send) => {
@@ -398,13 +415,15 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
           deviceScaleFactor: 1,
           mobile: false,
         });
-        await evaluate(`document.body.innerHTML = '<button id="target" style="position:fixed;width:80px;height:30px">Page action</button>';
-          window.clicks=[]; window.stops=0;
+        await evaluate(`(async () => { document.body.innerHTML = '<style>#target:hover { background: rgb(1, 2, 3); }</style><button id="target" style="position:fixed;width:80px;height:30px">Page action</button>';
+          window.clicks=[]; window.stops=0; window.pageEvents=[];
           document.querySelector('#target').onclick=e=>clicks.push(e.isTrusted);
+          for (const type of ['mouseover','mousedown','mouseup','click']) document.querySelector('#target').addEventListener(type,e=>pageEvents.push({type,trusted:e.isTrusted,hover:getComputedStyle(e.currentTarget).backgroundColor==='rgb(1, 2, 3)'}));
           window.overlay=document.createElement('browser-skill-overlay');
           overlay.setAttribute('data-bsk-overlay',''); overlay.setAttribute('data-bsk-overlay-surface','');
           document.documentElement.append(overlay);
-          window.overlayRoot=overlay.attachShadow({mode:'closed'});`);
+          window.overlayRoot=overlay.attachShadow({mode:'closed'});
+          window.passthroughController=(await import(${JSON.stringify(controllerUrl)})).createInputPassthroughController(()=>overlay); })()`);
         const manager = new SessionManager({
           agentWindow: {
             create: async () => ({ windowId: 100, initialTabIds: [] }),
@@ -418,17 +437,30 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
         const mouse: string[] = [];
         const cdp: CdpRunner = {
           send: async (_tabId, method, params) => {
-            if (method === "Input.dispatchMouseEvent")
+            if (method === "Input.dispatchMouseEvent") {
               mouse.push((params as { type: string }).type);
+              expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
+              expect(
+                await evaluate(
+                  "getComputedStyle(overlayRoot.querySelector('[data-slot=control-overlay-pill]')).opacity",
+                ),
+              ).toBe("1");
+              expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
+            }
             return (await local(method, params)) as never;
           },
         };
-        const sendToTab: CaptureSuppressSendToTab = async (_tabId, message) => {
-          // Transport adapter: use the production CSS suppression marker, as the content script does.
-          await evaluate(
-            `overlay.toggleAttribute('data-bsk-capture-hidden', ${message.phase === "begin"})`,
+        const phases: string[] = [];
+        const sendInputPassthrough: InputPassthroughSendToTab = async (_tabId, message) => {
+          phases.push(message.phase);
+          return evaluate(
+            `new Promise(resolve=>passthroughController.handleMessage(${JSON.stringify(message)},resolve))`,
           );
-          return { type: CAPTURE_SUPPRESS, ok: true };
+        };
+        const bypassOverlay = async (_tabId: number, enabled: boolean) => {
+          await evaluate(`window.bypassCount += ${enabled ? 1 : -1};
+            overlay.toggleAttribute('data-bsk-overlay-blocking',bypassCount===0);
+            overlayRoot.querySelector('[data-slot="control-overlay-blocker"]').style.pointerEvents=bypassCount>0?'none':'auto';`);
         };
         // A retained hover bypass leaves the pill interactive even though the host is transparent.
         for (const automationBypass of [false, true]) {
@@ -440,9 +472,23 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               onInterrupt: () => {},
             }),
           );
-          await evaluate(`overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
+          await evaluate(`window.bypassCount=${automationBypass ? 1 : 0}; overlay.toggleAttribute('data-bsk-overlay-blocking', ${!automationBypass});
             overlayRoot.innerHTML = ${JSON.stringify(`<style>${css}</style>`)} + ${JSON.stringify(markup)};
+            // Static markup starts before the component's reveal effect; model its settled state.
+            for (const control of overlayRoot.querySelectorAll('[data-slot^="control-overlay"]')) control.style.opacity='1';
             overlayRoot.querySelector('[data-slot="control-overlay-stop-all"]').addEventListener('click',()=>stops++);`);
+          await evaluate(
+            "Object.assign(document.querySelector('#target').style,{left:'20px',top:'20px'})",
+          );
+          phases.length = 0;
+          const clear = await handleClick(
+            manager,
+            { session_id: ctx.sessionId, selector: "#target" },
+            { cdp, tabsApi, sendInputPassthrough, bypassOverlay },
+          );
+          expect(clear).not.toHaveProperty("code");
+          expect(phases).toEqual([]);
+          expect(await evaluate("bypassCount")).toBe(automationBypass ? 1 : 0);
           for (const slot of ["control-overlay-pill", "control-overlay-stop-all"]) {
             const point = await evaluate<{ x: number; y: number }>(`(() => {
               const r=overlayRoot.querySelector('[data-slot="${slot}"]').getBoundingClientRect();
@@ -465,7 +511,9 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             };
             await nativeClick(); // Reproduce the interception before using the fixed click path.
             expect(await evaluate("clicks")).toEqual([]);
-            await evaluate("stops=0");
+            await local("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
+            await evaluate("stops=0; pageEvents=[]");
+            phases.length = 0;
             const { root } = await local<{ root: { nodeId: number } }>("DOM.getDocument");
             const { nodeId } = await local<{ nodeId: number }>("DOM.querySelector", {
               nodeId: root.nodeId,
@@ -482,10 +530,23 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
                 session_id: ctx.sessionId,
                 ...(automationBypass ? { ref: "e1" } : { selector: "#target" }),
               },
-              { cdp, tabsApi, sendToTab },
+              { cdp, tabsApi, sendInputPassthrough, bypassOverlay },
             );
             expect(result, JSON.stringify(result)).not.toHaveProperty("code");
             expect(await evaluate("clicks")).toEqual([true]);
+            expect(phases).toEqual(["begin", "end"]);
+            expect(await evaluate("pageEvents")).toEqual(
+              ["mouseover", "mousedown", "mouseup", "click"].map((type) => ({
+                type,
+                trusted: true,
+                hover: true,
+              })),
+            );
+            expect(await evaluate("bypassCount")).toBe(automationBypass ? 1 : 0);
+            expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
+            expect(await evaluate("overlay.hasAttribute('data-bsk-input-passthrough')")).toBe(
+              false,
+            );
             expect(await evaluate("stops")).toBe(0);
             expect(mouse).toEqual(["mouseMoved", "mousePressed", "mouseReleased"]);
             expect(await evaluate("overlay.hasAttribute('data-bsk-capture-hidden')")).toBe(false);
@@ -504,7 +565,8 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               {
                 cdp,
                 tabsApi,
-                sendToTab: async () => {
+                bypassOverlay,
+                sendInputPassthrough: async () => {
                   throw new Error("Content script unavailable");
                 },
               },
@@ -513,9 +575,40 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               code: "cdp_failed",
               data: { reason: "input_not_ready", effect_state: "none" },
             });
-            expect(mouse).toEqual(["mouseMoved"]);
+            expect(mouse).toEqual([]);
             expect(await evaluate("clicks")).toEqual([true]);
           }
+          // Other extension controls stay hit-testable even while a click lease is active.
+          await evaluate(
+            `(() => { const extra=document.createElement('div'); extra.innerHTML='<button id="other" style="position:fixed;left:20px;top:20px;width:80px;height:30px;pointer-events:auto">Help or recording control</button>'; overlayRoot.append(extra); })()`,
+          );
+          await evaluate(
+            "Object.assign(document.querySelector('#target').style,{left:'20px',top:'20px'})",
+          );
+          mouse.length = 0;
+          const protectedControl = await handleClick(
+            manager,
+            { session_id: ctx.sessionId, selector: "#target" },
+            { cdp, tabsApi, sendInputPassthrough, bypassOverlay },
+          );
+          expect(protectedControl).toHaveProperty("data.reason", "input_not_ready");
+          expect(mouse).toEqual([]);
+          await sendInputPassthrough(4, {
+            type: INPUT_PASSTHROUGH,
+            phase: "begin",
+            id: "css-check",
+          });
+          expect(await evaluate("overlayRoot.elementFromPoint(40,30).id")).toBe("other");
+          expect(await evaluate("getComputedStyle(overlay).display")).toBe("block");
+          await evaluate(`(() => { const replacement=document.createElement('browser-skill-overlay');
+            for(const attr of overlay.attributes) replacement.setAttribute(attr.name,attr.value);
+            const replacementRoot=replacement.attachShadow({mode:'closed'});
+            replacementRoot.innerHTML=overlayRoot.innerHTML;
+            overlay.replaceWith(replacement); overlay=replacement; overlayRoot=replacementRoot;
+            passthroughController.onHostMounted(overlay); })()`);
+          expect(await evaluate("overlay.hasAttribute('data-bsk-input-passthrough')")).toBe(true);
+          await sendInputPassthrough(4, { type: INPUT_PASSTHROUGH, phase: "end", id: "css-check" });
+          expect(await evaluate("overlay.hasAttribute('data-bsk-input-passthrough')")).toBe(false);
         }
       },
     );

@@ -15,11 +15,6 @@ import { isAbortError } from "./vom/capture-abort";
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { CdpTarget } from "@/browser-driver/frame-graph";
-import {
-  type CaptureSuppressSendToTab,
-  withExtensionOverlayHidden,
-} from "@/lib/capture-suppress-bridge";
-import { OVERLAY_HOST_SELECTOR } from "@/lib/overlay-bridge";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   BlurParams,
@@ -40,6 +35,7 @@ import type {
   SelectParams,
   SelectResult,
 } from "@/transport/types";
+import { type ClickOverlayDeps, withClickOverlay } from "./click-overlay";
 import { attachDialogs, markDialogCursor } from "./dialogs";
 import { backendNodeToObject } from "./element-geometry";
 import { rpcError } from "./errors";
@@ -57,18 +53,11 @@ import {
 } from "./shared";
 import { resolveSnapshotRef } from "./snapshot-ref";
 
-export interface InteractionDeps {
+export interface InteractionDeps extends ClickOverlayDeps {
   /** Arm short popup observation immediately before native input dispatch. */
   onInputSent?: (tabId: number) => void;
-  cdp: CdpRunner;
   tabsApi: ChromeTabsApi;
-  /** Abort hook (full chain wired in M10.2). */
-  signal?: AbortSignal;
   defaultTimeoutMs?: number;
-  /** Hide the complete extension overlay for the bounded click operation. */
-  sendToTab?: CaptureSuppressSendToTab;
-  /** Temporarily disable overlay click blocker during CDP automation. */
-  bypassOverlay?: (tabId: number, enabled: boolean) => Promise<void>;
   /** Keep hover hit-testing active for the caller's next observation/action. */
   keepOverlayBypassAfterHover?: boolean;
 }
@@ -524,10 +513,8 @@ export async function clickResolvedTarget(
   if (clickCount < 1) {
     return { code: "invalid_params", message: "click_count must be greater than zero" };
   }
-  const error = await withExtensionOverlayHidden(
-    target.tabId,
-    () => dispatchClickAtPoint(target.tabId, centre, params, deps, undefined, markSent),
-    deps.sendToTab,
+  const error = await withClickOverlay(target.tabId, centre, deps, (verifyOverlay) =>
+    dispatchClickAtPoint(target.tabId, centre, params, deps, verifyOverlay, undefined, markSent),
   );
   if (error) return error;
 
@@ -546,6 +533,7 @@ async function dispatchClickAtPoint(
   point: { x: number; y: number },
   params: Pick<ClickParams, "button" | "click_count" | "modifiers">,
   deps: InteractionDeps,
+  verifyOverlay: () => Promise<RpcError | null>,
   beforePress?: () => Promise<RpcError | null>,
   markSent?: () => void,
 ): Promise<RpcError | null> {
@@ -564,7 +552,7 @@ async function dispatchClickAtPoint(
       modifiers,
     });
   const failure = (error: RpcError): RpcError =>
-    beforePress
+    beforePress || error.data?.reason === "input_not_ready"
       ? {
           ...error,
           data: {
@@ -595,27 +583,8 @@ async function dispatchClickAtPoint(
         if (error) return failure(error);
       }
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
-      // A closed shadow root retargets its inner controls to the host here.
-      // Check the real hit after mouseMoved, including when suppression failed.
-      const hit = await deps.cdp.send<{
-        result?: { value?: boolean };
-        exceptionDetails?: unknown;
-      }>(tabId, "Runtime.evaluate", {
-        expression: `!!document.elementFromPoint(${point.x},${point.y})?.closest(${JSON.stringify(OVERLAY_HOST_SELECTOR)})`,
-        returnByValue: true,
-      });
-      if (hit.exceptionDetails || hit.result?.value !== false) {
-        return failure(
-          rpcError(
-            "cdp_failed",
-            "input_not_ready",
-            hit.result?.value === true
-              ? "Extension overlay intercepts the click point"
-              : "Could not verify that the click point is clear of the extension overlay",
-            { effect_state: attempted ? "unknown" : "none", pointer_moved: moved },
-          ),
-        );
-      }
+      const blocked = await verifyOverlay();
+      if (blocked) return failure(blocked);
       if (deps.signal?.aborted) return failure({ code: "cancelled", message: "click aborted" });
       deps.onInputSent?.(tabId);
       markSent?.();
@@ -690,9 +659,11 @@ async function clickVisualPoint(
   };
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    return await withExtensionOverlayHidden(
+    return await withClickOverlay<ClickResult | RpcError>(
       target.tabId,
-      async () => {
+      point,
+      deps,
+      async (verifyOverlay) => {
         const invalid = await validate();
         if (invalid) return { ...invalid, data: { ...invalid.data, effect_state: "none" } };
         const error = await dispatchClickAtPoint(
@@ -700,6 +671,7 @@ async function clickVisualPoint(
           point,
           params,
           deps,
+          verifyOverlay,
           async () => {
             await wait(32, deps.signal); // Scheduling opportunity, not a claim of page stability.
             return validate();
@@ -713,7 +685,7 @@ async function clickVisualPoint(
           ...point,
         });
       },
-      deps.sendToTab,
+      true, // Visual target validation also needs the page blocker bypassed.
     );
   } catch (error) {
     return {
