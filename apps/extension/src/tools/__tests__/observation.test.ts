@@ -2476,7 +2476,7 @@ describe("buildFrameVomScene", () => {
     expect(scene.nodes.find((node) => node.backendNodeId === 20)?.name).toBe("Inline only text");
   });
 
-  it("marks captured dialog elements as modal without AX role or aria-modal", () => {
+  it("does not infer modality from a captured dialog tag without modal state", () => {
     const scene = buildTestScene([], {
       viewport: { width: 640, height: 480 },
       excludedBackendNodeIds: new Set(),
@@ -2497,7 +2497,7 @@ describe("buildFrameVomScene", () => {
     expect(scene.nodes[0]).toEqual(
       expect.objectContaining({
         backendNodeId: 50,
-        modal: true,
+        modal: false,
       }),
     );
   });
