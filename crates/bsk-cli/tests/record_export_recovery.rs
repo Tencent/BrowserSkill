@@ -69,8 +69,12 @@ async fn handshake(ws: &mut Ws) {
     ws.send(Message::Text(serde_json::to_string(&request).unwrap()))
         .await
         .unwrap();
-    let Message::Text(response) = ws.next().await.unwrap().unwrap() else {
-        panic!("expected text handshake response");
+    let response = loop {
+        match ws.next().await.unwrap().unwrap() {
+            Message::Text(response) => break response,
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("expected text handshake response, got {other:?}"),
+        }
     };
     let response: ResponseFrame = serde_json::from_str(&response).unwrap();
     let ResponseBody::Ok(value) = response.body else {

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use bsk_protocol::{Frame, RpcId};
+use bsk_protocol::{ErrorCode, Frame, ResponseBody, ResponseFrame, RpcError, RpcId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -45,6 +45,10 @@ pub const BROWSER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the liveness reaper scans the registry for stale browsers.
 pub const BROWSER_LIVENESS_TICK: Duration = Duration::from_secs(15);
+
+/// Silence long enough that a live extension should already have sent its
+/// 20s heartbeat. A shorter gap is a slow command, not a dead control plane.
+pub const EXTENSION_SILENCE_BEFORE_UNRESPONSIVE: Duration = Duration::from_secs(20);
 
 /// Process-wide monotonic counter for [`BrowserClient::generation`]. Used
 /// by the reconnect-race guard: when an old WS task tears down it only
@@ -114,6 +118,41 @@ impl Pending {
     pub fn cancel(&mut self, id: &RpcId) {
         self.waiters.remove(id);
     }
+
+    /// Settle every waiter with the same error. Used when this client is
+    /// replaced by a newer connection and must not keep callers blocked.
+    pub fn fail_all(&mut self, error: RpcError) {
+        for (id, tx) in std::mem::take(&mut self.waiters) {
+            let _ = tx.send(ResponseFrame {
+                id,
+                body: ResponseBody::Err(error.clone()),
+            });
+        }
+    }
+}
+
+pub(crate) fn extension_reconnected_error() -> RpcError {
+    RpcError {
+        code: ErrorCode::ProtocolError,
+        message: "extension reconnected; the previous session is no longer valid".into(),
+        data: Some(serde_json::json!({ "reason": "extension_reconnected" })),
+    }
+}
+
+pub(crate) fn extension_unresponsive_error() -> RpcError {
+    RpcError {
+        code: ErrorCode::Timeout,
+        message: "extension is not responding".into(),
+        data: Some(serde_json::json!({ "reason": "extension_unresponsive" })),
+    }
+}
+
+pub(crate) fn is_extension_reconnected(err: &RpcError) -> bool {
+    err.data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(|reason| reason.as_str())
+        == Some("extension_reconnected")
 }
 
 #[derive(Debug)]
@@ -157,6 +196,10 @@ pub struct BrowserClient {
     /// before — otherwise a new daemon paired with an old extension would
     /// wrongly drop a live-but-idle connection.
     pub heartbeat_seen: AtomicBool,
+    /// Set when a call outlives a full heartbeat interval with no inbound
+    /// frame. Cleared by the next frame. The registry entry stays so other
+    /// sessions are not torn down.
+    pub unresponsive: AtomicBool,
 }
 
 impl BrowserClient {
@@ -165,6 +208,21 @@ impl BrowserClient {
         if let Ok(mut last) = self.last_seen.lock() {
             *last = Instant::now();
         }
+        self.unresponsive.store(false, Ordering::Release);
+    }
+
+    pub fn is_unresponsive(&self) -> bool {
+        self.unresponsive.load(Ordering::Acquire)
+    }
+
+    /// Mark this browser unresponsive when it has already missed a heartbeat
+    /// interval. Returns whether the mark was applied.
+    pub fn note_unresponsive_if_silent(&self) -> bool {
+        if self.idle_for() < EXTENSION_SILENCE_BEFORE_UNRESPONSIVE {
+            return false;
+        }
+        self.unresponsive.store(true, Ordering::Release);
+        true
     }
 
     /// Note that a `system.heartbeat` arrived, opting this browser in to
@@ -197,6 +255,7 @@ impl BrowserClient {
             connected_at_ms: self.connected_at_ms,
             version_skew: self.version_skew,
             extension_protocol_version: self.extension_protocol_version.clone(),
+            unresponsive: self.is_unresponsive(),
         }
     }
 }
@@ -214,16 +273,27 @@ impl BrowserRegistry {
     }
 
     pub fn insert(&self, client: std::sync::Arc<BrowserClient>) {
-        let mut guard = self.inner.lock().expect("browser registry poisoned");
-        if let Some(prev) = guard.get(&client.id) {
-            tracing::info!(
-                id = %client.id,
-                old_generation = prev.generation,
-                new_generation = client.generation,
-                "browser reconnect: replacing previous registration"
-            );
+        let id = client.id.clone();
+        let new_generation = client.generation;
+        let replaced = {
+            let mut guard = self.inner.lock().expect("browser registry poisoned");
+            let replaced = guard.insert(id.clone(), client);
+            if let Some(prev) = &replaced {
+                tracing::info!(
+                    id = %id,
+                    old_generation = prev.generation,
+                    new_generation,
+                    "browser reconnect: replacing previous registration"
+                );
+            }
+            replaced
+        };
+        if let Some(prev) = replaced {
+            prev.pending
+                .lock()
+                .expect("browser pending poisoned")
+                .fail_all(extension_reconnected_error());
         }
-        guard.insert(client.id.clone(), client);
     }
 
     pub fn remove(&self, id: &BrowserId) -> Option<std::sync::Arc<BrowserClient>> {
@@ -425,6 +495,7 @@ mod tests {
             version_skew: false,
             last_seen: Mutex::new(Instant::now()),
             heartbeat_seen: AtomicBool::new(false),
+            unresponsive: AtomicBool::new(false),
         })
     }
 
@@ -675,5 +746,45 @@ mod tests {
             started.elapsed() < Duration::from_millis(50),
             "should return immediately when browsers already connected"
         );
+    }
+
+    #[tokio::test]
+    async fn replacing_a_registration_fails_pending_calls_immediately() {
+        let reg = BrowserRegistry::new();
+        let first = fake_client("same", "");
+        reg.insert(std::sync::Arc::clone(&first));
+        let waiter = first
+            .pending
+            .lock()
+            .unwrap()
+            .register("inflight".to_string());
+
+        reg.insert(fake_client("same", ""));
+
+        let frame = waiter.await.expect("replaced client settles the waiter");
+        match frame.body {
+            ResponseBody::Err(err) => assert!(is_extension_reconnected(&err)),
+            other => panic!("expected reconnect error, got {other:?}"),
+        }
+        assert_ne!(
+            reg.get(&BrowserId("same".into())).unwrap().generation,
+            first.generation
+        );
+    }
+
+    #[test]
+    fn short_silence_stays_responsive_and_a_heartbeat_gap_clears_on_touch() {
+        let client = fake_client("a", "");
+        assert!(!client.note_unresponsive_if_silent());
+        assert!(!client.is_unresponsive());
+
+        *client.last_seen.lock().unwrap() = Instant::now() - EXTENSION_SILENCE_BEFORE_UNRESPONSIVE;
+        assert!(client.note_unresponsive_if_silent());
+        assert!(client.is_unresponsive());
+        assert!(client.status_entry(0).unresponsive);
+
+        client.touch();
+        assert!(!client.is_unresponsive());
+        assert!(!client.status_entry(0).unresponsive);
     }
 }

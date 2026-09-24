@@ -119,6 +119,11 @@
           "format": "uint32",
           "minimum": 0.0
         },
+        "unresponsive": {
+          "description": "The socket is still registered, but a call outlived a heartbeat interval with no inbound frame. Cleared when any frame arrives.",
+          "default": false,
+          "type": "boolean"
+        },
         "version_skew": {
           "description": "`true` when the browser's `protocol_version` differs from the daemon's (same major, minor drift). Connection is still allowed.",
           "default": false,

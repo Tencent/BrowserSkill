@@ -364,12 +364,17 @@ async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S
         "client":"browser-skill-extension","version":"0.2.1","protocol_version":bsk::daemon::state::PROTOCOL_VERSION,
         "instance_id":instance,"browser":{"name":"chrome","version":"131"},"label":"Remote browser"
     }}).to_string())).await.unwrap();
-    let frame = tokio::time::timeout(Duration::from_secs(3), ws.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let reply: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    let reply: Value = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if matches!(frame, Message::Ping(_) | Message::Pong(_)) {
+            continue;
+        }
+        break serde_json::from_str(frame.to_text().unwrap()).unwrap();
+    };
     assert!(reply.get("result").is_some(), "{reply}");
 }
 async fn closed<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>) {

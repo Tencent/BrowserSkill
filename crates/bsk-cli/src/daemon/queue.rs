@@ -616,6 +616,9 @@ async fn forward_one(
             data: None,
         });
     };
+    if client.is_unresponsive() {
+        return Err(super::browsers::extension_unresponsive_error());
+    }
     let rpc_id = next_rpc_id("tool");
     let waiter = {
         let mut pending = client.pending.lock().unwrap();
@@ -914,6 +917,7 @@ async fn forward_one(
         }
         WaitOutcome::Timeout => {
             client.pending.lock().unwrap().cancel(&rpc_id);
+            let unresponsive = client.note_unresponsive_if_silent();
             if job.method == Method::ToolTabBorrow {
                 return Err(unknown_borrow_error(ErrorCode::Timeout));
             }
@@ -925,6 +929,9 @@ async fn forward_one(
                     false,
                 ));
             }
+            if unresponsive && !is_native_input(&job.method) {
+                return Err(super::browsers::extension_unresponsive_error());
+            }
             return Err(RpcError {
                 code: ErrorCode::Timeout,
                 message: format!("tool RPC timed out after {:?}", job.timeout),
@@ -934,8 +941,32 @@ async fn forward_one(
     };
     match response.body {
         ResponseBody::Ok(v) => Ok(v),
-        ResponseBody::Err(err) => Err(err),
+        ResponseBody::Err(err) => Err(link_error_for_method(&job.method, err)),
     }
+}
+
+/// A replaced connection already failed this call. Keep the unknown-effect
+/// signal for input and transfers so a retry cannot repeat a side effect.
+fn link_error_for_method(method: &Method, err: RpcError) -> RpcError {
+    if !super::browsers::is_extension_reconnected(&err) {
+        return err;
+    }
+    if is_native_input(method) {
+        return RpcError {
+            code: err.code,
+            message: err.message,
+            data: Some(input_effect_data(None)),
+        };
+    }
+    if is_effect_aware_transfer(method) {
+        return unknown_transfer_error(
+            err.code,
+            "extension reconnected; file transfer outcome is unknown",
+            "transport",
+            false,
+        );
+    }
+    err
 }
 
 fn is_native_input(method: &Method) -> bool {
@@ -1467,6 +1498,35 @@ mod dispatch_unlocked_tests {
         );
         // No session row → forward_one returns NotFound as Rpc.
         assert!(matches!(unlocked, Err(DispatchError::Rpc(_))));
+    }
+}
+
+#[cfg(test)]
+mod link_error_tests {
+    use super::*;
+
+    fn reconnected() -> RpcError {
+        crate::daemon::browsers::extension_reconnected_error()
+    }
+
+    #[test]
+    fn reconnect_keeps_unknown_outcome_for_input_and_transfers() {
+        let click = link_error_for_method(&Method::ToolClick, reconnected());
+        assert_eq!(
+            click.message,
+            "extension reconnected; the previous session is no longer valid"
+        );
+        assert_eq!(click.data.unwrap()["reason"], "input_outcome_unknown");
+
+        let upload = link_error_for_method(&Method::ToolUpload, reconnected());
+        assert_eq!(
+            upload.message,
+            "extension reconnected; file transfer outcome is unknown"
+        );
+        assert_eq!(upload.data.unwrap()["reason"], "transfer_outcome_unknown");
+
+        let observe = link_error_for_method(&Method::ToolSnapshot, reconnected());
+        assert_eq!(observe.data.unwrap()["reason"], "extension_reconnected");
     }
 }
 
