@@ -1,6 +1,9 @@
 // Order-independent coordinator for one browser download. CDP supplies the
 // exact target/frame intent while chrome.downloads supplies the download id
-// and filename routing hook; neither event is assumed to arrive first.
+// and filename routing hook; neither event is assumed to arrive first. A click
+// that opens a new tab (for example `target="_blank"` to an attachment) emits
+// no CDP intent on the clicked target, so a navigation target that the clicked
+// tab opens after mouse press supplies the intent URL instead.
 
 import type { CdpTarget } from "@/browser-driver/frame-graph";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
@@ -45,16 +48,30 @@ export const chromeDownloadsApi: DownloadsApi = {
   removeFile: (id) => chrome.downloads.removeFile(id),
 };
 
+export interface NavigationTargetsApi {
+  onCreatedNavigationTarget: ListenerEvent<
+    (details: chrome.webNavigation.WebNavigationSourceCallbackDetails) => void
+  >;
+}
+
+export const chromeNavigationTargetsApi: NavigationTargetsApi = {
+  get onCreatedNavigationTarget() {
+    return chrome.webNavigation.onCreatedNavigationTarget;
+  },
+};
+
 export interface DownloadCaptureOptions {
   cdp: CdpRunner;
   target: CdpTarget;
   expectedFrameId?: string;
   downloads: DownloadsApi;
+  navigationTargets?: NavigationTargetsApi;
   browserRelativeDir: string;
   maxByteSize?: number;
   timeoutMs: number;
   signal?: AbortSignal;
-  trigger(): Promise<ClickResult | RpcError>;
+  /** `markDispatched` must be called immediately before the mouse press is sent. */
+  trigger(markDispatched: () => void): Promise<ClickResult | RpcError>;
 }
 
 export interface DownloadCaptureResult {
@@ -72,6 +89,7 @@ interface DownloadCandidate {
   item: chrome.downloads.DownloadItem;
   suggest: (suggestion?: chrome.downloads.DownloadFilenameSuggestion) => void;
   suggested: boolean;
+  afterDispatch: boolean;
   graceTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -87,6 +105,10 @@ function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpT
 function matchesIntent(item: chrome.downloads.DownloadItem, intent: DownloadIntent): boolean {
   const urlMatches = item.url === intent.url || item.finalUrl === intent.url;
   return urlMatches && safeBasename(item.filename) === safeBasename(intent.suggestedFilename);
+}
+
+function matchesPopupUrl(item: chrome.downloads.DownloadItem, popupUrls: Set<string>): boolean {
+  return popupUrls.has(item.url) || popupUrls.has(item.finalUrl);
 }
 
 function knownSize(item: chrome.downloads.DownloadItem): number | undefined {
@@ -138,6 +160,8 @@ export async function captureBrowserDownload(
 ): Promise<DownloadCaptureResult | RpcError> {
   let click: ClickResult | undefined;
   let intent: DownloadIntent | undefined;
+  let dispatched = false;
+  const popupUrls = new Set<string>();
   let capturedId: number | undefined;
   let settled = false;
   let succeeded = false;
@@ -174,18 +198,18 @@ export async function captureBrowserDownload(
     candidate.suggested = true;
     candidate.suggest();
   };
-  const matchingCandidates = (): DownloadCandidate[] => {
-    const currentIntent = intent;
-    return currentIntent
-      ? [...candidates.values()].filter(
-          (candidate) => !candidate.suggested && matchesIntent(candidate.item, currentIntent),
-        )
-      : [];
-  };
+  const matchesCdpIntent = (candidate: DownloadCandidate): boolean =>
+    intent !== undefined && matchesIntent(candidate.item, intent);
+  // Pre-dispatch candidates cannot come from the popup opened by this click.
+  const attributable = (candidate: DownloadCandidate): boolean =>
+    matchesCdpIntent(candidate) ||
+    (candidate.afterDispatch && matchesPopupUrl(candidate.item, popupUrls));
+  const matchingCandidates = (): DownloadCandidate[] =>
+    [...candidates.values()].filter((candidate) => !candidate.suggested && attributable(candidate));
 
   const claimUnique = () => {
     uniquenessTimer = undefined;
-    if (settled || capturedId !== undefined || !intent) return;
+    if (settled || capturedId !== undefined) return;
     const matches = matchingCandidates();
     if (matches.length !== 1) {
       if (matches.length > 1) {
@@ -198,8 +222,10 @@ export async function captureBrowserDownload(
     candidate.suggested = true;
     clearTimeout(candidate.graceTimer);
     capturedId = candidate.item.id;
+    const filename =
+      intent && matchesCdpIntent(candidate) ? intent.suggestedFilename : candidate.item.filename;
     candidate.suggest({
-      filename: `${options.browserRelativeDir}/${safeBasename(intent.suggestedFilename)}`,
+      filename: `${options.browserRelativeDir}/${safeBasename(filename)}`,
       conflictAction: "overwrite",
     });
     const size = knownSize(candidate.item);
@@ -215,7 +241,7 @@ export async function captureBrowserDownload(
     }
   };
   const reconcile = () => {
-    if (settled || capturedId !== undefined || !intent) return;
+    if (settled || capturedId !== undefined) return;
     const matches = matchingCandidates();
     if (matches.length > 1) {
       for (const candidate of matches) suggestDefault(candidate);
@@ -232,10 +258,11 @@ export async function captureBrowserDownload(
       item,
       suggest,
       suggested: false,
+      afterDispatch: dispatched,
       graceTimer: setTimeout(() => {
         suggestDefault(candidate);
         candidates.delete(item.id);
-        if (intent && matchesIntent(item, intent) && capturedId === undefined) {
+        if (attributable(candidate) && capturedId === undefined) {
           fail(new Error("download correlation grace elapsed before unique attribution"));
         }
       }, CORRELATION_GRACE_MS),
@@ -270,6 +297,13 @@ export async function captureBrowserDownload(
     }
   };
   const onAbort = () => fail(new DOMException("aborted", "AbortError"));
+  const navigationTargetListener = (
+    details: chrome.webNavigation.WebNavigationSourceCallbackDetails,
+  ) => {
+    if (!dispatched || details.sourceTabId !== options.target.tabId) return;
+    popupUrls.add(details.url);
+    reconcile();
+  };
   const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
     if (method !== "Page.downloadWillBegin" || !sameTarget(source, options.target)) return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
@@ -296,6 +330,7 @@ export async function captureBrowserDownload(
   options.downloads.onDeterminingFilename.addListener(determiningListener);
   options.downloads.onCreated.addListener(createdListener);
   options.downloads.onChanged.addListener(changedListener);
+  options.navigationTargets?.onCreatedNavigationTarget.addListener(navigationTargetListener);
   options.signal?.addEventListener("abort", onAbort, { once: true });
   operationTimer = setTimeout(
     () => fail(new Error("download did not complete before timeout")),
@@ -315,11 +350,13 @@ export async function captureBrowserDownload(
   }, SIZE_POLL_MS);
 
   try {
-    const triggered = await options.trigger();
+    const triggered = await options.trigger(() => {
+      dispatched = true;
+    });
     if (isRpcError(triggered)) {
       void completion.catch(() => undefined);
       const effect: TransferEffectState =
-        capturedId !== undefined ? "committed" : intent ? "unknown" : "none";
+        capturedId !== undefined ? "committed" : intent || popupUrls.size > 0 ? "unknown" : "none";
       failureResult = {
         ...triggered,
         data: { ...triggered.data, effect_state: effect, phase: "trigger" },
@@ -348,6 +385,7 @@ export async function captureBrowserDownload(
     options.downloads.onDeterminingFilename.removeListener(determiningListener);
     options.downloads.onCreated.removeListener(createdListener);
     options.downloads.onChanged.removeListener(changedListener);
+    options.navigationTargets?.onCreatedNavigationTarget.removeListener(navigationTargetListener);
     cdpSubscription.dispose();
     for (const candidate of candidates.values()) {
       clearTimeout(candidate.graceTimer);
