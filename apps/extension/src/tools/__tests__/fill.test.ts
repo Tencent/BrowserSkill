@@ -396,6 +396,19 @@ describe("fill result verification", () => {
     expect(await h.fill(requested)).toMatchObject({ value_length: normalized.length });
   });
 
+  it("fills a contenteditable descendant that has no contenteditable attribute", async () => {
+    const h = await setup('<p tabindex="0"></p>');
+    let innerText = "";
+    Object.defineProperty(h.element, "isContentEditable", { get: () => true });
+    Object.defineProperty(h.element, "innerText", { get: () => innerText });
+    h.insert.mockImplementation(async () => {
+      h.element.textContent = "hello";
+      innerText = "hello";
+    });
+    expect(await h.fill("hello")).toMatchObject({ value_length: 5 });
+    expect(h.insert).toHaveBeenCalledOnce();
+  });
+
   it("does not count an editable padding break as an extra typed character", async () => {
     const h = await setup('<div contenteditable="true" tabindex="0"></div>');
     // These two layout/editability properties are missing in Happy DOM.
