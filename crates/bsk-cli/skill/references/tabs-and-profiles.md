@@ -62,3 +62,28 @@ Remote content reads/actions require task-created or borrowed tabs. Page-opened
 popups gain no control automatically; an unowned tab inside the Agent Window
 needs the user to move it to a user window before borrowing. Remote upload/download
 are unsupported; screenshots work.
+
+## Tab groups
+
+```sh
+bsk tab group create --session <id> --tab <id> [--tab <id> ...] [--title <t>] [--color <c>]
+bsk tab group create --session <id> --tab <id> --group-id <existing-group-id>
+bsk tab group update <group-id> --session <id> [--title <t>] [--color <c>] [--collapsed|--expand]
+bsk tab group list --session <id>
+bsk tab group ungroup <group-id> --session <id>
+```
+
+Only tabs already inside the session's Agent Window (own tab or borrowed tab) can
+be grouped — same sandbox rule as `tab close` / `tab select`; a tab outside it is
+rejected with `permission_denied`. `list` and `ungroup` are scoped to the Agent
+Window's own groups the same way. `ungroup` removes tabs from the group without
+closing them.
+
+**Choose `--title` from what the tabs are actually about, never a placeholder.**
+Read the grouped tabs' titles/URLs first (`bsk tab list --scope agent`) and name
+the group after the real topic — e.g. `AI Security Research` for a set of OWASP
+LLM Top 10 / prompt-injection / red-team tabs, not `Group 1` or `New Tabs`. If the
+tabs cover more than one topic, either pick the dominant one or split the grouping
+calls so each group stays about one thing. `--color` is cosmetic; pick one that
+fits the topic (e.g. `red` for security-review tabs) or omit it and let the
+browser assign one.

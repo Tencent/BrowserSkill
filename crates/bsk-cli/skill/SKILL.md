@@ -115,7 +115,7 @@ A task may need more than one reference as it progresses.
 | When | Read |
 | --- | --- |
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
-| Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
+| Required profile, existing user tab, multiple/background tabs, grouping/organizing tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
 | Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |

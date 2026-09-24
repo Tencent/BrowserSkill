@@ -5,15 +5,21 @@ import { handleHover } from "../interaction";
 import { resolveTargetTab } from "../shared";
 import {
   type AgentOverlayResetApi,
+  type ChromeTabGroupsApi,
   type ChromeWindowsApi,
   handleTabBorrow,
   handleTabClose,
   handleTabCreate,
+  handleTabGroupCreate,
+  handleTabGroupList,
+  handleTabGroupUngroup,
+  handleTabGroupUpdate,
   handleTabList,
   handleTabReturn,
   handleTabSelect,
   NEW_TAB_DEFAULT_URL,
   returnBorrowedTab,
+  type TabGroupMutationApi,
   type TabMutationApi,
 } from "../tabs";
 
@@ -1459,4 +1465,403 @@ it("keeps borrowed tabs as the default target and preserves explicit targeting",
   expect(state.tabs.get(7)).toMatchObject({ windowId: 200, index: 3 });
   expect(ctx.borrowedTabs.has(7)).toBe(false);
   expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 7);
+});
+
+// ---------------------------------------------------------------------------
+// tool.tab_group_create / _update / _list / _ungroup
+// ---------------------------------------------------------------------------
+
+type FakeChromeTabGroup = chrome.tabGroups.TabGroup;
+
+interface FakeGroupState {
+  groups: Map<number, FakeChromeTabGroup>;
+  tabGroupOf: Map<number, number>;
+  nextGroupId: number;
+}
+
+function makeTabGroupApis(
+  tabState: FakeTabState,
+  groupState: FakeGroupState,
+  /**
+   * Simulates the real-world Chromium quirk (observed manually against
+   * Edge 153) where a freshly created group lands in the tabs' *previous*
+   * window rather than the requested `createProperties.windowId`. Exists
+   * only to exercise `handleTabGroupCreate`'s self-heal path.
+   */
+  options: { ignoreCreateWindowId?: boolean } = {},
+): {
+  tabGroups: TabGroupMutationApi;
+  tabGroupsApi: ChromeTabGroupsApi;
+  spies: {
+    group: ReturnType<typeof vi.fn>;
+    ungroup: ReturnType<typeof vi.fn>;
+    queryTabs: ReturnType<typeof vi.fn>;
+    get: ReturnType<typeof vi.fn>;
+    query: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    move: ReturnType<typeof vi.fn>;
+  };
+} {
+  const group = vi.fn(async (opts: chrome.tabs.GroupOptions) => {
+    const tabIds = Array.isArray(opts.tabIds) ? opts.tabIds : [opts.tabIds];
+    let groupId = opts.groupId;
+    if (groupId === undefined) {
+      groupId = groupState.nextGroupId++;
+      // The "ignore" path always lands in a fixed window unrelated to the
+      // tabs' own windowId, mirroring the real quirk observed against Edge
+      // 153: the freshly created group escaped to the browser's regular
+      // window regardless of what `createProperties.windowId` requested.
+      const windowId = options.ignoreCreateWindowId
+        ? 999
+        : (opts.createProperties?.windowId ?? tabState.tabs.get(tabIds[0])?.windowId ?? 1);
+      groupState.groups.set(groupId, {
+        id: groupId,
+        windowId,
+        title: "",
+        color: "grey",
+        collapsed: false,
+      } as FakeChromeTabGroup);
+      // A tab's own windowId always matches wherever its group physically
+      // lives (matches the real browser, and is what let this test suite
+      // catch a mismatch that a window-agnostic fake would have hidden).
+      for (const id of tabIds) {
+        const t = tabState.tabs.get(id);
+        if (t) (t as { windowId?: number }).windowId = windowId;
+      }
+    }
+    for (const id of tabIds) groupState.tabGroupOf.set(id, groupId);
+    return groupId;
+  });
+  const ungroup = vi.fn(async (tabIds: number | number[]) => {
+    for (const id of Array.isArray(tabIds) ? tabIds : [tabIds]) groupState.tabGroupOf.delete(id);
+  });
+  const queryTabs = vi.fn(async (q: chrome.tabs.QueryInfo) =>
+    [...tabState.tabs.values()].filter(
+      (t) =>
+        typeof t.id === "number" &&
+        (q.windowId === undefined || t.windowId === q.windowId) &&
+        (q.groupId === undefined || groupState.tabGroupOf.get(t.id) === q.groupId),
+    ),
+  );
+  const get = vi.fn(async (groupId: number) => {
+    const g = groupState.groups.get(groupId);
+    if (!g) throw new Error(`group ${groupId} not found`);
+    return g;
+  });
+  const query = vi.fn(async (q: chrome.tabGroups.QueryInfo) =>
+    [...groupState.groups.values()].filter((g) => q.windowId === undefined || g.windowId === q.windowId),
+  );
+  const update = vi.fn(async (groupId: number, props: chrome.tabGroups.UpdateProperties) => {
+    const g = groupState.groups.get(groupId);
+    if (!g) return undefined;
+    const updated = { ...g, ...props };
+    groupState.groups.set(groupId, updated);
+    return updated;
+  });
+  const move = vi.fn(async (groupId: number, props: chrome.tabGroups.MoveProperties) => {
+    const g = groupState.groups.get(groupId);
+    if (!g) throw new Error(`move: group ${groupId} not found`);
+    // Mirrors the real quirk this fallback exists for: `tabGroups.move`
+    // resolves without error but does not actually relocate anything
+    // against an unfocused window.
+    if (options.ignoreCreateWindowId) return g;
+    const updated = { ...g, ...(typeof props.windowId === "number" ? { windowId: props.windowId } : {}) };
+    groupState.groups.set(groupId, updated);
+    return updated;
+  });
+  return {
+    tabGroups: { group, ungroup, queryTabs },
+    tabGroupsApi: { get, query, update, move },
+    spies: { group, ungroup, queryTabs, get, query, update, move },
+  };
+}
+
+function emptyGroupState(): FakeGroupState {
+  return { groups: new Map(), tabGroupOf: new Map(), nextGroupId: 1 };
+}
+
+describe("handleTabGroupCreate", () => {
+  it("groups Agent Window tabs into a new group and returns its info", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 100, index: 0 } as chrome.tabs.Tab],
+        [6, { id: 6, windowId: 100, index: 1 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs } = makeTabMutationApi(tabState);
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, emptyGroupState());
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [5, 6], title: "Research", color: "blue" },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_ids.sort()).toEqual([5, 6]);
+    expect(res.title).toBe("Research");
+    expect(res.color).toBe("blue");
+    expect(spies.group).toHaveBeenCalledWith({
+      tabIds: [5, 6],
+      createProperties: { windowId: 100 },
+    });
+    expect(spies.update).toHaveBeenCalledWith(res.group_id, { title: "Research", color: "blue" });
+  });
+
+  it("refuses a tab outside the Agent Window with permission_denied", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([[9, { id: 9, windowId: 200 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs } = makeTabMutationApi(tabState);
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, emptyGroupState());
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [9] },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(spies.group).not.toHaveBeenCalled();
+  });
+
+  it("adds tabs to an existing Agent Window group via group_id", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 100, index: 0 } as chrome.tabs.Tab],
+        [6, { id: 6, windowId: 100, index: 1 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs } = makeTabMutationApi(tabState);
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 100, title: "Existing", color: "grey", collapsed: false });
+    groupState.tabGroupOf.set(5, 1);
+    const { tabGroups, tabGroupsApi } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [6], group_id: 1 },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.group_id).toBe(1);
+    expect(res.tab_ids.sort()).toEqual([5, 6]);
+  });
+
+  it("rejects group_id belonging to another window with permission_denied", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([[5, { id: 5, windowId: 100 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs } = makeTabMutationApi(tabState);
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 999, title: "", color: "grey", collapsed: false });
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [5], group_id: 1 },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(spies.group).not.toHaveBeenCalled();
+  });
+
+  it("falls back to per-tab moves when the browser ignores both createProperties.windowId and tabGroups.move", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 100, index: 0 } as chrome.tabs.Tab],
+        [6, { id: 6, windowId: 100, index: 1 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs, spies: tabSpies } = makeTabMutationApi(tabState);
+    const { tabGroups, tabGroupsApi, spies: groupSpies } = makeTabGroupApis(tabState, emptyGroupState(), {
+      ignoreCreateWindowId: true,
+    });
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [5, 6] },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    // Group-level relocation was attempted first...
+    expect(groupSpies.move).toHaveBeenCalledWith(res.group_id, { windowId: 100, index: -1 });
+    // ...but since it silently no-opped, each tab was moved back individually.
+    expect(tabSpies.move).toHaveBeenCalledWith(5, { windowId: 100, index: -1 });
+    expect(tabSpies.move).toHaveBeenCalledWith(6, { windowId: 100, index: -1 });
+    expect(tabState.tabs.get(5)?.windowId).toBe(100);
+    expect(tabState.tabs.get(6)?.windowId).toBe(100);
+  });
+
+  it("reports a clear error and ungroups the tabs when no relocation attempt lands them in the Agent Window", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([[5, { id: 5, windowId: 100, index: 0 } as chrome.tabs.Tab]]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: baseTabs } = makeTabMutationApi(tabState);
+    // Even the per-tab fallback fails to relocate here — worst case
+    // observed on some hosts for tabs that are members of a tab group.
+    const tabs: TabMutationApi = { ...baseTabs, move: vi.fn(async (id, p) => baseTabs.get(id)) };
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, emptyGroupState(), {
+      ignoreCreateWindowId: true,
+    });
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [5] },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "cdp_failed", data: { reason: "group_window_mismatch" } });
+    expect(spies.ungroup).toHaveBeenCalledWith([5]);
+  });
+
+  it("rejects an empty tab_ids array", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = { tabs: new Map(), nextTabId: 50, windowsClosed: new Set() };
+    const { api: tabs } = makeTabMutationApi(tabState);
+    const { tabGroups, tabGroupsApi } = makeTabGroupApis(tabState, emptyGroupState());
+    const res = await handleTabGroupCreate(
+      sm,
+      { session_id: "aa11", tab_ids: [] },
+      { tabs, tabGroups, tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+  });
+});
+
+describe("handleTabGroupUpdate", () => {
+  it("renames, recolors, and collapses an Agent Window group", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = { tabs: new Map(), nextTabId: 50, windowsClosed: new Set() };
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 100, title: "Old", color: "grey", collapsed: false });
+    const { tabGroupsApi } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupUpdate(
+      sm,
+      { session_id: "aa11", group_id: 1, title: "New", color: "red", collapsed: true },
+      { tabGroupsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res).toMatchObject({ group_id: 1, title: "New", color: "red", collapsed: true });
+  });
+
+  it("refuses a group outside the Agent Window with permission_denied", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = { tabs: new Map(), nextTabId: 50, windowsClosed: new Set() };
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 999, title: "", color: "grey", collapsed: false });
+    const { tabGroupsApi, spies } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupUpdate(
+      sm,
+      { session_id: "aa11", group_id: 1, title: "New" },
+      { tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(spies.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects an invalid color", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const res = await handleTabGroupUpdate(
+      sm,
+      {
+        session_id: "aa11",
+        group_id: 1,
+        color: "chartreuse" as unknown as Parameters<typeof handleTabGroupUpdate>[1]["color"],
+      },
+      {},
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+  });
+});
+
+describe("handleTabGroupList", () => {
+  it("lists only groups in the session's Agent Window", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 200]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 100 } as chrome.tabs.Tab],
+        [6, { id: 6, windowId: 200 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 100, title: "Mine", color: "blue", collapsed: false });
+    groupState.groups.set(2, { id: 2, windowId: 200, title: "Other window", color: "red", collapsed: false });
+    groupState.tabGroupOf.set(5, 1);
+    groupState.tabGroupOf.set(6, 2);
+    const { tabGroups, tabGroupsApi } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupList(sm, { session_id: "aa11" }, { tabGroups, tabGroupsApi });
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.groups).toHaveLength(1);
+    expect(res.groups[0]).toMatchObject({ group_id: 1, title: "Mine", tab_ids: [5] });
+  });
+});
+
+describe("handleTabGroupUngroup", () => {
+  it("removes every tab from the group and leaves them open", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = {
+      tabs: new Map([
+        [5, { id: 5, windowId: 100 } as chrome.tabs.Tab],
+        [6, { id: 6, windowId: 100 } as chrome.tabs.Tab],
+      ]),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 100, title: "", color: "grey", collapsed: false });
+    groupState.tabGroupOf.set(5, 1);
+    groupState.tabGroupOf.set(6, 1);
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupUngroup(
+      sm,
+      { session_id: "aa11", group_id: 1 },
+      { tabGroups, tabGroupsApi },
+    );
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.tab_ids.sort()).toEqual([5, 6]);
+    expect(spies.ungroup).toHaveBeenCalledWith([5, 6]);
+    expect(groupState.tabGroupOf.size).toBe(0);
+    expect(tabState.tabs.has(5)).toBe(true);
+    expect(tabState.tabs.has(6)).toBe(true);
+  });
+
+  it("refuses a group outside the Agent Window with permission_denied", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const tabState: FakeTabState = { tabs: new Map(), nextTabId: 50, windowsClosed: new Set() };
+    const groupState = emptyGroupState();
+    groupState.groups.set(1, { id: 1, windowId: 999, title: "", color: "grey", collapsed: false });
+    const { tabGroups, tabGroupsApi, spies } = makeTabGroupApis(tabState, groupState);
+    const res = await handleTabGroupUngroup(
+      sm,
+      { session_id: "aa11", group_id: 1 },
+      { tabGroups, tabGroupsApi },
+    );
+    expect(res).toMatchObject({ code: "permission_denied", data: { reason: "agent_window_scope" } });
+    expect(spies.ungroup).not.toHaveBeenCalled();
+  });
 });
