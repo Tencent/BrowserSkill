@@ -49,7 +49,11 @@ const HELP_REARM_RETRY_DELAY_MS = 400;
 const HELP_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_COMPLETION_STABLE_MS = 1_000;
 const COMPLETION_POLL_MS = 500;
-const MAX_URL_REGEX_LENGTH = 2_048;
+const MAX_COMPLETION_CONDITIONS = 8;
+const MAX_URL_REGEX_LENGTH = 128;
+const MAX_URL_REGEX_PROGRAM_SIZE = 4_096;
+const MAX_TOTAL_URL_REGEX_PROGRAM_SIZE = 8_192;
+const MAX_COMPLETION_URL_LENGTH = 8_192;
 
 export interface RequestHelpNotifications {
   create(id: string, options: chrome.notifications.NotificationOptions<true>): Promise<string>;
@@ -600,6 +604,7 @@ async function evaluateCompletionCondition(
     } catch {
       return false;
     }
+    if (url.length > MAX_COMPLETION_URL_LENGTH) return false;
     if (condition.url_contains && !url.includes(condition.url_contains)) return false;
     if (condition.url_matches) {
       if (!help.urlMatchers.get(condition.url_matches)?.test(url)) return false;
@@ -714,22 +719,48 @@ export async function handleRequestHelp(
   });
   if (helpDisabled()) return disabledResult(params.tab_id ?? 0);
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
-  const urlMatchers = new Map<string, RE2JS>();
-  for (const condition of [
-    ...(params.completion_criteria?.all ?? []),
-    ...(params.completion_criteria?.any ?? []),
-  ]) {
+  const all = params.completion_criteria?.all ?? [];
+  const any = params.completion_criteria?.any ?? [];
+  if (
+    !Array.isArray(all) ||
+    !Array.isArray(any) ||
+    all.length + any.length > MAX_COMPLETION_CONDITIONS
+  ) {
+    return { code: "invalid_params", message: "completion_criteria supports at most 8 conditions" };
+  }
+  const conditions = [...all, ...any];
+  for (const condition of conditions) {
+    if (!condition || typeof condition !== "object" || Array.isArray(condition)) {
+      return {
+        code: "invalid_params",
+        message: "completion_criteria contains an invalid condition",
+      };
+    }
     const pattern = condition.url_matches;
-    if (pattern === undefined) continue;
+    if (pattern == null || pattern === "") continue;
     if (typeof pattern !== "string" || pattern.length > MAX_URL_REGEX_LENGTH) {
       return {
         code: "invalid_params",
-        message: "url_matches must be a string of at most 2048 characters",
+        message: "url_matches must be a string of at most 128 characters",
       };
     }
-    if (urlMatchers.has(pattern)) continue;
+  }
+  const urlMatchers = new Map<string, RE2JS>();
+  let totalProgramSize = 0;
+  for (const condition of conditions) {
+    const pattern = condition.url_matches;
+    if (!pattern || urlMatchers.has(pattern)) continue;
     try {
-      urlMatchers.set(pattern, RE2JS.compile(pattern));
+      const matcher = RE2JS.compile(pattern);
+      const size = matcher.programSize();
+      if (
+        size > MAX_URL_REGEX_PROGRAM_SIZE ||
+        totalProgramSize + size > MAX_TOTAL_URL_REGEX_PROGRAM_SIZE
+      ) {
+        return { code: "invalid_params", message: "url_matches is too complex" };
+      }
+      totalProgramSize += size;
+      urlMatchers.set(pattern, matcher);
     } catch {
       return { code: "invalid_params", message: "url_matches uses unsupported regex syntax" };
     }

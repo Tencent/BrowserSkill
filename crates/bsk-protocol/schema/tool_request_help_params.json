@@ -95,12 +95,12 @@
           ]
         },
         "url_matches": {
-          "description": "RE2-compatible URL regex (maximum 2048 characters). Backtracking-only syntax is rejected.",
+          "description": "RE2-compatible URL regex (maximum 128 characters). Backtracking-only syntax is rejected.",
           "type": [
             "string",
             "null"
           ],
-          "maxLength": 2048
+          "maxLength": 128
         }
       }
     },
@@ -114,7 +114,8 @@
           ],
           "items": {
             "$ref": "#/definitions/HelpCompletionCondition"
-          }
+          },
+          "maxItems": 8
         },
         "any": {
           "type": [
@@ -123,7 +124,8 @@
           ],
           "items": {
             "$ref": "#/definitions/HelpCompletionCondition"
-          }
+          },
+          "maxItems": 8
         },
         "stable_for_ms": {
           "type": [
