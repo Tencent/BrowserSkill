@@ -113,6 +113,15 @@ for Microsoft Edge — and ask them to install it on the computer with that brow
 - **Remote:** ask the user to select **Remote connection**, paste the pairing link
   and save it. Follow the [remote verification steps](docs/remote-extension-connection.md#pair-and-verify);
   installing the extension or generating a link alone does not establish a connection.
+- **Extension installed but still not connecting?** If `bsk doctor` reports
+  `0 browsers connected` while the daemon itself is healthy, check whether Chrome has
+  been open since before the CLI and extension were installed. Chrome starts an
+  extension's service worker on browser events, not on demand, so the worker can stay
+  dormant: `~/.bsk/daemon.log.<date>` then shows no connection attempt at all, not
+  even a rejected one. Quit Chrome completely and reopen it once (reloading the
+  extension from `chrome://extensions` also works), then open the popup again.
+  Opening a new tab, `chrome://restart`, and command-line navigation to a
+  `chrome-extension://` URL do not wake it.
 
 After the user completes the browser-side step, run `bsk doctor` on the Agent's
 machine. For a managed remote server, use its `BSK_HOME` and `BSK_AUTO_START=0`.
