@@ -11,8 +11,8 @@ Browser tasks run in Agent Windows, with a live view in the dsh Web UI.
 
 Before installing the plugin:
 
-- Install [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) and
-  [pnpm](https://pnpm.io/installation), which dsh uses to manage plugins.
+- Install [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.1.5-rc.2`
+  or a newer compatible stable `0.1.x` release, and [pnpm](https://pnpm.io/installation), which dsh uses to manage plugins.
 - Install the `bsk` CLI and connect the BrowserSkill extension in Chrome or Edge.
   Follow the [BrowserSkill setup guide](https://github.com/Tencent/BrowserSkill#quick-start).
 - Make sure `bsk` is on the `PATH` used to start dsh, or set `bskPath` in the plugin configuration.

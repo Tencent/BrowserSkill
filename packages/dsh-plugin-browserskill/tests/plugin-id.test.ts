@@ -13,6 +13,8 @@ const pkg = JSON.parse(
 ) as {
   name: string;
   dsh: { client: { external?: string[] } };
+  peerDependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
 };
 
 describe("plugin identity", () => {
@@ -23,5 +25,20 @@ describe("plugin identity", () => {
 
   it("declares client require()s so dsh arrives them before materialize", () => {
     expect(pkg.dsh.client.external).toEqual(["@deepseek-ai/dsh-client-ui-primitives"]);
+  });
+
+  it("tests against the oldest supported DSH SDK", () => {
+    for (const dependency of [
+      "@deepseek-ai/dsh-attachment",
+      "@deepseek-ai/dsh-client-ui-primitives",
+      "@deepseek-ai/dsh-client-ui-tool",
+      "@deepseek-ai/dsh-llm",
+      "@deepseek-ai/dsh-tools",
+    ]) {
+      expect(pkg.peerDependencies[dependency]).toBe("^0.1.5-rc.2");
+    }
+    for (const [dependency, version] of Object.entries(pkg.devDependencies)) {
+      if (dependency.startsWith("@deepseek-ai/dsh-")) expect(version).toBe("0.1.5-rc.2");
+    }
   });
 });

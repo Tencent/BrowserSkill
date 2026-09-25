@@ -43,19 +43,26 @@ export function registerBskSkill(ctx: Context): () => void {
   if (skills == null || typeof skills.register !== "function") {
     return () => {};
   }
-  return skills.register({
-    name: BSK_SKILL_NAME,
-    description: BSK_SKILL_DESCRIPTION,
-    content: BSK_SKILL_MARKDOWN,
-    // Prompt-visible origin bucket: packaged with a plugin, not user/project files.
-    source: "bundled",
-    // Both src/ (tests) and lib/ (npm) are one level below the package root.
-    // Resolve from this module, never from the user's current working directory.
-    resourceBase: {
-      kind: "directory",
-      path: fileURLToPath(new URL("../skill/", import.meta.url)),
-    },
-  });
+  try {
+    return skills.register({
+      name: BSK_SKILL_NAME,
+      description: BSK_SKILL_DESCRIPTION,
+      content: BSK_SKILL_MARKDOWN,
+      // Prompt-visible origin bucket: packaged with a plugin, not user/project files.
+      source: "bundled",
+      // Both src/ (tests) and lib/ (npm) are one level below the package root.
+      // Resolve from this module, never from the user's current working directory.
+      resourceBase: {
+        kind: "directory",
+        path: fileURLToPath(new URL("../skill/", import.meta.url)),
+      },
+    });
+  } catch (error) {
+    console.warn(
+      `[dsh-plugin-browserskill] skill registration failed: ${error instanceof Error ? error.message : String(error)}; continuing without the agent skill`,
+    );
+    return () => {};
+  }
 }
 
 /**

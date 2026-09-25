@@ -568,12 +568,12 @@ describe("hasSuccessfulSkillInvocation", () => {
 });
 
 describe("lazyTools wiring in apply()", () => {
-  function applyHarness(config: Record<string, unknown>) {
+  function applyHarness(config: Record<string, unknown>, skills?: unknown) {
     const tools = new Map<string, ToolDefinition>();
     const listeners = new Map<string, (...args: never[]) => void>();
     const ctx = {
       tools: { register: (def: ToolDefinition) => tools.set(def.name, def) },
-      get: () => undefined,
+      get: (key: string) => (key === "skills" ? skills : undefined),
       inject: () => ({ dispose() {} }),
       effect: () => {},
       on: (event: string, listener: (...args: never[]) => void) => {
@@ -605,6 +605,31 @@ describe("lazyTools wiring in apply()", () => {
       "browser_session",
       "browser_tabs",
     ]);
+  });
+
+  it("keeps eager tools available when skill registration fails", () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { tools } = applyHarness(
+        { lazyTools: false },
+        {
+          register() {
+            throw new Error("incompatible SDK");
+          },
+        },
+      );
+      expect([...tools.keys()].sort()).toEqual([
+        "browser_assist",
+        "browser_inspect",
+        "browser_interact",
+        "browser_page",
+        "browser_session",
+        "browser_tabs",
+      ]);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("incompatible SDK"));
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("lazyTools: true hides the suite until the skill fires", () => {
