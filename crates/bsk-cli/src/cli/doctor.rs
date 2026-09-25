@@ -104,8 +104,8 @@ impl CheckResult {
     }
 }
 
-pub fn run(output: Output) -> Result<Vec<CheckResult>> {
-    let state = resolve_daemon_state(output);
+pub fn run(output: Output, no_wait: bool) -> Result<Vec<CheckResult>> {
+    let state = resolve_daemon_state(output, no_wait);
     let checks = collect_checks(state);
     match output {
         Output::Human => render_human(&checks),
@@ -122,8 +122,10 @@ pub fn has_failures(checks: &[CheckResult]) -> bool {
 
 /// Ensure the daemon is reachable and give the browser extension time to
 /// connect before checks run. Returns a single [`DaemonState`] snapshot
-/// for check evaluation.
-fn resolve_daemon_state(output: Output) -> DaemonState {
+/// for check evaluation. When `no_wait` is true the browser-connect
+/// phase is skipped entirely so the command returns immediately even
+/// when no extension is present.
+fn resolve_daemon_state(output: Output, no_wait: bool) -> DaemonState {
     let mut state = current_state(Duration::ZERO);
 
     if matches!(state, DaemonState::Missing | DaemonState::NoListener(_)) && auto_start_enabled() {
@@ -131,6 +133,10 @@ fn resolve_daemon_state(output: Output) -> DaemonState {
             return DaemonState::ProbeError(format!("{err:#}"));
         }
         state = current_state(Duration::ZERO);
+    }
+
+    if no_wait {
+        return state;
     }
 
     let wait = if needs_browser_wait(&state) {
