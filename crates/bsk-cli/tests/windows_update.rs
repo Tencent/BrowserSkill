@@ -322,16 +322,19 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
                 .info()
                 .is_some_and(|info| info.pid != old_pid && info.ws_port == port)
     });
-    assert!(
-        fixture
-            .daemon
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_some(),
-        "old daemon must exit"
-    );
+    // The old daemon exits only after it has seen the replacement serve.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fixture
+        .daemon
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "old daemon must exit");
+        thread::sleep(Duration::from_millis(50));
+    }
     // The replacement removes the image its predecessor ran from.
     fixture.wait_for("leftover cleanup", || fixture.leftovers().is_empty());
     let status = fixture
