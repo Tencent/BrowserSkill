@@ -167,7 +167,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     };
 
     let session_stop_result = stop_session(info.sock_path, &session.session_id);
-    record_state::clear();
+    record_state::clear_session(&session.session_id);
 
     run_result?;
     session_stop_result?;
@@ -199,7 +199,7 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         })();
 
         let session_stop_result = stop_session(info.sock_path, &session_id);
-        record_state::clear();
+        record_state::clear_session(&session_id);
 
         run_result?;
         session_stop_result?;
@@ -228,7 +228,7 @@ fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
     else {
         return err;
     };
-    record_state::clear();
+    record_state::clear_session(session_id);
     CliError::Rpc {
         code: ErrorCode::NotFound,
         message: format!(
@@ -451,6 +451,26 @@ mod tests {
             );
             assert!(record_state::read().is_err());
             prepare_record_start(Path::new("trace")).unwrap();
+        });
+    }
+
+    #[test]
+    fn late_stale_stop_keeps_a_newer_recording_state() {
+        with_temp_home(|| {
+            let not_found = || {
+                CliError::from_rpc(bsk_protocol::RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "session not registered or already stopped".into(),
+                    data: None,
+                })
+            };
+            record_state::write("old").unwrap();
+            forget_stale_recording(not_found(), "old");
+            record_state::write("new").unwrap();
+
+            forget_stale_recording(not_found(), "old");
+
+            assert_eq!(record_state::read().unwrap().session_id, "new");
         });
     }
 
