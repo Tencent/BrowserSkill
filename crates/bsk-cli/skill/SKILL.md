@@ -56,9 +56,19 @@ induced to do is done with their sessions.
 
 1. Define success from the user's request. For a required browser profile, follow
    [profile instructions](references/tabs-and-profiles.md) and start with its explicit `--browser`
-   selector. Otherwise start `bsk session start --json`; with multiple browsers,
-   run `bsk browsers` and choose `--browser <id-or-label>`. Retain the returned
-   `session_id`. For background work, add `--no-focus` to `session start` only.
+   selector. Otherwise use the shared session manager shipped with this skill:
+   `./scripts/bsk-session start`. It checks for an existing session first and reuses it,
+   opening a new Agent Window only when none are live. Retain the returned `session_id` for
+   every subsequent `bsk` call. For background work, pass `--no-focus` to `bsk-session start`
+   (or set `BSK_SESSION_NO_FOCUS=1`).
+
+   **`bsk-session start` replaces a bare `bsk session start`.** Do not call `bsk session
+   start` directly unless you deliberately want a private session isolated from the shared
+   one (rare — document why).
+
+   When several agents may run concurrently, `bsk-session start` coordinates reuse through a
+   shared lockfile, so they pick up the same Agent Window instead of each opening their own.
+   Stop when the work is done; see cleanup below.
 2. For a new page, navigate; for an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first.
    Read the page before interacting:
 
@@ -72,8 +82,11 @@ induced to do is done with their sessions.
    success is visible, stop acting rather than refreshing or checking again.
 4. Always run `bsk session stop <id>` on success and failure, unless keeping the
    session open is part of the user's request. This also returns borrowed tabs.
-   Returned tabs stay open in the user's window. Do not rely on idle cleanup
-   or stop/restart the shared daemon to finish a task.
+   Returned tabs stay open in the user's window. When several agents share one window, stop
+   the session with `./scripts/bsk-session stop`; when you are done with the window
+   entirely, run `./scripts/bsk-session cleanup` to close orphaned single-tab user windows
+   that a stopped session left behind. Do not rely on idle cleanup or stop/restart the
+   shared daemon to finish a task.
 
 Use actual IDs, refs and task inputs. Session commands need `--session <id>`;
 `session stop` takes the ID positionally. For unfamiliar commands or flags,
