@@ -11,9 +11,10 @@ Use a precise prompt and fresh targets; omit `--target` when no control fits.
 Use completion criteria only for a clear, stable success signal. `all` and `any`
 support at most eight conditions in total. For URL completion, `url_matches`
 accepts RE2-compatible regular expressions of at most 128 characters. A compiled
-pattern may contain at most 4096 instructions, and all distinct patterns together
-at most 8192. Invalid or over-budget patterns return `invalid_params` before help
-starts. URL conditions do not auto-complete on URLs longer than 8192 characters;
+pattern may contain at most 4096 instructions, and all URL-regex conditions together
+at most 8192, counting repeated patterns each time. Invalid or over-budget patterns
+return `invalid_params` before help starts. URL conditions do not auto-complete on URLs
+longer than 8192 characters;
 the user can still finish the help request manually. Empty, null, and omitted
 `url_matches` values impose no URL-regex condition.
 

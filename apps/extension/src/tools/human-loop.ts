@@ -671,22 +671,30 @@ async function completionCriteriaMatches(help: ActiveHelpRequest): Promise<boole
 function startCompletionPolling(help: ActiveHelpRequest): void {
   if (!help.completionCriteria) return;
   const stableMs = help.completionCriteria.stable_for_ms ?? DEFAULT_COMPLETION_STABLE_MS;
+  // A check can await tab or CDP work longer than the polling interval.
+  let checking = false;
   const check = async () => {
-    if (help.settled) return;
-    const matched = await completionCriteriaMatches(help);
-    const now = Date.now();
-    if (!matched) {
-      help.completionMatchedSince = null;
-      return;
+    if (help.settled || checking) return;
+    checking = true;
+    try {
+      const matched = await completionCriteriaMatches(help);
+      if (help.settled) return;
+      const now = Date.now();
+      if (!matched) {
+        help.completionMatchedSince = null;
+        return;
+      }
+      help.completionMatchedSince ??= now;
+      if (now - help.completionMatchedSince < stableMs) return;
+      void finishHelp(help, {
+        outcome: "completed",
+        completed_by: "system",
+        tab_id: help.primaryTabId,
+        resolved_targets: help.resolvedTargets,
+      });
+    } finally {
+      checking = false;
     }
-    help.completionMatchedSince ??= now;
-    if (now - help.completionMatchedSince < stableMs) return;
-    void finishHelp(help, {
-      outcome: "completed",
-      completed_by: "system",
-      tab_id: help.primaryTabId,
-      resolved_targets: help.resolvedTargets,
-    });
   };
   help.completionTimer = setInterval(() => void check(), COMPLETION_POLL_MS);
   void check();
@@ -749,9 +757,10 @@ export async function handleRequestHelp(
   let totalProgramSize = 0;
   for (const condition of conditions) {
     const pattern = condition.url_matches;
-    if (!pattern || urlMatchers.has(pattern)) continue;
+    if (!pattern) continue;
     try {
-      const matcher = RE2JS.compile(pattern);
+      // Compilation is shared, but each condition runs a match on every poll.
+      const matcher = urlMatchers.get(pattern) ?? RE2JS.compile(pattern);
       const size = matcher.programSize();
       if (
         size > MAX_URL_REGEX_PROGRAM_SIZE ||

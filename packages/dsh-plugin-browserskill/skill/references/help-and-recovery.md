@@ -5,8 +5,9 @@ OTP, payment confirmation, consent, or after two attempts without progress. Supp
 a precise prompt and fresh targets; completion criteria need a stable success signal.
 `all` and `any` support at most eight conditions in total. `urlMatches` accepts
 RE2-compatible regular expressions of at most 128 characters. A compiled pattern
-may contain at most 4096 instructions, and all distinct patterns together at most
-8192. Invalid or over-budget patterns return `invalid_params` before help starts.
+may contain at most 4096 instructions, and all URL-regex conditions together at most
+8192, counting repeated patterns each time. Invalid or over-budget patterns return
+`invalid_params` before help starts.
 URL conditions do not auto-complete on URLs longer than 8192 characters; the user
 can still finish manually. The protocol treats empty, null, and omitted
 `url_matches` values as no URL-regex condition.

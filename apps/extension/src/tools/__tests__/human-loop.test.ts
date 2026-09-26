@@ -673,6 +673,29 @@ describe("handleRequestHelp", () => {
     expect(deps.activateTab).not.toHaveBeenCalled();
   });
 
+  it("charges repeated URL patterns once per condition", async () => {
+    const deps = baseDeps();
+    const pattern = "a.{1000}.{1000}.{1000}.{996}[#%]";
+    const single = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { all: [{ url_matches: pattern }] } }),
+      deps,
+    );
+    expect(single).toMatchObject({ outcome: "continued" });
+
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          all: Array.from({ length: 8 }, () => ({ url_matches: pattern })),
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.activateTab).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     { label: "null", urlMatches: null },
     { label: "empty", urlMatches: "" },
@@ -811,6 +834,39 @@ describe("handleRequestHelp", () => {
       await vi.advanceTimersByTimeAsync(1_100);
       expect(get.mock.calls.length).toBeGreaterThanOrEqual(3);
       abort.abort();
+      await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not overlap completion checks while an earlier check is pending", async () => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    let releaseCheck!: (value: { result: { value: boolean } }) => void;
+    const evaluation = new Promise<{ result: { value: boolean } }>((resolve) => {
+      releaseCheck = resolve;
+    });
+    const send = vi.fn((_tabId: number, method: string) =>
+      method === "Runtime.evaluate" ? evaluation : Promise.resolve({}),
+    );
+    const deps = baseDeps({
+      signal: abort.signal,
+      cdp: { send } as unknown as RequestHelpDeps["cdp"],
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ completion_criteria: { any: [{ selector_exists: "#done" }] } }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(send.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(send.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+      abort.abort();
+      releaseCheck({ result: { value: true } });
       await expect(pending).resolves.toMatchObject({ code: "cancelled" });
     } finally {
       vi.useRealTimers();
