@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 #[cfg(windows)]
@@ -66,18 +66,6 @@ pub struct UpdateCandidate {
     pub asset: ManifestAsset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InstallAction {
-    Replaced,
-    Staged,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedReplacementPaths {
-    pub binary_path: PathBuf,
-    pub script_path: PathBuf,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct UpdateReport {
     status: &'static str,
@@ -93,6 +81,10 @@ struct UpdateReport {
 pub struct UpdateCheckCache {
     pub checked_at_epoch_secs: u64,
     pub latest_version: String,
+    /// Whether the daemon that wrote this cache installs updates itself.
+    /// Absent in caches written before the daemon recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_update: Option<bool>,
 }
 
 impl UpdateCheckCache {
@@ -263,38 +255,20 @@ fn run(args: UpdateArgs, format: Format) -> Result<()> {
         );
     }
 
-    let action = install_candidate_with_client(&candidate, args.restart_daemon, &client)?;
-    let action_label = match action {
-        InstallAction::Replaced => "replaced",
-        InstallAction::Staged => "staged",
-    };
-    let (status, message) = match action {
-        InstallAction::Replaced => (
-            "updated",
-            format!(
-                "updated bsk from {} to {}",
-                candidate.current, candidate.latest
-            ),
-        ),
-        InstallAction::Staged => (
-            "staged",
-            format!(
-                "staged bsk {} for replacement after this command exits",
-                candidate.latest
-            ),
-        ),
-    };
-
+    install_candidate_with_client(&candidate, args.restart_daemon, &client)?;
     render_report(
         format,
         &UpdateReport {
-            status,
+            status: "updated",
             current_version: candidate.current.to_string(),
             latest_version: Some(candidate.latest.to_string()),
             release_url: candidate.release_url,
             asset_url: Some(candidate.asset.url),
-            install_action: Some(action_label),
-            message,
+            install_action: Some("replaced"),
+            message: format!(
+                "updated bsk from {} to {}",
+                candidate.current, candidate.latest
+            ),
         },
     )
 }
@@ -352,22 +326,24 @@ fn install_candidate_with_client(
     candidate: &UpdateCandidate,
     restart_daemon: bool,
     client: &reqwest::blocking::Client,
-) -> Result<InstallAction> {
+) -> Result<()> {
     let binary = download_candidate_binary(candidate, client)?;
     let target = std::env::current_exe().context("locate current bsk executable")?;
 
     let daemon_was_running = restart_daemon
         && crate::daemon::start::stop_if_running().context("stop bsk daemon before update")?;
 
-    let restart_args = daemon_was_running.then(StartArgs::default);
-    let action = replace_binary_for_update(&target, &binary, restart_args.as_ref())?;
-
-    if daemon_was_running && matches!(action, InstallAction::Replaced) {
-        crate::daemon::start::run_start(StartArgs::default())
-            .context("restart bsk daemon after update")?;
+    let installed = replace_binary(&target, &binary);
+    if daemon_was_running {
+        // Also restart when installation failed: the previous binary is still
+        // in place. Start from `target` because `current_exe` stops naming it
+        // once replaced (Linux reports a " (deleted)" path).
+        let restarted = crate::daemon::start::start_detached(&target, &StartArgs::default())
+            .context("restart bsk daemon after update");
+        installed?;
+        return restarted;
     }
-
-    Ok(action)
+    installed
 }
 
 /// Download the candidate's release archive, verify its sha256 checksum,
@@ -390,21 +366,28 @@ pub(crate) fn download_candidate_binary(
 }
 
 /// Daemon-side install: download, verify, and replace the executable at
-/// `target` (on Windows: stage the replacement next to it). Unlike the
-/// CLI path this never stops the daemon. On Windows the helper starts
-/// its replacement after exit; elsewhere the daemon drives its own restart.
+/// `target` while the daemon keeps running from the old image. The daemon
+/// then starts its replacement itself and exits only once that succeeded.
 ///
 /// `target` must be captured *before* any replacement happens: on Linux
 /// `std::env::current_exe` starts returning a ` (deleted)`-suffixed
 /// path once the running binary has been replaced on disk.
-pub(crate) fn self_install_candidate(
-    candidate: &UpdateCandidate,
-    target: &Path,
-    restart_args: &StartArgs,
-) -> Result<InstallAction> {
+pub(crate) fn self_install_candidate(candidate: &UpdateCandidate, target: &Path) -> Result<()> {
     let client = update_http_client(ARCHIVE_FETCH_TIMEOUT)?;
     let binary = download_candidate_binary(candidate, &client)?;
-    replace_binary_for_update(target, &binary, Some(restart_args))
+    replace_binary(target, &binary)
+}
+
+/// What a daemon may do with a newer version it finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoUpdatePolicy {
+    /// Install it, then hand over to a replacement daemon.
+    Install,
+    /// [`AUTO_UPDATE_ENV`]`=off`: only refresh the cache behind the CLI hint.
+    Disabled,
+    /// A terminal or supervisor owns this daemon (`--foreground`). Only that
+    /// owner can restart it, so leave the upgrade to `bsk update`.
+    HostManaged,
 }
 
 /// Outcome of one daemon auto-update step (see [`auto_update_step`]).
@@ -414,34 +397,36 @@ pub(crate) enum AutoUpdateOutcome {
     UpToDate,
     /// A newer version exists but auto-update is switched off — the
     /// refreshed cache still feeds the CLI hint.
-    Disabled { latest: String },
-    /// Live agent sessions block replacing the binary; the next tick
-    /// retries.
-    PostponedSessions { latest: String, sessions: usize },
-    /// The new binary replaced the old one; the daemon should now
-    /// restart into it.
-    Replaced { latest: String },
-    /// Windows started a helper that will replace the executable and
-    /// restart the daemon once the current process exits.
-    Staged { latest: String },
+    Disabled { latest: Version },
+    /// A newer version exists but this daemon's owner must upgrade it.
+    HostManaged { latest: Version },
+    /// Live agent sessions block the upgrade; the next tick retries.
+    PostponedSessions { latest: Version, sessions: usize },
+    /// The new binary is in place (installed now, or by an earlier tick
+    /// whose handover failed); the daemon should hand over to it.
+    Replaced { latest: Version },
 }
 
 /// The daemon's auto-update step for one tick: decide whether the
-/// fetched `candidate` may be installed (auto-update on, no live agent
-/// sessions) and, only then, run `install`. The installer is injectable
-/// so tests never touch a real binary.
+/// fetched `candidate` may be installed (policy allows it, no live agent
+/// sessions) and, only then, run `install`, unless `installed` already
+/// put that version on disk. The installer is injectable so tests never
+/// touch a real binary.
 pub(crate) fn auto_update_step(
     candidate: Option<&UpdateCandidate>,
-    auto_update_enabled: bool,
+    policy: AutoUpdatePolicy,
     active_sessions: usize,
-    install: impl FnOnce(&UpdateCandidate) -> Result<InstallAction>,
+    installed: Option<&Version>,
+    install: impl FnOnce(&UpdateCandidate) -> Result<()>,
 ) -> Result<AutoUpdateOutcome> {
     let Some(candidate) = candidate else {
         return Ok(AutoUpdateOutcome::UpToDate);
     };
-    let latest = candidate.latest.to_string();
-    if !auto_update_enabled {
-        return Ok(AutoUpdateOutcome::Disabled { latest });
+    let latest = candidate.latest.clone();
+    match policy {
+        AutoUpdatePolicy::Install => {}
+        AutoUpdatePolicy::Disabled => return Ok(AutoUpdateOutcome::Disabled { latest }),
+        AutoUpdatePolicy::HostManaged => return Ok(AutoUpdateOutcome::HostManaged { latest }),
     }
     if active_sessions > 0 {
         return Ok(AutoUpdateOutcome::PostponedSessions {
@@ -449,10 +434,10 @@ pub(crate) fn auto_update_step(
             sessions: active_sessions,
         });
     }
-    Ok(match install(candidate)? {
-        InstallAction::Replaced => AutoUpdateOutcome::Replaced { latest },
-        InstallAction::Staged => AutoUpdateOutcome::Staged { latest },
-    })
+    if installed.is_none_or(|installed| *installed < latest) {
+        install(candidate)?;
+    }
+    Ok(AutoUpdateOutcome::Replaced { latest })
 }
 
 pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
@@ -576,10 +561,14 @@ pub(crate) fn cache_needs_refresh(
     }
 }
 
-/// Fetch the update manifest and rewrite the cache. Returns the update
-/// candidate when the manifest names a newer version. Blocking: call
-/// from a blocking context (the daemon wraps it in `spawn_blocking`).
-pub(crate) fn refresh_update_cache(cache_path: &Path) -> Result<Option<UpdateCandidate>> {
+/// Fetch the update manifest and rewrite the cache, recording whether this
+/// daemon installs updates itself. Returns the update candidate when the
+/// manifest names a newer version. Blocking: call from a blocking context
+/// (the daemon wraps it in `spawn_blocking`).
+pub(crate) fn refresh_update_cache(
+    cache_path: &Path,
+    auto_update: bool,
+) -> Result<Option<UpdateCandidate>> {
     let manifest = fetch_manifest(&manifest_url())?;
     let platform = current_platform_key()?;
     let candidate = manifest.update_candidate(env!("CARGO_PKG_VERSION"), platform)?;
@@ -588,6 +577,7 @@ pub(crate) fn refresh_update_cache(cache_path: &Path) -> Result<Option<UpdateCan
         &UpdateCheckCache {
             checked_at_epoch_secs: now_epoch_secs(),
             latest_version: manifest.version.to_string(),
+            auto_update: Some(auto_update),
         },
     )?;
     Ok(candidate)
@@ -630,7 +620,8 @@ pub fn print_update_hint_from_cache(flags: &super::GlobalFlags, command: &super:
 }
 
 /// The hint to show for a cache file: only when the cache is present,
-/// fresh, and names a version newer than `current_version`.
+/// fresh, and names a version newer than `current_version`. The daemon's
+/// recorded policy wins over this process's `auto_update` switch.
 fn cached_update_hint(
     cache_path: &Path,
     current_version: &str,
@@ -643,6 +634,7 @@ fn cached_update_hint(
     if !cache.is_fresh(now_epoch_secs, UPDATE_CHECK_INTERVAL) {
         return Ok(None);
     }
+    let auto_update = cache.auto_update.unwrap_or(auto_update);
     Ok(update_hint_for_cache(&cache, current_version, auto_update))
 }
 
@@ -664,10 +656,6 @@ fn render_report(format: Format, report: &UpdateReport) -> Result<()> {
             if let Some(release_url) = &report.release_url {
                 println!("release: {release_url}");
             }
-            if matches!(report.install_action, Some("staged")) {
-                println!("the detached update helper will apply the replacement after exit");
-                println!("if it fails, see the *.update-*.log file next to the executable");
-            }
         }
         Format::Json => {
             println!(
@@ -686,29 +674,29 @@ pub fn extract_bsk_binary(archive_bytes: &[u8], kind: ArchiveKind) -> Result<Vec
     }
 }
 
-pub fn replace_binary_at_path(target: &Path, binary: &[u8]) -> Result<InstallAction> {
-    replace_binary_for_update(target, binary, None)
-}
-
-fn replace_binary_for_update(
-    target: &Path,
-    binary: &[u8],
-    restart_args: Option<&StartArgs>,
-) -> Result<InstallAction> {
+/// Put `binary` at `target`, even while `target` is running: running
+/// processes keep their image and every later launch uses the new binary.
+fn replace_binary(target: &Path, binary: &[u8]) -> Result<()> {
     #[cfg(windows)]
     {
-        stage_windows_replacement(target, binary, restart_args)
+        windows::replace(target, binary)
     }
 
     #[cfg(not(windows))]
     {
-        let _ = restart_args;
         replace_binary_atomically(target, binary)
     }
 }
 
+/// Remove what earlier updates left next to `exe`. Only Windows leaves
+/// anything behind: a running image can be moved aside but not deleted.
+#[cfg(windows)]
+pub(crate) fn remove_update_leftovers(exe: &Path) {
+    windows::remove_leftovers(exe);
+}
+
 #[cfg(not(windows))]
-fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<InstallAction> {
+fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<()> {
     let dir = target
         .parent()
         .with_context(|| format!("target path has no parent: {}", target.display()))?;
@@ -719,17 +707,7 @@ fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<InstallActi
         .and_then(|name| name.to_str())
         .context("target path must have a UTF-8 file name")?;
     let tmp = target.with_file_name(format!(".{file_name}.update-{}.tmp", std::process::id()));
-
-    {
-        let mut file =
-            std::fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
-        file.write_all(binary)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        file.flush()
-            .with_context(|| format!("flush {}", tmp.display()))?;
-        file.sync_all()
-            .with_context(|| format!("sync {}", tmp.display()))?;
-    }
+    write_synced(&tmp, binary)?;
 
     #[cfg(unix)]
     {
@@ -741,130 +719,19 @@ fn replace_binary_atomically(target: &Path, binary: &[u8]) -> Result<InstallActi
     std::fs::rename(&tmp, target)
         .with_context(|| format!("rename {} to {}", tmp.display(), target.display()))?;
     sync_dir(dir);
-    Ok(InstallAction::Replaced)
+    Ok(())
 }
 
-#[cfg(windows)]
-fn stage_windows_replacement(
-    target: &Path,
-    binary: &[u8],
-    restart_args: Option<&StartArgs>,
-) -> Result<InstallAction> {
-    // The helper owns replacement/restart after this process exits. Do not
-    // report Staged until it has actually begun executing the script.
-    let _child = spawn_windows_replacement(target, binary, restart_args, 120)?;
-    Ok(InstallAction::Staged)
-}
-
-#[cfg(windows)]
-fn spawn_windows_replacement(
-    target: &Path,
-    binary: &[u8],
-    restart_args: Option<&StartArgs>,
-    attempts: u32,
-) -> Result<windows::Helper> {
-    let paths = staged_replacement_paths(target, std::process::id())?;
-    let ready_path = paths.script_path.with_extension("ready");
-    let log_path = paths.script_path.with_extension("log");
-    let result = (|| {
-        // A previous failed attempt by this process must not acknowledge a
-        // new helper. All paths are private to this target and process id.
-        match std::fs::remove_file(&ready_path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-        std::fs::write(&paths.binary_path, binary)
-            .with_context(|| format!("write {}", paths.binary_path.display()))?;
-        std::fs::write(
-            &paths.script_path,
-            windows_replacement_script(restart_args, attempts),
-        )
-        .with_context(|| format!("write {}", paths.script_path.display()))?;
-        let mut child = windows::spawn(
-            &paths.script_path,
-            &paths.binary_path,
-            target,
-            &ready_path,
-            &log_path,
-        )
-        .context("launch detached Windows update helper")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if std::fs::remove_file(&ready_path).is_ok() {
-                return Ok(child);
-            }
-            if let Some(status) = child.try_wait()? {
-                bail!("Windows update helper exited before becoming ready: {status}");
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!("Windows update helper did not become ready within 5 seconds");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&paths.binary_path);
-        let _ = std::fs::remove_file(&paths.script_path);
-        let _ = std::fs::remove_file(&ready_path);
-    }
-    result.with_context(|| format!("Windows update helper failed; see {}", log_path.display()))
-}
-
-pub fn staged_replacement_paths(target: &Path, pid: u32) -> Result<StagedReplacementPaths> {
-    let file_name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("target path must have a UTF-8 file name")?;
-    let binary_path = target.with_file_name(format!("{file_name}.update-{pid}"));
-    let script_path = target.with_file_name(format!("{file_name}.update-{pid}.cmd"));
-    Ok(StagedReplacementPaths {
-        binary_path,
-        script_path,
-    })
-}
-
-#[cfg(any(windows, test))]
-fn windows_replacement_script(restart_args: Option<&StartArgs>, attempts: u32) -> String {
-    // Only fixed switches and numeric values go into the ASCII script. Paths
-    // stay in Unicode environment variables, including %, ! and shell symbols.
-    let restart = restart_args.map_or_else(String::new, |args| {
-        format!(
-            "\"%BSK_UPDATE_TARGET%\" daemon start --port {} --session-idle {}ms --daemon-idle {}ms\r\nif errorlevel 1 goto failed_restart\r\n",
-            args.resolved_port(),
-            args.resolved_session_idle().as_millis(),
-            args.resolved_daemon_idle().as_millis(),
-        )
-    });
-    format!(
-        "@echo off\r\n\
-         setlocal DisableDelayedExpansion\r\n\
-         > \"%BSK_UPDATE_READY%\" echo ready\r\n\
-         if errorlevel 1 exit /b 1\r\n\
-         set /a attempts=0\r\n\
-         :retry\r\n\
-         move /Y \"%BSK_UPDATE_SOURCE%\" \"%BSK_UPDATE_TARGET%\" >nul\r\n\
-         if not errorlevel 1 goto replaced\r\n\
-         set /a attempts+=1\r\n\
-         if %attempts% geq {attempts} goto failed_replace\r\n\
-         if not exist \"%BSK_UPDATE_SOURCE%\" goto failed_replace\r\n\
-         ping -n 2 127.0.0.1 >nul\r\n\
-         goto retry\r\n\
-         :failed_replace\r\n\
-         echo Failed to replace the executable after %attempts% attempts.\r\n\
-         goto failed\r\n\
-         :replaced\r\n\
-         {restart}\
-         del /F /Q \"%BSK_UPDATE_LOG%\" >nul 2>nul\r\n\
-         (del /F /Q \"%BSK_UPDATE_SCRIPT%\" >nul 2>nul & exit 0)\r\n\
-         :failed_restart\r\n\
-         echo Replaced the executable but failed to restart the daemon.\r\n\
-         :failed\r\n\
-         del /F /Q \"%BSK_UPDATE_SOURCE%\" >nul 2>nul\r\n\
-         (del /F /Q \"%BSK_UPDATE_SCRIPT%\" >nul 2>nul & exit 1)\r\n"
-    )
+/// Write `bytes` to a file and flush them to disk before it is renamed into place.
+fn write_synced(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file =
+        std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.flush()
+        .with_context(|| format!("flush {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("sync {}", path.display()))
 }
 
 fn sync_dir(dir: &Path) {
@@ -1019,15 +886,15 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn replaces_binary_at_path() {
+    fn replaces_binary_atomically() {
         let tmp = tempfile::TempDir::new().unwrap();
         let target = tmp.path().join("bsk");
         std::fs::write(&target, b"old binary").unwrap();
 
-        let action = replace_binary_at_path(&target, b"new binary").unwrap();
+        replace_binary(&target, b"new binary").unwrap();
 
         assert_eq!(std::fs::read(&target).unwrap(), b"new binary");
-        assert!(matches!(action, InstallAction::Replaced));
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 1);
 
         #[cfg(unix)]
         {
@@ -1038,160 +905,11 @@ mod tests {
     }
 
     #[test]
-    fn staged_replacement_paths_are_next_to_target() {
-        let target = std::path::Path::new("/tmp/bsk.exe");
-        let paths = staged_replacement_paths(target, 42).unwrap();
-        assert_eq!(
-            paths.binary_path,
-            std::path::Path::new("/tmp/bsk.exe.update-42")
-        );
-        assert_eq!(
-            paths.script_path,
-            std::path::Path::new("/tmp/bsk.exe.update-42.cmd")
-        );
-    }
-
-    #[test]
-    fn windows_replacement_script_preserves_restart_config() {
-        let args = StartArgs {
-            port: Some(54321),
-            session_idle: Some(Duration::from_millis(1234)),
-            daemon_idle: Some(Duration::from_secs(75)),
-            ..Default::default()
-        };
-        let script = windows_replacement_script(Some(&args), 120);
-        assert!(script.is_ascii());
-        assert!(
-            script
-                .contains("daemon start --port 54321 --session-idle 1234ms --daemon-idle 75000ms")
-        );
-        assert!(!windows_replacement_script(None, 120).contains("daemon start"));
-    }
-
-    #[cfg(windows)]
-    fn wait_for_helper(mut child: windows::Helper) -> std::process::ExitStatus {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                return status;
-            }
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("Windows update helper did not exit");
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_helper_replaces_in_unicode_spaces_and_shell_symbol_paths() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        for name in [
-            "ascii",
-            "with space",
-            "中文目录",
-            "literal %PATH% ! & (folder)",
-        ] {
-            let dir = tmp.path().join(name);
-            std::fs::create_dir(&dir).unwrap();
-            let target = dir.join("bsk.exe");
-            std::fs::write(&target, b"old binary").unwrap();
-            let child = spawn_windows_replacement(&target, b"new binary", None, 5).unwrap();
-            let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
-            let status = wait_for_helper(child);
-            assert!(
-                status.success(),
-                "{name}: {:?}",
-                std::fs::read_to_string(paths.script_path.with_extension("log"))
-            );
-            assert_eq!(std::fs::read(&target).unwrap(), b"new binary", "{name}");
-            // Successful updates leave no helper, staged binary, ready file or log.
-            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1, "{name}");
-        }
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_helper_waits_for_unlock_then_replaces() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let target = tmp.path().join("bsk.exe");
-        std::fs::write(&target, b"old binary").unwrap();
-        // Deny delete sharing, like a running Windows executable.
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .open(&target)
-            .unwrap();
-        let mut child = spawn_windows_replacement(&target, b"new binary", None, 5).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(child.try_wait().unwrap().is_none());
-        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
-        drop(lock);
-        assert!(wait_for_helper(child).success());
-        assert_eq!(std::fs::read(&target).unwrap(), b"new binary");
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_helper_bounds_retries_and_preserves_old_binary_on_failure() {
-        use std::os::windows::fs::OpenOptionsExt;
-        let tmp = tempfile::TempDir::new().unwrap();
-        let target = tmp.path().join("bsk.exe");
-        std::fs::write(&target, b"old binary").unwrap();
-        let _lock = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .open(&target)
-            .unwrap();
-        let child = spawn_windows_replacement(&target, b"new binary", None, 2).unwrap();
-        assert!(!wait_for_helper(child).success());
-        let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
-        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
-        assert!(!paths.binary_path.exists());
-        assert!(!paths.script_path.exists());
-        let log_bytes = std::fs::read(paths.script_path.with_extension("log")).unwrap();
-        let log = String::from_utf8_lossy(&log_bytes);
-        assert!(
-            log.contains("Failed to replace the executable after 2 attempts."),
-            "{log}"
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn windows_helper_reports_restart_failure_without_losing_replacement() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let target = tmp.path().join("bsk.exe");
-        std::fs::write(&target, b"old binary").unwrap();
-        // Not a valid PE executable: replacement succeeds but restart fails.
-        let child = spawn_windows_replacement(
-            &target,
-            b"invalid executable",
-            Some(&StartArgs::default()),
-            2,
-        )
-        .unwrap();
-        assert!(!wait_for_helper(child).success());
-        let paths = staged_replacement_paths(&target, std::process::id()).unwrap();
-        let bytes = std::fs::read(paths.script_path.with_extension("log")).unwrap();
-        let log = String::from_utf8_lossy(&bytes);
-        assert!(
-            log.contains("Replaced the executable but failed to restart the daemon."),
-            "{log}"
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"invalid executable");
-        assert!(!paths.script_path.exists());
-        assert!(!paths.binary_path.exists());
-    }
-
-    #[test]
     fn cache_freshness_uses_epoch_seconds() {
         let cache = UpdateCheckCache {
             checked_at_epoch_secs: 100,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         assert!(cache.is_fresh(120, Duration::from_secs(30)));
         assert!(!cache.is_fresh(131, Duration::from_secs(30)));
@@ -1243,6 +961,7 @@ mod tests {
         let cache = UpdateCheckCache {
             checked_at_epoch_secs: 123,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
 
         write_update_cache(&path, &cache).unwrap();
@@ -1259,10 +978,12 @@ mod tests {
         let fresh = UpdateCheckCache {
             checked_at_epoch_secs: 1000,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         let stale = UpdateCheckCache {
             checked_at_epoch_secs: 100,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         let now = 1000 + UPDATE_CHECK_INTERVAL.as_secs();
 
@@ -1293,6 +1014,7 @@ mod tests {
         let cache = UpdateCheckCache {
             checked_at_epoch_secs: 10_000,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         let next_tick = 10_000 + UPDATE_CHECK_INTERVAL.as_secs();
         assert!(cache_needs_refresh(
@@ -1328,6 +1050,7 @@ mod tests {
         let fresh_newer = UpdateCheckCache {
             checked_at_epoch_secs: now,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         write_update_cache(&path, &fresh_newer).unwrap();
         assert_eq!(
@@ -1345,6 +1068,7 @@ mod tests {
         let fresh_current = UpdateCheckCache {
             checked_at_epoch_secs: now,
             latest_version: "0.1.7".to_string(),
+            auto_update: None,
         };
         write_update_cache(&path, &fresh_current).unwrap();
         assert_eq!(cached_update_hint(&path, "0.1.7", now, true).unwrap(), None);
@@ -1353,6 +1077,7 @@ mod tests {
         let stale_newer = UpdateCheckCache {
             checked_at_epoch_secs: now - UPDATE_CHECK_INTERVAL.as_secs() - 1,
             latest_version: "0.2.0".to_string(),
+            auto_update: None,
         };
         write_update_cache(&path, &stale_newer).unwrap();
         assert_eq!(cached_update_hint(&path, "0.1.7", now, true).unwrap(), None);
@@ -1360,6 +1085,50 @@ mod tests {
         // Corrupt cache file -> error surfaced to the caller, no panic.
         std::fs::write(&path, b"not json").unwrap();
         assert!(cached_update_hint(&path, "0.1.7", now, true).is_err());
+    }
+
+    #[test]
+    fn cached_update_hint_follows_the_policy_recorded_by_the_daemon() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("update-check.json");
+        let now = now_epoch_secs();
+        let manual = "A new bsk version is available: 0.1.7 -> 0.2.0. Run `bsk update`.";
+        let automatic = "A new bsk version is available: 0.1.7 -> 0.2.0. The daemon will upgrade bsk automatically.";
+        for (recorded, local, expected) in [
+            (Some(false), true, manual),
+            (Some(true), false, automatic),
+            (None, true, automatic),
+            (None, false, manual),
+        ] {
+            let cache = UpdateCheckCache {
+                checked_at_epoch_secs: now,
+                latest_version: "0.2.0".to_string(),
+                auto_update: recorded,
+            };
+            write_update_cache(&path, &cache).unwrap();
+            assert_eq!(
+                cached_update_hint(&path, "0.1.7", now, local).unwrap().as_deref(),
+                Some(expected),
+                "recorded {recorded:?}, local {local}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_check_cache_stays_compatible_with_older_readers_and_writers() {
+        let older: UpdateCheckCache =
+            serde_json::from_str(r#"{"checked_at_epoch_secs":1,"latest_version":"0.2.0"}"#)
+                .unwrap();
+        assert_eq!(older.auto_update, None);
+        assert!(!serde_json::to_string(&older).unwrap().contains("auto_update"));
+
+        let recorded = UpdateCheckCache {
+            auto_update: Some(false),
+            ..older
+        };
+        let json = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(json["auto_update"], false);
+        assert_eq!(json["latest_version"], "0.2.0");
     }
 
     #[test]
@@ -1386,81 +1155,133 @@ mod tests {
         }
     }
 
+    fn no_install(_: &UpdateCandidate) -> Result<()> {
+        panic!("install must not run")
+    }
+
+    const LATEST: Version = Version::new(0, 2, 0);
+
     #[test]
     fn auto_update_step_reports_up_to_date_without_candidate() {
-        let outcome = auto_update_step(None, true, 0, |_| panic!("install must not run")).unwrap();
+        let outcome =
+            auto_update_step(None, AutoUpdatePolicy::Install, 0, None, no_install).unwrap();
         assert_eq!(outcome, AutoUpdateOutcome::UpToDate);
     }
 
     #[test]
     fn auto_update_step_keeps_cache_only_when_disabled() {
         let candidate = test_candidate();
-        let outcome = auto_update_step(Some(&candidate), false, 0, |_| {
-            panic!("install must not run")
-        })
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Disabled,
+            0,
+            None,
+            no_install,
+        )
         .unwrap();
-        assert_eq!(
-            outcome,
-            AutoUpdateOutcome::Disabled {
-                latest: "0.2.0".to_string()
-            }
-        );
+        assert_eq!(outcome, AutoUpdateOutcome::Disabled { latest: LATEST });
+    }
+
+    #[test]
+    fn auto_update_step_leaves_host_managed_daemons_to_their_owner() {
+        let candidate = test_candidate();
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::HostManaged,
+            0,
+            None,
+            no_install,
+        )
+        .unwrap();
+        assert_eq!(outcome, AutoUpdateOutcome::HostManaged { latest: LATEST });
     }
 
     #[test]
     fn auto_update_step_postpones_with_active_sessions() {
         let candidate = test_candidate();
-        let outcome = auto_update_step(Some(&candidate), true, 2, |_| {
-            panic!("install must not run")
-        })
-        .unwrap();
-        assert_eq!(
-            outcome,
-            AutoUpdateOutcome::PostponedSessions {
-                latest: "0.2.0".to_string(),
-                sessions: 2,
-            }
-        );
+        for installed in [None, Some(&LATEST)] {
+            let outcome = auto_update_step(
+                Some(&candidate),
+                AutoUpdatePolicy::Install,
+                2,
+                installed,
+                no_install,
+            )
+            .unwrap();
+            assert_eq!(
+                outcome,
+                AutoUpdateOutcome::PostponedSessions {
+                    latest: LATEST,
+                    sessions: 2,
+                }
+            );
+        }
     }
 
     #[test]
     fn auto_update_step_installs_when_no_sessions() {
         let candidate = test_candidate();
         let installs = std::cell::Cell::new(0);
-        let outcome = auto_update_step(Some(&candidate), true, 0, |candidate| {
-            installs.set(installs.get() + 1);
-            assert_eq!(candidate.latest.to_string(), "0.2.0");
-            Ok(InstallAction::Replaced)
-        })
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Install,
+            0,
+            None,
+            |candidate| {
+                installs.set(installs.get() + 1);
+                assert_eq!(candidate.latest, LATEST);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(installs.get(), 1);
-        assert_eq!(
-            outcome,
-            AutoUpdateOutcome::Replaced {
-                latest: "0.2.0".to_string()
-            }
-        );
+        assert_eq!(outcome, AutoUpdateOutcome::Replaced { latest: LATEST });
     }
 
     #[test]
-    fn auto_update_step_reports_staged_handoff() {
-        // The helper, rather than this process, starts the new executable.
-        // The daemon must exit to let that staged handoff finish.
+    fn auto_update_step_retries_the_handover_without_reinstalling() {
         let candidate = test_candidate();
-        let outcome =
-            auto_update_step(Some(&candidate), true, 0, |_| Ok(InstallAction::Staged)).unwrap();
-        assert_eq!(
-            outcome,
-            AutoUpdateOutcome::Staged {
-                latest: "0.2.0".to_string()
-            }
-        );
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Install,
+            0,
+            Some(&LATEST),
+            no_install,
+        )
+        .unwrap();
+        assert_eq!(outcome, AutoUpdateOutcome::Replaced { latest: LATEST });
+    }
+
+    #[test]
+    fn auto_update_step_installs_a_release_newer_than_the_pending_one() {
+        let candidate = test_candidate();
+        let pending = Version::new(0, 1, 9);
+        let installs = std::cell::Cell::new(0);
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Install,
+            0,
+            Some(&pending),
+            |_| {
+                installs.set(installs.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(installs.get(), 1);
+        assert_eq!(outcome, AutoUpdateOutcome::Replaced { latest: LATEST });
     }
 
     #[test]
     fn auto_update_step_propagates_install_errors() {
         let candidate = test_candidate();
-        let result = auto_update_step(Some(&candidate), true, 0, |_| bail!("boom"));
+        let result = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Install,
+            0,
+            None,
+            |_| bail!("boom"),
+        );
         assert!(result.is_err());
     }
 

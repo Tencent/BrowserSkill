@@ -248,7 +248,9 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 bsk update --yes
 ```
 
-默认本地配置下，安装更新后会重启正在运行的 daemon。Windows 如果提示更新已暂存，请等待替换完成。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+默认本地配置下，安装更新后会重启正在运行的 daemon。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+
+daemon 还会每 30 分钟检查一次新版本。没有 Agent 会话时，它会安装新版本并交接给运行新版本的 daemon；新 daemon 无法启动时，当前 daemon 会继续服务。通过 `--foreground` 启动的 daemon 归所在终端或进程管理器管理，只提示新版本，请按下方步骤升级。设置 `BSK_AUTO_UPDATE=off` 可关闭 daemon 自动升级，手动 `bsk update` 仍然可用。Windows 上，`bsk.exe` 旁边可能暂时留下 `.bsk.exe.old-*` 文件，运行它的进程退出后，下次启动 daemon 时会自动清理。
 
 扩展通过浏览器商店更新。DSH 插件需要单独更新，完成后重启对应 profile：
 

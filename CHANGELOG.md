@@ -5,6 +5,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Fixed
+
+- Windows self-update no longer depends on a detached script: the new `bsk.exe`
+  is installed in place while the old one keeps running, and a running daemon
+  exits only after its replacement has started. If the replacement cannot
+  start, the daemon keeps serving, logs the reason and retries later instead of
+  leaving the browser disconnected ([#336](https://github.com/Tencent/BrowserSkill/issues/336)).
+- Daemons started with `--foreground` no longer replace themselves with a
+  detached process after an auto-update, which took them away from their
+  terminal or supervisor. They log the new version, and the CLI hint suggests
+  `bsk update`.
+- `bsk update` restarts a daemon it stopped even when installation fails, and
+  starts it from the installed path, which Linux no longer reports as the
+  current executable once it is replaced.
+
+### Changed
+
+- `bsk update --json` reports `"status": "updated"` on Windows too; the
+  `"staged"` status is gone.
+- README documents `BSK_AUTO_UPDATE=off`.
+
 ## [0.3.1] - 2026-09-23
 
 ### Added

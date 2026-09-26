@@ -196,18 +196,7 @@ impl Fixture {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        let diagnostics: Vec<_> = fs::read_dir(self.exe.parent().unwrap())
-            .unwrap()
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
-            .map(|entry| {
-                (
-                    entry.path(),
-                    String::from_utf8_lossy(&fs::read(entry.path()).unwrap_or_default())
-                        .into_owned(),
-                )
-            })
-            .collect();
+        let leftovers = self.leftovers();
         let home_logs: Vec<_> = fs::read_dir(&self.home)
             .unwrap()
             .flatten()
@@ -221,7 +210,7 @@ impl Fixture {
             })
             .collect();
         panic!(
-            "timed out waiting for {description}; helper logs: {diagnostics:?}; daemon logs: {home_logs:?}"
+            "timed out waiting for {description}; files next to bsk.exe: {leftovers:?}; daemon logs: {home_logs:?}"
         );
     }
 
@@ -232,6 +221,16 @@ impl Fixture {
     fn updated(&self) -> bool {
         // A locked executable may briefly reject reads during replacement.
         fs::read(&self.exe).is_ok_and(|binary| binary == self.binary)
+    }
+
+    /// Files next to the executable other than the executable itself.
+    fn leftovers(&self) -> Vec<String> {
+        fs::read_dir(self.exe.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "bsk.exe")
+            .collect()
     }
 }
 
@@ -248,7 +247,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn manual_update_replaces_the_running_executable_after_cli_exit() {
+fn manual_update_replaces_the_running_executable_in_place() {
     let fixture = Fixture::new();
     let out = fixture
         .command()
@@ -261,15 +260,34 @@ fn manual_update_replaces_the_running_executable_after_cli_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["status"], "staged");
-    fixture.wait_for("CLI replacement and helper cleanup", || {
-        fixture.updated() && fs::read_dir(fixture.exe.parent().unwrap()).unwrap().count() == 1
-    });
+    assert_eq!(report["status"], "updated");
+    assert!(
+        fixture.updated(),
+        "the new binary must be in place when the command returns"
+    );
     assert!(
         fixture.info().is_none(),
         "an update must not start a previously absent daemon"
     );
     assert_eq!(fixture.server.requests.load(Ordering::SeqCst), 1);
+
+    // The CLI ran from the image it moved aside; the next daemon removes it.
+    let leftovers = fixture.leftovers();
+    assert!(
+        leftovers.len() == 1 && leftovers[0].starts_with(".bsk.exe.old-"),
+        "{leftovers:?}"
+    );
+    let start = fixture
+        .command()
+        .args(["daemon", "start", "--port", &unused_port().to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    fixture.wait_for("leftover cleanup", || fixture.leftovers().is_empty());
 }
 
 #[test]
@@ -314,9 +332,8 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
             .is_some(),
         "old daemon must exit"
     );
-    fixture.wait_for("helper cleanup", || {
-        fs::read_dir(fixture.exe.parent().unwrap()).unwrap().count() == 1
-    });
+    // The replacement removes the image its predecessor ran from.
+    fixture.wait_for("leftover cleanup", || fixture.leftovers().is_empty());
     let status = fixture
         .command()
         .args(["--json", "status"])
@@ -330,7 +347,7 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
     assert_eq!(
         fixture.server.requests.load(Ordering::SeqCst),
         1,
-        "the replacement must not stage another update immediately"
+        "the replacement must not download another update immediately"
     );
 }
 
