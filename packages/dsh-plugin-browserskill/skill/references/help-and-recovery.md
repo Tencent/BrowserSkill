@@ -3,6 +3,20 @@
 With help enabled, use `browser_assist` action `request-help` for login, CAPTCHA,
 OTP, payment confirmation, consent, or after two attempts without progress. Supply
 a precise prompt and fresh targets; completion criteria need a stable success signal.
+`all` and `any` support at most eight conditions in total. `urlMatches` accepts
+RE2-compatible regular expressions of at most 128 characters. A compiled pattern
+may contain at most 4096 instructions, and all URL-regex conditions together at most
+8192, counting repeated patterns each time. Invalid or over-budget patterns return
+`invalid_params` before help starts.
+URL conditions do not auto-complete on URLs longer than 8192 characters; the user
+can still finish manually. The protocol treats empty, null, and omitted
+`url_matches` values as no URL-regex condition.
+
+RE2 rejects JavaScript patterns such as `\u0061`, `a{1001}`, `[^]`, lookahead,
+lookbehind, and backreferences. Some accepted patterns differ in meaning: `\a`
+is a control character in RE2 rather than `a`, and RE2's `\s` does not include
+Unicode whitespace. Rewrite patterns in RE2 syntax; use `urlContains` when a
+substring is enough.
 Resume only on `continued` / `completed`, then observe. Cancellation/timeout blocks
 the step; do not repeat the request. Navigation alone is not success.
 

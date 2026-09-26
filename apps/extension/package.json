@@ -16,6 +16,7 @@
     "@browser-skill/ui": "workspace:*",
     "@browser-skill/vom": "workspace:*",
     "@remixicon/react": "^4.9.0",
+    "re2js": "2.8.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

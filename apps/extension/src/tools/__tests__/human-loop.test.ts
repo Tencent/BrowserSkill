@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InteractionPreferenceStore } from "@/lib/interaction-preferences";
 import { SessionManager } from "@/session-manager/manager";
@@ -542,6 +546,331 @@ describe("handleRequestHelp", () => {
       deps,
     );
     expect(res).toMatchObject({ outcome: "completed", completed_by: "system", tab_id: 5 });
+  });
+
+  it.skipIf(process.env.BSK_URL_REGEX_CHILD === "1")(
+    "bounds dangerous URL regex checks in a child process",
+    () => {
+      const require = createRequire(import.meta.url);
+      const vitestCli = join(dirname(require.resolve("vitest/package.json")), "vitest.mjs");
+      const child = spawnSync(
+        process.execPath,
+        [
+          vitestCli,
+          "run",
+          fileURLToPath(import.meta.url),
+          "-t",
+          "isolated dangerous URL regex checks",
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, BSK_URL_REGEX_CHILD: "1" },
+          encoding: "utf8",
+          timeout: 10_000,
+        },
+      );
+      expect(child.error, `${child.stdout}\n${child.stderr}`).toBeUndefined();
+      expect(child.status, `${child.stdout}\n${child.stderr}`).toBe(0);
+    },
+  );
+
+  it.skipIf(process.env.BSK_URL_REGEX_CHILD !== "1")(
+    "isolated dangerous URL regex checks",
+    async () => {
+      const url = `https://app.example/${"a".repeat(28)}!`;
+      const deps = baseDeps({
+        sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+        tabsApi: {
+          get: vi.fn(async () => ({ id: 5, windowId: 99, active: true, url })) as never,
+          query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+        },
+      });
+      const started = performance.now();
+      const res = await handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({
+          completion_criteria: {
+            any: [{ url_matches: "(a+)+$" }, { url_matches: "^https://app.example/a+!$" }],
+            stable_for_ms: 0,
+          },
+        }),
+        deps,
+      );
+      expect(res).toMatchObject({ outcome: "completed", completed_by: "system" });
+      expect(performance.now() - started).toBeLessThan(1_000);
+
+      const expanded = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({
+          completion_criteria: { any: [{ url_matches: `(?:${"[ab]".repeat(20)}){1000}$` }] },
+        }),
+        deps,
+      );
+      await expect(expanded).resolves.toMatchObject({ code: "invalid_params" });
+
+      const nearLimit = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({
+          completion_criteria: { any: [{ url_matches: `(?:${"a".repeat(118)}){1000}` }] },
+        }),
+        deps,
+      );
+      await expect(nearLimit).resolves.toMatchObject({ code: "invalid_params" });
+    },
+  );
+
+  it.each([
+    { label: "unsupported lookahead", pattern: "(?=a)" },
+    { label: "unsupported lookbehind", pattern: "(?<=a)b" },
+    { label: "unsupported Unicode escape", pattern: "\\u0061" },
+    { label: "unsupported large repetition", pattern: "a{1001}" },
+    { label: "unsupported empty negated class", pattern: "[^]" },
+    { label: "unsupported backreference", pattern: "(a)\\1" },
+    { label: "oversized pattern", pattern: "a".repeat(129) },
+  ])("rejects $label before starting help", async ({ pattern }) => {
+    const deps = baseDeps();
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [{ url_matches: pattern }] } }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.activateTab).not.toHaveBeenCalled();
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+  });
+
+  it("rejects too many conditions before starting help", async () => {
+    const deps = baseDeps();
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          all: Array.from({ length: 5 }, () => ({ url_contains: "/done" })),
+          any: Array.from({ length: 4 }, () => ({ selector_exists: "#done" })),
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.tabsApi.get).not.toHaveBeenCalled();
+    expect(deps.sendToTab).not.toHaveBeenCalled();
+  });
+
+  it("rejects patterns whose total compiled program is too large", async () => {
+    const deps = baseDeps();
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          all: ["[ab]", "[ac]", "[ad]"].map((part) => ({
+            url_matches: `(?:${part.repeat(3)}){1000}`,
+          })),
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.activateTab).not.toHaveBeenCalled();
+  });
+
+  it("charges repeated URL patterns once per condition", async () => {
+    const deps = baseDeps();
+    const pattern = "a.{1000}.{1000}.{1000}.{996}[#%]";
+    const single = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { all: [{ url_matches: pattern }] } }),
+      deps,
+    );
+    expect(single).toMatchObject({ outcome: "continued" });
+
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          all: Array.from({ length: 8 }, () => ({ url_matches: pattern })),
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(deps.activateTab).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { label: "null", urlMatches: null },
+    { label: "empty", urlMatches: "" },
+    { label: "omitted", urlMatches: undefined },
+  ])("treats $label URL regex as absent", async ({ urlMatches }) => {
+    const deps = baseDeps({
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      tabsApi: {
+        get: vi.fn(async () => ({
+          id: 5,
+          windowId: 99,
+          active: true,
+          url: "https://app.example/done",
+        })) as never,
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({
+        completion_criteria: {
+          any: [{ url_matches: urlMatches, url_contains: "/done" }],
+          stable_for_ms: 0,
+        },
+      }),
+      deps,
+    );
+    expect(res).toMatchObject({ outcome: "completed" });
+  });
+
+  it.each([
+    { label: "unanchored substring", pattern: "/done" },
+    { label: "start and end anchors", pattern: "^https://app\\.example/done$" },
+  ])("matches a normal URL with $label", async ({ pattern }) => {
+    const deps = baseDeps({
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+      tabsApi: {
+        get: vi.fn(async () => ({
+          id: 5,
+          windowId: 99,
+          active: true,
+          url: "https://app.example/done",
+        })) as never,
+        query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+      },
+    });
+    const res = await handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [{ url_matches: pattern }], stable_for_ms: 0 } }),
+      deps,
+    );
+    expect(res).toMatchObject({ outcome: "completed" });
+  });
+
+  it("does not match an anchored regex against a different URL", async () => {
+    const abort = new AbortController();
+    const tabsApi = {
+      get: vi.fn(async () => ({
+        id: 5,
+        windowId: 99,
+        active: true,
+        url: "https://app.example/done/next",
+      })) as never,
+      query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+    };
+    const deps = baseDeps({
+      signal: abort.signal,
+      tabsApi,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    const pending = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [{ url_matches: "/done$" }], stable_for_ms: 0 } }),
+      deps,
+    );
+    await vi.waitFor(() => expect(tabsApi.get).toHaveBeenCalledTimes(2));
+    abort.abort();
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+  });
+
+  it.each([
+    { label: "url_contains", condition: { url_contains: "/done" } },
+    { label: "url_matches", condition: { url_matches: "/done" } },
+  ])("keeps waiting for manual control when a URL exceeds the $label limit", async ({
+    condition,
+  }) => {
+    const abort = new AbortController();
+    const tabsApi = {
+      get: vi.fn(async () => ({
+        id: 5,
+        windowId: 99,
+        active: true,
+        url: `https://app.example/done?${"x".repeat(8_192)}`,
+      })) as never,
+      query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+    };
+    const deps = baseDeps({
+      signal: abort.signal,
+      tabsApi,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    const pending = handleRequestHelp(
+      fakeManager("abcd", 99, 5),
+      baseParams({ completion_criteria: { any: [condition], stable_for_ms: 0 } }),
+      deps,
+    );
+    await vi.waitFor(() => expect(tabsApi.get).toHaveBeenCalledTimes(2));
+    abort.abort();
+    await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+  });
+
+  it("handles cancellation after later URL completion polls", async () => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    const get = vi.fn(async () => ({
+      id: 5,
+      windowId: 99,
+      active: true,
+      url: "https://app.example/wait",
+    }));
+    const tabsApi = {
+      get: get as never,
+      query: vi.fn(async () => [{ id: 5, windowId: 99, active: true }] as never),
+    };
+    const deps = baseDeps({
+      signal: abort.signal,
+      tabsApi,
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ completion_criteria: { any: [{ url_matches: "/done$" }] } }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(get.mock.calls.length).toBeGreaterThanOrEqual(3);
+      abort.abort();
+      await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not overlap completion checks while an earlier check is pending", async () => {
+    vi.useFakeTimers();
+    const abort = new AbortController();
+    let releaseCheck!: (value: { result: { value: boolean } }) => void;
+    const evaluation = new Promise<{ result: { value: boolean } }>((resolve) => {
+      releaseCheck = resolve;
+    });
+    const send = vi.fn((_tabId: number, method: string) =>
+      method === "Runtime.evaluate" ? evaluation : Promise.resolve({}),
+    );
+    const deps = baseDeps({
+      signal: abort.signal,
+      cdp: { send } as unknown as RequestHelpDeps["cdp"],
+      sendToTab: vi.fn(async () => ({ type: "bsk-help-ack", ok: true })),
+    });
+    try {
+      const pending = handleRequestHelp(
+        fakeManager("abcd", 99, 5),
+        baseParams({ completion_criteria: { any: [{ selector_exists: "#done" }] } }),
+        deps,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(send.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(send.mock.calls.filter(([, method]) => method === "Runtime.evaluate")).toHaveLength(1);
+      abort.abort();
+      releaseCheck({ result: { value: true } });
+      await expect(pending).resolves.toMatchObject({ code: "cancelled" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps user control active on new tabs without moving completion off the primary tab", async () => {

@@ -1,5 +1,6 @@
 // `tool.request_help` — pause automation and let the human control a tab.
 
+import { RE2JS } from "re2js";
 import {
   HELP_ACK,
   HELP_CANCEL,
@@ -48,6 +49,11 @@ const HELP_REARM_RETRY_DELAY_MS = 400;
 const HELP_CLEANUP_TIMEOUT_MS = 1_000;
 const DEFAULT_COMPLETION_STABLE_MS = 1_000;
 const COMPLETION_POLL_MS = 500;
+const MAX_COMPLETION_CONDITIONS = 8;
+const MAX_URL_REGEX_LENGTH = 128;
+const MAX_URL_REGEX_PROGRAM_SIZE = 4_096;
+const MAX_TOTAL_URL_REGEX_PROGRAM_SIZE = 8_192;
+const MAX_COMPLETION_URL_LENGTH = 8_192;
 
 export interface RequestHelpNotifications {
   create(id: string, options: chrome.notifications.NotificationOptions<true>): Promise<string>;
@@ -83,6 +89,7 @@ interface ActiveHelpRequest {
   notificationId: string;
   resolvedTargets?: ResolvedTarget[];
   completionCriteria?: HelpCompletionCriteria;
+  urlMatchers: Map<string, RE2JS>;
   deps: RequestHelpDeps;
   settled: boolean;
   unsubscribePreferences?: () => void;
@@ -597,13 +604,10 @@ async function evaluateCompletionCondition(
     } catch {
       return false;
     }
+    if (url.length > MAX_COMPLETION_URL_LENGTH) return false;
     if (condition.url_contains && !url.includes(condition.url_contains)) return false;
     if (condition.url_matches) {
-      try {
-        if (!new RegExp(condition.url_matches).test(url)) return false;
-      } catch {
-        return false;
-      }
+      if (!help.urlMatchers.get(condition.url_matches)?.test(url)) return false;
     }
   }
 
@@ -667,22 +671,30 @@ async function completionCriteriaMatches(help: ActiveHelpRequest): Promise<boole
 function startCompletionPolling(help: ActiveHelpRequest): void {
   if (!help.completionCriteria) return;
   const stableMs = help.completionCriteria.stable_for_ms ?? DEFAULT_COMPLETION_STABLE_MS;
+  // A check can await tab or CDP work longer than the polling interval.
+  let checking = false;
   const check = async () => {
-    if (help.settled) return;
-    const matched = await completionCriteriaMatches(help);
-    const now = Date.now();
-    if (!matched) {
-      help.completionMatchedSince = null;
-      return;
+    if (help.settled || checking) return;
+    checking = true;
+    try {
+      const matched = await completionCriteriaMatches(help);
+      if (help.settled) return;
+      const now = Date.now();
+      if (!matched) {
+        help.completionMatchedSince = null;
+        return;
+      }
+      help.completionMatchedSince ??= now;
+      if (now - help.completionMatchedSince < stableMs) return;
+      void finishHelp(help, {
+        outcome: "completed",
+        completed_by: "system",
+        tab_id: help.primaryTabId,
+        resolved_targets: help.resolvedTargets,
+      });
+    } finally {
+      checking = false;
     }
-    help.completionMatchedSince ??= now;
-    if (now - help.completionMatchedSince < stableMs) return;
-    void finishHelp(help, {
-      outcome: "completed",
-      completed_by: "system",
-      tab_id: help.primaryTabId,
-      resolved_targets: help.resolvedTargets,
-    });
   };
   help.completionTimer = setInterval(() => void check(), COMPLETION_POLL_MS);
   void check();
@@ -714,6 +726,54 @@ export async function handleRequestHelp(
     ].join(" "),
   });
   if (helpDisabled()) return disabledResult(params.tab_id ?? 0);
+  if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
+  const all = params.completion_criteria?.all ?? [];
+  const any = params.completion_criteria?.any ?? [];
+  if (
+    !Array.isArray(all) ||
+    !Array.isArray(any) ||
+    all.length + any.length > MAX_COMPLETION_CONDITIONS
+  ) {
+    return { code: "invalid_params", message: "completion_criteria supports at most 8 conditions" };
+  }
+  const conditions = [...all, ...any];
+  for (const condition of conditions) {
+    if (!condition || typeof condition !== "object" || Array.isArray(condition)) {
+      return {
+        code: "invalid_params",
+        message: "completion_criteria contains an invalid condition",
+      };
+    }
+    const pattern = condition.url_matches;
+    if (pattern == null || pattern === "") continue;
+    if (typeof pattern !== "string" || pattern.length > MAX_URL_REGEX_LENGTH) {
+      return {
+        code: "invalid_params",
+        message: "url_matches must be a string of at most 128 characters",
+      };
+    }
+  }
+  const urlMatchers = new Map<string, RE2JS>();
+  let totalProgramSize = 0;
+  for (const condition of conditions) {
+    const pattern = condition.url_matches;
+    if (!pattern) continue;
+    try {
+      // Compilation is shared, but each condition runs a match on every poll.
+      const matcher = urlMatchers.get(pattern) ?? RE2JS.compile(pattern);
+      const size = matcher.programSize();
+      if (
+        size > MAX_URL_REGEX_PROGRAM_SIZE ||
+        totalProgramSize + size > MAX_TOTAL_URL_REGEX_PROGRAM_SIZE
+      ) {
+        return { code: "invalid_params", message: "url_matches is too complex" };
+      }
+      totalProgramSize += size;
+      urlMatchers.set(pattern, matcher);
+    } catch {
+      return { code: "invalid_params", message: "url_matches uses unsupported regex syntax" };
+    }
+  }
   if (deps.signal?.aborted) return { code: "cancelled", message: "request_help aborted" };
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
@@ -765,6 +825,7 @@ export async function handleRequestHelp(
       notificationId,
       resolvedTargets,
       completionCriteria: params.completion_criteria,
+      urlMatchers,
       deps,
       settled: false,
       resolve,
