@@ -26,7 +26,9 @@ impl ReleaseServer {
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut assets = serde_json::Map::new();
         assets.insert(
-            bsk::cli::update::current_platform_key().unwrap().to_string(),
+            bsk::cli::update::current_platform_key()
+                .unwrap()
+                .to_string(),
             serde_json::json!({"url": format!("{base}/bsk.archive"), "sha256": "00"}),
         );
         let manifest =

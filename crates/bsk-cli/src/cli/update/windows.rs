@@ -157,8 +157,12 @@ fn retry(window: Duration, mut op: impl FnMut() -> io::Result<()>) -> io::Result
 /// Scanners and indexers open fresh files without delete sharing for a moment.
 fn is_transient(err: &io::Error) -> bool {
     err.raw_os_error().is_some_and(|code| {
-        [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION]
-            .contains(&(code as u32))
+        [
+            ERROR_ACCESS_DENIED,
+            ERROR_SHARING_VIOLATION,
+            ERROR_LOCK_VIOLATION,
+        ]
+        .contains(&(code as u32))
     })
 }
 
@@ -193,7 +197,11 @@ mod tests {
         let target = dir.join("bsk.exe");
         fs::copy(std::env::current_exe().unwrap(), &target).unwrap();
         let mut running = std::process::Command::new(&target)
-            .args(["--exact", "cli::update::windows::tests::idle_process", "--ignored"])
+            .args([
+                "--exact",
+                "cli::update::windows::tests::idle_process",
+                "--ignored",
+            ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -207,7 +215,10 @@ mod tests {
         let _ = running.wait();
 
         replaced.unwrap();
-        assert!(still_running, "replacement must not disturb the running process");
+        assert!(
+            still_running,
+            "replacement must not disturb the running process"
+        );
         assert_eq!(fs::read(&target).unwrap(), b"new binary");
         // The exited image is released asynchronously; scanners may also hold it briefly.
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -225,7 +236,12 @@ mod tests {
     #[test]
     fn replaces_in_unicode_space_and_shell_symbol_paths() {
         let tmp = tempfile::TempDir::new().unwrap();
-        for name in ["ascii", "with space", "中文目录", "literal %PATH% ! & (folder)"] {
+        for name in [
+            "ascii",
+            "with space",
+            "中文目录",
+            "literal %PATH% ! & (folder)",
+        ] {
             let dir = tmp.path().join(name);
             fs::create_dir(&dir).unwrap();
             let target = dir.join("bsk.exe");

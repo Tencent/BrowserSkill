@@ -1107,7 +1107,9 @@ mod tests {
             };
             write_update_cache(&path, &cache).unwrap();
             assert_eq!(
-                cached_update_hint(&path, "0.1.7", now, local).unwrap().as_deref(),
+                cached_update_hint(&path, "0.1.7", now, local)
+                    .unwrap()
+                    .as_deref(),
                 Some(expected),
                 "recorded {recorded:?}, local {local}"
             );
@@ -1120,7 +1122,11 @@ mod tests {
             serde_json::from_str(r#"{"checked_at_epoch_secs":1,"latest_version":"0.2.0"}"#)
                 .unwrap();
         assert_eq!(older.auto_update, None);
-        assert!(!serde_json::to_string(&older).unwrap().contains("auto_update"));
+        assert!(
+            !serde_json::to_string(&older)
+                .unwrap()
+                .contains("auto_update")
+        );
 
         let recorded = UpdateCheckCache {
             auto_update: Some(false),
@@ -1275,13 +1281,9 @@ mod tests {
     #[test]
     fn auto_update_step_propagates_install_errors() {
         let candidate = test_candidate();
-        let result = auto_update_step(
-            Some(&candidate),
-            AutoUpdatePolicy::Install,
-            0,
-            None,
-            |_| bail!("boom"),
-        );
+        let result = auto_update_step(Some(&candidate), AutoUpdatePolicy::Install, 0, None, |_| {
+            bail!("boom")
+        });
         assert!(result.is_err());
     }
 
