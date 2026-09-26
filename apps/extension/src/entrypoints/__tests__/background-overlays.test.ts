@@ -73,6 +73,7 @@ async function fixture() {
       onActivated: event(),
       onUpdated: event(),
       onCreated: event(),
+      onAttached: event(),
       onRemoved: event(),
     },
     debugger: { onDetach: event() },
