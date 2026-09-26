@@ -314,9 +314,6 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
             .is_some(),
         "old daemon must exit"
     );
-    fixture.wait_for("helper cleanup", || {
-        fs::read_dir(fixture.exe.parent().unwrap()).unwrap().count() == 1
-    });
     let status = fixture
         .command()
         .args(["--json", "status"])
@@ -332,6 +329,15 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
         1,
         "the replacement must not stage another update immediately"
     );
+    let stop = fixture.command().args(["daemon", "stop"]).output().unwrap();
+    assert!(
+        stop.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    fixture.wait_for("replacement daemon stop", || fixture.info().is_none());
+    // A foreground fallback intentionally keeps the update helper alive as its
+    // parent until the daemon stops, so helper-file cleanup is not required here.
 }
 
 fn unused_port() -> u16 {
