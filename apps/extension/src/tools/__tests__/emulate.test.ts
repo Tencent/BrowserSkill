@@ -89,6 +89,66 @@ describe("handleEmulate", () => {
     resetEmulateStatesForTests();
   });
 
+  it.each([
+    "new-session",
+    "same-id",
+    "detach",
+    "reattach",
+    "new-runner",
+  ])("does not restore an old device profile after %s", async (mode) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100, 100]) });
+    await sm.start("aa11");
+    const deps = makeDeps();
+    let attachment: string | undefined = "first";
+    deps.cdp.getAttachmentId = () => attachment;
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    let sessionId = "aa11";
+    if (mode === "new-session" || mode === "same-id") {
+      await sm.stop("aa11");
+      sessionId = mode === "same-id" ? "aa11" : "bb22";
+      await sm.start(sessionId);
+    } else if (mode === "detach") attachment = undefined;
+    else if (mode === "reattach") attachment = "second";
+    const next = mode === "new-runner" ? makeDeps() : deps;
+    const result = await handleEmulate(
+      sm,
+      {
+        session_id: sessionId,
+        overrides: { width: 1200, height: 800 },
+      },
+      next,
+    );
+    expect(result).toMatchObject({ applied: { width: 1200, height: 800 } });
+    expect("applied" in result && result.applied).toEqual({ width: 1200, height: 800 });
+    expect(next.calls.metrics.at(-1)?.metrics).toEqual({
+      width: 1200,
+      height: 800,
+      deviceScaleFactor: 0,
+      mobile: false,
+    });
+    expect(next.calls.ua).toHaveLength(mode === "new-runner" ? 0 : 1);
+    expect(next.calls.touch).toHaveLength(mode === "new-runner" ? 0 : 1);
+  });
+
+  it("keeps partial updates on the same live attachment", async () => {
+    const sm = await makeManager();
+    const deps = makeDeps();
+    // The first emulation call itself can establish the attachment.
+    let attachment: string | undefined;
+    deps.cdp.getAttachmentId = () => attachment;
+    vi.mocked(deps.cdp.setDeviceMetricsOverride).mockImplementation(async (tabId, metrics) => {
+      attachment = "live";
+      deps.calls.metrics.push({ tabId, metrics });
+    });
+    await handleEmulate(sm, { session_id: "aa11", overrides: fullOverrides }, deps);
+    const result = await handleEmulate(
+      sm,
+      { session_id: "aa11", overrides: { width: 500, height: 900 } },
+      deps,
+    );
+    expect(result).toMatchObject({ applied: { ...fullOverrides, width: 500, height: 900 } });
+  });
+
   it("applies viewport, UA and touch overrides to the active tab", async () => {
     const sm = await makeManager();
     const deps = makeDeps();
