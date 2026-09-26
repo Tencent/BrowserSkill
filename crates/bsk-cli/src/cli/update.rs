@@ -831,11 +831,18 @@ fn windows_replacement_script(restart_args: Option<&StartArgs>, attempts: u32) -
     // Only fixed switches and numeric values go into the ASCII script. Paths
     // stay in Unicode environment variables, including %, ! and shell symbols.
     let restart = restart_args.map_or_else(String::new, |args| {
-        format!(
-            "\"%BSK_UPDATE_TARGET%\" daemon start --port {} --session-idle {}ms --daemon-idle {}ms\r\nif errorlevel 1 goto failed_restart\r\n",
+        let flags = format!(
+            "--port {} --session-idle {}ms --daemon-idle {}ms",
             args.resolved_port(),
             args.resolved_session_idle().as_millis(),
             args.resolved_daemon_idle().as_millis(),
+        );
+        format!(
+            "\"%BSK_UPDATE_TARGET%\" daemon start {flags}\r\n\
+             if not errorlevel 1 goto restarted\r\n\
+             echo Detached daemon restart failed; retrying in foreground mode.\r\n\
+             \"%BSK_UPDATE_TARGET%\" daemon start --foreground {flags}\r\n\
+             if errorlevel 1 goto failed_restart\r\n",
         )
     });
     format!(
@@ -857,6 +864,7 @@ fn windows_replacement_script(restart_args: Option<&StartArgs>, attempts: u32) -
          goto failed\r\n\
          :replaced\r\n\
          {restart}\
+         :restarted\r\n\
          del /F /Q \"%BSK_UPDATE_LOG%\" >nul 2>nul\r\n\
          (del /F /Q \"%BSK_UPDATE_SCRIPT%\" >nul 2>nul & exit 0)\r\n\
          :failed_restart\r\n\
@@ -1060,11 +1068,15 @@ mod tests {
             ..Default::default()
         };
         let script = windows_replacement_script(Some(&args), 120);
+        let detached = "daemon start --port 54321 --session-idle 1234ms --daemon-idle 75000ms";
+        let foreground =
+            "daemon start --foreground --port 54321 --session-idle 1234ms --daemon-idle 75000ms";
         assert!(script.is_ascii());
-        assert!(
-            script
-                .contains("daemon start --port 54321 --session-idle 1234ms --daemon-idle 75000ms")
-        );
+        assert!(script.contains(detached));
+        assert!(script.contains(foreground));
+        assert!(script.contains("Detached daemon restart failed; retrying in foreground mode."));
+        assert!(script.find(detached) < script.find(foreground));
+        assert!(script.find(foreground) < script.find(":restarted"));
         assert!(!windows_replacement_script(None, 120).contains("daemon start"));
     }
 

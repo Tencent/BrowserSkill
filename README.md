@@ -248,7 +248,7 @@ Finish active browser tasks, then update the CLI:
 bsk update --yes
 ```
 
-For the default local setup, this restarts a running daemon when an update is installed. If Windows reports a staged update, wait for replacement to finish. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
+For the default local setup, this restarts a running daemon when an update is installed. On Windows, the update helper first tries a detached daemon restart. If the host Job Object denies breakaway, it falls back to a supervised `bsk daemon start --foreground` process and remains its parent until the daemon exits. Set `BSK_AUTO_UPDATE=off` to disable daemon-side auto-update while keeping manual `bsk update` available. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
 
 Update the extension through its browser store. Update the DSH plugin separately, then restart its profile:
 
