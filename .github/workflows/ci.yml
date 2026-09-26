@@ -183,6 +183,27 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
           node scripts/check-dsh-package.mjs
 
+  browser-download:
+    name: Browser download cancellation regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Prepare extension types
+        run: pnpm --filter @browser-skill/extension exec wxt prepare
+      - name: Run download cancellation browser regression
+        working-directory: apps/extension
+        env:
+          BSK_CLICK_CHROME: google-chrome
+        run: pnpm exec vitest run src/tools/__tests__/download-deadline.browser.test.ts
+
   browser-input:
     name: Browser input readiness regression
     runs-on: ubuntu-latest
@@ -202,12 +223,6 @@ jobs:
 
       - name: Prepare extension types
         run: pnpm --filter @browser-skill/extension exec wxt prepare
-
-      - name: Run download cancellation browser regression
-        working-directory: apps/extension
-        env:
-          BSK_CLICK_CHROME: google-chrome
-        run: pnpm exec vitest run src/tools/__tests__/download-deadline.browser.test.ts
 
       - name: Run browser input and debugging regressions
         working-directory: apps/extension
