@@ -248,9 +248,11 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 bsk update --yes
 ```
 
-默认本地配置下，安装更新后会重启正在运行的 daemon。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+默认本地配置下，这条命令会在 daemon 继续服务的同时安装新版本并检查它能否运行，然后用新版本重启 daemon。重启后的 daemon 没有就绪时，会放回旧版本并用它重启 daemon。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
 
-daemon 还会每 30 分钟检查一次新版本。没有 Agent 会话时，它会安装新版本并交接给运行新版本的 daemon；新 daemon 无法启动时，当前 daemon 会继续服务。通过 `--foreground` 启动的 daemon 归所在终端或进程管理器管理，只提示新版本，请按下方步骤升级。设置 `BSK_AUTO_UPDATE=off` 可关闭 daemon 自动升级，手动 `bsk update` 仍然可用。Windows 上，`bsk.exe` 旁边可能暂时留下 `.bsk.exe.old-*` 文件，运行它的进程退出后，下次启动 daemon 时会自动清理。
+由 `bsk` 在后台启动的 daemon 还会每 30 分钟检查一次新版本。没有 Agent 会话时，它按同样方式安装新版本，再用新版本启动一个 daemon，等新 daemon 开始响应后才退出。新 daemon 退出，或 20 秒内没有就绪时，当前 daemon 会放回旧版本，在原端口继续服务，6 小时后再尝试这个版本。交接期间浏览器连接会短暂断开并自动重连。通过 `--foreground` 启动的 daemon 归所在终端或进程管理器管理，只提示新版本，请按下方步骤升级。bsk 无法在可执行文件所在目录写入时，也只提示新版本，请用原来的安装脚本或包管理器升级。设置 `BSK_AUTO_UPDATE=off` 可关闭 daemon 自动升级，手动 `bsk update` 仍然可用。
+
+`bsk doctor` 会显示最近一次更新的结果；bsk home 下的 `update-state.json` 记录了它的阶段、结果和错误原因。更新确认成功前，旧版本会以 `.bsk.old-*`（Windows 上为 `.bsk.exe.old-*`）的名字留在新版本旁边；仍在运行的旧版本会保留到对应进程退出，之后再启动 daemon 时会清理。Windows 上的自更新依赖重命名正在运行的可执行文件，NTFS 支持这一操作；文件系统不支持时，更新会失败，已安装的版本保持不变。bsk 支持 Windows 10 和 Windows Server 2016 及以上版本。
 
 扩展通过浏览器商店更新。DSH 插件需要单独更新，完成后重启对应 profile：
 

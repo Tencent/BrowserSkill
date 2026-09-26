@@ -160,6 +160,11 @@ fn foreground_daemon_reports_updates_without_replacing_itself() {
         serde_json::from_slice(&fs::read(home.join("update-check.json")).unwrap()).unwrap();
     assert_eq!(cache["latest_version"], "999.0.0");
     assert_eq!(cache["auto_update"], false);
+    let record: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("update-state.json")).unwrap()).unwrap();
+    assert_eq!(record["result"], "skipped", "{record}");
+    assert_eq!(record["skip_reason"], "host_managed", "{record}");
+    assert_eq!(record["target_version"], "999.0.0", "{record}");
 
     // The CLI hint follows the daemon's policy, not the CLI's own switch.
     let status = bsk(&home, &server).arg("status").output().unwrap();

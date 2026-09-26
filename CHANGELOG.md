@@ -9,21 +9,29 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
-- Windows self-update no longer depends on a detached script: the new `bsk.exe`
-  is installed in place while the old one keeps running, and a running daemon
-  exits only after its replacement has started. If the replacement cannot
-  start, the daemon keeps serving, logs the reason and retries later instead of
-  leaving the browser disconnected ([#336](https://github.com/Tencent/BrowserSkill/issues/336)).
-- Daemons started with `--foreground` no longer replace themselves with a
-  detached process after an auto-update, which took them away from their
-  terminal or supervisor. They log the new version, and the CLI hint suggests
-  `bsk update`.
-- `bsk update` restarts a daemon it stopped even when installation fails, and
-  starts it from the installed path, which Linux no longer reports as the
-  current executable once it is replaced.
+- A failed auto-update no longer leaves the browser disconnected
+  ([#336](https://github.com/Tencent/BrowserSkill/issues/336)). The daemon
+  runs the new executable once before relying on it, starts a daemon from it,
+  and exits only after that daemon answers. If the new daemon exits or is not
+  ready within 20 seconds, the previous executable is put back and the running
+  daemon serves again on the same port; the release is retried after 6 hours.
+  This applies on all platforms.
+- Windows self-update no longer depends on a detached script: the running
+  `bsk.exe` is renamed aside and the new one takes its place.
+- `bsk update` installs and checks the new executable before stopping the
+  daemon, and puts the previous executable back if the restarted daemon does
+  not become ready. It restarts the daemon from the installed path, which
+  Linux no longer reports as the current executable once it is replaced.
 
 ### Changed
 
+- Daemons started with `--foreground` no longer install updates or replace
+  themselves with a detached process, on any platform. They log a new version
+  once, and the CLI hint suggests `bsk update`.
+- A daemon that cannot write next to its executable reports new releases
+  instead of installing them, and the CLI hint points to the installer.
+- Each update attempt, including the stage and error of a failure, is kept in
+  `update-state.json` in the bsk home and shown by `bsk doctor`.
 - `bsk update --json` reports `"status": "updated"` on Windows too; the
   `"staged"` status is gone.
 - README documents `BSK_AUTO_UPDATE=off`.

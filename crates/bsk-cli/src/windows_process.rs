@@ -17,7 +17,7 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::Threading::{
     CREATE_UNICODE_ENVIRONMENT, CreateProcessW, DeleteProcThreadAttributeList,
-    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
+    EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess, GetProcessId,
     InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
     ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
@@ -29,6 +29,11 @@ pub(crate) struct Process {
 }
 
 impl Process {
+    pub(crate) fn id(&self) -> u32 {
+        // SAFETY: the owned process handle remains valid for the call.
+        unsafe { GetProcessId(self.handle.as_raw_handle()) }
+    }
+
     pub(crate) fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         // SAFETY: the owned process handle remains valid for both calls.
         match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
