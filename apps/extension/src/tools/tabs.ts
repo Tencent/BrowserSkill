@@ -111,6 +111,88 @@ export interface TabReturnResult {
 
 const TAB_SCOPES = new Set<TabScope>(["user", "agent", "all"]);
 
+// --- Tab group payload mirrors (bsk-protocol/src/tools/tabs.rs) ---
+
+/** Mirrors `chrome.tabGroups.ColorEnum`; the wire strings match verbatim. */
+export type TabGroupColor =
+  | "grey"
+  | "blue"
+  | "red"
+  | "yellow"
+  | "green"
+  | "pink"
+  | "purple"
+  | "cyan"
+  | "orange";
+
+const TAB_GROUP_COLORS = new Set<TabGroupColor>([
+  "grey",
+  "blue",
+  "red",
+  "yellow",
+  "green",
+  "pink",
+  "purple",
+  "cyan",
+  "orange",
+]);
+
+export interface TabGroupInfo {
+  group_id: number;
+  title?: string;
+  color: TabGroupColor;
+  collapsed: boolean;
+  tab_ids: number[];
+}
+
+export interface TabGroupCreateParams {
+  session_id: string;
+  tab_ids: number[];
+  /** Add to this existing Agent Window group instead of creating a new one. */
+  group_id?: number;
+  title?: string;
+  color?: TabGroupColor;
+}
+
+export interface TabGroupCreateResult {
+  group_id: number;
+  title?: string;
+  color: TabGroupColor;
+  tab_ids: number[];
+}
+
+export interface TabGroupUpdateParams {
+  session_id: string;
+  group_id: number;
+  title?: string;
+  color?: TabGroupColor;
+  collapsed?: boolean;
+}
+
+export interface TabGroupUpdateResult {
+  group_id: number;
+  title?: string;
+  color: TabGroupColor;
+  collapsed: boolean;
+}
+
+export interface TabGroupListParams {
+  session_id: string;
+}
+
+export interface TabGroupListResult {
+  groups: TabGroupInfo[];
+}
+
+export interface TabGroupUngroupParams {
+  session_id: string;
+  group_id: number;
+}
+
+export interface TabGroupUngroupResult {
+  tab_ids: number[];
+}
+
 /** Default URL used when `tool.tab_create` is called with no `url`. */
 export const NEW_TAB_DEFAULT_URL = "chrome://newtab/";
 
@@ -151,6 +233,41 @@ export const chromeTabMutationApi: TabMutationApi = {
   update: (id, p) => chrome.tabs.update(id, p),
   get: (id) => chrome.tabs.get(id),
   move: (id, p) => chrome.tabs.move(id, p),
+};
+
+/**
+ * Subset of `chrome.tabs` used by the tab-group handlers: grouping,
+ * ungrouping, and querying tabs by group. Kept separate from
+ * `TabMutationApi` so its existing callers/tests are untouched.
+ */
+export interface TabGroupMutationApi {
+  group(options: chrome.tabs.GroupOptions): Promise<number>;
+  ungroup(tabIds: number | number[]): Promise<void>;
+  queryTabs(query: chrome.tabs.QueryInfo): Promise<chrome.tabs.Tab[]>;
+}
+
+export const chromeTabGroupMutationApi: TabGroupMutationApi = {
+  group: (o) => chrome.tabs.group(o),
+  ungroup: (ids) => chrome.tabs.ungroup(ids),
+  queryTabs: (q) => chrome.tabs.query(q),
+};
+
+/** Subset of `chrome.tabGroups` we depend on. */
+export interface ChromeTabGroupsApi {
+  get(groupId: number): Promise<chrome.tabGroups.TabGroup>;
+  query(query: chrome.tabGroups.QueryInfo): Promise<chrome.tabGroups.TabGroup[]>;
+  update(
+    groupId: number,
+    props: chrome.tabGroups.UpdateProperties,
+  ): Promise<chrome.tabGroups.TabGroup | undefined>;
+  move(groupId: number, props: chrome.tabGroups.MoveProperties): Promise<chrome.tabGroups.TabGroup>;
+}
+
+export const chromeTabGroupsApi: ChromeTabGroupsApi = {
+  get: (id) => chrome.tabGroups.get(id),
+  query: (q) => chrome.tabGroups.query(q),
+  update: (id, p) => chrome.tabGroups.update(id, p),
+  move: (id, p) => chrome.tabGroups.move(id, p),
 };
 
 /**
@@ -304,10 +421,22 @@ export interface TabManagementDeps {
    * default only preserves legacy behaviour for direct/test callers.
    */
   isAgentWindowId?: (windowId: number) => boolean;
+  /** Tab-group mutation surface (`tab_group_create` / `_update` / `_ungroup`). */
+  tabGroups?: TabGroupMutationApi;
+  /** `chrome.tabGroups` read/update surface. */
+  tabGroupsApi?: ChromeTabGroupsApi;
 }
 
 function getTabsApi(deps: TabManagementDeps): TabMutationApi {
   return deps.tabs ?? chromeTabMutationApi;
+}
+
+function getTabGroupMutationApi(deps: TabManagementDeps): TabGroupMutationApi {
+  return deps.tabGroups ?? chromeTabGroupMutationApi;
+}
+
+function getTabGroupsApi(deps: TabManagementDeps): ChromeTabGroupsApi {
+  return deps.tabGroupsApi ?? chromeTabGroupsApi;
 }
 
 function getWindowsApi(deps: TabManagementDeps): ChromeWindowsApi {
@@ -1298,4 +1427,346 @@ export async function handleTabReturn(
   };
   if (outcome.fallback) result.fallback = true;
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// tool.tab_group_create / _update / _list / _ungroup
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify that `groupId` is a tab group living in the session's Agent
+ * Window. Mirrors `authoriseAgentTab`'s sandbox rule: groups outside
+ * the Agent Window (or belonging to another session's Agent Window)
+ * are not addressable.
+ */
+async function authoriseAgentGroup(
+  ctx: SessionContext,
+  groupId: number,
+  api: ChromeTabGroupsApi,
+  toolName: string,
+): Promise<chrome.tabGroups.TabGroup | RpcError> {
+  let group: chrome.tabGroups.TabGroup;
+  try {
+    group = await api.get(groupId);
+  } catch (err) {
+    return {
+      code: "not_found",
+      message: err instanceof Error ? err.message : `group ${groupId} not found`,
+    };
+  }
+  if (group.windowId !== ctx.agentWindowId) {
+    return rpcError(
+      "permission_denied",
+      "agent_window_scope",
+      `${toolName}: group ${groupId} is not in Agent Window ${ctx.agentWindowId}`,
+    );
+  }
+  return group;
+}
+
+/** Re-read a group's current title/color/collapsed state and member tabs. */
+async function buildGroupInfo(
+  groupsApi: ChromeTabGroupsApi,
+  queryTabs: TabGroupMutationApi["queryTabs"],
+  windowId: number,
+  groupId: number,
+): Promise<TabGroupInfo | RpcError> {
+  let group: chrome.tabGroups.TabGroup;
+  try {
+    group = await groupsApi.get(groupId);
+  } catch (err) {
+    return {
+      code: "protocol_error",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  let tabs: chrome.tabs.Tab[];
+  try {
+    tabs = await queryTabs({ windowId, groupId });
+  } catch (err) {
+    return {
+      code: "protocol_error",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const tabIds = tabs
+    .filter((t): t is CreatedChromeTab => typeof t.id === "number")
+    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+    .map((t) => t.id);
+  return {
+    group_id: groupId,
+    title: group.title || undefined,
+    color: group.color as TabGroupColor,
+    collapsed: group.collapsed,
+    tab_ids: tabIds,
+  };
+}
+
+function validateTabGroupCreateParams(params: TabGroupCreateParams): RpcError | null {
+  if (!Array.isArray(params.tab_ids) || params.tab_ids.length === 0) {
+    return {
+      code: "invalid_params",
+      message: "tab_group_create requires a non-empty tab_ids array",
+    };
+  }
+  for (const tabId of params.tab_ids) {
+    const err = validatePositiveInt("tab_ids[]", tabId);
+    if (err) return err;
+  }
+  if (params.group_id !== undefined) {
+    const err = validatePositiveInt("group_id", params.group_id);
+    if (err) return err;
+  }
+  if (params.title !== undefined && typeof params.title !== "string") {
+    return { code: "invalid_params", message: "tab_group_create title must be a string" };
+  }
+  if (params.color !== undefined && !TAB_GROUP_COLORS.has(params.color)) {
+    return { code: "invalid_params", message: "tab_group_create color must be a valid tab group color" };
+  }
+  return null;
+}
+
+/**
+ * Group one or more Agent Window tabs into a new tab group, or add them
+ * to an existing Agent Window group when `group_id` is given. Every tab
+ * (and, when given, the target group) must already live in the
+ * requesting session's Agent Window — same sandbox rule as `tab_close`
+ * / `tab_select` (design §6): agents never reach into a user window's
+ * tab strip directly.
+ */
+export async function handleTabGroupCreate(
+  manager: SessionManager,
+  params: TabGroupCreateParams,
+  deps: TabManagementDeps = {},
+): Promise<TabGroupCreateResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "tab_group_create");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const paramErr = validateTabGroupCreateParams(params);
+  if (paramErr) return paramErr;
+  if (aborted(deps.signal, "tab_group_create")) {
+    return { code: "cancelled", message: "tab_group_create aborted" };
+  }
+
+  const tabsApi = getTabsApi(deps);
+  for (const tabId of params.tab_ids) {
+    const tabOrErr = await authoriseAgentTab(manager, ctx, tabId, tabsApi, "tab_group_create");
+    if (isRpcError(tabOrErr)) return tabOrErr;
+  }
+  const groupsApi = getTabGroupsApi(deps);
+  if (params.group_id !== undefined) {
+    const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_create");
+    if (isRpcError(groupOrErr)) return groupOrErr;
+  }
+  if (aborted(deps.signal, "tab_group_create")) {
+    return { code: "cancelled", message: "tab_group_create aborted" };
+  }
+
+  const groupMutation = getTabGroupMutationApi(deps);
+  let groupId: number;
+  try {
+    groupId = await groupMutation.group({
+      tabIds: params.tab_ids,
+      ...(params.group_id !== undefined
+        ? { groupId: params.group_id }
+        : // Chrome does not reliably keep a *new* group in the tabs' current
+          // window — observed moving grouped tabs into a regular user
+          // window instead. Pin it explicitly so a fresh group never
+          // escapes the Agent Window (design §6 sandbox rule).
+          { createProperties: { windowId: ctx.agentWindowId } }),
+    });
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+
+  // Belt-and-suspenders: some Chromium builds have been observed placing a
+  // freshly created group (and the tabs riding along with it) in a
+  // different window than `createProperties.windowId` requested — most
+  // reliably reproduced when the Agent Window is unfocused (the default
+  // for `session start --no-focus`). Try relocating the group, then each
+  // member tab individually, before giving up — never silently hand tabs
+  // to the user's regular browsing session (design §6 sandbox rule).
+  if (params.group_id === undefined) {
+    const misplaced = async () => (await groupsApi.get(groupId)).windowId !== ctx.agentWindowId;
+    try {
+      if (await misplaced()) {
+        await groupsApi.move(groupId, { windowId: ctx.agentWindowId, index: -1 }).catch(() => {});
+        if (await misplaced()) {
+          for (const tabId of params.tab_ids) {
+            await tabsApi.move(tabId, { windowId: ctx.agentWindowId, index: -1 });
+          }
+        }
+      }
+    } catch (err) {
+      return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  if (params.title !== undefined || params.color !== undefined) {
+    try {
+      await groupsApi.update(groupId, {
+        ...(params.title !== undefined ? { title: params.title } : {}),
+        ...(params.color !== undefined ? { color: params.color } : {}),
+      });
+    } catch (err) {
+      return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  const infoOrErr = await buildGroupInfo(groupsApi, groupMutation.queryTabs, ctx.agentWindowId, groupId);
+  if (isRpcError(infoOrErr)) return infoOrErr;
+
+  // Every relocation attempt above ran and the group's own metadata may
+  // still claim the Agent Window, but the only signal worth trusting is
+  // which requested tabs `buildGroupInfo` can actually see there. If none
+  // made it, don't report a hollow success: undo the stray group so it
+  // doesn't linger in the user's regular browsing session, and say so.
+  const requested = new Set(params.tab_ids);
+  const landed = infoOrErr.tab_ids.filter((id) => requested.has(id));
+  if (landed.length === 0 && params.group_id === undefined) {
+    await groupMutation.ungroup(params.tab_ids).catch(() => {});
+    return rpcError(
+      "cdp_failed",
+      "group_window_mismatch",
+      "tab_group_create: the browser did not keep the new group in the Agent Window " +
+        `${ctx.agentWindowId} after relocation was attempted; the tabs remain open, ungrouped`,
+    );
+  }
+  return {
+    group_id: infoOrErr.group_id,
+    title: infoOrErr.title,
+    color: infoOrErr.color,
+    tab_ids: infoOrErr.tab_ids,
+  };
+}
+
+/** Rename, recolor, or (un)collapse an existing Agent Window tab group. */
+export async function handleTabGroupUpdate(
+  manager: SessionManager,
+  params: TabGroupUpdateParams,
+  deps: TabManagementDeps = {},
+): Promise<TabGroupUpdateResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "tab_group_update");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const bad = validatePositiveInt("group_id", params.group_id);
+  if (bad) return bad;
+  if (params.title !== undefined && typeof params.title !== "string") {
+    return { code: "invalid_params", message: "tab_group_update title must be a string" };
+  }
+  if (params.color !== undefined && !TAB_GROUP_COLORS.has(params.color)) {
+    return { code: "invalid_params", message: "tab_group_update color must be a valid tab group color" };
+  }
+  if (params.collapsed !== undefined && typeof params.collapsed !== "boolean") {
+    return { code: "invalid_params", message: "tab_group_update collapsed must be a boolean" };
+  }
+  if (aborted(deps.signal, "tab_group_update")) {
+    return { code: "cancelled", message: "tab_group_update aborted" };
+  }
+
+  const groupsApi = getTabGroupsApi(deps);
+  const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_update");
+  if (isRpcError(groupOrErr)) return groupOrErr;
+  if (aborted(deps.signal, "tab_group_update")) {
+    return { code: "cancelled", message: "tab_group_update aborted" };
+  }
+
+  let updated: chrome.tabGroups.TabGroup | undefined;
+  try {
+    updated = await groupsApi.update(params.group_id, {
+      ...(params.title !== undefined ? { title: params.title } : {}),
+      ...(params.color !== undefined ? { color: params.color } : {}),
+      ...(params.collapsed !== undefined ? { collapsed: params.collapsed } : {}),
+    });
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+  if (!updated) {
+    return { code: "not_found", message: `tab_group_update: group ${params.group_id} not found` };
+  }
+  return {
+    group_id: params.group_id,
+    title: updated.title || undefined,
+    color: updated.color as TabGroupColor,
+    collapsed: updated.collapsed,
+  };
+}
+
+/** List tab groups living in the session's Agent Window. */
+export async function handleTabGroupList(
+  manager: SessionManager,
+  params: TabGroupListParams,
+  deps: TabManagementDeps = {},
+): Promise<TabGroupListResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "tab_group_list");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  if (aborted(deps.signal, "tab_group_list")) {
+    return { code: "cancelled", message: "tab_group_list aborted" };
+  }
+
+  const groupsApi = getTabGroupsApi(deps);
+  const groupMutation = getTabGroupMutationApi(deps);
+  let chromeGroups: chrome.tabGroups.TabGroup[];
+  try {
+    chromeGroups = await groupsApi.query({ windowId: ctx.agentWindowId });
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+  const groups: TabGroupInfo[] = [];
+  for (const g of chromeGroups) {
+    if (aborted(deps.signal, "tab_group_list")) {
+      return { code: "cancelled", message: "tab_group_list aborted" };
+    }
+    const infoOrErr = await buildGroupInfo(groupsApi, groupMutation.queryTabs, ctx.agentWindowId, g.id);
+    // A group that vanished between query() and the follow-up get() is
+    // reported as empty rather than failing the whole listing.
+    if (isRpcError(infoOrErr)) continue;
+    groups.push(infoOrErr);
+  }
+  return { groups };
+}
+
+/**
+ * Remove every tab currently in `group_id` from that group. Tabs stay
+ * open in place; only their group membership is cleared.
+ */
+export async function handleTabGroupUngroup(
+  manager: SessionManager,
+  params: TabGroupUngroupParams,
+  deps: TabManagementDeps = {},
+): Promise<TabGroupUngroupResult | RpcError> {
+  const ctxOrErr = lookupSession(manager, params, "tab_group_ungroup");
+  if (isRpcError(ctxOrErr)) return ctxOrErr;
+  const ctx = ctxOrErr;
+  const bad = validatePositiveInt("group_id", params.group_id);
+  if (bad) return bad;
+  if (aborted(deps.signal, "tab_group_ungroup")) {
+    return { code: "cancelled", message: "tab_group_ungroup aborted" };
+  }
+
+  const groupsApi = getTabGroupsApi(deps);
+  const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_ungroup");
+  if (isRpcError(groupOrErr)) return groupOrErr;
+
+  const groupMutation = getTabGroupMutationApi(deps);
+  let tabs: chrome.tabs.Tab[];
+  try {
+    tabs = await groupMutation.queryTabs({ windowId: ctx.agentWindowId, groupId: params.group_id });
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+  const tabIds = tabs.filter((t): t is CreatedChromeTab => typeof t.id === "number").map((t) => t.id);
+  if (aborted(deps.signal, "tab_group_ungroup")) {
+    return { code: "cancelled", message: "tab_group_ungroup aborted" };
+  }
+  if (tabIds.length === 0) {
+    return { tab_ids: [] };
+  }
+  try {
+    await groupMutation.ungroup(tabIds);
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+  return { tab_ids: tabIds };
 }

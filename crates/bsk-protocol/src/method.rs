@@ -68,6 +68,14 @@ pub enum Method {
     ToolTabReturn,
     #[serde(rename = "tool.tab_select")]
     ToolTabSelect,
+    #[serde(rename = "tool.tab_group_create")]
+    ToolTabGroupCreate,
+    #[serde(rename = "tool.tab_group_update")]
+    ToolTabGroupUpdate,
+    #[serde(rename = "tool.tab_group_list")]
+    ToolTabGroupList,
+    #[serde(rename = "tool.tab_group_ungroup")]
+    ToolTabGroupUngroup,
     #[serde(rename = "tool.navigate")]
     ToolNavigate,
     #[serde(rename = "tool.navigate_back")]
@@ -185,6 +193,9 @@ impl Method {
             | Method::ToolTabBorrow
             | Method::ToolTabReturn
             | Method::ToolTabSelect
+            | Method::ToolTabGroupCreate
+            | Method::ToolTabGroupUpdate
+            | Method::ToolTabGroupUngroup
             | Method::ToolWindowResize
             | Method::ToolEmulate
             | Method::ToolNavigate
@@ -215,6 +226,7 @@ impl Method {
             // without driving new automation gestures, so they stay
             // ungated (teardown after interrupt must still work).
             Method::ToolTabList
+            | Method::ToolTabGroupList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
             | Method::ToolScreenshot
@@ -362,6 +374,7 @@ mod tests {
     #[test]
     fn is_mutating_classifies_read_only_tools_as_non_mutating() {
         assert!(!Method::ToolTabList.is_mutating());
+        assert!(!Method::ToolTabGroupList.is_mutating());
         assert!(!Method::ToolSnapshot.is_mutating());
         assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
@@ -380,6 +393,9 @@ mod tests {
         assert!(Method::ToolTabBorrow.is_mutating());
         assert!(Method::ToolTabReturn.is_mutating());
         assert!(Method::ToolTabSelect.is_mutating());
+        assert!(Method::ToolTabGroupCreate.is_mutating());
+        assert!(Method::ToolTabGroupUpdate.is_mutating());
+        assert!(Method::ToolTabGroupUngroup.is_mutating());
         assert!(Method::ToolNavigate.is_mutating());
         assert!(Method::ToolNavigateBack.is_mutating());
         assert!(Method::ToolNavigateForward.is_mutating());

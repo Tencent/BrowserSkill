@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
+## [Unreleased]
+
+### Added
+
+- `bsk tab group create|update|list|ungroup`: native Chrome/Edge tab-group
+  management (`chrome.tabGroups`) scoped to the session's Agent Window, with
+  the same sandbox rule as `tab close` / `tab select`. Guards against browsers
+  that place a freshly created group outside the target window (most
+  reproducible with `session start --no-focus`) with a relocation fallback,
+  and reports an honest error instead of a silent partial group when no
+  relocation attempt lands the tabs in the Agent Window.
+
 ## [0.3.1] - 2026-09-23
 
 ### Added
