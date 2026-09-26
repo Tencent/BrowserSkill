@@ -11,7 +11,7 @@
 
 import type { DeviceMetricsOverride, UserAgentOverride } from "@/browser-driver/chromium-cdp";
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
-import type { SessionManager } from "@/session-manager/manager";
+import type { SessionContext, SessionManager } from "@/session-manager/manager";
 import type {
   EmulateOverrides,
   EmulateParams,
@@ -39,6 +39,7 @@ export interface EmulateCdpRunner {
   setUserAgentOverride(tabId: number, override: UserAgentOverride): Promise<void>;
   setTouchEmulationEnabled(tabId: number, enabled: boolean, maxTouchPoints?: number): Promise<void>;
   trackSessionTab?(sessionId: string, tabId: number): void;
+  getAttachmentId?(tabId: number): string | undefined;
 }
 
 export interface EmulateDeps {
@@ -79,24 +80,21 @@ function invalidParams(message: string): RpcError {
   return { code: "invalid_params", message };
 }
 
-/**
- * Per-tab record of the emulation state applied so far. New requests
- * are merged onto it field by field (see `mergeEmulateOverrides`) and
- * the merged state is applied as a whole, so e.g. a later
- * `--width/--height` does not silently reset the dpr/mobile of an
- * earlier `--device` preset.
- *
- * The record is best-effort: an entry left behind by a closed tab is
- * simply overwritten by the next emulate call that targets the same tab
- * id, and the whole map is lost when the extension service worker
- * reloads — after a reload the next emulate is equivalent to a full
- * (re)set of just the fields it carries.
- */
-const tabEmulationStates = new Map<number, EmulateOverrides>();
+interface EmulationState {
+  cdp: EmulateCdpRunner;
+  attachmentId: string | undefined;
+  overrides: EmulateOverrides;
+}
 
-/** Test hook: drop every per-tab emulation state record. */
+// A session's partial updates belong to one live debugger attachment. Chrome
+// clears overrides on detach, so neither a new owner nor a reattached owner
+// may resurrect the previous device profile. Weak keys also retire stopped
+// sessions without retaining them in a browser-global tab-id map.
+let sessionEmulationStates = new WeakMap<SessionContext, Map<number, EmulationState>>();
+
+/** Test hook: drop every remembered emulation state. */
 export function resetEmulateStatesForTests(): void {
-  tabEmulationStates.clear();
+  sessionEmulationStates = new WeakMap();
 }
 
 /**
@@ -241,7 +239,7 @@ export async function handleEmulate(
     } catch (err) {
       return cdpFailed(err);
     }
-    tabEmulationStates.delete(target.tabId);
+    sessionEmulationStates.get(ctx)?.delete(target.tabId);
     return { tab_id: target.tabId, cleared: true, note: EMULATE_SCOPE_NOTE };
   }
 
@@ -254,7 +252,11 @@ export async function handleEmulate(
 
   // Fields absent from this request keep their previously applied
   // values; the merged state is what gets applied (and echoed back).
-  const merged = mergeEmulateOverrides(tabEmulationStates.get(target.tabId), overrides);
+  const states = sessionEmulationStates.get(ctx) ?? new Map<number, EmulationState>();
+  const stored = states.get(target.tabId);
+  const current =
+    stored?.cdp === deps.cdp && stored.attachmentId === deps.cdp.getAttachmentId?.(target.tabId);
+  const merged = mergeEmulateOverrides(current ? stored.overrides : undefined, overrides);
   try {
     if (deps.signal?.aborted) return { code: "cancelled", message: "emulate aborted" };
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -292,7 +294,12 @@ export async function handleEmulate(
     return cdpFailed(err);
   }
   // Record the merged state only once it was fully applied.
-  tabEmulationStates.set(target.tabId, merged);
+  states.set(target.tabId, {
+    cdp: deps.cdp,
+    attachmentId: deps.cdp.getAttachmentId?.(target.tabId),
+    overrides: merged,
+  });
+  sessionEmulationStates.set(ctx, states);
   return {
     tab_id: target.tabId,
     cleared: false,

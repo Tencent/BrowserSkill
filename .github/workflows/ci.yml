@@ -209,6 +209,12 @@ jobs:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/click.browser.test.ts src/tools/__tests__/observation-layers.browser.test.ts src/debug/__tests__/*.browser.test.ts
 
+      - name: Run emulation-lifecycle browser regression
+        working-directory: apps/extension
+        env:
+          BSK_CLICK_CHROME: google-chrome
+        run: pnpm exec vitest run src/tools/__tests__/emulation-lifecycle.browser.test.ts
+
   node-scripts:
     name: Node script tests
     runs-on: ubuntu-latest
