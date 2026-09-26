@@ -24,7 +24,6 @@ use bsk_protocol::{
     ResponseFrame, RpcError,
 };
 use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
 use serde_json::json;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
@@ -35,13 +34,7 @@ use support::{wait_for_inflight_forwarded, wait_for_session_interrupt_pending};
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
 fn tempfile_path(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let mut rng = rand::thread_rng();
-    let suffix: String = (0..8)
-        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
-        .collect();
-    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
-    p
+    support::ipc_endpoint(prefix)
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
@@ -158,6 +151,7 @@ async fn session_user_interrupt_event_cancels_inflight_with_user_aborted() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
@@ -335,6 +329,7 @@ async fn assert_idle_interrupt_rejects(method: Method) {
             if let Frame::Request(req) = frame {
                 if req.method == Method::ToolSessionStart {
                     let result = SessionStartResult {
+                        container_mode: None,
                         interaction: None,
                         agent_window_id: Some(1),
                     };
@@ -464,6 +459,7 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         })
@@ -623,6 +619,7 @@ async fn user_interrupt_marker_survives_long_delay_before_next_tool() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         })

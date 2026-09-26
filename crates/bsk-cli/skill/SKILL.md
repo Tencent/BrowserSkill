@@ -8,9 +8,10 @@ description: |
 
 # browser-skill
 
-Use `bsk` in an **Agent Window** with the user's existing logins. User tabs
-require explicit borrowing. This skill does not install the extension or handle
-advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
+Use `bsk` in an **Agent Window** by default. For current-window or tab reuse,
+read [tabs and profiles](references/tabs-and-profiles.md). User tabs require
+permission. This skill does not install the extension or handle advice-only
+tasks. Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
@@ -59,7 +60,8 @@ induced to do is done with their sessions.
    selector. Otherwise start `bsk session start --json`; with multiple browsers,
    run `bsk browsers` and choose `--browser <id-or-label>`. Retain the returned
    `session_id`. For background work, add `--no-focus` to `session start` only.
-2. For a new page, navigate; for an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first.
+2. For a new page, navigate; to add a user tab, read
+   [tab borrowing](references/tabs-and-profiles.md) first.
    Read the page before interacting:
 
    ```sh

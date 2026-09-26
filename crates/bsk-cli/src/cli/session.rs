@@ -48,10 +48,21 @@ pub enum SessionSub {
     List,
     /// Inspect, claim, or cancel a recoverable start request.
     Request(SessionRequestArgs),
+    /// Renew or release sessions owned by an ephemeral client.
+    Lease(SessionLeaseArgs),
 }
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Create session tabs in the last-focused user window (local only).
+    #[arg(long, conflicts_with_all = ["width", "height", "current_tab", "tab_id"])]
+    pub in_window: bool,
+    /// Reuse the active tab in the last-focused normal user window.
+    #[arg(long, conflicts_with_all = ["in_window", "tab_id", "width", "height", "no_focus"])]
+    pub current_tab: bool,
+    /// Reuse a specific existing Chrome tab without moving or closing it.
+    #[arg(long, conflicts_with_all = ["in_window", "current_tab", "width", "height", "no_focus"])]
+    pub tab_id: Option<i64>,
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
@@ -76,9 +87,22 @@ pub struct SessionStartArgs {
     #[arg(long, value_parser = window_size)]
     pub height: Option<u32>,
 
-    /// Open the Agent Window in the background without stealing focus.
+    /// Start without stealing focus (an inactive tab with --in-window).
     #[arg(long)]
     pub no_focus: bool,
+
+    /// Stop after the owner lease expires (the standalone CLI does not renew it).
+    #[arg(long)]
+    pub ephemeral: bool,
+    /// Stable lifecycle owner token (advanced clients).
+    #[arg(long, hide = true)]
+    pub owner_id: Option<String>,
+    /// Diagnostic owner type shown by `session list`.
+    #[arg(long, hide = true)]
+    pub owner_kind: Option<String>,
+    /// Owner lease duration in milliseconds; also enables ephemeral mode.
+    #[arg(long, value_parser = lease_ttl)]
+    pub lease_ttl_ms: Option<u64>,
 }
 
 /// Parse a `--width` / `--height` Agent Window dimension (CSS pixels).
@@ -91,6 +115,19 @@ fn window_size(s: &str) -> Result<u32, String> {
     } else {
         Err(format!(
             "window dimension {value} out of range (100..=7680)"
+        ))
+    }
+}
+
+fn lease_ttl(s: &str) -> Result<u64, String> {
+    let value: u64 = s
+        .parse()
+        .map_err(|_| format!("invalid lease duration {s:?}: expected milliseconds"))?;
+    if (10_000..=600_000).contains(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "lease duration {value} out of range (10000..=600000)"
         ))
     }
 }
@@ -117,8 +154,24 @@ pub struct SessionRequestArgs {
     pub claim: bool,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct SessionLeaseArgs {
+    #[arg(long)]
+    pub owner: String,
+    #[arg(long, default_value_t = 60_000, value_parser = lease_ttl)]
+    pub ttl_ms: u64,
+    #[arg(long)]
+    pub release: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_window: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    current_tab: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tab_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,16 +184,38 @@ struct StartParams {
     height: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     focused: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct StartReply {
+    #[serde(default)]
+    pub container_mode: Option<String>,
     #[serde(default)]
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
     #[serde(default)]
     pub agent_window_id: Option<i64>,
+}
+
+fn start_reply_json(reply: &StartReply, owner_id: Option<&str>) -> serde_json::Value {
+    let mut output = serde_json::json!({
+        "session_id": &reply.session_id,
+        "browser_instance_id": &reply.browser_instance_id,
+        "agent_window_id": &reply.agent_window_id,
+        "container_mode": &reply.container_mode,
+        "interaction": &reply.interaction,
+    });
+    if let Some(owner_id) = owner_id {
+        output["owner_id"] = serde_json::Value::String(owner_id.into());
+    }
+    output
 }
 
 #[derive(Debug, Serialize)]
@@ -208,6 +283,26 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
             );
             Ok(())
         }
+        SessionSub::Lease(args) => {
+            let reply: serde_json::Value = call(
+                info.sock_path,
+                if args.release {
+                    Method::SessionOwnerRelease
+                } else {
+                    Method::SessionLeaseRenew
+                },
+                Some(serde_json::json!({
+                    "owner_id": args.owner,
+                    "lease_ttl_ms": args.ttl_ms,
+                })),
+                SESSION_STOP_IPC_TIMEOUT,
+            )?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&reply).context("encode lease result")?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -236,34 +331,52 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
             }
         });
     }
+    let ephemeral = args.ephemeral
+        || args.owner_id.is_some()
+        || args.owner_kind.is_some()
+        || args.lease_ttl_ms.is_some();
+    let lease_ttl_ms = args.lease_ttl_ms.unwrap_or(60_000);
+    let owner_id = ephemeral.then(|| {
+        args.owner_id
+            .unwrap_or_else(|| format!("cli:{}:{}", std::process::id(), uuid::Uuid::new_v4()))
+    });
+    let owner_kind = ephemeral.then(|| args.owner_kind.unwrap_or_else(|| "cli".into()));
+    let displayed_owner_id = owner_id.clone();
     let result = start_session(
         sock,
         SessionStartOptions {
+            in_window: args.in_window,
+            current_tab: args.current_tab,
+            tab_id: args.tab_id,
             name: args.name,
             request_id: args.request_id,
             browser: args.browser,
             width: args.width,
             height: args.height,
             focused: args.no_focus.then_some(false),
+            owner_id,
+            owner_kind,
+            lease_ttl_ms: ephemeral.then_some(lease_ttl_ms),
         },
     );
     waited.store(true, Ordering::SeqCst);
     match result {
         Ok(reply) => match format {
             Format::Json => {
+                let output = start_reply_json(&reply, displayed_owner_id.as_deref());
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&serde_json::json!({
-                        "session_id": reply.session_id,
-                        "browser_instance_id": reply.browser_instance_id,
-                        "agent_window_id": reply.agent_window_id,
-                        "interaction": reply.interaction,
-                    }))
-                    .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+                    serde_json::to_string_pretty(&output)
+                        .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
                 );
             }
             Format::Human => {
                 println!("{}", reply.session_id);
+                if let Some(owner_id) = displayed_owner_id {
+                    eprintln!(
+                        "ephemeral owner: {owner_id} (standalone CLI lease is not renewed automatically)"
+                    );
+                }
             }
         },
         Err(err) => return Err(handle_start_error(err, format)),
@@ -277,15 +390,83 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
     pub request_id: Option<String>,
+    pub in_window: bool,
+    pub current_tab: bool,
+    pub tab_id: Option<i64>,
     pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub focused: Option<bool>,
+    pub owner_id: Option<String>,
+    pub owner_kind: Option<String>,
+    pub lease_ttl_ms: Option<u64>,
 }
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.in_window || opts.current_tab || opts.tab_id.is_some() || opts.owner_id.is_some() {
+        let status: bsk_protocol::StatusResult = call(
+            sock.clone(),
+            Method::SystemStatus,
+            None::<serde_json::Value>,
+            Duration::from_secs(10),
+        )?;
+        if (opts.in_window || opts.current_tab || opts.tab_id.is_some())
+            && !bsk_protocol::tools::session::supports_shared_window(&status.protocol_version)
+        {
+            if !opts.in_window {
+                return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                    code: bsk_protocol::ErrorCode::Unsupported,
+                    message:
+                        "Existing-tab sessions require daemon protocol 1.5; restart or update the daemon"
+                            .into(),
+                    data: Some(serde_json::json!({
+                        "reason": "unsupported_feature", "component": "daemon",
+                        "required_protocol": "1.5", "actual_protocol": status.protocol_version,
+                    })),
+                }));
+            }
+            return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                code: bsk_protocol::ErrorCode::Unsupported,
+                message:
+                    "Shared sessions require daemon protocol 1.4; restart or update the daemon"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "component": "daemon",
+                    "required_protocol": "1.4", "actual_protocol": status.protocol_version,
+                })),
+            }));
+        }
+        if (opts.current_tab || opts.tab_id.is_some())
+            && !bsk_protocol::tools::session::supports_existing_tab(&status.protocol_version)
+        {
+            return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                code: bsk_protocol::ErrorCode::Unsupported,
+                message:
+                    "Existing-tab sessions require daemon protocol 1.5; restart or update the daemon"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "component": "daemon",
+                    "required_protocol": "1.5", "actual_protocol": status.protocol_version,
+                })),
+                }));
+        }
+        if opts.owner_id.is_some()
+            && !bsk_protocol::tools::session::supports_session_lease(&status.protocol_version)
+        {
+            return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                code: bsk_protocol::ErrorCode::Unsupported,
+                message:
+                    "Ephemeral sessions require daemon protocol 1.5; restart or update the daemon"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "component": "daemon",
+                    "required_protocol": "1.5", "actual_protocol": status.protocol_version,
+                })),
+            }));
+        }
+    }
     call(
         sock,
         if opts.request_id.is_some() {
@@ -294,12 +475,18 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             Method::SessionStart
         },
         Some(StartParams {
+            in_window: opts.in_window,
+            current_tab: opts.current_tab,
+            tab_id: opts.tab_id,
             request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
             width: opts.width,
             height: opts.height,
             focused: opts.focused,
+            owner_id: opts.owner_id,
+            owner_kind: opts.owner_kind,
+            lease_ttl_ms: opts.lease_ttl_ms,
         }),
         SESSION_START_IPC_TIMEOUT,
     )
@@ -538,42 +725,81 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
             );
         }
         Format::Human => {
-            if reply.sessions.is_empty() {
-                println!("(no active sessions)");
-                return Ok(());
-            }
-            let headers = ("SESSION", "BROWSER", "AGENT WINDOW");
-            let session_w = reply
-                .sessions
-                .iter()
-                .map(|s| s.session_id.len())
-                .max()
-                .unwrap_or(0)
-                .max(headers.0.len());
-            let browser_w = reply
-                .sessions
-                .iter()
-                .map(|s| s.browser_instance_id.len())
-                .max()
-                .unwrap_or(0)
-                .max(headers.1.len());
-            println!(
-                "{:<session_w$}  {:<browser_w$}  {}",
-                headers.0, headers.1, headers.2,
-            );
-            for s in &reply.sessions {
-                let window = s
-                    .agent_window_id
-                    .map(|w| w.to_string())
-                    .unwrap_or_else(|| "-".into());
-                println!(
-                    "{:<session_w$}  {:<browser_w$}  {}",
-                    s.session_id, s.browser_instance_id, window,
-                );
-            }
+            print!("{}", format_human_session_list(&reply.sessions));
         }
     }
     Ok(())
+}
+
+fn format_human_session_list(sessions: &[SessionStatusEntry]) -> String {
+    use std::fmt::Write as _;
+
+    if sessions.is_empty() {
+        return "(no active sessions)\n".into();
+    }
+    let headers = ("SESSION", "BROWSER", "WINDOW / MODE", "OWNER", "LIFECYCLE");
+    let session_w = sessions
+        .iter()
+        .map(|s| s.session_id.len())
+        .max()
+        .unwrap_or(0)
+        .max(headers.0.len());
+    let browser_w = sessions
+        .iter()
+        .map(|s| s.browser_instance_id.len())
+        .max()
+        .unwrap_or(0)
+        .max(headers.1.len());
+    let owners: Vec<String> = sessions
+        .iter()
+        .map(|s| match (&s.owner_kind, &s.owner_id) {
+            (Some(kind), Some(id)) if id.starts_with(&format!("{kind}:")) => id.clone(),
+            (Some(kind), Some(id)) => format!("{kind}:{id}"),
+            (_, Some(id)) => id.clone(),
+            _ => "-".into(),
+        })
+        .collect();
+    let owner_w = owners
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max(headers.3.len());
+    let mut output = String::new();
+    writeln!(
+        output,
+        "{:<session_w$}  {:<browser_w$}  {:<20}  {:<owner_w$}  {}",
+        headers.0, headers.1, headers.2, headers.3, headers.4,
+    )
+    .expect("write session-list header");
+    for (s, owner) in sessions.iter().zip(owners) {
+        let window = s
+            .agent_window_id
+            .map(|w| w.to_string())
+            .unwrap_or_else(|| "-".into());
+        let lifecycle = format!(
+            "{}/{}{}",
+            s.lifecycle_mode.as_deref().unwrap_or("persistent"),
+            s.lifecycle_state.as_deref().unwrap_or("active"),
+            s.lease_expires_at_ms
+                .map(|expires| format!(" expires={expires}"))
+                .unwrap_or_default(),
+        );
+        writeln!(
+            output,
+            "{:<session_w$}  {:<browser_w$}  {:<20}  {:<owner_w$}  {}",
+            s.session_id,
+            s.browser_instance_id,
+            format!(
+                "{window} / {}",
+                s.container_mode.as_deref().unwrap_or("window")
+            ),
+            owner,
+            lifecycle,
+        )
+        .expect("write session-list row");
+    }
+    output
 }
 
 fn call<P, R>(
@@ -631,12 +857,18 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                in_window: false,
+                current_tab: false,
+                tab_id: None,
                 request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,
                 width: None,
                 height: None,
                 focused: None,
+                owner_id: None,
+                owner_kind: None,
+                lease_ttl_ms: None,
             };
             let expected = task_name.map_or_else(
                 || serde_json::json!({}),
@@ -644,6 +876,57 @@ mod start_params_tests {
             );
             assert_eq!(serde_json::to_value(params).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn start_json_only_includes_owner_for_ephemeral_sessions() {
+        let reply = StartReply {
+            container_mode: Some("window".into()),
+            interaction: None,
+            session_id: "aa11".into(),
+            browser_instance_id: "chrome-main".into(),
+            agent_window_id: Some(42),
+        };
+
+        assert!(start_reply_json(&reply, None).get("owner_id").is_none());
+        assert_eq!(
+            start_reply_json(&reply, Some("cli:123:token"))["owner_id"],
+            "cli:123:token"
+        );
+    }
+
+    #[test]
+    fn human_session_list_renders_owner_and_lifecycle_columns() {
+        let sessions = vec![
+            serde_json::from_value::<SessionStatusEntry>(serde_json::json!({
+                "session_id": "aa11",
+                "browser_instance_id": "chrome-main",
+                "agent_window_id": 42,
+                "container_mode": "existing_tab",
+                "created_at_ms": 1,
+                "owner_id": "dsh:123:token",
+                "owner_kind": "dsh",
+                "lifecycle_mode": "lease",
+                "lifecycle_state": "active",
+                "lease_expires_at_ms": 9999
+            }))
+            .unwrap(),
+            serde_json::from_value::<SessionStatusEntry>(serde_json::json!({
+                "session_id": "bb22",
+                "browser_instance_id": "chrome-main",
+                "created_at_ms": 2
+            }))
+            .unwrap(),
+        ];
+
+        let output = format_human_session_list(&sessions);
+        assert!(output.contains("SESSION"));
+        assert!(output.contains("OWNER"));
+        assert!(output.contains("LIFECYCLE"));
+        assert!(output.contains("42 / existing_tab"));
+        assert!(output.contains("dsh:123:token"));
+        assert!(output.contains("lease/active expires=9999"));
+        assert!(output.contains("persistent/active"));
     }
 }
 

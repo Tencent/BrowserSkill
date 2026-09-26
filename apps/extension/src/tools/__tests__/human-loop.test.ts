@@ -60,8 +60,15 @@ function fakeManager(sessionId: string, agentWindowId: number, tabId: number, un
   const mgr = {
     get: (id: string) =>
       id === sessionId
-        ? { sessionId, agentWindowId, refStore, borrowedTabs: new Map(), unattended }
+        ? {
+            sessionId,
+            container: { mode: "window", agentWindowId },
+            refStore,
+            borrowedTabs: new Map(),
+            unattended,
+          }
         : null,
+    findByTabId: () => null,
     findByWindowId: (wid: number) => (wid === agentWindowId ? { sessionId } : null),
   } as unknown as SessionManager;
   return mgr;
@@ -1006,11 +1013,12 @@ describe("handleRequestHelp", () => {
         id === "abcd"
           ? {
               sessionId: "abcd",
-              agentWindowId: 99,
+              container: { mode: "window", agentWindowId: 99 },
               refStore,
               borrowedTabs: new Map(),
             }
           : null,
+      findByTabId: () => null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
     } as unknown as SessionManager;
     const deps = baseDeps({
@@ -1054,7 +1062,7 @@ describe("handleRequestHelp", () => {
         id === "abcd"
           ? {
               sessionId: "abcd",
-              agentWindowId: 99,
+              container: { mode: "window", agentWindowId: 99 },
               refStore: {
                 resolveEntry: () => ({
                   kind: "dom",
@@ -1068,6 +1076,7 @@ describe("handleRequestHelp", () => {
               borrowedTabs: new Map(),
             }
           : null,
+      findByTabId: () => null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
     } as unknown as SessionManager;
     const send = vi.fn(async (_tabId, method) => {
@@ -1149,11 +1158,12 @@ describe("handleRequestHelp", () => {
         id === "abcd"
           ? {
               sessionId: "abcd",
-              agentWindowId: 99,
+              container: { mode: "window", agentWindowId: 99 },
               refStore,
               borrowedTabs: new Map(),
             }
           : null,
+      findByTabId: () => null,
       findByWindowId: (wid: number) => (wid === 99 ? { sessionId: "abcd" } : null),
     } as unknown as SessionManager;
     const deps = baseDeps();

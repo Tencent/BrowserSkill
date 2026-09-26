@@ -310,6 +310,30 @@ fn sessions_and_default_borrowing_work_with_legacy_daemons_without_forwarding_ov
 }
 
 #[test]
+fn shared_session_preflight_never_sends_start_to_a_legacy_daemon() {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let observed = starts.clone();
+    let daemon = MockDaemon::with_requests(FOREIGN_PID, move |_, info, request| {
+        if request.method == Method::SessionStart {
+            observed.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(status(info))
+    });
+    let result = command(
+        daemon.home(),
+        &["session", "start", "--in-window", "--json"],
+    )
+    .env("BSK_AUTO_START", "0")
+    .output()
+    .unwrap();
+    assert!(!result.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(error["code"], "unsupported", "{error}");
+    assert_eq!(error["data"]["required_protocol"], "1.4");
+    assert_eq!(starts.load(Ordering::Relaxed), 0);
+}
+
+#[test]
 fn discovery_accepts_ipc_without_local_pid_but_management_refuses_it() {
     assert!(!pid_alive(FOREIGN_PID));
     let daemon = MockDaemon::new(FOREIGN_PID, |_, info| Some(status(info)));

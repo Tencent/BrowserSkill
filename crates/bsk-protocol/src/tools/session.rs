@@ -40,6 +40,12 @@ pub struct InteractionPolicy {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartParams {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_window: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub current_tab: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
@@ -61,6 +67,8 @@ pub struct SessionStartParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction: Option<InteractionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -124,6 +132,8 @@ mod tests {
         let legacy: SessionStartParams =
             serde_json::from_value(json!({"session_id": "abcd"})).unwrap();
         assert!(!legacy.unattended);
+        assert!(!legacy.current_tab);
+        assert_eq!(legacy.tab_id, None);
     }
 
     #[test]
@@ -159,5 +169,65 @@ mod tests {
         let encoded = serde_json::to_value(result).unwrap();
         assert_eq!(encoded["returned_tab_ids"], json!([7, 8]));
         assert_eq!(encoded["return_failures"][0]["code"], "cdp_failed");
+    }
+}
+
+/// Shared-window support is optional within protocol major 1.
+pub fn supports_shared_window(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, "1.4"),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
+/// Direct reuse of an existing user tab is optional within protocol major 1.
+pub fn supports_existing_tab(protocol: &str) -> bool {
+    crate::system::compare_protocol(protocol, "2.0") == Some(std::cmp::Ordering::Less)
+        && matches!(
+            crate::system::compare_protocol(protocol, "1.5"),
+            Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+        )
+}
+
+/// Owner leases and lifecycle diagnostics are available from protocol 1.5.
+pub fn supports_session_lease(protocol: &str) -> bool {
+    supports_existing_tab(protocol)
+}
+
+#[cfg(test)]
+mod shared_window_tests {
+    use super::*;
+    #[test]
+    fn support_is_optional_and_bounded_to_this_major() {
+        for version in ["1.0", "1.3", "2.0", "invalid"] {
+            assert!(!supports_shared_window(version));
+        }
+        for version in ["1.4", "1.5"] {
+            assert!(supports_shared_window(version));
+        }
+        let legacy: SessionStartParams =
+            serde_json::from_value(serde_json::json!({"session_id":"test"})).unwrap();
+        assert!(!legacy.in_window);
+        assert!(
+            serde_json::to_value(legacy)
+                .unwrap()
+                .get("in_window")
+                .is_none()
+        );
+        let shared: SessionStartParams =
+            serde_json::from_value(serde_json::json!({"session_id":"test", "in_window":true}))
+                .unwrap();
+        assert!(shared.in_window);
+    }
+
+    #[test]
+    fn existing_tab_support_starts_at_protocol_1_5() {
+        for version in ["1.0", "1.4", "2.0", "invalid"] {
+            assert!(!supports_existing_tab(version));
+        }
+        for version in ["1.5", "1.6"] {
+            assert!(supports_existing_tab(version));
+        }
     }
 }

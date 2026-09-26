@@ -1,6 +1,10 @@
 import type { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import type { SessionContext } from "@/session-manager/manager";
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionManager,
+  sessionWindowId,
+} from "@/session-manager/manager";
 import {
   checkedUiTab,
   runTaskUi,
@@ -32,7 +36,7 @@ export function captureTaskPreview(
       if (!claim) return;
       const tab = await chrome.tabs.get(tabId).catch(() => undefined);
       if (manager.get(sessionId) !== task) return;
-      if (!isAgentControlledTab(task, tabId) || (tab && tab.windowId !== task.agentWindowId))
+      if (!isAgentControlledTab(task, tabId) || (tab && tab.windowId !== sessionWindowId(task)))
         await cdp.releaseSessionTab(sessionId, tabId, { ifClaim: claim });
     };
     const onAbort = () => {
@@ -69,7 +73,7 @@ export function focusTask(manager: SessionManager, sessionId: string) {
     await checkedUiTab(task, op, tabId);
     await op.mutate(tabId, () => chrome.tabs.update(tabId, { active: true }));
     await checkedUiTab(task, op, tabId);
-    await op.mutate(tabId, () => chrome.windows.update(task.agentWindowId, { focused: true }));
+    await op.mutate(tabId, () => chrome.windows.update(sessionWindowId(task), { focused: true }));
     await checkedUiTab(task, op, tabId);
     return { focused: true };
   });
@@ -191,7 +195,7 @@ async function downscale(jpegBase64: string, op: UiOperation): Promise<string> {
 export async function taskTarget(manager: SessionManager, sessionId: string): Promise<number> {
   const task = manager.get(sessionId);
   if (!task?.remote) throw new UiTaskError("not_found", "Task unavailable", "task_unavailable");
-  const tabs = await chrome.tabs.query({ windowId: task.agentWindowId });
+  const tabs = await chrome.tabs.query({ windowId: sessionWindowId(task) });
   if (manager.get(sessionId) !== task)
     throw new UiTaskError("not_found", "Task unavailable", "task_unavailable");
   const owned = tabs.filter(

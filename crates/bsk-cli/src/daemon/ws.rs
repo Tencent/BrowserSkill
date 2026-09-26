@@ -501,7 +501,8 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
                     );
                 }
             }
-            bsk_protocol::EventKind::SessionWindowClosed => {
+            bsk_protocol::EventKind::SessionWindowClosed
+            | bsk_protocol::EventKind::SessionTabsClosed => {
                 handle_session_window_closed(state, &client.id, &ev.payload);
             }
             bsk_protocol::EventKind::SessionUserInterrupt => {
@@ -631,9 +632,9 @@ fn handle_session_window_closed(
         &session_id,
     ) {
         state.transfers.release_session(&session_id.0);
-        info!(session = %session_id, "session removed: user closed Agent Window");
+        info!(session = %session_id, "session removed: session pages closed");
     } else {
-        debug!(session = %session_id, "session.window_closed for unknown session id");
+        debug!(session = %session_id, "session closure event for unknown session id");
     }
     for failure in return_failures {
         warn!(
@@ -641,7 +642,7 @@ fn handle_session_window_closed(
             tab_id = failure.tab_id,
             code = ?failure.code,
             message = %failure.message,
-            "borrowed tab could not be returned before Agent Window closed"
+            "borrowed tab could not be returned before session window closed"
         );
     }
 }

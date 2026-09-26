@@ -100,6 +100,32 @@ describe("screenshot backends", () => {
 });
 
 describe("agent screenshot source", () => {
+  it.each(["win", "mac", "linux"])("shared mode uses only its tab backend on %s", async (os) => {
+    platform.mockResolvedValue({ os });
+    const owned = vi.fn(async () => ({ capture: async () => "owned", close: async () => {} }));
+    const source = await openScreenshotSource(
+      4,
+      1,
+      new AbortController().signal,
+      async () => {},
+      true,
+      owned,
+      true,
+    );
+    expect(await source.capture()).toBe("owned");
+    expect(source.checkFreshness).toBe(os === "win" ? true : undefined);
+    expect(native).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to a window screenshot when shared capture fails", async () => {
+    const owned = vi.fn(async () => {
+      throw new Error("CDP capture unavailable");
+    });
+    await expect(
+      openScreenshotSource(4, 1, new AbortController().signal, async () => {}, true, owned, true),
+    ).rejects.toThrow("CDP capture unavailable");
+    expect(native).not.toHaveBeenCalled();
+  });
   it.each(["mac", "linux"])("retains a working surface source on %s", async (os) => {
     platform.mockResolvedValue({ os });
     vi.useFakeTimers();

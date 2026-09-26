@@ -53,9 +53,12 @@ and retry a clearly stale frame twice before failing with `stale_frame`. Blank o
 ambiguous content alone does not trigger this error. Layout and stale-frame retries
 have separate consecutive-failure counters.
 
-On other platforms, Agent captures retain a working window-surface source and fall
-back to their session renderer only if the initial probe fails. Popup captures keep
-their existing backend selection and do not enable the Agent freshness check.
+On other platforms, dedicated Agent Window captures retain a working window-surface
+source and fall back to their session renderer only if the initial probe fails.
+Local shared-window sessions (`--in-window`) always use their tab-specific session
+renderer on every platform; failure never falls back to window-surface capture.
+Only Windows enables the renderer freshness check. Popup captures keep their
+existing backend selection and do not enable the Agent freshness check.
 Screenshot backends never switch midway through an image.
 
 In Agent `follow` mode, 30 seconds at an unchanged bottom with a rendered loading
@@ -67,7 +70,7 @@ page contact. Keeping the tab selected is necessary; hiding it can stop capture.
 Individual browser operations retain their own shorter deadlines.
 
 The default viewport screenshot and `--ref` crop are unchanged. `--full-page` is exclusive
-with `--ref`. An optional `--tab-id` identifies a tab in the session's Agent Window;
+with `--ref`. An optional `--tab-id` identifies a tab in the session's dedicated or shared host window;
 the tab must have been created or borrowed by that session. Background targets are supported
 without selecting the tab or focusing the window. Agent capture uses target-scoped CDP
 for every viewport, with no fallback to the window's selected tab. Automatic document

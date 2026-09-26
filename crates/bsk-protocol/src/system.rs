@@ -524,6 +524,8 @@ pub struct BrowserStatusEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionStatusEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction: Option<crate::tools::InteractionPolicy>,
     pub session_id: String,
     pub browser_instance_id: String,
@@ -531,6 +533,25 @@ pub struct SessionStatusEntry {
     pub agent_window_id: Option<i64>,
     /// Unix epoch milliseconds.
     pub created_at_ms: i64,
+    /// Stable caller identity when lifecycle ownership was declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    /// `persistent` for legacy sessions, `lease` for auto-stop sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_mode: Option<String>,
+    /// Current lifecycle state (`starting`, `active`, or `cleanup_failed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    /// Unix epoch milliseconds of the most recent accepted session activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at_ms: Option<i64>,
+    /// Unix epoch milliseconds at which an owner lease expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleanup_error: Option<String>,
 }
 
 /// `system.status` request payload.

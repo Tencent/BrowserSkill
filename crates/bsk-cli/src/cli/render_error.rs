@@ -124,9 +124,9 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
             exit_code: 1,
         },
         ErrorCode::PermissionDenied => RenderInfo {
-            summary: "operation denied by the Agent Window sandbox",
+            summary: "operation denied by the session's access policy",
             hint: Some(
-                "tabs outside an Agent Window must first be borrowed via `bsk tab borrow <tab-id> --session <id>`",
+                "user tabs require authorization via `bsk tab borrow <tab-id> --session <id>`; sharing a window does not grant control",
             ),
             exit_code: 1,
         },
@@ -433,7 +433,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TAB_NOT_ACTIVE) => RenderInfo {
             summary: "screenshot requires the visible active tab",
             hint: Some(
-                "select the tab with `bsk tab select <tab-id> --session <id>` or omit `--tab-id` to capture the Agent Window's active tab",
+                "select a session-controlled tab with `bsk tab select <tab-id> --session <id>` before capturing it",
             ),
             exit_code: base.exit_code,
         },

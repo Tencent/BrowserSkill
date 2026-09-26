@@ -19,16 +19,21 @@ export async function openScreenshotSource(
   // Agent requests can reuse their session's debugger instead of attaching a
   // second owner. Popup captures keep the standalone attachment below.
   ownedSource?: () => Promise<ScreenshotSource>,
+  tabOnly = false,
 ): Promise<ScreenshotSource> {
   // Limit this workaround to Windows Agent captures. Other platforms and
   // popup captures retain the working surface source and its fallback policy.
   if (allowDebugger && ownedSource) {
     const platform = await waitForReply(chrome.runtime.getPlatformInfo(), signal);
-    if (platform.os === "win") {
+    if (platform.os === "win" || tabOnly) {
       await checkTab();
-      return { ...(await ownedSource()), checkFreshness: true };
+      return {
+        ...(await ownedSource()),
+        ...(platform.os === "win" ? { checkFreshness: true } : {}),
+      };
     }
   }
+  if (tabOnly) throw new ScreenshotError("unavailable");
   let lastShot = Date.now();
   try {
     // A short probe keeps ordinary captures free of debugger attachments, while

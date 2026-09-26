@@ -4,13 +4,24 @@ import {
   interactionPolicy,
 } from "@/lib/interaction-preferences";
 import { withTaskPreviewStop } from "@/lib/task-preview";
-import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
+import {
+  isSharedSession,
+  type SessionManager,
+  SessionStartCleanupError,
+  SharedSessionStartCleanupError,
+  sessionWindowId,
+} from "@/session-manager/manager";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
-import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
+import {
+  type BorrowConfirmationApprover,
+  chromeAgentOverlayResetApi,
+  returnBorrowedTab,
+  type TabManagementDeps,
+} from "./tabs";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -52,6 +63,9 @@ export function validateWindowSize(
 }
 
 export interface SessionStartParams {
+  in_window?: boolean;
+  current_tab?: boolean;
+  tab_id?: number;
   session_id: string;
   browser_instance_id?: string;
   /** Optional Agent Window outer width in CSS pixels (100..=7680). */
@@ -59,19 +73,28 @@ export interface SessionStartParams {
   /** Optional Agent Window outer height in CSS pixels (100..=7680). */
   height?: number;
   /** Defaults to true so existing clients preserve visible Agent Windows. */
-  focused?: boolean;
+  focused?: boolean | null;
   /** Legacy input accepted for compatibility; browser settings always decide. */
   unattended?: boolean;
 }
 
 export interface SessionStartResult {
+  container_mode?: "window" | "in_window" | "existing_tab";
   interaction?: InteractionPolicy;
   agent_window_id?: number;
 }
 
 export interface SessionStartDeps {
+  approveBorrow?: BorrowConfirmationApprover;
   preferences?: InteractionPreferenceStore;
   signal?: AbortSignal;
+}
+
+class SessionStartBorrowError extends Error {
+  constructor(readonly rpc: RpcError) {
+    super(rpc.message);
+    this.name = "SessionStartBorrowError";
+  }
 }
 
 export interface SessionStopParams {
@@ -132,20 +155,96 @@ export async function handleSessionStart(
   if (params.unattended !== undefined && typeof params.unattended !== "boolean") {
     return { code: "invalid_params", message: "unattended must be a boolean" };
   }
+  if (params.in_window !== undefined && typeof params.in_window !== "boolean") {
+    return { code: "invalid_params", message: "in_window must be a boolean" };
+  }
+  if (params.current_tab !== undefined && typeof params.current_tab !== "boolean") {
+    return { code: "invalid_params", message: "current_tab must be a boolean" };
+  }
+  if (params.tab_id !== undefined && (!Number.isInteger(params.tab_id) || params.tab_id <= 0)) {
+    return { code: "invalid_params", message: "tab_id must be a positive integer" };
+  }
+  if (params.focused != null && typeof params.focused !== "boolean") {
+    return { code: "invalid_params", message: "focused must be a boolean" };
+  }
+  const existingTab = params.current_tab === true || params.tab_id !== undefined;
+  if (params.current_tab && params.tab_id !== undefined) {
+    return { code: "invalid_params", message: "current_tab and tab_id are mutually exclusive" };
+  }
+  if (params.in_window && existingTab) {
+    return { code: "invalid_params", message: "in_window cannot be combined with an existing tab" };
+  }
+  if (existingTab && params.focused === false) {
+    return { code: "invalid_params", message: "existing-tab sessions cannot disable focus" };
+  }
+  if (
+    (params.in_window || existingTab) &&
+    (params.width !== undefined || params.height !== undefined)
+  ) {
+    return {
+      code: "invalid_params",
+      message: "shared and existing-tab sessions cannot be combined with window dimensions",
+    };
+  }
+  if ((params.in_window || existingTab) && manager.isRemote()) {
+    return {
+      code: "unsupported",
+      message: "Shared windows and existing tabs are only supported for local sessions",
+    };
+  }
   const sizeOrErr = validateWindowSize(params.width, params.height);
   if (isRpcError(sizeOrErr)) return sizeOrErr;
   try {
     await deps.preferences?.readyOrFallback();
     const ctx = await manager.start(params.session_id, {
       size: sizeOrErr,
-      focused: params.focused,
+      focused: params.focused ?? undefined,
       signal: deps.signal,
+      inWindow: params.in_window,
+      ...(existingTab
+        ? {
+            existingTab: {
+              ...(params.current_tab ? { current: true } : { tabId: params.tab_id }),
+              approve: async (tabId: number) => {
+                const approve =
+                  deps.approveBorrow ??
+                  (async () =>
+                    rpcError(
+                      "permission_denied",
+                      "confirmation_ui_unavailable",
+                      "Borrow confirmation is unavailable",
+                    ));
+                const approval = await approve({
+                  sessionId: params.session_id,
+                  tabId,
+                  ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+                });
+                if (approval && typeof approval === "object") {
+                  throw new SessionStartBorrowError(approval);
+                }
+                if (!approval) {
+                  throw new SessionStartBorrowError(
+                    rpcError("cancelled", "user_denied", "Existing-tab session cancelled by user"),
+                  );
+                }
+              },
+            },
+          }
+        : {}),
     });
     return {
-      agent_window_id: ctx.agentWindowId,
+      agent_window_id: sessionWindowId(ctx),
+      ...(ctx.container.mode !== "window" ? { container_mode: ctx.container.mode } : {}),
       interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
     };
   } catch (err) {
+    if (err instanceof SessionStartBorrowError) return err.rpc;
+    if (err instanceof SharedSessionStartCleanupError) {
+      return rpcError("protocol_error", "cleanup_failed", err.message, {
+        resource_type: "tab",
+        resource_id: err.tabId,
+      });
+    }
     if (err instanceof SessionStartCleanupError) {
       return rpcError("protocol_error", "cleanup_failed", err.message, {
         resource_type: "agent_window",
@@ -193,7 +292,7 @@ export async function handleSessionStart(
  * state. The daemon/CLI surface the failure and keep the session
  * retryable.
  */
-export async function handleSessionStop(
+async function handleSessionStopCore(
   manager: SessionManager,
   params: SessionStopParams,
   deps: SessionStopDeps = {},
@@ -221,6 +320,9 @@ async function stopSession(
   }
   if (deps.signal?.aborted) {
     return { code: "cancelled", message: "session_stop aborted before teardown" };
+  }
+  if (isSharedSession(ctx) && ctx.pendingOperations) {
+    return { code: "cancelled", message: "Session has pending tab operations; retry stop" };
   }
 
   // Remote access must end before returning a tab. Preserve the local recording
@@ -256,6 +358,7 @@ async function stopSession(
       } else {
         returnedTabIds.push(outcome.tabId);
         ctx.borrowedTabs.delete(tabId);
+        await manager.persist(ctx);
       }
     } catch (err) {
       if (!ctx.borrowedTabs.has(tabId)) continue;
@@ -292,7 +395,7 @@ async function stopSession(
   if (pendingReturnFailures.length > 0) {
     result.return_failures = pendingReturnFailures;
     // A failed return means at least one borrowed user tab may still be
-    // inside the Agent Window. Keep the session/window alive so the user
+    // controlled by this session. Keep the session/window alive so the user
     // can retry `bsk session stop` or explicitly `bsk tab return` after the
     // underlying Chrome issue is resolved.
     return result;
@@ -311,6 +414,15 @@ async function stopSession(
   }
 
   return manager.withExpectedWindowClose(ctx, async () => {
+    if (isSharedSession(ctx)) {
+      // The manager enforces tab-only cleanup even when Chrome queries fail.
+      try {
+        await manager.stop(params.session_id);
+      } catch (err) {
+        return { code: "protocol_error", message: String(err) };
+      }
+      return result;
+    }
     // Step 4: close every tab explicitly created by the agent, including the
     // home tab. `tabsApi` is a
     // TabMutationApi (remove only); `queryApi` is a separate read-only
@@ -326,6 +438,7 @@ async function stopSession(
         try {
           await tabsApi.remove(tabId);
           ctx.agentCreatedTabs.delete(tabId);
+          await manager.persist(ctx);
         } catch (err) {
           // Tab may already be gone (closed by the user). Non-fatal.
           console.warn(`[bsk session_stop] failed to close agent tab ${tabId}`, err);
@@ -337,7 +450,7 @@ async function stopSession(
     let shouldRelease = (ctx.observedTabs?.size ?? 0) > 0;
     if (queryApi) {
       try {
-        const liveWindowTabs = await queryApi.query({ windowId: ctx.agentWindowId });
+        const liveWindowTabs = await queryApi.query({ windowId: sessionWindowId(ctx) });
         // Only genuine *user* tabs count toward keeping the window open.
         // An agent tab that failed to close in Step 4 may still be present
         // here; if we counted it as a reason to release (dropOnly), the
@@ -359,7 +472,7 @@ async function stopSession(
             "Agent tabs could not be closed; user tabs were preserved and cleanup can be retried",
             {
               resource_type: "agent_window",
-              resource_id: ctx.agentWindowId,
+              resource_id: sessionWindowId(ctx),
             },
           );
         }
@@ -396,5 +509,24 @@ async function stopSession(
     }
 
     return result;
+  });
+}
+
+export async function handleSessionStop(
+  manager: SessionManager,
+  params: SessionStopParams,
+  deps: SessionStopDeps = {},
+): Promise<SessionStopResult | RpcError> {
+  const ctx = manager.get(params?.session_id);
+  if (!ctx || ctx.container.mode === "window") return handleSessionStopCore(manager, params, deps);
+  if (ctx.stopping || ctx.pendingOperations)
+    return { code: "cancelled", message: "Session has pending operations; retry stop" };
+  ctx.stopping = true;
+  return manager.withExpectedWindowClose(ctx, async () => {
+    try {
+      return await handleSessionStopCore(manager, params, deps);
+    } finally {
+      if (manager.get(ctx.sessionId) === ctx) ctx.stopping = false;
+    }
   });
 }

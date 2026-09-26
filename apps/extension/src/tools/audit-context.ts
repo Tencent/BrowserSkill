@@ -1,5 +1,11 @@
-import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  isSharedSession,
+  type SessionManager,
+  sessionWindowId,
+} from "@/session-manager/manager";
 import type { RequestFrame } from "@/transport/types";
+import { chromeTabsApi, isRpcError, resolveTargetTab } from "./shared";
 
 /** Read cached element labels and tab metadata only; never stimulate the page. */
 export async function auditContext(
@@ -12,10 +18,22 @@ export async function auditContext(
   if (!context) return null;
   const ref = typeof params.ref === "string" ? context.refStore.resolveEntry(params.ref) : null;
   const requestedTab = typeof params.tab_id === "number" ? params.tab_id : null;
-  const tab =
-    requestedTab !== null
-      ? await chrome.tabs.get(requestedTab)
-      : (await chrome.tabs.query({ windowId: context.agentWindowId, active: true }))[0];
+  let tab: chrome.tabs.Tab | undefined;
+  if (isSharedSession(context)) {
+    const target = await resolveTargetTab(
+      sessions,
+      context,
+      requestedTab ?? undefined,
+      chromeTabsApi,
+    );
+    if (isRpcError(target)) return null;
+    tab = await chrome.tabs.get(target.tabId);
+  } else {
+    tab =
+      requestedTab !== null
+        ? await chrome.tabs.get(requestedTab)
+        : (await chrome.tabs.query({ windowId: sessionWindowId(context), active: true }))[0];
+  }
   if (!tab?.id || !isAgentControlledTab(context, tab.id)) return null;
   let url: string | undefined;
   try {

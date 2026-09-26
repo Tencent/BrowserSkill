@@ -15,6 +15,38 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn shared_window_is_opt_in_and_rejects_dimensions() {
+    for in_window in [false, true] {
+        let mut argv = vec!["bsk", "session", "start", "--no-focus"];
+        if in_window {
+            argv.push("--in-window");
+        }
+        let Command::Session(SessionCmd {
+            sub: SessionSub::Start(args),
+        }) = parse(&argv).command
+        else {
+            panic!("session start expected")
+        };
+        assert_eq!(args.in_window, in_window);
+        assert!(args.no_focus);
+    }
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "session",
+            "start",
+            "--in-window",
+            "--width",
+            "800",
+            "--height",
+            "600"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["bsk", "record", "start", "--in-window"]).is_err());
+}
+
+#[test]
 fn parses_unattended_session_without_changing_normal_defaults() {
     for unattended in [false, true] {
         let mut argv = vec!["bsk", "session", "start"];
@@ -737,6 +769,96 @@ fn parses_session_start_no_focus() {
         panic!("expected session start subcommand");
     };
     assert!(args.no_focus);
+}
+
+#[test]
+fn session_placement_focus_contract() {
+    let cli = parse(&["bsk", "session", "start", "--in-window", "--no-focus"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert!(args.in_window && args.no_focus);
+
+    for placement in ["--current-tab", "--tab-id"] {
+        let mut argv = vec!["bsk", "session", "start", placement];
+        if placement == "--tab-id" {
+            argv.push("7");
+        }
+        argv.push("--no-focus");
+        assert!(Cli::try_parse_from(argv).is_err());
+    }
+}
+
+#[test]
+fn parses_ephemeral_session_and_owner_lease_commands() {
+    let cli = parse(&[
+        "bsk",
+        "session",
+        "start",
+        "--ephemeral",
+        "--owner-id",
+        "owner-1",
+        "--owner-kind",
+        "dsh",
+        "--lease-ttl-ms",
+        "45000",
+    ]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert!(args.ephemeral);
+    assert_eq!(args.owner_id.as_deref(), Some("owner-1"));
+    assert_eq!(args.owner_kind.as_deref(), Some("dsh"));
+    assert_eq!(args.lease_ttl_ms, Some(45_000));
+
+    let cli = parse(&["bsk", "session", "lease", "--owner", "owner-1", "--release"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Lease(args),
+    }) = cli.command
+    else {
+        panic!("expected session lease subcommand");
+    };
+    assert_eq!(args.owner, "owner-1");
+    assert!(args.release);
+}
+
+#[test]
+fn explicit_start_lease_duration_is_not_silently_ignored() {
+    let cli = parse(&["bsk", "session", "start", "--lease-ttl-ms", "30000"]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("expected session start subcommand");
+    };
+    assert_eq!(args.lease_ttl_ms, Some(30_000));
+}
+
+#[test]
+fn rejects_out_of_range_owner_lease_duration() {
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "session",
+            "start",
+            "--ephemeral",
+            "--lease-ttl-ms",
+            "9999",
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "bsk", "session", "lease", "--owner", "owner-1", "--ttl-ms", "600001",
+        ])
+        .is_err()
+    );
 }
 
 #[test]

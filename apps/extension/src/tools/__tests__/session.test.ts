@@ -280,6 +280,38 @@ describe("handleSessionStop with auto-return", () => {
     expect(sm.has("aa11")).toBe(false);
   });
 
+  it("converges without a fallback window when a borrowed tab disappeared during worker sleep", async () => {
+    const aw = fakeAgentWindow([100]);
+    const sm = new SessionManager({ agentWindow: aw });
+    const ctx = await sm.start("aa11");
+    ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 3 });
+    const state: FakeState = {
+      tabs: new Map(),
+      windowsClosed: new Set([200]),
+      moves: [],
+    };
+    const { tabs, windows } = makeApis(state);
+    const cdp = {
+      releaseSessionTab: vi.fn(async () => {}),
+      detachSession: vi.fn(async () => {}),
+    };
+
+    const res = await handleSessionStop(
+      sm,
+      { session_id: "aa11" },
+      { cdp, tabManagement: { tabs, windows } },
+    );
+
+    if ("code" in res) throw new Error(`unexpected error: ${JSON.stringify(res)}`);
+    expect(res.returned_tab_ids).toEqual([7]);
+    expect(res.return_failures).toBeUndefined();
+    expect(ctx.borrowedTabs.size).toBe(0);
+    expect(sm.has("aa11")).toBe(false);
+    expect(tabs.move).not.toHaveBeenCalled();
+    expect(windows.create).not.toHaveBeenCalled();
+    expect(cdp.releaseSessionTab).toHaveBeenCalledWith("aa11", 7);
+  });
+
   it("keeps the session open when any borrowed tab cannot be returned", async () => {
     const aw = fakeAgentWindow([100]);
     const sm = new SessionManager({ agentWindow: aw });

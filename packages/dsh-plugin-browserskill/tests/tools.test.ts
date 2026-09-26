@@ -200,6 +200,7 @@ function setup(
   responses: Record<string, unknown>,
   services: Record<string, unknown> = {},
   maxSessions = 5,
+  leaseOwnerId?: string,
 ) {
   const { ctx, tools } = makeCtx(services);
   const { runner, calls } = fakeRunner(responses);
@@ -212,6 +213,7 @@ function setup(
     config,
     observation: disabledObservation({ ctx, runner: runner as BskRunner, registry }),
     queue: new KeyedExecutor(),
+    leaseOwnerId,
   });
   return { tools, calls, registry };
 }
@@ -336,6 +338,23 @@ describe("action dispatch", () => {
 });
 
 describe("session.start", () => {
+  it("starts production-owned sessions with an expiring daemon lease", async () => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") }, {}, 5, "owner-1");
+    await tools.get("session.start")?.execute({}, makeExec());
+    expect(calls[0]?.args).toEqual([
+      "session",
+      "start",
+      "--request-id",
+      expect.any(String),
+      "--ephemeral",
+      "--owner-id",
+      "owner-1",
+      "--owner-kind",
+      "dsh",
+      "--lease-ttl-ms",
+      "60000",
+    ]);
+  });
   it("maps the start reply and tracks the session as current", async () => {
     const { tools, registry } = setup({ "session start": START_REPLY("s1") });
     const value = await startSession(tools);
@@ -378,6 +397,44 @@ describe("session.start", () => {
     const { tools } = setup({ "session start": START_REPLY("s1") });
     const tool = tools.get("session.start");
     await expect(tool?.execute({ width: 1280 }, makeExec())).rejects.toThrow(/together/);
+  });
+
+  it("can reuse the current tab without creating a window or tab", async () => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await tools.get("session.start")?.execute({ currentTab: true }, makeExec());
+    expect(calls[0].args).toEqual([
+      "session",
+      "start",
+      "--request-id",
+      expect.any(String),
+      "--current-tab",
+    ]);
+  });
+
+  it("allows noFocus with inWindow but rejects it with an existing tab", async () => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await tools.get("session.start")?.execute({ inWindow: true, noFocus: true }, makeExec());
+    expect(calls[0].args).toEqual([
+      "session",
+      "start",
+      "--request-id",
+      expect.any(String),
+      "--in-window",
+      "--no-focus",
+    ]);
+    for (const placement of [{ currentTab: true }, { tabId: 7 }]) {
+      await expect(
+        tools.get("session.start")?.execute({ ...placement, noFocus: true }, makeExec()),
+      ).rejects.toThrow(/noFocus/);
+    }
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects conflicting session placement options", async () => {
+    const { tools } = setup({ "session start": START_REPLY("s1") });
+    await expect(
+      tools.get("session.start")?.execute({ inWindow: true, currentTab: true }, makeExec()),
+    ).rejects.toThrow(/mutually exclusive/);
   });
 
   it("cleans up a half-initialized session when the initial navigate fails", async () => {

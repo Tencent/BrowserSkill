@@ -21,6 +21,26 @@ report it; never omit the selector or substitute another instance to recover.
 Opening another Chrome profile does not retarget an existing session. After an
 extension reinstall or storage reset, obtain the instance mapping again.
 
+## Session placement in a user window
+
+By default, `bsk session start` opens a dedicated Agent Window. For a local
+normal, non-incognito user window, choose one of these options:
+
+- `bsk session start --in-window --json` creates an agent-owned `about:blank`
+  tab in the last-focused user window. `--no-focus` creates it inactive, but
+  operations that require focus may still need you to select it.
+- `bsk session start --current-tab --json` reuses the active tab in that window.
+- `bsk session start --tab-id <id> --json` reuses a specified open user tab.
+
+Existing-tab modes require user approval, do not move or close the selected tab,
+and cannot be combined with `--no-focus`. The `--in-window` mode requires
+CLI, daemon and extension protocol 1.4; existing-tab modes require 1.5.
+These modes do not support remote connections or window dimensions.
+`record start` remains dedicated. In a shared session, an omitted tab target
+selects a session-controlled page, never an arbitrary active user page.
+Same-window borrowing and returning do not move tabs. Stopping a shared
+session returns borrowed tabs and closes only agent-created tabs, not the host window.
+
 ## Borrowing and browser settings
 
 List before borrowing, and return the tab as soon as the relevant step ends:

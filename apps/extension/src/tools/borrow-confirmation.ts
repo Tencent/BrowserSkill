@@ -91,6 +91,7 @@ export interface RequestBorrowConfirmationDeps {
   notifications?: ChromeNotificationsForBorrow | null;
   /** Returns `true` when `windowId` belongs to *any* live session's Agent Window. */
   isAgentWindowId?: (windowId: number) => boolean;
+  isTabAllowed?: (tabId: number) => boolean;
   notificationCopy?: BorrowNotificationCopy;
 }
 
@@ -297,6 +298,7 @@ interface ConfirmationCandidate {
 async function listConfirmationCandidates(
   windows: ChromeWindowsForBorrow,
   isAgentWindowId: (windowId: number) => boolean,
+  isTabAllowed: (tabId: number) => boolean = () => true,
 ): Promise<ConfirmationCandidate[]> {
   const seen = new Set<number>();
   const ordered: chrome.windows.Window[] = [];
@@ -337,6 +339,7 @@ async function listConfirmationCandidates(
     if (isAgentWindowId(w.id)) continue;
     const activeTab = w.tabs?.find((t) => t.active === true) ?? null;
     if (!activeTab || typeof activeTab.id !== "number") continue;
+    if (!isTabAllowed(activeTab.id)) continue;
     const tabUrl = activeTab.url ?? activeTab.pendingUrl ?? undefined;
     if (!isInjectableContentScriptUrl(tabUrl)) continue;
     candidates.push({ tabId: activeTab.id, windowId: w.id, tabUrl });
@@ -407,7 +410,11 @@ export async function requestBorrowConfirmation(
     tabTitle = String(tabId);
   }
 
-  const candidates = await listConfirmationCandidates(windowsApi, isAgentWindowId);
+  const candidates = await listConfirmationCandidates(
+    windowsApi,
+    isAgentWindowId,
+    deps.isTabAllowed,
+  );
   if (signal?.aborted) return { code: "cancelled", message: "tab_borrow aborted" };
   if (options.autoAllow?.get()) return true;
   if (candidates.length === 0) {

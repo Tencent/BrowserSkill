@@ -119,7 +119,7 @@ impl StartRequest {
         };
         json!({
             "request_id": self.id, "state": phase,
-            "session": data.session.as_ref().map(Session::status_entry),
+            "session": data.session.as_ref().map(|session| state.sessions.status_entry(session)),
             "cleanup_error": data.cleanup_error,
         })
     }
@@ -506,6 +506,7 @@ mod ownership_tests {
 
     fn session(id: &str, window: i64) -> Session {
         Session {
+            container_mode: None,
             id: SessionId(id.into()),
             browser_id: BrowserId("browser".into()),
             agent_window_id: Some(window),

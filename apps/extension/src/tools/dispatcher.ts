@@ -443,6 +443,7 @@ export class ToolDispatcher {
       case "tool.session_start":
         return handleSessionStart(this.sessions, req.params as SessionStartParams, {
           signal,
+          approveBorrow: this.approveBorrow,
           preferences: this.interactionPreferences,
         });
       case "tool.session_stop": {

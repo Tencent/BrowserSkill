@@ -15,6 +15,18 @@ use bsk_protocol::RpcId;
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// A private endpoint for each embedded daemon, including concurrent Windows tests.
+pub fn ipc_endpoint(prefix: &str) -> std::path::PathBuf {
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    // Preserve the short suffix used by the Unix fixtures (macOS socket paths
+    // have a small length limit, especially underneath its default temp dir).
+    let name = format!("{prefix}-{}-{}", std::process::id(), &suffix[..8]);
+    #[cfg(windows)]
+    return format!(r"\\.\pipe\{name}").into();
+    #[cfg(not(windows))]
+    std::env::temp_dir().join(format!("{name}.sock"))
+}
+
 /// Poll `condition` until it returns `true` or `timeout` elapses.
 pub async fn wait_until<F>(label: &str, timeout: Duration, mut condition: F)
 where
