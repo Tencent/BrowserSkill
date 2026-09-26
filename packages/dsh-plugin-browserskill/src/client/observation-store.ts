@@ -50,6 +50,11 @@ export interface OverlaySnapshot {
   readonly displayFrames: Readonly<Record<string, ThumbnailState>>;
   /** False when the host reports the browser/daemon as unreachable. */
   readonly available: boolean;
+  /**
+   * True from a stream error until the stream delivers a frame again;
+   * meanwhile sessions and availability are the last ones received.
+   */
+  readonly reconnecting: boolean;
 }
 
 const EVENTS_URL = "/bsk-observation/events";
@@ -92,8 +97,10 @@ export class ObservationClientStore {
     thumbnails: {},
     displayFrames: {},
     available: true,
+    reconnecting: false,
   };
   private available = true;
+  private reconnecting = false;
   private started = false;
   /** Refcount of mounted consumers (overlay card, sidebar tab, sidebar fiber). */
   private consumers = 0;
@@ -115,6 +122,7 @@ export class ObservationClientStore {
       thumbnails: Object.fromEntries(this.thumbs),
       displayFrames: this.buildDisplayFrames(),
       available: this.available,
+      reconnecting: this.reconnecting,
     };
     for (const listener of [...this.listeners]) listener();
   }
@@ -151,6 +159,8 @@ export class ObservationClientStore {
   }
 
   private connectEvents(): void {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     const previous = this.events;
     this.events = undefined;
     previous?.close();
@@ -160,14 +170,15 @@ export class ObservationClientStore {
     this.events = events;
     events.onmessage = (message) => {
       if (!this.started || this.events !== events) return;
-      // Healthy traffic resets the backoff.
-      this.reconnectAttempts = 0;
       let event: ObservationEvent;
       try {
         event = JSON.parse(message.data) as ObservationEvent;
       } catch {
         return;
       }
+      // Healthy traffic resets the backoff and ends the outage.
+      this.reconnectAttempts = 0;
+      this.reconnecting = false;
       this.apply(event);
     };
     // A non-200 response is fatal for an EventSource: the browser fails the
@@ -176,12 +187,11 @@ export class ObservationClientStore {
     // a CLOSED (2) readyState asks us to rebuild the stream.
     events.onerror = () => {
       if (!this.started || this.events !== events) return;
-      if (events.readyState !== undefined && events.readyState !== 2) return;
-      this.scheduleReconnect();
+      if (events.readyState === undefined || events.readyState === 2) this.scheduleReconnect();
+      if (this.reconnecting) return;
+      this.reconnecting = true;
+      this.publish();
     };
-    // `subscribed` is derived from `this.events`, so the snapshot has to be
-    // republished whenever the stream is (re)created.
-    this.publish();
   }
 
   /** Re-create the stream after a fatal failure, with a bounded backoff. */
@@ -214,6 +224,7 @@ export class ObservationClientStore {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.reconnectAttempts = 0;
+    this.reconnecting = false;
     this.clearThumbnails();
     this.sessions.clear();
     this.available = true;

@@ -100,7 +100,7 @@ export function ObservationSidebarTab({
       focus={focus}
       sessions={snapshot.sessions}
       available={snapshot.available}
-      subscribed={snapshot.subscribed}
+      reconnecting={snapshot.reconnecting}
       pinnedId={pinnedId}
       onTogglePin={onTogglePin}
       now={now}

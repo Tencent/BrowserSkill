@@ -197,6 +197,44 @@ describe("ObservationOverlay", () => {
     expect(screen.getByTestId("obs-card")).toBeTruthy();
   });
 
+  it("never commits the card without sessions, even while the feed is down", async () => {
+    const h = makeHarness([]);
+    const inserted: Node[] = [];
+    const collect = (records: MutationRecord[]) => {
+      for (const record of records) inserted.push(...record.addedNodes);
+    };
+    const observer = new MutationObserver(collect);
+    observer.observe(document.body, { childList: true, subtree: true });
+    render(<ObservationOverlay store={h.store} />);
+    await waitFor(() => expect(h.es).not.toThrow());
+    act(() => {
+      h.es().readyState = 2;
+      h.es().onerror?.({});
+    });
+    collect(observer.takeRecords());
+    observer.disconnect();
+    expect(h.store.getSnapshot().reconnecting).toBe(true);
+    const cardCommitted = inserted.some(
+      (node) => node instanceof Element && node.closest("[data-obs-card]") !== null,
+    );
+    expect(cardCommitted).toBe(false);
+  });
+
+  it("marks a live session as reconnecting until the feed recovers", async () => {
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s1 · clicking/);
+    act(() => {
+      h.es().readyState = 0;
+      h.es().onerror?.({});
+    });
+    expect(screen.getByTestId("obs-header").textContent).toContain("reconnecting…");
+    expect(screen.queryByText(/s1 · clicking/)).toBeNull();
+    act(() => h.emitRaw({ type: "snapshot", sessions: [BUSY], available: true }));
+    expect(screen.getByTestId("obs-header").textContent).not.toContain("reconnecting");
+    expect(screen.getByText(/s1 · clicking/)).toBeTruthy();
+  });
+
   it("shows the status row and a placeholder without a thumbnail", async () => {
     const h = makeHarness([BUSY]);
     render(<ObservationOverlay store={h.store} />);

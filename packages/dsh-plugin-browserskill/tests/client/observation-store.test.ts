@@ -470,13 +470,14 @@ describe("event stream recovery", () => {
     const { store, esInstances, eventUrls } = harness([OBS_IDLE]);
     store.start();
     await Promise.resolve();
-    expect(store.getSnapshot().subscribed).toBe(true);
+    expect(store.getSnapshot().reconnecting).toBe(false);
 
     // A 404 from the observation route is fatal: CLOSED, never retried by the browser.
     const failed = streamAt(esInstances, 0);
     failed.readyState = 2;
     failed.onerror?.({});
     expect(esInstances).toHaveLength(1);
+    expect(store.getSnapshot()).toMatchObject({ reconnecting: true, sessions: [OBS_IDLE] });
 
     await vi.advanceTimersByTimeAsync(1000);
     expect(esInstances).toHaveLength(2);
@@ -485,8 +486,26 @@ describe("event stream recovery", () => {
       "/bsk-observation/events?thumbnails=0",
     ]);
     expect(failed.close).toHaveBeenCalledOnce();
-    expect(store.getSnapshot().subscribed).toBe(true);
-    expect(store.getSnapshot().sessions).toEqual([OBS_IDLE]);
+    expect(store.getSnapshot()).toMatchObject({ reconnecting: false, sessions: [OBS_IDLE] });
+  });
+
+  it("stays reconnecting until a rebuilt stream delivers a frame", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+
+    const failed = streamAt(esInstances, 0);
+    failed.readyState = 2;
+    failed.onerror?.({});
+    await vi.advanceTimersByTimeAsync(999);
+    expect(esInstances).toHaveLength(1);
+    // The rebuilt stream exists before its snapshot frame arrives.
+    vi.advanceTimersByTime(1);
+    expect(esInstances).toHaveLength(2);
+    expect(store.getSnapshot().reconnecting).toBe(true);
+    await Promise.resolve();
+    expect(store.getSnapshot().reconnecting).toBe(false);
   });
 
   it("leaves a transient drop to the EventSource's own retry", async () => {
@@ -496,10 +515,37 @@ describe("event stream recovery", () => {
     await Promise.resolve();
 
     const dropped = streamAt(esInstances, 0);
-    dropped.readyState = 1;
+    dropped.readyState = 0;
     dropped.onerror?.({});
+    expect(store.getSnapshot().reconnecting).toBe(true);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(esInstances).toHaveLength(1);
+
+    // The browser's own reconnect replays the snapshot on the same stream.
+    emit(dropped, { type: "snapshot", sessions: [OBS_BUSY], available: true });
+    expect(store.getSnapshot()).toMatchObject({ reconnecting: false, sessions: [OBS_BUSY] });
+  });
+
+  it("lets a thumbnail switch take over a pending reconnect", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { store, esInstances, eventUrls } = harness([OBS_IDLE]);
+    store.start();
+    await Promise.resolve();
+
+    const failed = streamAt(esInstances, 0);
+    failed.readyState = 2;
+    failed.onerror?.({});
+    store.watchThumbnails();
+    await Promise.resolve();
+    expect(store.getSnapshot().reconnecting).toBe(false);
+
+    // The stale backoff timer must not tear down the healthy replacement.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(eventUrls).toEqual([
+      "/bsk-observation/events?thumbnails=0",
+      "/bsk-observation/events?thumbnails=1",
+    ]);
+    expect(streamAt(esInstances, 1).close).not.toHaveBeenCalled();
   });
 
   it("resets the backoff after healthy traffic", async () => {
@@ -533,6 +579,7 @@ describe("event stream recovery", () => {
     failed.readyState = 2;
     failed.onerror?.({});
     store.stop();
+    expect(store.getSnapshot().reconnecting).toBe(false);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(esInstances).toHaveLength(1);
   });
