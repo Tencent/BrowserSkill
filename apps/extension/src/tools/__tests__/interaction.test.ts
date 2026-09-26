@@ -1453,12 +1453,22 @@ describe("parseKeySpec", () => {
   it("treats single keys as no-modifier presses", () => {
     expect(parseKeySpec("Enter")).toEqual({ key: "Enter", modifiers: [] });
     expect(parseKeySpec("a")).toEqual({ key: "a", modifiers: [] });
+    expect(parseKeySpec("+")).toEqual({ key: "+", modifiers: [] });
   });
   it("normalises modifier casing", () => {
     expect(parseKeySpec("CONTROL+SHIFT+P")).toEqual({
       key: "P",
       modifiers: ["ctrl", "shift"],
     });
+  });
+  it.each([
+    { spec: "Ctrl++", modifiers: ["ctrl"] },
+    { spec: "Ctrl+Shift++", modifiers: ["ctrl", "shift"] },
+    { spec: "Cmd++", modifiers: ["meta"] },
+    { spec: "Shift++", modifiers: ["shift"] },
+    { spec: " cOnTrOl + + ", modifiers: ["ctrl"] },
+  ])("preserves the plus key in $spec", ({ spec, modifiers }) => {
+    expect(parseKeySpec(spec)).toEqual({ key: "+", modifiers });
   });
 });
 
@@ -1564,6 +1574,31 @@ describe("handlePress", () => {
     );
     expect(keyDown?.params).toMatchObject({ modifiers: 2, key: "A", code: "KeyA" });
     expect(keyDown?.params).not.toHaveProperty("text");
+  });
+
+  it("dispatches Ctrl++ like a plus key with an explicit ctrl modifier", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const events: unknown[][] = [];
+    for (const key of ["Ctrl++", "+"]) {
+      const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+      const res = await handlePress(
+        sm,
+        { session_id: "aa11", key, ...(key === "+" ? { modifiers: ["ctrl" as const] } : {}) },
+        { cdp: fake.cdp, tabsApi: fake.tabsApi },
+      );
+      expectPressOk(res);
+      expect(res).toMatchObject({ key: "+", modifiers: ["ctrl"] });
+      const dispatched = fake.sent
+        .filter((call) => call.method === "Input.dispatchKeyEvent")
+        .map((call) => call.params);
+      expect(dispatched).toMatchObject([
+        { type: "rawKeyDown", key: "+", modifiers: 2 },
+        { type: "keyUp", key: "+", modifiers: 2 },
+      ]);
+      events.push(dispatched);
+    }
+    expect(events[0]).toEqual(events[1]);
   });
 
   it("focuses an optional target before dispatch", async () => {
