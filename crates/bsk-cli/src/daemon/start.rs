@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bsk_protocol::StatusResult;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::cli::daemon::StartArgs;
 use crate::cli::ensure_daemon::SPAWN_DEADLINE;
@@ -32,6 +32,7 @@ use crate::daemon::{
     ws,
 };
 
+mod handover;
 #[cfg(windows)]
 mod windows;
 
@@ -68,6 +69,13 @@ pub struct DaemonConfig {
     /// How often the liveness task scans the registry. Defaults to
     /// [`BROWSER_LIVENESS_TICK`].
     pub browser_liveness_tick: Duration,
+    /// Started by `bsk` as an independent background process, rather than
+    /// owned by a terminal or supervisor. Only such a daemon replaces
+    /// itself after installing an update.
+    pub detached: bool,
+    /// The daemon this one takes over from after an auto-update. It waits
+    /// for that daemon to release the lock before starting to serve.
+    pub replaces: Option<u32>,
 }
 
 impl DaemonConfig {
@@ -84,6 +92,8 @@ impl DaemonConfig {
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
+            detached: false,
+            replaces: None,
         }
     }
 
@@ -119,6 +129,8 @@ impl From<&StartArgs> for DaemonConfig {
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
+            detached: false,
+            replaces: None,
         }
     }
 }
@@ -134,25 +146,30 @@ pub fn run_start(args: StartArgs) -> Result<()> {
 
     // Detached child mode (set by parent before spawn).
     if is_daemonized_child() {
-        wait_for_replaced_daemon();
         detach_stdio()?;
+        cfg.detached = true;
+        cfg.replaces = replaced_daemon();
         return run_foreground(cfg);
     }
 
+    let exe = std::env::current_exe().context("locate daemon executable")?;
+    start_detached(&exe, &args).map(drop)
+}
+
+/// Reuse the running daemon, or start one from `exe` and wait until it is ready.
+pub(crate) fn start_detached(exe: &Path, args: &StartArgs) -> Result<daemon_info::DaemonInfo> {
     let deadline = Instant::now() + SPAWN_DEADLINE;
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
-        let status = daemon.status;
-        validate_existing_start(&args, &status)?;
+        validate_existing_start(args, &daemon.status)?;
         info!(
-            pid = status.pid,
-            ws_port = status.ws_port,
+            pid = daemon.status.pid,
+            ws_port = daemon.status.ws_port,
             "daemon already running"
         );
-        return Ok(());
+        return Ok(daemon.info);
     }
 
-    start_background(&args, deadline)?;
-    Ok(())
+    start_background_at(exe, args, deadline)
 }
 
 /// Shared explicit/automatic startup, without an intermediate launcher or
@@ -161,12 +178,20 @@ pub(crate) fn start_background(
     args: &StartArgs,
     deadline: Instant,
 ) -> Result<daemon_info::DaemonInfo> {
+    let exe = std::env::current_exe().context("locate daemon executable")?;
+    start_background_at(&exe, args, deadline)
+}
+
+fn start_background_at(
+    exe: &Path,
+    args: &StartArgs,
+    deadline: Instant,
+) -> Result<daemon_info::DaemonInfo> {
     anyhow::ensure!(
         Instant::now() < deadline,
         "daemon startup deadline exceeded"
     );
-    let exe = std::env::current_exe().context("locate daemon executable")?;
-    let child = spawn_detached_at(&exe, args, None)?;
+    let child = spawn_detached_at(exe, args, None)?;
     wait_for_background(child, args, deadline)
 }
 
@@ -323,22 +348,102 @@ fn wait_for_stopped(expected: &daemon_info::DaemonInfo, timeout: Duration) -> Re
 pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
     paths::ensure_bsk_home()?;
     let _log_guard = init_tracing();
+    let result = run_daemon(&cfg);
+    if let Err(err) = &result {
+        // Detached daemons have no stderr; keep the reason in the log.
+        error!(error = %format_args!("{err:#}"), "daemon stopped with an error");
+    }
+    result
+}
+
+/// Serve until shutdown. After a failed auto-update handover this process
+/// serves again with the lock it took back.
+fn run_daemon(cfg: &DaemonConfig) -> Result<()> {
     #[cfg(windows)]
     info!(
         pid = std::process::id(),
-        background = is_daemonized_child(),
+        background = cfg.detached,
         in_job = ?crate::windows_process::current_process_in_job(),
         "Windows daemon process started"
     );
-    let lock = lockfile::acquire().context("acquire daemon lock")?;
-    info!(?lock, "daemon lock acquired");
+    let startup = acquire_daemon_lock(cfg.replaces).and_then(|lock| {
+        info!(?lock, "daemon lock acquired");
+        serve(cfg).map(|stopped| (lock, stopped))
+    });
+    let (mut lock, mut stopped) = match startup {
+        Ok(started) => started,
+        Err(err) => {
+            if cfg.replaces.is_some() {
+                handover::report_startup_failure(&err);
+            }
+            return Err(err);
+        }
+    };
+    loop {
+        let Stopped::HandOver(pending) = stopped else {
+            return Ok(());
+        };
+        drop(lock);
+        match handover::finish(*pending) {
+            handover::Finished::Exit => return Ok(()),
+            handover::Finished::Resume(reclaimed) => lock = reclaimed,
+        }
+        stopped = serve(cfg)?;
+    }
+}
 
+/// Take the daemon lock. A replacement waits for its predecessor, which
+/// keeps serving until the replacement has started and then releases it.
+fn acquire_daemon_lock(predecessor: Option<u32>) -> Result<lockfile::DaemonLock> {
+    let Some(pid) = predecessor else {
+        return lockfile::acquire().context("acquire daemon lock");
+    };
+    info!(
+        predecessor = pid,
+        "replacement daemon waiting for its predecessor to release the daemon lock"
+    );
+    let deadline = Instant::now() + handover::REPLACEMENT_LOCK_WAIT;
+    loop {
+        match lockfile::acquire() {
+            Ok(lock) => return Ok(lock),
+            Err(err) if err.is::<lockfile::AlreadyLocked>() && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return Err(
+                    err.context(format!("acquire daemon lock released by predecessor {pid}"))
+                );
+            }
+        }
+    }
+}
+
+/// Why [`serve`] returned.
+enum Stopped {
+    Shutdown,
+    /// An auto-update started a replacement that waits for the lock.
+    HandOver(Box<handover::Pending>),
+}
+
+enum StopReason {
+    Signal,
+    Idle,
+    Handover,
+}
+
+/// Bind IPC and WS, publish `daemon.json`, and serve until shutdown. Returns
+/// with every endpoint released except the daemon lock, which the caller holds.
+fn serve(cfg: &DaemonConfig) -> Result<Stopped> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("build tokio runtime")?;
+    let handover_slot = Arc::new(Mutex::new(None::<handover::Pending>));
+    let cfg = cfg.clone();
 
-    runtime.block_on(async move {
+    let reason = runtime.block_on({
+        let handover_slot = Arc::clone(&handover_slot);
+        async move {
         #[cfg(unix)]
         let sock_path = paths::sock_path().context("resolve socket path")?;
         #[cfg(windows)]
@@ -355,12 +460,14 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             .context("initialize transfer staging")?;
         let session_idle_task = spawn_session_idle_reaper(Arc::clone(&state));
         let browser_liveness_task = spawn_browser_liveness_reaper(Arc::clone(&state));
-        // Fired by the update check task after a successful auto-update:
-        // the replacement daemon (or Windows update helper) is ready, so
-        // this process should shut down and let it take over.
+        // Fired by the update check task once it has started a replacement
+        // daemon, which waits for this process to release the lock.
         let restart_notify = Arc::new(tokio::sync::Notify::new());
-        let update_check_task =
-            spawn_update_check_task(Arc::clone(&state), Arc::clone(&restart_notify));
+        let update_check_task = spawn_update_check_task(
+            Arc::clone(&state),
+            Arc::clone(&restart_notify),
+            Arc::clone(&handover_slot),
+        );
         let ws_addr = SocketAddr::new(cfg.listen_ip(), cfg.ws_port);
         let ws_handle = ws::WsServer::new(Arc::clone(&state))
             .bind(ws_addr)
@@ -381,6 +488,7 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
             sock = %sock_path.display(),
             "daemon ready"
         );
+        remove_update_leftovers_after(cfg.replaces);
 
         // Best-effort: keep installed agent skills in step with this
         // daemon's bundled SKILL.md. Spawned so a slow/failing fs
@@ -510,19 +618,22 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
         let restart_notified = restart_notify.notified();
         tokio::pin!(restart_notified);
 
-        tokio::select! {
+        let reason = tokio::select! {
             _ = wait_for_shutdown() => {
                 info!("bsk daemon shutting down (signal)");
+                StopReason::Signal
             }
             res = idle_task => {
                 if matches!(res, Ok(Some(()))) {
                     info!("bsk daemon shutting down (idle)");
                 }
+                StopReason::Idle
             }
             _ = &mut restart_notified => {
-                info!("bsk daemon shutting down (auto-update restart)");
+                info!("bsk daemon releasing its endpoints to the replacement (auto-update)");
+                StopReason::Handover
             }
-        }
+        };
 
         let _ = ipc_shutdown_tx.send(());
         let _ = ipc_task.await;
@@ -537,11 +648,41 @@ pub fn run_foreground(cfg: DaemonConfig) -> Result<()> {
 
         let _ = daemon_info::remove();
         let _ = std::fs::remove_file(&sock_path);
-        Result::<()>::Ok(())
+        Result::<StopReason>::Ok(reason)
+        }
     })?;
+    drop(runtime);
 
-    drop(lock);
-    Ok(())
+    let pending = handover_slot
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take();
+    Ok(match (reason, pending) {
+        (StopReason::Handover, Some(pending)) => Stopped::HandOver(Box::new(pending)),
+        (StopReason::Signal | StopReason::Idle, Some(pending)) => {
+            handover::abandon(pending, "the daemon stopped before handing over");
+            Stopped::Shutdown
+        }
+        (_, None) => Stopped::Shutdown,
+    })
+}
+
+/// Remove files earlier updates left next to this executable. A predecessor
+/// still runs from its previous executable until it exits, so wait for it.
+fn remove_update_leftovers_after(predecessor: Option<u32>) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    // A plain thread, so a slow predecessor never delays this daemon's exit.
+    std::thread::spawn(move || {
+        if let Some(pid) = predecessor {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while lockfile::pid_alive(pid) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        crate::cli::update::remove_update_leftovers(&exe);
+    });
 }
 
 /// Spawn the browser-liveness reaper shared by the production foreground
@@ -663,19 +804,22 @@ pub(crate) fn spawn_session_idle_reaper(state: Arc<DaemonState>) -> tokio::task:
 /// it never delays daemon exit (an in-flight fetch is bounded by the
 /// update client's own timeout and detached on abort).
 ///
-/// When a tick finds a newer version the daemon also *installs* it
+/// When a tick finds a newer version a detached daemon also *installs* it
 /// (auto-update, on by default; [`crate::cli::update::AUTO_UPDATE_ENV`]
-/// `=off` disables it and keeps the check cache/hint-only). Safety
-/// gate: while any agent session is live the tick postpones the
-/// install and retries next time. Once the new binary is in place the
-/// task spawns the replacement daemon (see
-/// [`DAEMON_REPLACEMENT_WAIT_ENV`]) and fires `restart` so this process
-/// shuts down and the new version takes over; on Windows the
-/// helper waits for this process to exit, replaces the binary, and starts
-/// the new daemon with the same configuration.
+/// `=off` disables it and keeps the check cache/hint-only). A daemon owned
+/// by a terminal or supervisor only reports the version, since nothing but
+/// its owner can restart it. Safety gate: while any agent session is live
+/// the tick postpones the install and retries next time. Once the new
+/// executable is installed and has passed its self-check, this process
+/// spawns the replacement daemon (see [`DAEMON_REPLACEMENT_WAIT_ENV`]),
+/// leaves it in `handover_slot` and fires `restart`; [`handover`] then
+/// confirms the replacement serves before this process exits, or restores
+/// the previous executable and serves again. A failed attempt is retried
+/// after [`crate::cli::update::state::RETRY_AFTER_FAILURE`].
 pub(crate) fn spawn_update_check_task(
     state: Arc<DaemonState>,
     restart: Arc<tokio::sync::Notify>,
+    handover_slot: Arc<Mutex<Option<handover::Pending>>>,
 ) -> tokio::task::JoinHandle<()> {
     use crate::cli::update;
 
@@ -704,6 +848,9 @@ pub(crate) fn spawn_update_check_task(
             }
         };
 
+        // The version and reason last reported as someone else's to install,
+        // so the warning is logged once rather than on every tick.
+        let mut reported: Option<(semver::Version, update::state::SkipReason)> = None;
         let mut ticker = tokio::time::interval(update::UPDATE_CHECK_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -725,37 +872,52 @@ pub(crate) fn spawn_update_check_task(
                 continue;
             }
 
+            let policy = auto_update_policy(
+                update::auto_update_enabled() && exe_path.is_some(),
+                state.config.detached,
+            );
             let result = {
                 let cache_path = cache_path.clone();
                 let state = Arc::clone(&state);
                 let exe_path = exe_path.clone();
                 tokio::task::spawn_blocking(move || {
-                    let candidate = update::refresh_update_cache(&cache_path)?;
+                    // Checked on every tick: permissions can change while
+                    // the daemon runs.
+                    let not_writable = match (policy, exe_path.as_deref()) {
+                        (update::AutoUpdatePolicy::Install, Some(exe)) => {
+                            update::ensure_replaceable(exe).err()
+                        }
+                        _ => None,
+                    };
+                    let policy = if not_writable.is_some() {
+                        update::AutoUpdatePolicy::NotWritable
+                    } else {
+                        policy
+                    };
+                    let candidate = update::refresh_update_cache(
+                        &cache_path,
+                        policy == update::AutoUpdatePolicy::Install,
+                    )?;
                     // The session gate is read after the fetch, as late
                     // as possible before the binary gets replaced.
                     let active_sessions = state.sessions.len();
-                    let auto_update = update::auto_update_enabled() && exe_path.is_some();
-                    update::auto_update_step(
+                    let last_attempt = update::state::current();
+                    let outcome = update::auto_update_step(
                         candidate.as_ref(),
-                        auto_update,
+                        policy,
                         active_sessions,
-                        |candidate| {
-                            let target =
-                                exe_path.as_deref().context("current executable unknown")?;
-                            update::self_install_candidate(
-                                candidate,
-                                target,
-                                &restart_start_args(&state.config)?,
-                            )
-                        },
-                    )
+                        last_attempt.as_ref(),
+                        update::now_epoch_secs(),
+                        |candidate| prepare_handover(candidate, exe_path.as_deref()),
+                    )?;
+                    anyhow::Ok((outcome, not_writable, last_attempt))
                 })
                 .await
             };
-            let outcome = match result {
-                Ok(Ok(outcome)) => outcome,
+            let (outcome, not_writable, last_attempt) = match result {
+                Ok(Ok(checked)) => checked,
                 Ok(Err(err)) => {
-                    warn!(error = %err, "periodic update check failed");
+                    warn!(error = %format_args!("{err:#}"), "periodic update check failed");
                     continue;
                 }
                 Err(err) => {
@@ -771,46 +933,192 @@ pub(crate) fn spawn_update_check_task(
                     %latest,
                     "periodic update check found a new version; auto-update off, CLI hint only"
                 ),
+                update::AutoUpdateOutcome::HostManaged { latest } => {
+                    let reason = update::state::SkipReason::HostManaged;
+                    if reported.as_ref() != Some(&(latest.clone(), reason)) {
+                        record_skip(
+                            &latest,
+                            exe_path.as_deref(),
+                            reason,
+                            None,
+                            last_attempt.as_ref(),
+                        );
+                        warn!(
+                            %latest,
+                            "a new bsk version is available; this daemon belongs to its terminal or supervisor, so run `bsk update` and restart it there"
+                        );
+                        reported = Some((latest, reason));
+                    }
+                }
+                update::AutoUpdateOutcome::NotWritable { latest } => {
+                    let reason = update::state::SkipReason::NotWritable;
+                    if reported.as_ref() != Some(&(latest.clone(), reason)) {
+                        let error = not_writable
+                            .as_ref()
+                            .map(|err| format!("{err:#}"))
+                            .unwrap_or_default();
+                        let hint = exe_path
+                            .as_deref()
+                            .map(update::installer_hint)
+                            .unwrap_or_default();
+                        record_skip(
+                            &latest,
+                            exe_path.as_deref(),
+                            reason,
+                            not_writable.as_ref(),
+                            last_attempt.as_ref(),
+                        );
+                        warn!(
+                            %latest,
+                            %error,
+                            %hint,
+                            "a new bsk version is available, but bsk cannot install it next to its executable"
+                        );
+                        reported = Some((latest, reason));
+                    }
+                }
                 update::AutoUpdateOutcome::PostponedSessions { latest, sessions } => info!(
                     %latest,
                     sessions,
                     "auto-update postponed: agent session(s) active; will retry on the next tick"
                 ),
-                update::AutoUpdateOutcome::Staged { latest } => {
-                    info!(%latest, "update helper ready; exiting so it can replace and restart the daemon");
-                    restart.notify_one();
-                    return;
-                }
-                update::AutoUpdateOutcome::Replaced { latest } => {
+                update::AutoUpdateOutcome::Deferred { latest, until } => info!(
+                    %latest,
+                    retry_after_epoch_secs = until,
+                    "auto-update of this version failed recently; see `bsk doctor`, or run `bsk update` to retry now"
+                ),
+                update::AutoUpdateOutcome::Installed { latest, installed } => {
                     info!(
                         current = env!("CARGO_PKG_VERSION"),
                         %latest,
-                        "auto-update installed the new bsk binary; restarting daemon"
+                        "new bsk executable installed and checked; starting the replacement daemon"
                     );
-                    // `exe_path` is always Some here: the install only
-                    // runs when it was captured.
-                    if let Some(exe) = &exe_path {
-                        match restart_start_args(&state.config).and_then(|args| {
-                            spawn_detached_at(exe, &args, Some(std::process::id())).map(drop)
-                        }) {
-                            Ok(()) => {
-                                info!(
-                                    pid = std::process::id(),
-                                    "replacement daemon spawned; exiting so it can take over"
-                                );
-                                restart.notify_one();
-                                return;
-                            }
-                            Err(err) => warn!(
-                                error = %err,
-                                "auto-update replaced the binary but failed to spawn the replacement daemon; the next daemon start picks up the new version"
-                            ),
+                    let exe = exe_path.clone();
+                    let config = state.config.clone();
+                    let started = tokio::task::spawn_blocking(move || {
+                        start_replacement(installed, exe.as_deref(), &config)
+                    })
+                    .await;
+                    match started {
+                        Ok(Some(pending)) => {
+                            info!(
+                                replacement = pending.child_pid,
+                                "replacement daemon started; handing over once it is ready"
+                            );
+                            *handover_slot
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner()) = Some(pending);
+                            restart.notify_one();
+                            return;
                         }
+                        Ok(None) => {}
+                        Err(err) => warn!(error = %err, "starting the replacement daemon panicked"),
                     }
                 }
             }
         }
     })
+}
+
+/// Everything a daemon needs to hand over to the version it just installed.
+struct Prepared {
+    installed: crate::cli::update::Installed,
+    record: crate::cli::update::state::UpdateRecord,
+    lock: crate::cli::update::state::UpdateLock,
+}
+
+/// Install and self-check `candidate` under the update lock. Blocking.
+fn prepare_handover(
+    candidate: &crate::cli::update::UpdateCandidate,
+    exe: Option<&Path>,
+) -> Result<Prepared> {
+    use crate::cli::update::{
+        self,
+        state::{UpdateLock, UpdateRecord, UpdateSource},
+    };
+    let exe = exe.context("current executable unknown")?;
+    let lock = UpdateLock::try_acquire()?;
+    let mut record = UpdateRecord::start(UpdateSource::Daemon, &candidate.latest, exe);
+    record.save();
+    let installed = update::self_install_candidate(candidate, exe, &mut record)?;
+    Ok(Prepared {
+        installed,
+        record,
+        lock,
+    })
+}
+
+/// Spawn the replacement daemon from the new executable. If it cannot even
+/// be started, restore the previous executable and keep serving. Blocking.
+fn start_replacement(
+    prepared: Prepared,
+    exe: Option<&Path>,
+    config: &DaemonConfig,
+) -> Option<handover::Pending> {
+    use crate::cli::update::state::{Recovery, UpdateStage};
+    let Prepared {
+        installed,
+        mut record,
+        lock,
+    } = prepared;
+    record.enter(UpdateStage::Handover);
+    let spawned = exe
+        .context("current executable unknown")
+        .and_then(|exe| {
+            let args = restart_start_args(config)?;
+            spawn_detached_at(exe, &args, Some(std::process::id()))
+        })
+        .context("start the replacement daemon");
+    match spawned {
+        Ok(child) => Some(handover::Pending {
+            child_pid: child.id(),
+            child,
+            installed,
+            record,
+            _update_lock: lock,
+        }),
+        Err(err) => {
+            warn!(
+                error = %format_args!("{err:#}"),
+                "could not start the replacement daemon; restoring the previous executable and serving on"
+            );
+            let recovery = installed.roll_back(|| Recovery::Restored {
+                daemon_serving: true,
+            });
+            record.fail(&err, recovery);
+            None
+        }
+    }
+}
+
+/// Record, once per version, that someone other than this daemon must
+/// install `latest`.
+fn record_skip(
+    latest: &semver::Version,
+    exe: Option<&Path>,
+    reason: crate::cli::update::state::SkipReason,
+    error: Option<&anyhow::Error>,
+    last_attempt: Option<&crate::cli::update::state::UpdateRecord>,
+) {
+    use crate::cli::update::state::{UpdateRecord, UpdateSource};
+    let (Some(exe), false) = (
+        exe,
+        last_attempt.is_some_and(|record| record.skips(latest, reason)),
+    ) else {
+        return;
+    };
+    UpdateRecord::skipped(UpdateSource::Daemon, latest, exe, reason, error).save();
+}
+
+/// Only a daemon `bsk` started in the background may replace itself; one
+/// owned by a terminal or supervisor must be restarted by that owner.
+fn auto_update_policy(enabled: bool, detached: bool) -> crate::cli::update::AutoUpdatePolicy {
+    use crate::cli::update::AutoUpdatePolicy;
+    match (enabled, detached) {
+        (false, _) => AutoUpdatePolicy::Disabled,
+        (true, false) => AutoUpdatePolicy::HostManaged,
+        (true, true) => AutoUpdatePolicy::Install,
+    }
 }
 
 /// Rebuild the `StartArgs` for the replacement daemon from the running
@@ -945,22 +1253,12 @@ fn is_daemonized_child() -> bool {
     std::env::var(DAEMONIZED_ENV).as_deref() == Ok("1")
 }
 
-/// Self-update handoff: when the outgoing daemon spawned us as its
-/// replacement ([`DAEMON_REPLACEMENT_WAIT_ENV`]), wait for its pid to
-/// exit so the daemon lock, IPC socket, and WS port are free before we
-/// try to take them over. Bounded on purpose — the lockfile is the real
-/// backstop if the predecessor somehow lingers.
-fn wait_for_replaced_daemon() {
-    let pid = std::env::var(DAEMON_REPLACEMENT_WAIT_ENV)
+/// The daemon that spawned this one as its replacement
+/// ([`DAEMON_REPLACEMENT_WAIT_ENV`]), if any.
+fn replaced_daemon() -> Option<u32> {
+    std::env::var(DAEMON_REPLACEMENT_WAIT_ENV)
         .ok()
-        .and_then(|raw| raw.parse::<u32>().ok());
-    let Some(pid) = pid else {
-        return;
-    };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while lockfile::pid_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        .and_then(|raw| raw.parse::<u32>().ok())
 }
 
 #[cfg(unix)]
@@ -1387,6 +1685,20 @@ mod tests {
         assert!(!args.foreground);
         assert_eq!(args.session_idle, Some(Duration::from_secs(11)));
         assert_eq!(args.daemon_idle, Some(Duration::from_secs(22)));
+    }
+
+    #[test]
+    fn only_detached_daemons_install_updates_themselves() {
+        use crate::cli::update::AutoUpdatePolicy;
+        assert_eq!(auto_update_policy(true, true), AutoUpdatePolicy::Install);
+        assert_eq!(
+            auto_update_policy(true, false),
+            AutoUpdatePolicy::HostManaged
+        );
+        assert_eq!(auto_update_policy(false, true), AutoUpdatePolicy::Disabled);
+        assert_eq!(auto_update_policy(false, false), AutoUpdatePolicy::Disabled);
+        assert!(!DaemonConfig::new(0).detached);
+        assert!(!DaemonConfig::from(&StartArgs::default()).detached);
     }
 
     #[test]

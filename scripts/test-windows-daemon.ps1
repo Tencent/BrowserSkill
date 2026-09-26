@@ -37,6 +37,8 @@ public static class DaemonTestHost {
         Set-Location -LiteralPath $manifest.workspace
         $env:CI = 'true' # Default-port cold startup must execute, never skip.
         if ($manifest.runnerTrackingId) { $env:RUNNER_TRACKING_ID = $manifest.runnerTrackingId }
+        # Update tests compile stand-ins for broken releases.
+        $env:RUSTC = $manifest.rustc
         for ($round = 1; $round -le $manifest.repeat; $round++) {
             foreach ($suite in $manifest.suites) {
                 $name = "$($suite.name)-$round"
@@ -88,7 +90,7 @@ Push-Location -LiteralPath $workspace
 try {
     # Build in the normal runner environment; the WMI host needs no inherited
     # Cargo PATH, credentials or toolchain environment. Use Cargo's exact paths.
-    $artifacts = @(& cargo test -p bsk --lib --test windows_daemon_start --test windows_update --no-run --locked --message-format=json-render-diagnostics)
+    $artifacts = @(& cargo test -p bsk --lib --test windows_daemon_start --test windows_update --test auto_update_handover --no-run --locked --message-format=json-render-diagnostics)
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Windows lifecycle tests' }
     $tests = @{}
     foreach ($line in $artifacts) {
@@ -101,13 +103,18 @@ try {
     $suites = @(
         @{ name='startup'; executable=$tests['windows_daemon_start']; arguments=@('--test-threads=1','--nocapture') },
         @{ name='launcher-lifetime'; executable=$tests['bsk']; arguments=@('daemon::start::tests','--test-threads=1','--nocapture') },
-        @{ name='update'; executable=$tests['windows_update']; arguments=@('--test-threads=1','--nocapture') }
+        @{ name='update'; executable=$tests['windows_update']; arguments=@('--test-threads=1','--nocapture') },
+        @{ name='update-handover'; executable=$tests['auto_update_handover']; arguments=@('--test-threads=1','--nocapture') }
     )
     foreach ($suite in $suites) {
         if (-not $suite.executable -or -not (Test-Path -LiteralPath $suite.executable)) { throw "Missing executable for $($suite.name)" }
     }
+    $sysroot = (& rustc --print sysroot).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not locate rustc' }
+    $rustc = Join-Path $sysroot 'bin/rustc.exe'
+    if (-not (Test-Path -LiteralPath $rustc)) { throw "Missing $rustc" }
     $manifest = @{
-        workspace=$workspace; repeat=$Repeat; suites=$suites
+        workspace=$workspace; repeat=$Repeat; suites=$suites; rustc=$rustc
         userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         runnerTrackingId=$env:RUNNER_TRACKING_ID
     }
@@ -132,7 +139,7 @@ try {
         $report = Get-Content -LiteralPath "$runDir/result.json" -Raw | ConvertFrom-Json
         $report.results | Format-Table -AutoSize | Out-Host
         if ($report.error) { throw $report.error }
-        if (@($report.results).Count -ne (3 * $Repeat)) { throw 'Not all lifecycle suites executed' }
+        if (@($report.results).Count -ne ($suites.Count * $Repeat)) { throw 'Not all lifecycle suites executed' }
         if (@($report.results | Where-Object exitCode -ne 0).Count) { throw "Lifecycle regression failed; logs: $runDir" }
         Write-Output "All lifecycle suites passed; logs: $runDir"
     } finally {

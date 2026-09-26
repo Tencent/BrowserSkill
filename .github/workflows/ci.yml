@@ -80,7 +80,10 @@ jobs:
           node scripts/check-crate-skill.mjs
 
       - name: Run Windows update tests
-        run: cargo test -p bsk --lib --locked cli::update::tests
+        run: |
+          cargo test -p bsk --lib --locked cli::update::
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p bsk --test auto_update_policy --locked
 
       - name: Run Windows cancellation process tests
         run: cargo test -p bsk --test windows_parent_cancel --locked

@@ -12,6 +12,10 @@ use crate::cli::browser_wait::{
 };
 use crate::cli::ensure_daemon::{AUTO_START_DISABLED_HINT, auto_start_enabled, ensure_daemon};
 use crate::cli::status::Output;
+use crate::cli::update::{
+    self,
+    state::{Recovery, SkipReason, UpdateRecord, UpdateResult, UpdateSource, UpdateStage},
+};
 use crate::daemon::info::DaemonInfo;
 use crate::daemon::paths;
 use crate::daemon::probe::{self, Probe};
@@ -185,9 +189,182 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_daemon_running(&state),
         check_daemon_management(&state),
         check_version_compatible(state.status()),
+        check_auto_update(state.status()),
         check_extension_connected(state.status()),
         check_browsers_protocol_compatible(state.status()),
     ]
+}
+
+/// An attempt still `in_progress` after this long was interrupted.
+const UPDATE_STALLED_AFTER_SECS: u64 = 10 * 60;
+
+fn check_auto_update(status: Option<&StatusResult>) -> CheckResult {
+    let leftovers = std::env::current_exe()
+        .map(|exe| update::update_leftovers(&exe))
+        .unwrap_or_default();
+    auto_update_check(
+        update::state::current().as_ref(),
+        status.map(|status| status.daemon_version.as_str()),
+        env!("CARGO_PKG_VERSION"),
+        &leftovers,
+        update::now_epoch_secs(),
+    )
+}
+
+/// Report the recorded update attempt as it happened, rather than inferring
+/// it from which versions exist.
+fn auto_update_check(
+    record: Option<&UpdateRecord>,
+    daemon_version: Option<&str>,
+    installed_version: &str,
+    leftovers: &[update::Leftover],
+    now: u64,
+) -> CheckResult {
+    let name = "auto-update";
+    let mut details = Vec::new();
+    let mut hints = Vec::new();
+    if let Some(daemon_version) = daemon_version.filter(|version| *version != installed_version) {
+        details.push(format!(
+            "the daemon runs bsk {daemon_version}, the installed bsk is {installed_version}"
+        ));
+        hints.push(
+            "restart the daemon with `bsk daemon restart` to run the installed version".to_string(),
+        );
+    }
+    match record {
+        None => details.push("no update attempt recorded".to_string()),
+        Some(record) => describe_update(record, installed_version, now, &mut details, &mut hints),
+    }
+    if !leftovers.is_empty() {
+        let names = leftovers
+            .iter()
+            .map(|leftover| leftover.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        details.push(format!(
+            "kept from earlier updates until nothing runs them: {names}"
+        ));
+    }
+    let detail = details.join("; ");
+    if hints.is_empty() {
+        CheckResult::ok(name, detail)
+    } else {
+        CheckResult::warn(name, detail, hints.join("; "))
+    }
+}
+
+fn describe_update(
+    record: &UpdateRecord,
+    installed_version: &str,
+    now: u64,
+    details: &mut Vec<String>,
+    hints: &mut Vec<String>,
+) {
+    let attempt = format!(
+        "{} {} -> {} ({})",
+        match record.source {
+            UpdateSource::Daemon => "auto-update",
+            UpdateSource::Command => "`bsk update`",
+        },
+        record.from_version,
+        record.target_version,
+        ago(now, record.updated_at_epoch_secs),
+    );
+    let stage = record.stage.map_or("", |stage| match stage {
+        UpdateStage::Download => " while downloading",
+        UpdateStage::Install => " while installing",
+        UpdateStage::Handover => " while handing over to the new daemon",
+        UpdateStage::Restart => " while restarting the daemon",
+    });
+    // An attempt at a version that is installed by now needs no action.
+    let superseded = semver::Version::parse(&record.target_version)
+        .ok()
+        .zip(semver::Version::parse(installed_version).ok())
+        .is_some_and(|(target, installed)| target <= installed);
+    let retry = "run `bsk update` to try again now, and check `bsk logs` for details";
+    match record.result {
+        UpdateResult::Succeeded => details.push(format!("{attempt} succeeded")),
+        UpdateResult::InProgress
+            if now.saturating_sub(record.updated_at_epoch_secs) < UPDATE_STALLED_AFTER_SECS =>
+        {
+            details.push(format!("{attempt} in progress{stage}"));
+        }
+        UpdateResult::InProgress => {
+            details.push(format!(
+                "{attempt} stopped{stage}; the process running it exited"
+            ));
+            if !superseded {
+                hints.push(retry.to_string());
+            }
+        }
+        UpdateResult::Failed => {
+            let error = record.error.as_deref().unwrap_or("unknown error");
+            let recovery = match &record.recovery {
+                Some(Recovery::Unchanged) | None => "nothing was changed".to_string(),
+                Some(Recovery::Restored {
+                    daemon_serving: true,
+                }) => "the previous version was restored and a daemon kept serving".to_string(),
+                Some(Recovery::Restored {
+                    daemon_serving: false,
+                }) => {
+                    hints.push("start the daemon with `bsk daemon start`".to_string());
+                    "the previous version was restored, but no daemon was left serving".to_string()
+                }
+                Some(Recovery::RestoreFailed { action }) => {
+                    hints.push(action.clone());
+                    "the previous executable could not be put back".to_string()
+                }
+            };
+            let mut detail = format!("{attempt} failed{stage}: {error}; {recovery}");
+            if let Some(retry_after) = record.retry_after_epoch_secs.filter(|at| *at > now) {
+                detail.push_str(&format!(
+                    "; the daemon retries in {}",
+                    duration(retry_after - now)
+                ));
+            }
+            details.push(detail);
+            if !superseded {
+                hints.push(retry.to_string());
+            }
+        }
+        UpdateResult::Skipped => {
+            details.push(match record.skip_reason {
+                Some(SkipReason::HostManaged) => format!(
+                    "bsk {} is available; this daemon belongs to its terminal or supervisor",
+                    record.target_version
+                ),
+                Some(SkipReason::NotWritable) | None => format!(
+                    "bsk {} is available, but bsk cannot write next to {}{}",
+                    record.target_version,
+                    record.executable.display(),
+                    record
+                        .error
+                        .as_deref()
+                        .map(|error| format!(": {error}"))
+                        .unwrap_or_default()
+                ),
+            });
+            if !superseded {
+                hints.push(match record.skip_reason {
+                    Some(SkipReason::HostManaged) => "stop the host task, run `bsk update --yes --no-restart-daemon`, then start the task again".to_string(),
+                    Some(SkipReason::NotWritable) | None => update::installer_hint(&record.executable),
+                });
+            }
+        }
+    }
+}
+
+fn ago(now: u64, then: u64) -> String {
+    format!("{} ago", duration(now.saturating_sub(then)))
+}
+
+fn duration(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
 }
 
 fn current_state(browser_wait: Duration) -> DaemonState {
@@ -528,6 +705,150 @@ mod m2_tests {
             sessions: Vec::new(),
             version_skew_browsers: skew,
         }
+    }
+
+    fn attempt(result: UpdateResult) -> UpdateRecord {
+        UpdateRecord {
+            result,
+            from_version: "0.3.1".into(),
+            target_version: "0.4.0".into(),
+            updated_at_epoch_secs: 1_000,
+            ..UpdateRecord::start(
+                UpdateSource::Daemon,
+                &semver::Version::new(0, 4, 0),
+                std::path::Path::new("/home/u/.local/bin/bsk"),
+            )
+        }
+    }
+
+    fn update_check(record: Option<&UpdateRecord>, daemon: Option<&str>) -> CheckResult {
+        auto_update_check(record, daemon, "0.3.1", &[], 1_120)
+    }
+
+    #[test]
+    fn auto_update_check_reports_success_and_version_skew() {
+        let none = update_check(None, Some("0.3.1"));
+        assert_eq!(none.status, CheckStatus::Ok);
+        assert!(none.detail.contains("no update attempt recorded"));
+
+        let succeeded = update_check(Some(&attempt(UpdateResult::Succeeded)), Some("0.3.1"));
+        assert_eq!(succeeded.status, CheckStatus::Ok);
+        assert!(
+            succeeded
+                .detail
+                .contains("auto-update 0.3.1 -> 0.4.0 (2m ago) succeeded"),
+            "{}",
+            succeeded.detail
+        );
+
+        let skewed = update_check(None, Some("0.3.0"));
+        assert_eq!(skewed.status, CheckStatus::Warning);
+        assert!(skewed.detail.contains("the daemon runs bsk 0.3.0"));
+        assert!(skewed.hint.unwrap().contains("bsk daemon restart"));
+        assert!(!has_failures(&[update_check(None, Some("0.3.0"))]));
+    }
+
+    #[test]
+    fn auto_update_check_explains_a_failure_and_its_recovery() {
+        let mut failed = attempt(UpdateResult::Failed);
+        failed.stage = Some(UpdateStage::Handover);
+        failed.error = Some("the replacement daemon (pid 7) exited with exit status: 3".into());
+        failed.recovery = Some(Recovery::Restored {
+            daemon_serving: true,
+        });
+        failed.retry_after_epoch_secs = Some(1_120 + 2 * 3600);
+
+        let check = update_check(Some(&failed), Some("0.3.1"));
+
+        assert_eq!(check.status, CheckStatus::Warning);
+        for text in [
+            "failed while handing over to the new daemon",
+            "exited with exit status: 3",
+            "the previous version was restored and a daemon kept serving",
+            "the daemon retries in 2h",
+        ] {
+            assert!(check.detail.contains(text), "{text}: {}", check.detail);
+        }
+        assert!(check.hint.unwrap().contains("bsk update"));
+
+        failed.recovery = Some(Recovery::RestoreFailed {
+            action: "stop bsk, then move /a to /b".into(),
+        });
+        let check = update_check(Some(&failed), Some("0.3.1"));
+        assert!(check.hint.unwrap().contains("stop bsk, then move /a to /b"));
+
+        // Nothing is left to do once that version is installed.
+        let superseded = auto_update_check(
+            Some(&UpdateRecord {
+                recovery: Some(Recovery::Unchanged),
+                ..failed.clone()
+            }),
+            Some("0.4.0"),
+            "0.4.0",
+            &[],
+            1_120,
+        );
+        assert_eq!(superseded.status, CheckStatus::Ok, "{}", superseded.detail);
+    }
+
+    #[test]
+    fn auto_update_check_flags_an_interrupted_attempt() {
+        let mut interrupted = attempt(UpdateResult::InProgress);
+        interrupted.stage = Some(UpdateStage::Install);
+        let running = auto_update_check(Some(&interrupted), None, "0.3.1", &[], 1_060);
+        assert_eq!(running.status, CheckStatus::Ok);
+        assert!(running.detail.contains("in progress while installing"));
+
+        let stalled = auto_update_check(
+            Some(&interrupted),
+            None,
+            "0.3.1",
+            &[],
+            1_000 + UPDATE_STALLED_AFTER_SECS,
+        );
+        assert_eq!(stalled.status, CheckStatus::Warning);
+        assert!(stalled.detail.contains("stopped while installing"));
+    }
+
+    #[test]
+    fn auto_update_check_names_who_must_install_a_skipped_version() {
+        let mut skipped = attempt(UpdateResult::Skipped);
+        skipped.stage = None;
+        skipped.skip_reason = Some(SkipReason::HostManaged);
+        let host = update_check(Some(&skipped), Some("0.3.1"));
+        assert_eq!(host.status, CheckStatus::Warning);
+        assert!(
+            host.detail
+                .contains("belongs to its terminal or supervisor")
+        );
+        assert!(host.hint.unwrap().contains("--no-restart-daemon"));
+
+        skipped.skip_reason = Some(SkipReason::NotWritable);
+        skipped.error = Some("permission denied".into());
+        let unwritable = update_check(Some(&skipped), Some("0.3.1"));
+        assert!(
+            unwritable
+                .detail
+                .contains("cannot write next to /home/u/.local/bin/bsk: permission denied")
+        );
+        assert!(
+            unwritable
+                .hint
+                .unwrap()
+                .contains("installer or package manager")
+        );
+    }
+
+    #[test]
+    fn auto_update_check_lists_leftover_files_without_warning() {
+        let leftovers = [update::Leftover {
+            path: "/bin/.bsk.old-1-1".into(),
+            owner: Some(1),
+            expired: true,
+        }];
+        let check = auto_update_check(None, None, "0.3.1", &leftovers, 0);
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.detail.contains("/bin/.bsk.old-1-1"));
     }
 
     #[test]
