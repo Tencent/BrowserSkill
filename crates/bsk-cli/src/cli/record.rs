@@ -167,7 +167,7 @@ fn dispatch_start(args: RecordStartArgs, format: Format) -> Result<(), CliError>
     };
 
     let session_stop_result = stop_session(info.sock_path, &session.session_id);
-    record_state::clear();
+    record_state::clear_session(&session.session_id);
 
     run_result?;
     session_stop_result?;
@@ -190,7 +190,8 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
             Method::ToolRecordStop,
             Some(params),
             TOOL_IPC_TIMEOUT,
-        )?;
+        )
+        .map_err(|err| forget_stale_recording(err, &session_id))?;
 
         let run_result: Result<(), CliError> = (|| {
             let exported = export_with_recovery(&args.output, &result.trace)?;
@@ -198,7 +199,7 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
         })();
 
         let session_stop_result = stop_session(info.sock_path, &session_id);
-        record_state::clear();
+        record_state::clear_session(&session_id);
 
         run_result?;
         session_stop_result?;
@@ -213,6 +214,29 @@ fn dispatch_stop(args: RecordStopArgs, format: Format) -> Result<(), CliError> {
 
     let exported = export_with_recovery(&args.output, &trace)?;
     render_finish(&trace, &args.output, &exported, format)
+}
+
+/// A `not_found` stop means the session or its recording is gone, so the
+/// saved pointer can never be stopped; drop it so `record start` works again.
+fn forget_stale_recording(err: CliError, session_id: &str) -> CliError {
+    let CliError::Rpc {
+        code: ErrorCode::NotFound,
+        message,
+        data,
+        source,
+    } = err
+    else {
+        return err;
+    };
+    record_state::clear_session(session_id);
+    CliError::Rpc {
+        code: ErrorCode::NotFound,
+        message: format!(
+            "{message}; cleared the stale recording state for session {session_id}, so `bsk record start` can run again"
+        ),
+        data,
+        source,
+    }
 }
 
 /// When `record start` omitted `--url` and the default example.com page
@@ -405,6 +429,65 @@ mod tests {
                 msg.contains("not exported") || msg.contains("recover"),
                 "{msg}"
             );
+        });
+    }
+
+    #[test]
+    fn stop_of_a_vanished_session_unblocks_record_start() {
+        with_temp_home(|| {
+            record_state::write("megi").unwrap();
+            let err = CliError::from_rpc(bsk_protocol::RpcError {
+                code: ErrorCode::NotFound,
+                message: "session not registered or already stopped".into(),
+                data: None,
+            });
+
+            let err = forget_stale_recording(err, "megi");
+
+            assert_eq!(err.code(), Some(ErrorCode::NotFound));
+            assert!(
+                err.to_string()
+                    .contains("cleared the stale recording state")
+            );
+            assert!(record_state::read().is_err());
+            prepare_record_start(Path::new("trace")).unwrap();
+        });
+    }
+
+    #[test]
+    fn late_stale_stop_keeps_a_newer_recording_state() {
+        with_temp_home(|| {
+            let not_found = || {
+                CliError::from_rpc(bsk_protocol::RpcError {
+                    code: ErrorCode::NotFound,
+                    message: "session not registered or already stopped".into(),
+                    data: None,
+                })
+            };
+            record_state::write("old").unwrap();
+            forget_stale_recording(not_found(), "old");
+            record_state::write("new").unwrap();
+
+            forget_stale_recording(not_found(), "old");
+
+            assert_eq!(record_state::read().unwrap().session_id, "new");
+        });
+    }
+
+    #[test]
+    fn failed_flush_keeps_the_recording_state_for_a_retry() {
+        with_temp_home(|| {
+            record_state::write("oabu").unwrap();
+            let err = CliError::from_rpc(bsk_protocol::RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "failed to flush recorded steps for session oabu".into(),
+                data: None,
+            });
+
+            let err = forget_stale_recording(err, "oabu");
+
+            assert_eq!(err.code(), Some(ErrorCode::ProtocolError));
+            assert_eq!(record_state::read().unwrap().session_id, "oabu");
         });
     }
 
