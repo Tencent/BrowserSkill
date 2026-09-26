@@ -12,6 +12,10 @@ import { ObservationPresentation } from "./observation-presentation";
 
 export interface EventSourceLike {
   onmessage: ((event: { data: string }) => void) | null;
+  /** Present on a real EventSource; test doubles may omit it. */
+  onerror?: ((event: unknown) => void) | null;
+  /** 0 CONNECTING, 1 OPEN, 2 CLOSED; undefined on test doubles. */
+  readyState?: number;
   close(): void;
 }
 
@@ -46,12 +50,25 @@ export interface OverlaySnapshot {
   readonly displayFrames: Readonly<Record<string, ThumbnailState>>;
   /** False when the host reports the browser/daemon as unreachable. */
   readonly available: boolean;
+  /**
+   * True from a stream error until the stream delivers a frame again;
+   * meanwhile sessions and availability are the last ones received.
+   */
+  readonly reconnecting: boolean;
 }
 
 const EVENTS_URL = "/bsk-observation/events";
 const INTERRUPT_URL = "/bsk-observation/interrupt";
 const STOP_URL = "/bsk-observation/stop";
 const THUMBNAIL_RETRY_DELAYS_MS = [1000, 3000];
+/**
+ * Backoff for re-creating the live event stream after a *fatal* failure.
+ * A non-200 response (for example the observation route answering 404 while
+ * the plugin is still starting, or right after a plugin reload) is terminal
+ * for an EventSource: the browser never retries it. Without this the view
+ * stays empty until the page is reloaded.
+ */
+const EVENT_STREAM_RETRY_DELAYS_MS = [1000, 3000, 10000, 30000];
 
 function revoke(url: string | undefined): void {
   if (url !== undefined && typeof URL.revokeObjectURL === "function") {
@@ -71,14 +88,19 @@ export class ObservationClientStore {
   private readonly retryCounts = new Map<string, number>();
   private listeners = new Set<() => void>();
   private events: EventSourceLike | undefined;
+  /** Pending re-creation of the event stream after a fatal failure. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private reconnectAttempts = 0;
   private snapshot: OverlaySnapshot = {
     sessions: [],
     subscribed: false,
     thumbnails: {},
     displayFrames: {},
     available: true,
+    reconnecting: false,
   };
   private available = true;
+  private reconnecting = false;
   private started = false;
   /** Refcount of mounted consumers (overlay card, sidebar tab, sidebar fiber). */
   private consumers = 0;
@@ -100,6 +122,7 @@ export class ObservationClientStore {
       thumbnails: Object.fromEntries(this.thumbs),
       displayFrames: this.buildDisplayFrames(),
       available: this.available,
+      reconnecting: this.reconnecting,
     };
     for (const listener of [...this.listeners]) listener();
   }
@@ -136,6 +159,8 @@ export class ObservationClientStore {
   }
 
   private connectEvents(): void {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
     const previous = this.events;
     this.events = undefined;
     previous?.close();
@@ -151,8 +176,36 @@ export class ObservationClientStore {
       } catch {
         return;
       }
+      // Healthy traffic resets the backoff and ends the outage.
+      this.reconnectAttempts = 0;
+      this.reconnecting = false;
       this.apply(event);
     };
+    // A non-200 response is fatal for an EventSource: the browser fails the
+    // connection permanently and never retries it. Transient drops keep
+    // readyState 0/1 and are still retried by the EventSource itself, so only
+    // a CLOSED (2) readyState asks us to rebuild the stream.
+    events.onerror = () => {
+      if (!this.started || this.events !== events) return;
+      if (events.readyState === undefined || events.readyState === 2) this.scheduleReconnect();
+      if (this.reconnecting) return;
+      this.reconnecting = true;
+      this.publish();
+    };
+  }
+
+  /** Re-create the stream after a fatal failure, with a bounded backoff. */
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer !== undefined) return;
+    const index = Math.min(this.reconnectAttempts, EVENT_STREAM_RETRY_DELAYS_MS.length - 1);
+    const delay = EVENT_STREAM_RETRY_DELAYS_MS[index];
+    if (delay === undefined) return;
+    this.reconnectAttempts += 1;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (!this.started) return;
+      this.connectEvents();
+    }, delay);
   }
 
   /** Every initial connection and reconnect starts with the server's snapshot. */
@@ -168,6 +221,10 @@ export class ObservationClientStore {
     this.events = undefined;
     this.started = false;
     previous?.close();
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.reconnectAttempts = 0;
+    this.reconnecting = false;
     this.clearThumbnails();
     this.sessions.clear();
     this.available = true;
