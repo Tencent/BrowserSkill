@@ -239,14 +239,16 @@ function StopSessionAction(props: {
   );
 }
 
+type ChromeState = "active" | "idle" | "error" | "reconnecting";
+
 /** Flat status dot, specced after the BSK popup's ConnectionStatusIndicator. */
-function StatusDot({ state }: { state: "active" | "idle" | "error" | "dead" }) {
+function StatusDot({ state }: { state: ChromeState | "dead" }) {
   const color =
     state === "active"
       ? "bg-emerald-500"
       : state === "error"
         ? "bg-red-500"
-        : state === "dead"
+        : state === "dead" || state === "reconnecting"
           ? "bg-amber-500"
           : "bg-muted-foreground/40";
   return (
@@ -390,7 +392,13 @@ export function OverlayBody(props: {
       : focus === undefined
         ? "no session"
         : `${focus.sessionId} · ${focus.action === "idle" ? "idle" : focus.action} · ${formatElapsed(focus.since, now)}`;
-  const state = !available ? "error" : focus !== undefined ? statusOf(focus) : "idle";
+  const state: ChromeState = reconnecting
+    ? "reconnecting"
+    : !available
+      ? "error"
+      : focus !== undefined
+        ? statusOf(focus)
+        : "idle";
 
   return (
     <div
@@ -406,7 +414,7 @@ export function OverlayBody(props: {
         onPointerDown={onHeaderPointerDown}
         role="presentation"
       >
-        <StatusDot state={state === "error" ? "error" : state === "active" ? "active" : "idle"} />
+        <StatusDot state={state} />
         <span className={css["status-text"]}>{statusText}</span>
         {onUseFloating !== undefined ? (
           <IconAction
@@ -660,21 +668,28 @@ export function ObservationOverlay({ store }: { store: ObservationClientStore })
   if (snapshot.sessions.length === 0) return null;
 
   if (collapsed) {
-    const state = focus !== undefined ? statusOf(focus) : "idle";
+    const state: ChromeState = snapshot.reconnecting
+      ? "reconnecting"
+      : focus !== undefined
+        ? statusOf(focus)
+        : "idle";
     return (
       <button
         type="button"
         className={cn(css.capsule, "bsk-obs")}
         data-state={state}
+        data-testid="obs-capsule"
         aria-label="Expand browser observation overlay"
         onClick={() => setCollapsed(false)}
       >
         <StatusDot state={state} />
         <span className={css["capsule-text"]}>
           {snapshot.sessions.length} session{snapshot.sessions.length === 1 ? "" : "s"}
-          {focus !== undefined && focus.action !== "idle"
-            ? ` · ${focus.action} · ${formatElapsed(focus.since, now)}`
-            : ""}
+          {snapshot.reconnecting
+            ? " · reconnecting…"
+            : focus !== undefined && focus.action !== "idle"
+              ? ` · ${focus.action} · ${formatElapsed(focus.since, now)}`
+              : ""}
         </span>
       </button>
     );

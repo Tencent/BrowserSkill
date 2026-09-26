@@ -228,11 +228,35 @@ describe("ObservationOverlay", () => {
       h.es().readyState = 0;
       h.es().onerror?.({});
     });
-    expect(screen.getByTestId("obs-header").textContent).toContain("reconnecting…");
+    const header = screen.getByTestId("obs-header");
+    expect(header.textContent).toContain("reconnecting…");
+    expect(header.querySelector("[data-state]")?.getAttribute("data-state")).toBe("reconnecting");
     expect(screen.queryByText(/s1 · clicking/)).toBeNull();
     act(() => h.emitRaw({ type: "snapshot", sessions: [BUSY], available: true }));
-    expect(screen.getByTestId("obs-header").textContent).not.toContain("reconnecting");
+    expect(header.textContent).not.toContain("reconnecting");
+    expect(header.querySelector("[data-state]")?.getAttribute("data-state")).toBe("active");
     expect(screen.getByText(/s1 · clicking/)).toBeTruthy();
+  });
+
+  it("collapses to a capsule that drops stale action timing while reconnecting", async () => {
+    const h = makeHarness([BUSY]);
+    render(<ObservationOverlay store={h.store} />);
+    await screen.findByText(/s1 · clicking/);
+    fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    const capsule = await screen.findByTestId("obs-capsule");
+    expect(capsule.textContent).toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("active");
+    act(() => {
+      h.es().readyState = 0;
+      h.es().onerror?.({});
+    });
+    expect(capsule.textContent).toContain("reconnecting…");
+    expect(capsule.textContent).not.toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("reconnecting");
+    expect(capsule.querySelector("[data-state]")?.getAttribute("data-state")).toBe("reconnecting");
+    act(() => h.emitRaw({ type: "snapshot", sessions: [BUSY], available: true }));
+    expect(capsule.textContent).toContain("clicking");
+    expect(capsule.getAttribute("data-state")).toBe("active");
   });
 
   it("shows the status row and a placeholder without a thumbnail", async () => {
