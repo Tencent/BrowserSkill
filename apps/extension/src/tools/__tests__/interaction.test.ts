@@ -694,6 +694,7 @@ describe("click input readiness", () => {
       rendered?: () => boolean | Promise<boolean>;
       defaultTimeoutMs?: number;
       onCommand?: (method: string, params: Record<string, unknown>) => void;
+      ownsBackgroundExecution?: boolean;
     } = {},
   ) {
     const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
@@ -716,6 +717,9 @@ describe("click input readiness", () => {
     );
     let attachmentId: string | undefined = "original";
     fake.cdp.getAttachmentId = () => attachmentId;
+    if (options.ownsBackgroundExecution !== undefined) {
+      fake.cdp.ownsBackgroundExecution = vi.fn(() => options.ownsBackgroundExecution as boolean);
+    }
     return {
       ...fake,
       ctx,
@@ -744,6 +748,23 @@ describe("click input readiness", () => {
     const f = await fixture({ visibility: () => "visible" });
     expect(await f.click()).not.toHaveProperty("code");
     expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it("leaves readiness and cleanup to an existing persistent background lease", async () => {
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => {
+        throw new Error("persistent leases must not sample visibility");
+      },
+      rendered: () => {
+        throw new Error("persistent leases must not gate input on a screenshot");
+      },
+    });
+    expect(await f.click()).not.toHaveProperty("code");
+    expect(f.cdp.ownsBackgroundExecution).toHaveBeenCalledWith("aa11", 4);
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
     expect(f.mouseCommands()).toHaveLength(3);
   });
 
