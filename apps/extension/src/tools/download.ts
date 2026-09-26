@@ -10,6 +10,7 @@ import {
   type DownloadsApi,
   type NavigationTargetsApi,
 } from "./download-capture";
+import { downloadTriggerDeps } from "./download-trigger";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
 import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from "./shared";
 
@@ -42,6 +43,7 @@ export async function handleDownload(
     const address = await resolveActionTarget(deps.cdp, ctx, target, params, "download");
     if (isRpcError(address)) return address;
 
+    let trigger: ReturnType<typeof downloadTriggerDeps> | undefined;
     const capture = await captureBrowserDownload({
       cdp: deps.cdp,
       target: address.cdpTarget,
@@ -52,7 +54,11 @@ export async function handleDownload(
       timeoutMs: params.timeout_ms ?? 120_000,
       signal: deps.signal,
       expectedFrameId: address.frameId,
-      trigger: (markDispatched) => clickResolvedTarget(ctx, address, {}, deps, markDispatched),
+      trigger: (markDispatched, signal) => {
+        trigger = downloadTriggerDeps(deps, signal);
+        return clickResolvedTarget(ctx, address, {}, trigger.deps, markDispatched);
+      },
+      cleanupTrigger: (deadline) => trigger?.cleanup(deadline) ?? Promise.resolve(),
     });
     if (isRpcError(capture)) return capture;
     const { click, item } = capture;

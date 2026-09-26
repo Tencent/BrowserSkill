@@ -9,10 +9,12 @@ import type { CdpTarget } from "@/browser-driver/frame-graph";
 import type { ClickResult, RpcError, TransferEffectState } from "@/transport/types";
 import { transferError } from "./errors";
 import { type CdpRunner, isRpcError } from "./shared";
+import { waitBounded } from "./transfer-transaction";
 
 const CORRELATION_GRACE_MS = 750;
 const UNIQUE_SETTLE_MS = 50;
 const SIZE_POLL_MS = 250;
+const CLEANUP_TIMEOUT_MS = 1_000;
 
 type DeterminingFilenameListener = (
   item: chrome.downloads.DownloadItem,
@@ -71,7 +73,9 @@ export interface DownloadCaptureOptions {
   timeoutMs: number;
   signal?: AbortSignal;
   /** `markDispatched` must be called immediately before the mouse press is sent. */
-  trigger(markDispatched: () => void): Promise<ClickResult | RpcError>;
+  trigger(markDispatched: () => void, signal: AbortSignal): Promise<ClickResult | RpcError>;
+  /** Retire the trigger and release any held input within this cleanup deadline. */
+  cleanupTrigger?(deadline: number): Promise<void>;
 }
 
 export interface DownloadCaptureResult {
@@ -158,6 +162,8 @@ async function cleanupClaimedDownload(downloads: DownloadsApi, downloadId: numbe
 export async function captureBrowserDownload(
   options: DownloadCaptureOptions,
 ): Promise<DownloadCaptureResult | RpcError> {
+  const deadline = Date.now() + options.timeoutMs;
+  const triggerController = new AbortController();
   let click: ClickResult | undefined;
   let intent: DownloadIntent | undefined;
   let dispatched = false;
@@ -178,9 +184,12 @@ export async function captureBrowserDownload(
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
+  // The trigger may still be pending when timeout, abort or attribution fails.
+  void completion.catch(() => undefined);
   const fail = (error: Error) => {
     if (settled) return;
     settled = true;
+    triggerController.abort();
     rejectCompletion(error);
   };
   const complete = (item: chrome.downloads.DownloadItem) => {
@@ -254,6 +263,10 @@ export async function captureBrowserDownload(
   };
 
   const determiningListener: DeterminingFilenameListener = (item, suggest) => {
+    if (settled) {
+      suggest();
+      return;
+    }
     const candidate: DownloadCandidate = {
       item,
       suggest,
@@ -272,6 +285,7 @@ export async function captureBrowserDownload(
     return true;
   };
   const createdListener = (item: chrome.downloads.DownloadItem) => {
+    if (settled) return;
     createdItems.set(item.id, item);
     if (capturedId !== item.id) return;
     if (item.state === "interrupted") {
@@ -300,12 +314,13 @@ export async function captureBrowserDownload(
   const navigationTargetListener = (
     details: chrome.webNavigation.WebNavigationSourceCallbackDetails,
   ) => {
-    if (!dispatched || details.sourceTabId !== options.target.tabId) return;
+    if (settled || !dispatched || details.sourceTabId !== options.target.tabId) return;
     popupUrls.add(details.url);
     reconcile();
   };
   const cdpSubscription = options.cdp.onEvent?.((source, method, raw) => {
-    if (method !== "Page.downloadWillBegin" || !sameTarget(source, options.target)) return;
+    if (settled || method !== "Page.downloadWillBegin" || !sameTarget(source, options.target))
+      return;
     const event = raw as { url?: unknown; suggestedFilename?: unknown; frameId?: unknown };
     if (typeof event.url !== "string" || typeof event.suggestedFilename !== "string") return;
     if (options.expectedFrameId && event.frameId !== options.expectedFrameId) {
@@ -350,9 +365,22 @@ export async function captureBrowserDownload(
   }, SIZE_POLL_MS);
 
   try {
-    const triggered = await options.trigger(() => {
-      dispatched = true;
-    });
+    if (options.signal?.aborted) throw new DOMException("aborted", "AbortError");
+    // A failed completion can stop a pending trigger, while successful file
+    // completion still needs a click acknowledgement within the same deadline.
+    const captureFailure = completion.then(() => new Promise<never>(() => {}));
+    const triggered = await waitBounded(
+      Promise.race([
+        options.trigger(() => {
+          if (triggerController.signal.aborted) throw new DOMException("aborted", "AbortError");
+          dispatched = true;
+        }, triggerController.signal),
+        captureFailure,
+      ]),
+      deadline,
+      options.signal,
+      "download trigger timed out",
+    );
     if (isRpcError(triggered)) {
       void completion.catch(() => undefined);
       const effect: TransferEffectState =
@@ -369,7 +397,11 @@ export async function captureBrowserDownload(
     return { click, item };
   } catch (err) {
     const effect: TransferEffectState =
-      capturedId !== undefined ? "committed" : click ? "unknown" : "none";
+      capturedId !== undefined
+        ? "committed"
+        : dispatched || click || intent || popupUrls.size > 0
+          ? "unknown"
+          : "none";
     failureResult = captureError(
       err instanceof Error ? err.message : String(err),
       effect,
@@ -378,6 +410,7 @@ export async function captureBrowserDownload(
     return failureResult;
   } finally {
     settled = true;
+    triggerController.abort();
     if (operationTimer) clearTimeout(operationTimer);
     if (uniquenessTimer) clearTimeout(uniquenessTimer);
     if (sizePoll) clearInterval(sizePoll);
@@ -391,12 +424,26 @@ export async function captureBrowserDownload(
       clearTimeout(candidate.graceTimer);
       if (candidate.item.id !== capturedId) suggestDefault(candidate);
     }
+    const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
+    const cleanups: Promise<void>[] = [];
+    if (options.cleanupTrigger) cleanups.push(options.cleanupTrigger(cleanupDeadline));
     if (!succeeded && capturedId !== undefined) {
-      try {
-        await cleanupClaimedDownload(options.downloads, capturedId);
-      } catch {
-        if (failureResult?.data) failureResult.data.cleanup_state = "failed";
+      cleanups.push(cleanupClaimedDownload(options.downloads, capturedId));
+    }
+    try {
+      // One failed cleanup must not skip or outlive the other. Start both
+      // while this capture still owns the gate and share one bounded budget.
+      const results = await waitBounded(
+        Promise.allSettled(cleanups),
+        cleanupDeadline,
+        undefined,
+        "download cleanup timed out",
+      );
+      if (results.some((result) => result.status === "rejected") && failureResult?.data) {
+        failureResult.data.cleanup_state = "failed";
       }
+    } catch {
+      if (failureResult?.data) failureResult.data.cleanup_state = "failed";
     }
   }
 }
