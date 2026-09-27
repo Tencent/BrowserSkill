@@ -16,7 +16,9 @@ export interface AgentWindowApi {
    * so sessions bootstrap with `about:blank` instead.
    *
    * Resolves with the id of the activated (or newly created) tab, so callers
-   * can track the session's home tab without re-querying Chrome.
+   * can track the session's home tab without re-querying Chrome. A creation
+   * tab that now shows an undrivable page (foreign `chrome-extension://`,
+   * `chrome://`, …) is not adopted; a fresh home tab is created for it.
    */
   ensureActiveTab(windowId: number, url: string, ownedTabIds: ReadonlySet<number>): Promise<number>;
 }
@@ -37,6 +39,22 @@ export interface AgentWindowCreateOptions {
 
 /** Initial tab URL for every new session's Agent Window. */
 export const AGENT_WINDOW_HOME = "about:blank";
+
+/**
+ * URL schemes a session can never drive: `chrome://` pages reject
+ * `Page.navigate`, and a `chrome-extension://` page owned by another
+ * extension rejects DevTools attachment entirely ("Cannot access a
+ * chrome-extension:// URL of different extension").
+ *
+ * A new-tab hijacker can replace the content of the tab
+ * `chrome.windows.create` returned before initialization runs, so the
+ * home tab's URL must be validated rather than assumed.
+ */
+const UNDRIVABLE_URL = /^(chrome|chrome-extension|edge|brave|opera|vivaldi|devtools|view-source):/i;
+
+function isUndrivableUrl(url: string | undefined): boolean {
+  return url !== undefined && UNDRIVABLE_URL.test(url);
+}
 
 export const chromeAgentWindowApi: AgentWindowApi = {
   async create(url: string, opts: AgentWindowCreateOptions = {}): Promise<AgentWindowCreation> {
@@ -72,7 +90,15 @@ export const chromeAgentWindowApi: AgentWindowApi = {
     // A user may have opened a tab while window initialization was pending.
     // Reuse only a tab whose identity came from our creation result.
     const first = tabs.find((t) => t.id !== undefined && ownedTabIds.has(t.id));
-    if (first?.id !== undefined) {
+    // A hijacker may also have moved the creation tab onto an
+    // undrivable page (e.g. its own options page). Such a tab can never
+    // serve as the session home: every CDP call on it fails. Leave it
+    // untouched and bootstrap a fresh home tab instead.
+    if (
+      first?.id !== undefined &&
+      !isUndrivableUrl(first.url) &&
+      !isUndrivableUrl(first.pendingUrl)
+    ) {
       if (!first.active) {
         await chrome.tabs.update(first.id, { active: true });
       }
