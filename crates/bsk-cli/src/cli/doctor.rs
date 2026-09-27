@@ -104,6 +104,13 @@ impl CheckResult {
     }
 }
 
+/// Collect the checks without rendering them. Callers that need the
+/// structured results (e.g. `bsk diagnostics export`) use this; the
+/// JSON output mode keeps the browser-connect wait silent.
+pub fn checks() -> Result<Vec<CheckResult>> {
+    Ok(collect_checks(resolve_daemon_state(Output::Json)))
+}
+
 pub fn run(output: Output) -> Result<Vec<CheckResult>> {
     let state = resolve_daemon_state(output);
     let checks = collect_checks(state);
