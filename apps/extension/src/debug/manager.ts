@@ -6,8 +6,10 @@ import {
 } from "@/browser-driver/chromium-cdp";
 import {
   isAgentControlledTab,
+  preferredSharedTab,
   type SessionContext,
   type SessionManager,
+  sessionWindowId,
 } from "@/session-manager/manager";
 import type { CdpRunner, ChromeTabsApi } from "@/tools/shared";
 import type { RequestFrame } from "@/transport/types";
@@ -318,7 +320,7 @@ export class DebugManager {
         if (this.sessions.get(sessionId) !== owner)
           throw new Error("task ended during debug start");
         const tab = await wait(this.tabs.get(tabId));
-        if (tab.windowId !== this.sessions.get(sessionId)?.agentWindowId)
+        if (tab.windowId !== sessionWindowId(owner))
           throw new Error("debug tab must remain in its Agent Window");
         if (!this.runs.has(id) || state.run.state !== "capturing")
           throw new Error("capture stopped during debug start");
@@ -557,15 +559,24 @@ export class DebugManager {
     if (!params?.session_id || !this.active(params.session_id)) return;
     const context = this.sessions.get(params.session_id);
     if (!context) return;
-    const tabId =
-      params.tab_id ??
-      (
+    let tabId = params.tab_id;
+    if (tabId === undefined && context.container.mode === "in_window") {
+      const tabs = await deadline(
+        this.tabs.query({ windowId: sessionWindowId(context) }),
+        OBSERVATION_TIMEOUT_MS,
+        signal,
+      ).catch(() => undefined);
+      // If Chrome cannot list the host window, retain the prior debug behavior.
+      tabId = tabs ? preferredSharedTab(context, tabs)?.id : context.activeTabId;
+    } else if (tabId === undefined) {
+      tabId = (
         await deadline(
-          this.tabs.query({ windowId: context.agentWindowId, active: true }),
+          this.tabs.query({ windowId: sessionWindowId(context), active: true }),
           OBSERVATION_TIMEOUT_MS,
           signal,
         )
       )[0]?.id;
+    }
     if (tabId === undefined || !this.owned(params.session_id, tabId)) return;
     const state = this.active(params.session_id, tabId);
     if (!state) return;
@@ -841,8 +852,7 @@ export class DebugManager {
       );
       if (!this.owned(state.run.session_id, state.run.tab_id) || state.run.state !== "capturing")
         return { at, state: "unavailable" };
-      if (tab.windowId !== this.sessions.get(state.run.session_id)?.agentWindowId)
-        return { at, state: "unavailable" };
+      if (tab.windowId !== sessionWindowId(state.owner)) return { at, state: "unavailable" };
       const lines: string[] = [];
       let chars = 0;
       let truncated = false;
@@ -988,7 +998,13 @@ export class DebugManager {
     this.sync();
     return Promise.all(
       this.sessions.list().map(async (context) => {
-        const tab = (await this.tabs.query({ windowId: context.agentWindowId, active: true }))[0];
+        const tab =
+          context.container.mode === "in_window"
+            ? preferredSharedTab(
+                context,
+                await this.tabs.query({ windowId: sessionWindowId(context) }).catch(() => []),
+              )
+            : (await this.tabs.query({ windowId: sessionWindowId(context), active: true }))[0];
         const latest = [...this.runs.values()]
           .filter(({ run, released }) => !released && run.session_id === context.sessionId)
           .at(-1);
@@ -1354,7 +1370,7 @@ export class DebugManager {
       const tab = await this.tabs.get(state.run.tab_id);
       if (
         !this.owned(params.session_id, state.run.tab_id) ||
-        tab.windowId !== this.sessions.get(params.session_id)?.agentWindowId
+        tab.windowId !== sessionWindowId(state.owner)
       )
         throw new Error("debug tab must remain in its Agent Window");
       if (signal?.aborted) throw new Error("debug action cancelled");

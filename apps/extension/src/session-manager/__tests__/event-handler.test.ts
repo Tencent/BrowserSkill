@@ -131,15 +131,26 @@ describe("attachSessionEventHandler", () => {
     ]);
   });
 
-  it("reports borrowed tabs as return failures when the Agent Window was already closed", async () => {
+  it.each([
+    false,
+    true,
+  ])("reports borrowed-tab failures when the session window closes (shared=%s)", async (inWindow) => {
+    const removeWindow = vi.fn(async () => {});
+    const removeTab = vi.fn(async () => {});
     const manager = new SessionManager({
       agentWindow: {
         create: vi.fn(async () => ({ windowId: 4242, initialTabIds: [] })),
-        remove: vi.fn(async () => {}),
+        remove: removeWindow,
         ensureActiveTab: vi.fn(async () => 1),
       },
+      sharedWindow: {
+        host: async () => ({ id: 4242, type: "normal", incognito: false }) as chrome.windows.Window,
+        create: async () => 1,
+        get: async () => ({ id: 1, windowId: 4242 }) as chrome.tabs.Tab,
+        remove: removeTab,
+      },
     });
-    const ctx = await manager.start("aa11");
+    const ctx = await manager.start("aa11", { inWindow });
     ctx.borrowedTabs.set(7, { tabId: 7, originalWindowId: 200, originalIndex: 0 });
     const transport = fakeTransport();
     const events = fakeWindowEvents();
@@ -152,7 +163,10 @@ describe("attachSessionEventHandler", () => {
 
     manager.forgetClosedTab(7, { isWindowClosing: true });
     events.emit(4242);
-    for (let i = 0; i < 4; i += 1) await Promise.resolve();
+    await vi.waitUntil(() => transport.sent.length > 0);
+    expect(manager.has("aa11")).toBe(false);
+    expect(removeWindow).not.toHaveBeenCalled();
+    expect(removeTab).not.toHaveBeenCalled();
 
     expect(transport.sent).toEqual([
       {
@@ -164,7 +178,7 @@ describe("attachSessionEventHandler", () => {
             {
               tab_id: 7,
               code: "cdp_failed",
-              message: "Agent Window was closed before borrowed tab could be returned",
+              message: "Session window was closed before borrowed tab could be returned",
             },
           ],
         },

@@ -1,5 +1,10 @@
 import type { ErrorCode, RpcError, RpcErrorReason } from "@/transport/types";
-import { isAgentControlledTab, type SessionContext, type SessionManager } from "./manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+  sessionWindowId,
+} from "./manager";
 
 export class UiTaskError extends Error {
   constructor(
@@ -175,7 +180,11 @@ export async function checkedUiTab(task: SessionContext, op: UiOperation, tabId:
     );
   }
   op.check();
-  if (tab.id !== tabId || tab.windowId !== task.agentWindowId || !isAgentControlledTab(task, tabId))
+  if (
+    tab.id !== tabId ||
+    tab.windowId !== sessionWindowId(task) ||
+    !isAgentControlledTab(task, tabId)
+  )
     throw new UiTaskError("not_found", "Task ended during capture", "target_unavailable");
   return tab;
 }

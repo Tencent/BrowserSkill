@@ -18,7 +18,12 @@ import {
   isHelpResponseMessage,
 } from "@/lib/help-bridge";
 import type { InteractionPreferenceStore } from "@/lib/interaction-preferences";
-import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import {
+  isAgentControlledTab,
+  type SessionContext,
+  type SessionManager,
+  sessionWindowId,
+} from "@/session-manager/manager";
 import type {
   HelpCompletionCondition,
   HelpCompletionCriteria,
@@ -365,7 +370,12 @@ async function findHelpForTab(
     const windowId = tab.windowId;
     if (typeof windowId !== "number") return null;
     for (const help of activeHelpRequests.values()) {
-      if (!help.settled && help.ctx.agentWindowId === windowId) return help;
+      if (
+        !help.settled &&
+        sessionWindowId(help.ctx) === windowId &&
+        (help.ctx.container.mode === "window" || isAgentControlledTab(help.ctx, tabId))
+      )
+        return help;
     }
   } catch {
     return null;

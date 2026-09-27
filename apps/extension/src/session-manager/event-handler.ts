@@ -19,8 +19,8 @@ export interface SessionEventHandlerOptions {
     detachSession(sessionId: string): Promise<void>;
   };
   /**
-   * Invoked after a user-closed Agent Window has been removed from the
-   * SessionManager. Lets the caller refresh side caches such as the
+   * Invoked after a session has been removed from the SessionManager.
+   * Lets the caller refresh side caches such as the
    * `chrome.storage.session` "sessions live" flag (review M4/M5 I3).
    */
   onSessionsChanged?: () => void;
@@ -34,7 +34,7 @@ function chromeWindowEvents(): WindowRemovedListener {
 }
 
 /**
- * Watch for the user closing an Agent Window. When that happens we:
+ * Watch for the user closing a dedicated or shared session window. We:
  *  1. Drop the local SessionContext (without trying to close the window
  *     again — it's already gone).
  *  2. Emit a `session.window_closed` event to the daemon so it can
@@ -49,54 +49,78 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
   const events = options.windowEvents ?? chromeWindowEvents();
 
   const onRemoved = (windowId: number): void => {
-    const ctx = manager.findByWindowId(windowId);
-    if (!ctx) return;
-    // Chrome also emits onRemoved when session.stop removes the last tab or
-    // the window itself. Capture the cause before asynchronous cleanup so the
-    // normal stop response, rather than a user-close event, ends the audit.
-    const expectedClose = manager.isWindowCloseExpected(ctx);
-    const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
-      tab_id: tabId,
-      code: "cdp_failed",
-      message: "Agent Window was closed before borrowed tab could be returned",
-    }));
-    if (returnFailures.length > 0) {
-      console.warn(
-        `[bh] Agent Window ${windowId} closed with borrowed tabs that could not be returned`,
-        returnFailures,
-      );
-    }
-    const detach = options.cdp
-      ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
-          console.debug("[bh] session-event cdp detach failed", err);
+    for (const ctx of manager.sessionsInWindow(windowId)) {
+      // Chrome also emits onRemoved when session.stop removes the last tab or
+      // the window itself. Capture the cause before asynchronous cleanup so the
+      // normal stop response, rather than a user-close event, ends the audit.
+      const expectedClose = manager.isWindowCloseExpected(ctx);
+      if (ctx.container.mode === "in_window") ctx.stopping = true;
+      const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
+        tab_id: tabId,
+        code: "cdp_failed",
+        message: "Session window was closed before borrowed tab could be returned",
+      }));
+      if (returnFailures.length > 0) {
+        console.warn(
+          `[bh] Session window ${windowId} closed with borrowed tabs that could not be returned`,
+          returnFailures,
+        );
+      }
+      const detach = options.cdp
+        ? options.cdp.detachSession(ctx.sessionId).catch((err) => {
+            console.debug("[bh] session-event cdp detach failed", err);
+          })
+        : Promise.resolve();
+      void detach
+        .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
+        .then((removed) => {
+          if (!removed) return;
+          onSessionsChanged?.();
+          if (expectedClose) return;
+          const event: EventFrame = {
+            event: "session.window_closed",
+            payload: {
+              session_id: ctx.sessionId,
+              reason: "user_closed_window",
+              ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
+            },
+          };
+          try {
+            transport.send(event);
+          } catch (err) {
+            console.warn("[bh] could not push session.window_closed event", err);
+          }
         })
-      : Promise.resolve();
-    void detach
+        .catch((err) => {
+          console.warn("[bh] session-event handler failed", err);
+        });
+    }
+  };
+
+  const disposeEmpty = manager.onEmpty((ctx) => {
+    if (ctx.stopping) return;
+    ctx.stopping = true;
+    void (options.cdp?.detachSession(ctx.sessionId) ?? Promise.resolve())
       .then(() => manager.stop(ctx.sessionId, { dropOnly: true }))
-      .then(() => {
+      .then((removed) => {
+        if (!removed) return;
         onSessionsChanged?.();
-        if (expectedClose) return;
-        const event: EventFrame = {
-          event: "session.window_closed",
-          payload: {
-            session_id: ctx.sessionId,
-            reason: "user_closed_window",
-            ...(returnFailures.length > 0 ? { return_failures: returnFailures } : {}),
-          },
-        };
-        try {
-          transport.send(event);
-        } catch (err) {
-          console.warn("[bh] could not push session.window_closed event", err);
-        }
+        transport.send({
+          event: "session.tabs_closed",
+          payload: { session_id: ctx.sessionId, reason: "no_controlled_tabs" },
+        });
       })
       .catch((err) => {
-        console.warn("[bh] session-event handler failed", err);
+        ctx.stopping = false;
+        console.warn("[bh] empty session cleanup failed", err);
       });
-  };
+  });
 
   events.addListener(onRemoved);
   return {
-    dispose: () => events.removeListener(onRemoved),
+    dispose: () => {
+      events.removeListener(onRemoved);
+      disposeEmpty();
+    },
   };
 }

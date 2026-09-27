@@ -24,7 +24,7 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 
 | Category | What is accessed | Why |
 |---|---|---|
-| **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in the "Agent Window," tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
+| **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in a dedicated Agent Window or an opt-in local shared-window session, tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Website debugging evidence** | For the selected tab while capture is active: request URLs, methods, headers, request and response bodies when available, status, timing, errors and related network metadata; console messages; agent actions and supported manual input, click, submission and navigation events; bounded visible page text, form-field values and page/performance context. Configured HTTP rules and replay outcomes are also recorded. | Used to inspect and reproduce website behavior, associate operations with requests and page changes, analyze performance, and review or export debugging history. |
 | **Tab and window metadata** | Tab IDs, URLs, titles and window IDs, including user tabs listed to select a tab for borrowing. | Required to target automation commands at the correct tab/window. |
@@ -50,8 +50,8 @@ The Extension requests the following Chrome permissions. Each is used solely for
 - **`activeTab`** — Allow temporary access to the active tab when the user invokes the Extension, for user-initiated Quick Actions.
 - **`scripting`** — Inject the full-page screenshot helper into the selected page when it is missing, such as after an extension reload.
 - **`webNavigation`** — Track page navigation and frames so captures, recordings, and human-help completion checks follow the correct document.
-- **`tabs`** — Inspect, create, and close tabs in the Agent Window; query tab metadata.
-- **`windows`** — Create and manage the dedicated Agent Window that isolates agent activity from the user's normal browsing.
+- **`tabs`** — Inspect, create, and close session-owned tabs; query tab metadata. An opt-in local shared-window session creates tabs in a user window but does not thereby control other user tabs.
+- **`windows`** — Create and manage dedicated Agent Windows, or identify the user window selected for an opt-in local shared-window session. Shared-session cleanup does not close that user window.
 - **`alarms`** — Periodically wake the service worker to keep the selected connection alive and renew remote device authorization.
 - **`idle`** — Detect when the device returns from idle/locked so the Extension can promptly re-establish the selected WebSocket connection after the machine wakes. No idle data is stored or transmitted.
 - **`notifications`** — Show a system notification to obtain user approval before borrowing a user-owned tab when browser confirmation is enabled.
@@ -88,7 +88,7 @@ Users can at any time:
 - Uninstall the Extension from `chrome://extensions`, which removes extension storage. Audit files on the daemon host and exported copies must be deleted separately.
 - Stop website debugging from Quick Actions → Website debugging, or ask the agent to stop capture. Open its history page to review or export records and delete stopped records, including when no daemon is connected. Stop an active capture before deleting its record.
 - Turn operation audit off in Quick Features to stop collecting new audit operations while retaining existing audit history. Previously recorded tasks still receive their final lifecycle status. This switch does not stop website debugging capture or delete its history.
-- Close the Agent Window to stop all agent automation immediately.
+- Stop a session with `bsk session stop SESSION_ID`. A dedicated session also ends when its Agent Window closes; a shared-window session ends when its last controlled tab closes. Stopping a shared session does not close the user window.
 - Enable confirmation before borrowing and deny tab-borrow prompts to keep existing tabs off-limits.
 - Disable the connection, choose Local connection, or stop the selected daemon to disconnect.
 - Revoke a paired device from the server with `bsk daemon revoke DEVICE_ID`, or use the gateway operator’s revocation controls.

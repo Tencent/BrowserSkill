@@ -70,6 +70,7 @@ async function fixture() {
     tabs: {
       sendMessage,
       onDetached,
+      onAttached: event(),
       onActivated: event(),
       onUpdated: event(),
       onCreated: event(),

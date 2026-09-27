@@ -53,7 +53,7 @@ Key modules:
 - In local mode, listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
 - Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
 - Validates `Origin: chrome-extension://…` on handshake.
-- Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
+- Maintains `browsers` (connected extensions) and `sessions` (window containers and page ownership).
 - **Per-session queue** serializes tool calls targeting one session.
 - Forwards `tool.*` RPCs to the correct extension connection.
 
@@ -74,10 +74,10 @@ WXT / MV3 Chromium extension. Built with React popup and a service worker backgr
 | --- | --- |
 | `transport/` | Pluggable `Transport` (v1: `WSTransport`) |
 | `tools/` | `ToolDispatcher` → 21 tool handlers |
-| `session-manager/` | Sessions, Agent Window, ref-store (`@e1`) |
+| `session-manager/` | Dedicated/shared session containers, tab ownership, ref-store (`@e1`) |
 | `browser-driver/` | CDP-backed browser operations |
 | `entrypoints/popup/` | Connection status UI |
-| `content/` | Control overlay in Agent Windows |
+| `content/` | Control overlay on session-controlled pages |
 
 ### bsk-protocol (`crates/bsk-protocol`)
 
@@ -99,13 +99,17 @@ mutation for session queueing and user-interruption gating.
 
 ## Session and sandbox model
 
-- **Session** = opaque ID (4 lowercase letters in v0.1) + dedicated **Agent Window**
-  + session-scoped ref-store + borrow table.
-- **Sandbox-only**: write tools require tabs inside the Agent Window unless the tab
-  was **borrowed** from the user profile.
+- **Session** = opaque ID + window container + session-scoped ref-store and tab ownership.
+  The default container is a dedicated **Agent Window**. Local `session start --in-window`
+  creates a controlled tab in the last-focused normal user window (protocol 1.4).
+- **Write scope**: dedicated sessions use their Agent Window. Shared sessions require
+  both explicit tab ownership (created or borrowed) and location in their host window.
+  Sharing a host never grants control of user pages or another session's pages.
 - **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
   (default 5 min) is a safety net only.
-- Multiple sessions on one browser → multiple Agent Windows, fully isolated.
+- Multiple sessions may use separate Agent Windows or share a local user window;
+  controlled pages remain isolated by session. Shared cleanup returns borrowed pages
+  and removes its created pages without actively closing the host window.
 - Remote content reads and actions require task-created or explicitly borrowed tabs.
   A page-opened popup or a user tab moved into the Agent Window does not become
   controlled automatically; see [remote tab ownership](remote-extension-connection.md#browser-permissions-and-task-lifetime).
@@ -114,9 +118,9 @@ mutation for session queueing and user-interruption gating.
 
 | `scope` | Visible tabs |
 | --- | --- |
-| `user` | User profile windows (default) |
-| `agent` | Current session's Agent Window only |
-| `all` | Agent Window + user windows for this session |
+| `user` | User pages, excluding other sessions' controlled pages and dedicated windows |
+| `agent` | Current dedicated Agent Window, or explicitly controlled pages in a shared host |
+| `all` | Both scopes, excluding other sessions' controlled pages and dedicated windows |
 
 ## Concurrency
 
@@ -161,7 +165,7 @@ flowchart LR
 - Website cookies stay in the user's browser profile. Remote device credentials
   are stored in extension-origin IndexedDB; the built-in server stores credential
   hashes in its private `BSK_HOME`. Pairing and device grants govern remote access.
-- `evaluate` restricted to Agent Window tabs in sandbox mode.
+- `evaluate` follows session write scope, including explicit ownership in shared mode.
 - Operation audit, when enabled, is stored on the daemon host, including the
   server in remote mode. See [operation audit](operation-audit.md).
 
