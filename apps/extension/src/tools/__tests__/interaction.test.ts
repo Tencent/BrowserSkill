@@ -1292,12 +1292,11 @@ function successfulFillScript(params: unknown) {
   const args = script.arguments ?? [];
   return {
     result: {
-      value:
-        args.length === 2
-          ? { before: "", expected: args[0].value }
-          : script.functionDeclaration.startsWith("function(expected)")
-            ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-            : "ready",
+      value: script.functionDeclaration.startsWith("function(value, clearBefore")
+        ? { before: "", expected: args[0].value }
+        : script.functionDeclaration.startsWith("function(expected)")
+          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
+          : "ready",
     },
   };
 }
@@ -1380,8 +1379,10 @@ describe("handleFill", () => {
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
-        const args = (p as { arguments?: Array<{ value: unknown }> }).arguments ?? [];
-        if (args.length === 2) expect(args[1].value).toBe(false);
+        const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
+        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+          expect(script.arguments?.[1].value).toBe(false);
+        }
         return successfulFillScript(p);
       },
       "Input.dispatchKeyEvent": () => ({}),

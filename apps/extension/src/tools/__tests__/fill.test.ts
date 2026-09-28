@@ -4,8 +4,10 @@ import type { CdpRunner } from "@/tools/shared";
 import { handleFill } from "../interaction";
 
 interface ScriptParams {
+  objectId?: string;
   functionDeclaration: string;
-  arguments?: Array<{ value: unknown }>;
+  arguments?: Array<{ value?: unknown; objectId?: string }>;
+  returnByValue?: boolean;
 }
 
 async function setup(markup = '<input value="old">') {
@@ -20,17 +22,23 @@ async function setup(markup = '<input value="old">') {
   });
   const ctx = await manager.start("aa11");
   ctx.refStore.set("e1", 12, { tabId: 4 });
+  // Remote object handles, as Runtime.callFunctionOn hands them out.
+  const objects = new Map<string, Element>([["fill-target", element]]);
   const script = vi.fn(async (params: ScriptParams): Promise<unknown> => {
     try {
       const fn = new Function(`return (${params.functionDeclaration})`)();
-      return {
-        result: {
-          value: await fn.apply(
-            element,
-            (params.arguments ?? []).map((arg) => arg.value),
-          ),
-        },
-      };
+      const value = await fn.apply(
+        objects.get(params.objectId ?? "fill-target"),
+        (params.arguments ?? []).map((arg) =>
+          arg.objectId === undefined ? arg.value : objects.get(arg.objectId),
+        ),
+      );
+      if (params.returnByValue === false && value instanceof Element) {
+        const objectId = `object-${objects.size}`;
+        objects.set(objectId, value);
+        return { result: { objectId } };
+      }
+      return { result: { value } };
     } catch {
       return { exceptionDetails: { text: "test page script failed" } };
     }
@@ -67,9 +75,11 @@ async function setup(markup = '<input value="old">') {
         };
       case "DOM.scrollIntoViewIfNeeded":
         return {};
-      case "DOM.focus":
-        element.focus();
+      case "DOM.focus": {
+        const objectId = (params as { objectId?: string }).objectId;
+        ((objectId ? objects.get(objectId) : element) as HTMLElement).focus();
         return {};
+      }
       case "DOM.resolveNode":
         return { object: { objectId: "fill-target" } };
       case "Runtime.callFunctionOn":
@@ -407,6 +417,16 @@ describe("fill result verification", () => {
     });
     expect(await h.fill("hello")).toMatchObject({ value_length: 5 });
     expect(h.insert).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an element that is not editable before focusing it", async () => {
+    const h = await setup('<div tabindex="0">text</div>');
+    expect(await h.fill("hello")).toMatchObject({
+      code: "invalid_params",
+      data: { reason: "target_not_fillable" },
+    });
+    expect(h.send.mock.calls.map(([, method]) => method)).not.toContain("DOM.focus");
+    expect(h.insert).not.toHaveBeenCalled();
   });
 
   it("does not count an editable padding break as an extra typed character", async () => {
