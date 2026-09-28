@@ -157,7 +157,9 @@ flowchart LR
 - Local mode binds WebSocket to **loopback**. Server mode permits remote access
   through authenticated WSS; plaintext listeners remain on loopback behind TLS
   termination or for development.
-- Extension origin allow-list at WS upgrade.
+- Extension origin allow-list at WS upgrade: pinned to BrowserSkill's own
+  store extension IDs. Sideloaded dev builds are admitted explicitly via the
+  `BSK_ALLOWED_EXTENSION_IDS` environment variable (comma-separated IDs).
 - Website cookies stay in the user's browser profile. Remote device credentials
   are stored in extension-origin IndexedDB; the built-in server stores credential
   hashes in its private `BSK_HOME`. Pairing and device grants govern remote access.

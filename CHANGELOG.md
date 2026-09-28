@@ -9,6 +9,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Daemon: the local WebSocket origin gate now pins connections to BrowserSkill's
+  own extension IDs (Chrome Web Store and Edge Add-ons) instead of accepting any
+  `chrome-extension://` origin, so a foreign extension installed in the same
+  profile can no longer register as a browser and answer agent requests with
+  fabricated results (#273). Sideloaded/dev builds are admitted explicitly via
+  the `BSK_ALLOWED_EXTENSION_IDS` environment variable (comma-separated IDs).
 - Protocol: preserve explicit `null` results when deserializing `ResponseFrame`,
   restoring round-trip consistency while rejecting responses with both a result and an error.
 

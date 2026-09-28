@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-pub const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop"; // 32 chars in a-p
+pub const TEST_EXT_ID: &str = "hhcmgoofomhgciiibhipgmgkgnoenaoi"; // 32 chars in a-p
 
 pub async fn spawn_daemon() -> daemon::DaemonHandle {
     // Bind to any free TCP port.

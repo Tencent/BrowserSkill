@@ -358,7 +358,7 @@ fn cli(home: &Path) -> Command {
         .env("BSK_UPDATE_MANIFEST_URL", "http://127.0.0.1:1/disabled");
     command
 }
-const ORIGIN: &str = "chrome-extension://abcdefghijklmnopabcdefghijklmnop";
+const ORIGIN: &str = "chrome-extension://hhcmgoofomhgciiibhipgmgkgnoenaoi";
 async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>, instance: &str) {
     ws.send(Message::Text(json!({"id":"handshake","method":"system.handshake","params":{
         "client":"browser-skill-extension","version":"0.2.1","protocol_version":bsk::daemon::state::PROTOCOL_VERSION,

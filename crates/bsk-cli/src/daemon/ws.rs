@@ -33,27 +33,39 @@ use super::state::{
     DaemonState, LEGACY_MIN_COMPATIBLE_PEER, MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION, SERVER_NAME,
 };
 
-/// Result of the optional Origin allow-list check.
-///
-/// TODO(M10/M12): pair v0.1 GA with an actual extension-id allow-list
-/// (`DaemonConfig::allowed_extension_ids: HashSet<String>`) populated
-/// from a config file / pairing flow, rather than accepting any
-/// extension-shaped origin. Review M4/M5 I8 — acceptable defense-in-
-/// depth gap for now because pairing happens through the popup, but
-/// a side-loaded extension on the same machine currently passes the
-/// gate.
-pub(super) fn origin_allowed(origin: &str, allow_any: bool) -> bool {
+/// Extension IDs the daemon treats as its own: the official Chrome Web
+/// Store and Edge Add-ons listings. Every MV3 extension origin has the
+/// same `chrome-extension://<32 a-p chars>` shape, so shape alone cannot
+/// distinguish BrowserSkill from any other installed extension — the ID
+/// must match one of these, or be admitted explicitly via
+/// `DaemonConfig::extra_allowed_extension_ids` (env
+/// `BSK_ALLOWED_EXTENSION_IDS`), which covers sideloaded dev builds
+/// whose unpacked IDs are path-derived.
+pub(super) const BROWSER_SKILL_EXTENSION_IDS: [&str; 2] = [
+    "hhcmgoofomhgciiibhipgmgkgnoenaoi", // Chrome Web Store
+    "emacgiaaaiojkkpkddmmdfhmokgmnikg", // Edge Add-ons
+];
+
+/// Origin check at WS upgrade: the caller must be one of BrowserSkill's
+/// own extensions (see [`BROWSER_SKILL_EXTENSION_IDS`]) or an ID the
+/// operator admitted via `BSK_ALLOWED_EXTENSION_IDS`.
+pub(super) fn origin_allowed(origin: &str, extra_ids: &[String], allow_any: bool) -> bool {
     if allow_any {
         return true;
     }
-    // MV3 extension ids are 32 a–p characters per Chrome spec.
-    let prefix = "chrome-extension://";
-    if let Some(rest) = origin.strip_prefix(prefix) {
-        if rest.len() == 32 && rest.bytes().all(|b| (b'a'..=b'p').contains(&b)) {
-            return true;
+    match origin.strip_prefix("chrome-extension://") {
+        Some(id) => {
+            is_extension_id(id)
+                && (BROWSER_SKILL_EXTENSION_IDS.contains(&id)
+                    || extra_ids.iter().any(|extra| extra == id))
         }
+        None => false,
     }
-    false
+}
+
+/// MV3 extension ids are 32 a–p characters per Chrome spec.
+fn is_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b))
 }
 
 pub struct WsServer {
@@ -124,6 +136,7 @@ async fn handle_connection(
     peer: SocketAddr,
 ) -> anyhow::Result<()> {
     let allow_any = state.config.allow_any_origin;
+    let extra_ids = state.config.extra_allowed_extension_ids.clone();
     let captured_origin: std::sync::Arc<std::sync::Mutex<Option<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let captured_origin_for_cb = std::sync::Arc::clone(&captured_origin);
@@ -135,10 +148,14 @@ async fn handle_connection(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        if !origin_allowed(&origin, allow_any) {
-            warn!(?origin, "rejecting WS upgrade with disallowed origin");
+        if !origin_allowed(&origin, &extra_ids, allow_any) {
+            warn!(
+                ?origin,
+                "rejecting WS upgrade: extension id not in allow-list \
+                 (set BSK_ALLOWED_EXTENSION_IDS to admit a sideloaded/dev build)"
+            );
             let mut err = ErrorResponse::new(Some(
-                "Origin not in chrome-extension allow-list".to_string(),
+                "Origin not in BrowserSkill extension allow-list".to_string(),
             ));
             *err.status_mut() = StatusCode::FORBIDDEN;
             return Err(err);
@@ -710,33 +727,66 @@ fn handle_session_user_interrupt(
 mod tests {
     use super::*;
 
+    fn builtin_ids() -> Vec<String> {
+        BROWSER_SKILL_EXTENSION_IDS.map(str::to_string).into()
+    }
+
     #[test]
-    fn origin_allowlist_accepts_valid_extension_id() {
+    fn origin_allowlist_accepts_builtin_extension_ids() {
+        for id in builtin_ids() {
+            assert!(origin_allowed(
+                &format!("chrome-extension://{id}"),
+                &[],
+                false
+            ));
+        }
+    }
+
+    #[test]
+    fn origin_allowlist_rejects_well_formed_but_unknown_extension_id() {
+        // 32 a-p chars, yet not BrowserSkill's: any other installed
+        // extension must not pass the gate (#273).
         let id = "a".repeat(32);
-        assert!(origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            &[],
+            false
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_uppercase() {
         let id = "A".repeat(32);
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            &builtin_ids(),
+            false
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_unknown_scheme() {
         let id = "a".repeat(32);
-        assert!(!origin_allowed(&format!("http://{id}.example"), false));
+        assert!(!origin_allowed(
+            &format!("http://{id}.example"),
+            &builtin_ids(),
+            false
+        ));
     }
 
     #[test]
     fn origin_allowlist_rejects_chars_outside_ap() {
         let id = "z".repeat(32); // 'z' > 'p'
-        assert!(!origin_allowed(&format!("chrome-extension://{id}"), false));
+        assert!(!origin_allowed(
+            &format!("chrome-extension://{id}"),
+            &builtin_ids(),
+            false
+        ));
     }
 
     #[test]
     fn origin_allowlist_bypassed_when_allow_any() {
-        assert!(origin_allowed("http://localhost", true));
+        assert!(origin_allowed("http://localhost", &[], true));
     }
 }
 

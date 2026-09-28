@@ -59,6 +59,11 @@ pub struct DaemonConfig {
     pub daemon_idle: Duration,
     /// Skip the Origin allow-list (tests / `--insecure-origin`).
     pub allow_any_origin: bool,
+    /// Extension IDs admitted at WS upgrade on top of the built-in
+    /// BrowserSkill store IDs. Populated from
+    /// `BSK_ALLOWED_EXTENSION_IDS` (comma-separated) so sideloaded dev
+    /// builds — whose unpacked IDs are path-derived — can connect.
+    pub extra_allowed_extension_ids: Vec<String>,
     /// How long `session.start` polls for an extension handshake before
     /// returning `no_browser_connected`.
     pub extension_connect_wait: Duration,
@@ -81,6 +86,7 @@ impl DaemonConfig {
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
             allow_any_origin: false,
+            extra_allowed_extension_ids: Vec::new(),
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
@@ -116,11 +122,37 @@ impl From<&StartArgs> for DaemonConfig {
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
             allow_any_origin: false,
+            extra_allowed_extension_ids: extra_allowed_extension_ids_from_env(),
             extension_connect_wait: EXTENSION_CONNECT_WAIT,
             browser_liveness_timeout: BROWSER_LIVENESS_TIMEOUT,
             browser_liveness_tick: BROWSER_LIVENESS_TICK,
         }
     }
+}
+
+/// Env var admitting extra extension IDs at WS upgrade, comma-separated.
+pub(crate) const EXTRA_ALLOWED_EXTENSION_IDS_ENV: &str = "BSK_ALLOWED_EXTENSION_IDS";
+
+/// Parse `BSK_ALLOWED_EXTENSION_IDS`. Well-formed MV3 IDs (32 a-p
+/// chars) are kept; malformed entries are skipped with a warning so one
+/// typo cannot silently disable the daemon's extension gate entirely.
+fn extra_allowed_extension_ids_from_env() -> Vec<String> {
+    let raw = std::env::var(EXTRA_ALLOWED_EXTENSION_IDS_ENV).unwrap_or_default();
+    raw.split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .filter(|id| {
+            let valid = id.len() == 32 && id.bytes().all(|b| (b'a'..=b'p').contains(&b));
+            if !valid {
+                warn!(
+                    id,
+                    "ignoring malformed entry in {EXTRA_ALLOWED_EXTENSION_IDS_ENV}"
+                );
+            }
+            valid
+        })
+        .map(str::to_string)
+        .collect()
 }
 
 /// `bsk daemon start` entrypoint.

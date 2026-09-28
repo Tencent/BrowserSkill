@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const TEST_EXT_ID: &str = "hhcmgoofomhgciiibhipgmgkgnoenaoi";
 static DOCTOR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct EnvRestore(Vec<(&'static str, Option<OsString>)>);

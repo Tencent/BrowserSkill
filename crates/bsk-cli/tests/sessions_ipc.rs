@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use support::{wait_for_browser_count, wait_for_no_sessions};
 
-const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const TEST_EXT_ID: &str = "hhcmgoofomhgciiibhipgmgkgnoenaoi";
 
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -760,7 +760,7 @@ async fn connect_second_ext(
         .header("Sec-WebSocket-Key", generate_key())
         .header(
             "Origin",
-            "chrome-extension://abcdefghijklmnoppmnolkjihgfedcba".to_string(),
+            "chrome-extension://emacgiaaaiojkkpkddmmdfhmokgmnikg".to_string(),
         )
         .body(())
         .unwrap();
