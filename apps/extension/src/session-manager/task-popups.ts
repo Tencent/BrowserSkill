@@ -77,6 +77,9 @@ export async function withTaskPopups<T>(
         return false;
       });
     candidates.set(tabId, work);
+    // Observation finishes after onCreated, so the Agent Window tab guard would
+    // otherwise evict a legitimate popup before this decides whether to claim it.
+    manager.trackPendingTabClaim(task.sessionId, work);
   };
   const stopListening = () => {
     listening = false;
