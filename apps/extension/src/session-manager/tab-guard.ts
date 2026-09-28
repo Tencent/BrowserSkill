@@ -28,6 +28,15 @@ export interface TabGuardEvents {
     addListener(cb: (tabId: number, info: { newWindowId: number }) => void): void;
     removeListener(cb: (tabId: number, info: { newWindowId: number }) => void): void;
   };
+  /**
+   * `chrome.windows.getLastFocused` answers with the Agent Window while the
+   * agent is working, so it cannot name the window the user was last in. The
+   * guard keeps its own order from focus events instead.
+   */
+  onFocusChanged?: {
+    addListener(cb: (windowId: number) => void): void;
+    removeListener(cb: (windowId: number) => void): void;
+  };
 }
 
 export interface TabGuardOptions {
@@ -72,6 +81,18 @@ export const chromeTabGuardWindowsApi: TabGuardWindowsApi = {
 export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: () => void } {
   const { manager, tabs, windows, events, onError } = options;
 
+  /** User windows in the order they were last focused, most recent first. */
+  const recentUserWindows: number[] = [];
+  const noteFocus = (windowId: number): void => {
+    // chrome.windows.WINDOW_ID_NONE is -1 and means focus left the browser.
+    if (typeof windowId !== "number" || windowId < 0) return;
+    if (manager.list().some((ctx) => ctx.agentWindowId === windowId)) return;
+    const seen = recentUserWindows.indexOf(windowId);
+    if (seen !== -1) recentUserWindows.splice(seen, 1);
+    recentUserWindows.unshift(windowId);
+    if (recentUserWindows.length > 16) recentUserWindows.length = 16;
+  };
+
   const report = (error: unknown): void => {
     if (onError) onError(error);
     else console.warn("[browser-skill] agent-window tab guard failed", error);
@@ -91,15 +112,47 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
     if (manager.findBorrowingSession(tabId, null) === ctx.sessionId) return;
     if (openerTabId !== undefined && isAgentControlledTab(ctx, openerTabId)) return;
 
-    const target = await resolveUserWindow(manager, windows);
+    // `tab_create` registers ownership only once `chrome.tabs.create` resolves,
+    // and popup observation decides later still. Both reach this listener
+    // first, so the read above is not final: wait for what the session already
+    // has in flight, then read again. Waiting on the operation rather than on a
+    // delay is what makes this correct instead of merely usually right.
+    await manager.settlePendingTabClaims(ctx.sessionId);
+    if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
+
+    const target = await resolveUserWindow(manager, windows, recentUserWindows);
+    // Every await above is a point where the tab may have been claimed, moved
+    // by the user, or the session torn down. Re-read both before touching it.
+    if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
+    const current = await tabs.get(tabId);
+    if (!current || current.windowId !== windowId) return;
+    if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
+
     if (target === null) {
       await windows.createWithTab(tabId);
       return;
     }
     if (target === windowId) return;
-    await tabs.move(tabId, { windowId: target, index: -1 });
+    await moveWithRetries(tabs, tabId, target, () =>
+      stillForeign(ctx, tabId, windowId, openerTabId),
+    );
     await windows.focus(target);
     await tabs.update(tabId, { active: true });
+  };
+
+  /** Re-read the claim tables and the session, which any await may have changed. */
+  const stillForeign = (
+    ctx: { sessionId: string; agentWindowId: number },
+    tabId: number,
+    windowId: number,
+    openerTabId: number | undefined,
+  ): boolean => {
+    const current = manager.findByWindowId(windowId);
+    if (!current || current.sessionId !== ctx.sessionId) return false;
+    if (isAgentControlledTab(current, tabId)) return false;
+    if (manager.findBorrowingSession(tabId, null) === current.sessionId) return false;
+    if (openerTabId !== undefined && isAgentControlledTab(current, openerTabId)) return false;
+    return true;
   };
 
   const onCreated = (tab: { id?: number; windowId?: number; openerTabId?: number }): void => {
@@ -116,10 +169,12 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
 
   events.onCreated.addListener(onCreated);
   events.onAttached.addListener(onAttached);
+  events.onFocusChanged?.addListener(noteFocus);
   return {
     dispose: () => {
       events.onCreated.removeListener(onCreated);
       events.onAttached.removeListener(onAttached);
+      events.onFocusChanged?.removeListener(noteFocus);
     },
   };
 }
@@ -127,12 +182,47 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
 async function resolveUserWindow(
   manager: SessionManager,
   windows: TabGuardWindowsApi,
+  recentUserWindows: readonly number[],
 ): Promise<number | null> {
   const agentWindowIds = new Set(manager.list().map((ctx) => ctx.agentWindowId));
+  const open = new Set(await windows.listNormalIds());
+  // Observed focus first: Chrome's own answer is the Agent Window while the
+  // agent works, and the open-window order below is arbitrary rather than
+  // most-recently-used.
+  for (const id of recentUserWindows) {
+    if (!agentWindowIds.has(id) && open.has(id)) return id;
+  }
   const lastFocused = await windows.getLastFocusedNormalId();
-  if (lastFocused !== null && !agentWindowIds.has(lastFocused)) return lastFocused;
-  for (const id of await windows.listNormalIds()) {
+  if (lastFocused !== null && !agentWindowIds.has(lastFocused) && open.has(lastFocused)) {
+    return lastFocused;
+  }
+  for (const id of open) {
     if (!agentWindowIds.has(id)) return id;
   }
   return null;
+}
+
+/**
+ * Chrome refuses a move while the user is dragging the tab, which is transient.
+ * Retry a bounded number of times, re-checking between attempts so a tab that
+ * became ours in the meantime is left alone, and give up rather than loop.
+ */
+async function moveWithRetries(
+  tabs: TabGuardTabsApi,
+  tabId: number,
+  windowId: number,
+  stillForeign: () => boolean,
+): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!stillForeign()) return;
+    try {
+      await tabs.move(tabId, { windowId, index: -1 });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+  throw lastError;
 }
