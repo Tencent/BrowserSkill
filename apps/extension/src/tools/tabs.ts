@@ -14,7 +14,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
-import type { RpcError } from "@/transport/types";
+import type { RpcError, TransferCleanupState } from "@/transport/types";
 import { rpcError } from "./errors";
 import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
 
@@ -1466,6 +1466,53 @@ async function authoriseAgentGroup(
   return group;
 }
 
+/**
+ * Run `authoriseAgentTab` against every tab in `tabIds`, so that group
+ * operations can never affect a tab the direct-control tools would reject
+ * (remote-session ownership, cross-session borrows, Agent Window scope).
+ * Returns the first failure, or null when every tab is authorised.
+ */
+async function authoriseAgentTabIds(
+  manager: SessionManager,
+  ctx: SessionContext,
+  tabIds: number[],
+  api: TabMutationApi,
+  toolName: string,
+): Promise<RpcError | null> {
+  for (const tabId of tabIds) {
+    const tabOrErr = await authoriseAgentTab(manager, ctx, tabId, api, toolName);
+    if (isRpcError(tabOrErr)) return tabOrErr;
+  }
+  return null;
+}
+
+/**
+ * Authorise every tab currently in `groupId`. A group operation renames,
+ * recolors, collapses or ungroups *all* its members, so each member needs
+ * the same authorization as a direct call against it — an unowned or
+ * borrowed tab must not be affected through group operations.
+ */
+async function authoriseAgentGroupMembers(
+  manager: SessionManager,
+  ctx: SessionContext,
+  groupId: number,
+  tabsApi: TabMutationApi,
+  queryTabs: TabGroupMutationApi["queryTabs"],
+  toolName: string,
+): Promise<RpcError | null> {
+  let members: chrome.tabs.Tab[];
+  try {
+    members = await queryTabs({ windowId: ctx.agentWindowId, groupId });
+  } catch (err) {
+    return {
+      code: "protocol_error",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+  const memberIds = members.filter((t): t is CreatedChromeTab => typeof t.id === "number").map((t) => t.id);
+  return authoriseAgentTabIds(manager, ctx, memberIds, tabsApi, toolName);
+}
+
 /** Re-read a group's current title/color/collapsed state and member tabs. */
 async function buildGroupInfo(
   groupsApi: ChromeTabGroupsApi,
@@ -1502,6 +1549,137 @@ async function buildGroupInfo(
     collapsed: group.collapsed,
     tab_ids: tabIds,
   };
+}
+
+/**
+ * Ensure a freshly created group lives in the session's Agent Window, with
+ * a bounded recovery ladder. Returns the group ID that is actually valid
+ * afterwards — it may not be the ID `tabs.group` returned — or an RpcError.
+ *
+ * Recovery stages, verified against real Chromium during review of #339:
+ *
+ * 1. Nothing to do: the group already reports the Agent Window.
+ * 2. Move the whole group (`tabGroups.move`). Some hosts accept this
+ *    silently without relocating anything, which is why it cannot be
+ *    trusted without re-checking.
+ * 3. Move each member tab individually. In real Chromium a per-tab move
+ *    across windows *drops the tab's group membership*, and once the last
+ *    member leaves, the group itself is destroyed — so `groupId` must not
+ *    be trusted afterwards. Verify that every tab actually landed in the
+ *    Agent Window, then recreate the group there and use the new ID.
+ *
+ * Every stage re-verifies placement from the browser's own state instead
+ * of assuming the previous call worked, and cleanup (ungrouping stranded
+ * tabs) reports honestly whether it succeeded rather than being silently
+ * swallowed.
+ */
+async function placeNewGroupInAgentWindow(
+  deps: TabManagementDeps,
+  ctx: SessionContext,
+  tabIds: number[],
+  groupId: number,
+  signal: AbortSignal | undefined,
+): Promise<number | RpcError> {
+  const toolName = "tab_group_create";
+  const tabsApi = getTabsApi(deps);
+  const groupsApi = getTabGroupsApi(deps);
+  const groupMutation = getTabGroupMutationApi(deps);
+
+  const groupIsPlaced = async (gid: number): Promise<boolean> => {
+    try {
+      return (await groupsApi.get(gid)).windowId === ctx.agentWindowId;
+    } catch {
+      // The group may no longer exist at all — e.g. Chromium destroyed it
+      // when the last member was moved out during stage 3.
+      return false;
+    }
+  };
+  const landedTabs = async (ids: number[]): Promise<number[]> => {
+    const landed: number[] = [];
+    for (const id of ids) {
+      try {
+        if ((await tabsApi.get(id)).windowId === ctx.agentWindowId) landed.push(id);
+      } catch {
+        // Tab closed mid-relocation: it certainly did not land.
+      }
+    }
+    return landed;
+  };
+  /** Best-effort membership cleanup; the outcome is surfaced, never hidden. */
+  const cleanupStrandedTabs = async (): Promise<TransferCleanupState> => {
+    try {
+      await groupMutation.ungroup(tabIds);
+      return "complete";
+    } catch {
+      return "failed";
+    }
+  };
+  const mismatch = (message: string, cleanup?: TransferCleanupState): RpcError =>
+    rpcError("cdp_failed", "group_window_mismatch", message, {
+      ...(cleanup ? { cleanup_state: cleanup } : {}),
+    });
+  /** Cancel mid-recovery: still ungroup whatever is stranded, then stop. */
+  const cancelledWithCleanup = async (): Promise<RpcError> => {
+    const cleanup = await cleanupStrandedTabs();
+    return { code: "cancelled", message: `${toolName} aborted`, data: { cleanup_state: cleanup } };
+  };
+
+  // Stage 1 — asked for this window at creation time.
+  if (await groupIsPlaced(groupId)) return groupId;
+
+  // Stage 2 — relocate the whole group. Harmless when the host silently
+  // no-ops it; placement is re-verified rather than assumed.
+  if (aborted(signal, toolName)) return cancelledWithCleanup();
+  await groupsApi.move(groupId, { windowId: ctx.agentWindowId, index: -1 }).catch(() => undefined);
+  if (await groupIsPlaced(groupId)) return groupId;
+
+  // Stage 3 — per-tab relocation. The old group ID is dead once the last
+  // member crosses windows (see doc comment), so treat it as unusable.
+  for (const tabId of tabIds) {
+    if (aborted(signal, toolName)) return cancelledWithCleanup();
+    try {
+      await tabsApi.move(tabId, { windowId: ctx.agentWindowId, index: -1 });
+    } catch {
+      // Verification below decides the outcome; keep trying the rest.
+    }
+  }
+  // Re-grouping below is a mutation: a cancellation that arrived during
+  // the moves must stop here, after recovering stranded memberships.
+  if (aborted(signal, toolName)) return cancelledWithCleanup();
+  const landed = await landedTabs(tabIds);
+  if (landed.length < tabIds.length) {
+    const cleanup = await cleanupStrandedTabs();
+    return mismatch(
+      `tab_group_create: only ${landed.length} of ${tabIds.length} requested tabs reached ` +
+        `Agent Window ${ctx.agentWindowId} after relocation was attempted ` +
+        `(${tabIds.filter((id) => !landed.includes(id)).join(", ")} did not land); ` +
+        "the tabs remain open" +
+        (cleanup === "complete" ? ", ungrouped" : `, ungrouping failed (cleanup_state: ${cleanup})`),
+      cleanup,
+    );
+  }
+
+  // Recreate the group now that every member is back in the Agent Window,
+  // and verify the recreation itself actually landed there.
+  let recreatedGroupId: number;
+  try {
+    recreatedGroupId = await groupMutation.group({
+      tabIds,
+      createProperties: { windowId: ctx.agentWindowId },
+    });
+  } catch (err) {
+    return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
+  }
+  if (!(await groupIsPlaced(recreatedGroupId))) {
+    const cleanup = await cleanupStrandedTabs();
+    return mismatch(
+      "tab_group_create: the browser did not keep the recreated group in the Agent Window " +
+        `${ctx.agentWindowId}; the tabs remain open` +
+        (cleanup === "complete" ? ", ungrouped" : `, ungrouping failed (cleanup_state: ${cleanup})`),
+      cleanup,
+    );
+  }
+  return recreatedGroupId;
 }
 
 function validateTabGroupCreateParams(params: TabGroupCreateParams): RpcError | null {
@@ -1551,20 +1729,35 @@ export async function handleTabGroupCreate(
   }
 
   const tabsApi = getTabsApi(deps);
-  for (const tabId of params.tab_ids) {
-    const tabOrErr = await authoriseAgentTab(manager, ctx, tabId, tabsApi, "tab_group_create");
-    if (isRpcError(tabOrErr)) return tabOrErr;
-  }
   const groupsApi = getTabGroupsApi(deps);
+  const groupMutation = getTabGroupMutationApi(deps);
+
+  // Authorise every tab the request names...
+  const namedErr = await authoriseAgentTabIds(manager, ctx, params.tab_ids, tabsApi, "tab_group_create");
+  if (namedErr) return namedErr;
+  // ...and, when adding to an existing group, every tab already in it:
+  // they will be renamed/re-grouped alongside, so each needs the same
+  // authorization a direct tab_select against it would require. Without
+  // this, an unowned user tab or another session's borrowed tab could be
+  // affected through group operations while `tab_select` rejects direct
+  // control of the same tab.
   if (params.group_id !== undefined) {
     const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_create");
     if (isRpcError(groupOrErr)) return groupOrErr;
+    const membersErr = await authoriseAgentGroupMembers(
+      manager,
+      ctx,
+      params.group_id,
+      tabsApi,
+      groupMutation.queryTabs,
+      "tab_group_create",
+    );
+    if (membersErr) return membersErr;
   }
   if (aborted(deps.signal, "tab_group_create")) {
     return { code: "cancelled", message: "tab_group_create aborted" };
   }
 
-  const groupMutation = getTabGroupMutationApi(deps);
   let groupId: number;
   try {
     groupId = await groupMutation.group({
@@ -1585,23 +1778,23 @@ export async function handleTabGroupCreate(
   // freshly created group (and the tabs riding along with it) in a
   // different window than `createProperties.windowId` requested — most
   // reliably reproduced when the Agent Window is unfocused (the default
-  // for `session start --no-focus`). Try relocating the group, then each
-  // member tab individually, before giving up — never silently hand tabs
-  // to the user's regular browsing session (design §6 sandbox rule).
+  // for `session start --no-focus`). Run the bounded recovery ladder —
+  // never silently hand tabs to the user's regular browsing session
+  // (design §6 sandbox rule).
   if (params.group_id === undefined) {
-    const misplaced = async () => (await groupsApi.get(groupId)).windowId !== ctx.agentWindowId;
-    try {
-      if (await misplaced()) {
-        await groupsApi.move(groupId, { windowId: ctx.agentWindowId, index: -1 }).catch(() => {});
-        if (await misplaced()) {
-          for (const tabId of params.tab_ids) {
-            await tabsApi.move(tabId, { windowId: ctx.agentWindowId, index: -1 });
-          }
-        }
-      }
-    } catch (err) {
-      return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
-    }
+    const placedOrErr = await placeNewGroupInAgentWindow(
+      deps,
+      ctx,
+      params.tab_ids,
+      groupId,
+      deps.signal,
+    );
+    if (isRpcError(placedOrErr)) return placedOrErr;
+    groupId = placedOrErr;
+  }
+
+  if (aborted(deps.signal, "tab_group_create")) {
+    return { code: "cancelled", message: "tab_group_create aborted" };
   }
 
   if (params.title !== undefined || params.color !== undefined) {
@@ -1618,20 +1811,17 @@ export async function handleTabGroupCreate(
   const infoOrErr = await buildGroupInfo(groupsApi, groupMutation.queryTabs, ctx.agentWindowId, groupId);
   if (isRpcError(infoOrErr)) return infoOrErr;
 
-  // Every relocation attempt above ran and the group's own metadata may
-  // still claim the Agent Window, but the only signal worth trusting is
-  // which requested tabs `buildGroupInfo` can actually see there. If none
-  // made it, don't report a hollow success: undo the stray group so it
-  // doesn't linger in the user's regular browsing session, and say so.
-  const requested = new Set(params.tab_ids);
-  const landed = infoOrErr.tab_ids.filter((id) => requested.has(id));
-  if (landed.length === 0 && params.group_id === undefined) {
-    await groupMutation.ungroup(params.tab_ids).catch(() => {});
+  // Every relocation attempt above ran, but the only signal worth trusting
+  // is which requested tabs are actually members of the group the browser
+  // reports now. Anything less than all of them is not a success.
+  const missing = params.tab_ids.filter((id) => !infoOrErr.tab_ids.includes(id));
+  if (missing.length > 0) {
     return rpcError(
       "cdp_failed",
       "group_window_mismatch",
-      "tab_group_create: the browser did not keep the new group in the Agent Window " +
-        `${ctx.agentWindowId} after relocation was attempted; the tabs remain open, ungrouped`,
+      `tab_group_create: tab(s) ${missing.join(", ")} did not join group ${groupId} ` +
+        `in Agent Window ${ctx.agentWindowId}; the group's current members are ` +
+        `${infoOrErr.tab_ids.join(", ") || "(none)"}`,
     );
   }
   return {
@@ -1669,6 +1859,17 @@ export async function handleTabGroupUpdate(
   const groupsApi = getTabGroupsApi(deps);
   const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_update");
   if (isRpcError(groupOrErr)) return groupOrErr;
+  // Renaming/recoloring/collapsing affects every member, so all of them
+  // need the same authorization a direct control call would require.
+  const membersErr = await authoriseAgentGroupMembers(
+    manager,
+    ctx,
+    params.group_id,
+    getTabsApi(deps),
+    getTabGroupMutationApi(deps).queryTabs,
+    "tab_group_update",
+  );
+  if (membersErr) return membersErr;
   if (aborted(deps.signal, "tab_group_update")) {
     return { code: "cancelled", message: "tab_group_update aborted" };
   }
@@ -1759,6 +1960,16 @@ export async function handleTabGroupUngroup(
     return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
   }
   const tabIds = tabs.filter((t): t is CreatedChromeTab => typeof t.id === "number").map((t) => t.id);
+  // Ungrouping affects every member: authorise them the same way direct
+  // control would before touching any of them.
+  const membersErr = await authoriseAgentTabIds(
+    manager,
+    ctx,
+    tabIds,
+    getTabsApi(deps),
+    "tab_group_ungroup",
+  );
+  if (membersErr) return membersErr;
   if (aborted(deps.signal, "tab_group_ungroup")) {
     return { code: "cancelled", message: "tab_group_ungroup aborted" };
   }

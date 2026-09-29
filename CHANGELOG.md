@@ -65,11 +65,18 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 - `bsk tab group create|update|list|ungroup`: native Chrome/Edge tab-group
   management (`chrome.tabGroups`) scoped to the session's Agent Window, with
-  the same sandbox rule as `tab close` / `tab select`. Guards against browsers
-  that place a freshly created group outside the target window (most
-  reproducible with `session start --no-focus`) with a relocation fallback,
-  and reports an honest error instead of a silent partial group when no
-  relocation attempt lands the tabs in the Agent Window.
+  the same sandbox rule as `tab close` / `tab select`. Every affected tab —
+  not only the ones a request names, but every existing member of the group
+  too — is authorised with the direct-control rules, so unowned or borrowed
+  tabs cannot be renamed, regrouped or ungrouped through group operations.
+  Browsers that misplace a freshly created group (most reproducible with
+  `session start --no-focus`) get a bounded recovery ladder — group-level
+  move, then per-tab relocation plus an in-place group recreation, each
+  step re-verified against browser state — and an honest
+  `group_window_mismatch` error with `cleanup_state` instead of a silent
+  partial group when no attempt lands every tab. Group creation checks
+  cancellation between stages and stops with cleanup rather than
+  continuing to mutate after an abort.
 
 ## [0.3.1] - 2026-09-23
 

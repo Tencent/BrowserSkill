@@ -113,9 +113,20 @@ bsk tab group ungroup <group-id> --session <id>
 
 Only tabs already inside the session's Agent Window (own tab or borrowed tab) can
 be grouped — same sandbox rule as `tab close` / `tab select`; a tab outside it is
-rejected with `permission_denied`. `list` and `ungroup` are scoped to the Agent
+rejected with `permission_denied`. A group operation touches *every* member, so
+all members must satisfy those same rules: a group containing an unowned tab or
+another session's borrowed tab is rejected outright, even when the request only
+names tabs the session owns. `list` and `ungroup` are scoped to the Agent
 Window's own groups the same way. `ungroup` removes tabs from the group without
 closing them.
+
+If the browser places a newly created group outside the Agent Window, the
+handler relocates it (group move, then per-tab moves plus an in-place group
+recreation), re-verifying placement after each step. If no step lands every
+requested tab in the Agent Window, the call fails with `group_window_mismatch`,
+reports which tabs did not land, and states whether the stranded tabs were
+ungrouped (`cleanup_state`) — it never leaves a stray group in the user's
+regular browsing session while claiming success.
 
 **Choose `--title` from what the tabs are actually about, never a placeholder.**
 Read the grouped tabs' titles/URLs first (`bsk tab list --scope agent`) and name
