@@ -1,9 +1,10 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { INPUT_PASSTHROUGH, INPUT_PASSTHROUGH_ATTR } from "@/lib/input-passthrough-bridge";
 import {
   OVERLAY_AGENT_OVERLAY_RESET,
   OVERLAY_AGENT_STATE,
   type OverlayMode,
+  type OverlayVersion,
 } from "@/lib/overlay-bridge";
 import { RECORD_START, RECORD_STOP } from "@/lib/record-bridge";
 
@@ -81,12 +82,21 @@ async function fixture() {
     },
   });
   const send = (message: unknown) => receive(message, {}, vi.fn());
-  const state = (sessionId = "one", mode: OverlayMode = "control") =>
-    send({ type: OVERLAY_AGENT_STATE, sessionId, mode, generation: 0 });
+  // Versions in the order one background worker hands them out.
+  let generation = 0;
+  const version = (): OverlayVersion => ({ epoch: "worker", generation: ++generation });
+  const state = (
+    sessionId: string | null = "one",
+    mode: OverlayMode = "control",
+    v: OverlayVersion = version(),
+  ) => send({ type: OVERLAY_AGENT_STATE, sessionId, mode, ...v });
+  const reset = (sessionId: string, v: OverlayVersion = version()) =>
+    send({ type: OVERLAY_AGENT_OVERLAY_RESET, sessionId, ...v });
   const begin = (id = "click-one") => send({ type: INPUT_PASSTHROUGH, phase: "begin", id });
   const active = () => host.hasAttribute(INPUT_PASSTHROUGH_ATTR);
+  const blocking = () => host.hasAttribute("data-bsk-overlay-blocking");
   state();
-  return { send, state, begin, active, remount: () => mount() };
+  return { send, version, state, reset, begin, active, blocking, remount: () => mount() };
 }
 
 it.each([
@@ -121,10 +131,10 @@ it("clears old session leases without letting stale reset/end clear the new sess
   f.state("two");
   expect(f.active()).toBe(false);
   f.begin("click-two");
-  f.send({ type: OVERLAY_AGENT_OVERLAY_RESET, sessionId: "one" });
+  f.reset("one");
   f.send({ type: INPUT_PASSTHROUGH, phase: "end", id: "click-one" });
   expect(f.active()).toBe(true);
-  f.send({ type: OVERLAY_AGENT_OVERLAY_RESET, sessionId: "two" });
+  f.reset("two");
   expect(f.active()).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
   f.remount();
@@ -148,4 +158,55 @@ it("removes passthrough and timers when the content context is invalidated", asy
   dispose?.();
   expect(f.active()).toBe(false);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+describe("overlay state ordering", () => {
+  it("drops a control state that arrives after a newer hidden state", async () => {
+    const f = await fixture();
+    const late = f.version();
+    f.state(null, "hidden");
+    f.state("one", "control", late);
+    expect(f.blocking()).toBe(false);
+  });
+
+  it("drops a control state sent before a reset", async () => {
+    const f = await fixture();
+    expect(f.blocking()).toBe(true);
+    const late = f.version();
+    f.reset("one");
+    expect(f.blocking()).toBe(false);
+    f.state("one", "control", late);
+    expect(f.blocking()).toBe(false);
+  });
+
+  it("drops a reset sent before a newer control state", async () => {
+    const f = await fixture();
+    const late = f.version();
+    f.state("one", "control");
+    f.reset("one", late);
+    expect(f.blocking()).toBe(true);
+  });
+
+  it("follows a restarted worker although its generation starts over", async () => {
+    const f = await fixture();
+    f.state("one", "control", { epoch: "worker", generation: 20 });
+    f.state(null, "hidden", { epoch: "restarted", generation: 1 });
+    expect(f.blocking()).toBe(false);
+    f.state("one", "control", { epoch: "restarted", generation: 2 });
+    expect(f.blocking()).toBe(true);
+  });
+
+  it("lets a restarted worker claim a page it had hidden", async () => {
+    const f = await fixture();
+    f.state(null, "hidden", { epoch: "worker", generation: 20 });
+    f.state("one", "control", { epoch: "restarted", generation: 1 });
+    expect(f.blocking()).toBe(true);
+  });
+
+  it("keeps dropping the replaced worker's messages", async () => {
+    const f = await fixture();
+    f.state(null, "hidden", { epoch: "restarted", generation: 1 });
+    f.state("one", "control", { epoch: "worker", generation: 30 });
+    expect(f.blocking()).toBe(false);
+  });
 });

@@ -68,11 +68,20 @@ export type OverlayMode = "control" | "interrupting" | "paused" | "hidden";
 /** Background → content: complete, authoritative control-overlay state. */
 export const OVERLAY_AGENT_STATE = "bh-agent-overlay-state";
 
-export interface OverlayAgentStateMessage {
+/**
+ * Orders the overlay state and reset messages one background worker sends:
+ * `generation` counts them, and `epoch` names the worker instance, whose
+ * counter starts over when the worker restarts.
+ */
+export interface OverlayVersion {
+  epoch: string;
+  generation: number;
+}
+
+export interface OverlayAgentStateMessage extends OverlayVersion {
   type: typeof OVERLAY_AGENT_STATE;
   sessionId: string | null;
   mode: OverlayMode;
-  generation: number;
 }
 
 export interface OverlayInterruptRequest {
@@ -95,17 +104,58 @@ export interface OverlayAutomationBypassMessage {
 /** Background → content: clear overlays that belong only inside an Agent tab. */
 export const OVERLAY_AGENT_OVERLAY_RESET = "bh-agent-overlay-reset";
 
-export interface OverlayAgentOverlayResetMessage {
+export interface OverlayAgentOverlayResetMessage extends OverlayVersion {
   type: typeof OVERLAY_AGENT_OVERLAY_RESET;
   sessionId: string;
+}
+
+function isOverlayVersion(candidate: { epoch?: unknown; generation?: unknown }): boolean {
+  return typeof candidate.epoch === "string" && typeof candidate.generation === "number";
 }
 
 export function isOverlayAgentOverlayResetMessage(
   message: unknown,
 ): message is OverlayAgentOverlayResetMessage {
   if (!message || typeof message !== "object") return false;
-  const candidate = message as { type?: unknown; sessionId?: unknown };
-  return candidate.type === OVERLAY_AGENT_OVERLAY_RESET && typeof candidate.sessionId === "string";
+  const candidate = message as {
+    type?: unknown;
+    sessionId?: unknown;
+    epoch?: unknown;
+    generation?: unknown;
+  };
+  return (
+    candidate.type === OVERLAY_AGENT_OVERLAY_RESET &&
+    typeof candidate.sessionId === "string" &&
+    isOverlayVersion(candidate)
+  );
+}
+
+/**
+ * Page side: admits overlay state and reset messages in the order the
+ * background worker sent them, dropping one that arrives after a newer one.
+ * A late `control` state after a newer `hidden` state or reset would
+ * otherwise pin the full-viewport blocker on the page. A message from
+ * another worker instance is newer, as a worker never outlives its
+ * successor, and messages from the instance it replaced stay dropped.
+ */
+export class OverlayVersionGate {
+  private last: OverlayVersion | null = null;
+  private readonly retiredEpochs = new Set<string>();
+
+  /** Whether the message with this version is current; records it if so. */
+  admit(version: OverlayVersion): boolean {
+    const last = this.last;
+    if (last && version.epoch === last.epoch) {
+      // The same message again, such as a re-sent state, is still current.
+      if (version.generation < last.generation) return false;
+    } else if (this.retiredEpochs.has(version.epoch)) {
+      return false;
+    } else if (last) {
+      this.retiredEpochs.add(last.epoch);
+    }
+    this.last = { epoch: version.epoch, generation: version.generation };
+    return true;
+  }
 }
 
 export function isOverlayAgentStateMessage(message: unknown): message is OverlayAgentStateMessage {
@@ -114,6 +164,7 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
     type?: unknown;
     sessionId?: unknown;
     mode?: unknown;
+    epoch?: unknown;
     generation?: unknown;
   };
   return (
@@ -123,7 +174,7 @@ export function isOverlayAgentStateMessage(message: unknown): message is Overlay
       candidate.mode === "interrupting" ||
       candidate.mode === "paused" ||
       candidate.mode === "hidden") &&
-    typeof candidate.generation === "number"
+    isOverlayVersion(candidate)
   );
 }
 

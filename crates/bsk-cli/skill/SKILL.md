@@ -20,6 +20,7 @@ advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 - If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
   before starting. Verify its instance mapping, bind every new session explicitly,
   and never substitute another instance or omit the selector to recover.
+- Parallel work: [parallel tasks](references/tabs-and-profiles.md).
 - Installing this skill does not install the `bsk` CLI or browser extension.
   For a missing CLI, startup or connection failure, or remote pairing, read
   [environment setup](references/environment.md). Commands normally auto-start the

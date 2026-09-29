@@ -194,6 +194,8 @@ it.each([
   expect(sendMessage).toHaveBeenCalledWith(20, {
     type: "bh-agent-overlay-reset",
     sessionId: "one",
+    epoch: expect.any(String),
+    generation: expect.any(Number),
   });
 });
 

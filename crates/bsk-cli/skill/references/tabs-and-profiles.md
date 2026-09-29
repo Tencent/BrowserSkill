@@ -62,3 +62,41 @@ Remote content reads/actions require task-created or borrowed tabs. Page-opened
 popups gain no control automatically; an unowned tab inside the Agent Window
 needs the user to move it to a user window before borrowing. Remote upload/download
 are unsupported; screenshots work.
+
+## Parallel tasks and shared login state
+
+This guidance applies to the `bsk` CLI skill; the DSH plugin is a separate
+skill with plugin-owned session visibility.
+
+Sessions started in the same browser profile share one cookie jar and one set
+of site state. Two tasks operating on the same logged-in site - or switching
+accounts/tenants there - can overwrite each other's login state with no error
+and no obvious trace. Treat a domain overlap as a signal to assess that risk;
+it does not by itself require serialization. Independent reads under the same
+account, or tasks already running in separate profiles, need not be forced
+serial.
+
+Before starting tasks in parallel:
+
+1. `bsk session list --json` and keep the sessions whose `browser_instance_id`
+   matches the browser you will use.
+2. Drop your own session, then for each remaining session run
+   `bsk tab list --session <id> --scope agent --json` and collect the tab URLs.
+3. Compare those URLs against each task's planned target domain.
+
+`tab list --scope all` is not sufficient here: it returns only the requesting
+session's Agent tabs plus user tabs, and hides other sessions' Agent Windows.
+
+An empty overlap result is a limited observation, not a guarantee of isolation.
+A task may still be on `about:blank`, start at the same time as another, or
+navigate elsewhere after the check. Re-check when a destination changes.
+
+When tasks run in parallel, each independent task keeps its own session ID and
+passes that same `--session <id>` to every later command. Do not infer isolation
+from the count of active sessions: N active sessions does not mean N tasks each
+use a different session.
+
+Serial execution does not restore a previous login state, so each task still
+verifies the expected account or tenant on its target site. When isolating with
+a separate profile, follow the profile-to-instance verification and explicit
+binding steps above, and preserve any profile the user required.
