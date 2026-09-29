@@ -147,6 +147,8 @@ bsk session stop <id>
 
 Use `bsk --help` or `bsk <command> --help` for command options. Always stop your session when finished, including after a failed task; borrowed tabs are returned to their original window.
 
+For a local session in the last-focused user window, start with `bsk session start --in-window --json`. It creates a session-owned tab; stopping closes that tab, not the user window. Existing user tabs still require an explicit borrow. Window dimensions and remote connections do not support this option.
+
 </details>
 
 If your agent sandbox removes background processes after each command, use the [sandbox setup guide](docs/sandboxed-agents.md). It explains how to keep the daemon in a persistent host environment and connect with shared `BSK_HOME` and `BSK_AUTO_START=0`.

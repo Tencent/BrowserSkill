@@ -36,7 +36,7 @@ import { attachUiChannel } from "@/lib/ui-channel";
 import { attachLongScreenshot } from "@/long-screenshot/background";
 import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { attachSessionEventHandler } from "@/session-manager/event-handler";
-import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
+import { isAgentControlledTab, SessionManager, sessionWindowId } from "@/session-manager/manager";
 import {
   attachBorrowNotificationButtonHandler,
   attachBorrowNotificationClickHandler,
@@ -89,8 +89,7 @@ export default defineBackground(() => {
     onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
     shouldAutoAcceptDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
-      const session = sessions.findByWindowId(tab.windowId);
-      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
+      return sessions.canAutoAcceptDialog(tabId, tab.windowId);
     },
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());
@@ -141,25 +140,7 @@ export default defineBackground(() => {
     if (controlModes.get(sessionId) === mode) return;
     controlModes.set(sessionId, mode);
     const ctx = sessions.get(sessionId);
-    if (ctx) void pushOverlayStateForWindow(ctx.agentWindowId);
-  }
-
-  function overlayStateForWindow(windowId?: number): OverlayAgentStateMessage {
-    const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
-    if (!ctx) {
-      return {
-        type: OVERLAY_AGENT_STATE,
-        sessionId: null,
-        mode: "hidden",
-        ...nextOverlayVersion(),
-      };
-    }
-    return {
-      type: OVERLAY_AGENT_STATE,
-      sessionId: ctx.sessionId,
-      mode: controlModes.get(ctx.sessionId) ?? "control",
-      ...nextOverlayVersion(),
-    };
+    if (ctx) void pushOverlayStateForWindow(sessionWindowId(ctx));
   }
 
   /**
@@ -169,8 +150,14 @@ export default defineBackground(() => {
    */
   function overlayStateForTab(tabId?: number, windowId?: number): OverlayAgentStateMessage {
     if (typeof tabId === "number" && typeof windowId === "number") {
-      const ctx = sessions.findByWindowId(windowId);
-      if (ctx && isAgentControlledTab(ctx, tabId)) return overlayStateForWindow(windowId);
+      const ctx = sessions.findByTabId(tabId);
+      if (ctx && sessionWindowId(ctx) === windowId)
+        return {
+          type: OVERLAY_AGENT_STATE,
+          sessionId: ctx.sessionId,
+          mode: controlModes.get(ctx.sessionId) ?? "control",
+          ...nextOverlayVersion(),
+        };
     }
     return {
       type: OVERLAY_AGENT_STATE,
@@ -207,7 +194,7 @@ export default defineBackground(() => {
   }
 
   function pushAllAgentOverlayStates(): void {
-    const windowIds = new Set(sessions.list().map((ctx) => ctx.agentWindowId));
+    const windowIds = new Set(sessions.list().map((ctx) => sessionWindowId(ctx)));
     for (const windowId of windowIds) {
       void pushOverlayStateForWindow(windowId);
     }
@@ -231,10 +218,12 @@ export default defineBackground(() => {
   }
 
   function pushOverlayStateForAgentWindow(windowId: number): void {
-    if (!sessions.findByWindowId(windowId)) return;
+    if (!sessions.sessionsInWindow(windowId).length) return;
     void pushOverlayStateForWindow(windowId);
   }
   chrome.tabs.onActivated.addListener((activeInfo) => {
+    const ctx = sessions.findByTabId(activeInfo.tabId);
+    if (ctx?.container.mode === "in_window") ctx.activeTabId = activeInfo.tabId;
     pushOverlayStateForAgentWindow(activeInfo.windowId);
   });
   chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
@@ -247,7 +236,7 @@ export default defineBackground(() => {
   // state; it never infers or mutates ownership from event ordering.
   chrome.tabs.onCreated.addListener((tab) => {
     if (typeof tab.windowId !== "number" || typeof tab.id !== "number") return;
-    if (!sessions.findByWindowId(tab.windowId)) return;
+    if (!sessions.sessionsInWindow(tab.windowId).length) return;
     void pushOverlayStateForTab(tab.id, tab.windowId);
   });
   chrome.tabs.onDetached.addListener((tabId) => {
@@ -263,6 +252,18 @@ export default defineBackground(() => {
     debug.stopTab(tabId, "tab_closed");
     sessions.forgetClosedTab(tabId, { isWindowClosing: removeInfo.isWindowClosing });
     debug.sync();
+  });
+  chrome.tabs.onAttached.addListener((tabId, info) => {
+    const ctx = sessions.findByTabId(tabId);
+    if (!ctx || ctx.container.mode !== "in_window" || sessionWindowId(ctx) === info.newWindowId)
+      return;
+    ctx.agentCreatedTabs.delete(tabId);
+    ctx.borrowedTabs.delete(tabId);
+    ctx.observedTabs?.delete(tabId);
+    ctx.refStore.invalidateTab(tabId);
+    void cdp.releaseSessionTab(ctx.sessionId, tabId).catch(console.warn);
+    void pushOverlayStateForTab(tabId, info.newWindowId);
+    sessions.checkEmpty(ctx);
   });
   // Re-sync the storage.session flag on SW startup so a previous SW's
   // stale `true` does not keep waking us on every page load until the
@@ -343,6 +344,7 @@ export default defineBackground(() => {
           // overlay — Agent Windows boot on about:blank, which has no
           // content script, so they cannot surface an authorization decision.
           isAgentWindowId: (windowId) => sessions.findByWindowId(windowId) !== null,
+          isTabAllowed: (tabId) => sessions.findByTabId(tabId) === null,
           // Resolve i18n strings per-borrow so language switches take effect
           // without re-creating the dispatcher.
           notificationCopy: makeBorrowNotificationCopy(),
@@ -460,8 +462,7 @@ export default defineBackground(() => {
     if (!msg || typeof msg !== "object" || !("kind" in msg)) return false;
 
     if (msg.kind === OVERLAY_MSG_WHO_AM_I) {
-      const windowId = sender.tab?.windowId;
-      const ctx = typeof windowId === "number" ? sessions.findByWindowId(windowId) : null;
+      const ctx = typeof sender.tab?.id === "number" ? sessions.findByTabId(sender.tab.id) : null;
       sendResponse({ sessionId: ctx?.sessionId ?? null });
       return false;
     }

@@ -24,6 +24,7 @@ describe("profile selection through browser_session", () => {
       "start",
       "--request-id",
       expect.any(String),
+      "--ephemeral",
       "--browser",
       browser,
     ]);

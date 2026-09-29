@@ -20,7 +20,7 @@
   },
   "definitions": {
     "TabScope": {
-      "description": "View scope for [`TabListParams`] (§6 sandbox table).\n\n* `User` — tabs that live in any window other than an Agent Window. * `Agent` — tabs in the requesting session's Agent Window only. * `All` — both of the above; never reveals other sessions' Agent Windows (cross-session isolation per §6).",
+      "description": "View scope for [`TabListParams`] (§6 sandbox table).\n\n* `User` — user pages outside dedicated Agent Windows, including shared hosts. * `Agent` — pages in the requesting session's dedicated Agent Window, or explicitly controlled pages in its shared host. * `All` — both of the above; never reveals other sessions' Agent Windows (cross-session isolation per §6).",
       "type": "string",
       "enum": [
         "user",

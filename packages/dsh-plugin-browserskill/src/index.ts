@@ -134,6 +134,12 @@ export function apply(
   // archived sessions are hidden from every surface, so their Agent Windows
   // would otherwise linger unreachable until idle timeout or unload.
   const disarmArchiveCleanup = armArchiveCleanup(ctx, starts);
+  const disarmTurnCleanup =
+    typeof ctx.on === "function"
+      ? ctx.on("agent/status", ({ agent, status }) => {
+          if (status === "idle") starts.turnEnded(agent.id);
+        })
+      : () => {};
 
   // Non-blocking install probe: warn early when bsk is missing instead of
   // failing the first tool call with a bare spawn error. Uses --version on
@@ -161,6 +167,7 @@ export function apply(
       unregisterSkill();
       removeRoutes();
       disarmArchiveCleanup();
+      disarmTurnCleanup();
       return starts.dispose().then(() => observation.dispose());
     };
   });

@@ -52,12 +52,21 @@ pub enum SessionSub {
 
 #[derive(Debug, Clone, Args)]
 pub struct SessionStartArgs {
+    /// Create session tabs in a normal user window, skipping Agent Windows (local only).
+    #[arg(long, conflicts_with_all = ["width", "height"])]
+    pub in_window: bool,
+    /// Reuse an existing tab in its user window (requires --in-window).
+    #[arg(long, requires = "in_window")]
+    pub tab_id: Option<i64>,
     /// Deprecated compatibility flag. Automation settings in the extension take precedence.
     #[arg(long)]
     pub unattended: bool,
     /// Recoverable request token: <expiry-unix-ms>:<UUID>. Valid for at most ten minutes.
     #[arg(long)]
     pub request_id: Option<String>,
+    /// Stop a managed session when its owner stops renewing its lease.
+    #[arg(long, requires = "request_id")]
+    pub ephemeral: bool,
     /// Optional task name displayed in local operation history.
     #[arg(long)]
     pub name: Option<String>,
@@ -76,7 +85,7 @@ pub struct SessionStartArgs {
     #[arg(long, value_parser = window_size)]
     pub height: Option<u32>,
 
-    /// Open the Agent Window in the background without stealing focus.
+    /// Start without stealing focus (an inactive tab with --in-window).
     #[arg(long)]
     pub no_focus: bool,
 }
@@ -115,10 +124,18 @@ pub struct SessionRequestArgs {
     pub prepare: bool,
     #[arg(long)]
     pub claim: bool,
+    #[arg(long, conflicts_with_all = ["claim", "prepare", "cancel"])]
+    pub renew: bool,
 }
 
 #[derive(Debug, Serialize)]
 struct StartParams {
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_window: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tab_id: Option<i64>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    ephemeral: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -135,6 +152,8 @@ struct StartParams {
 
 #[derive(Debug, Deserialize)]
 pub struct StartReply {
+    #[serde(default)]
+    pub container_mode: Option<String>,
     #[serde(default)]
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
@@ -193,6 +212,8 @@ pub fn dispatch(cmd: SessionCmd, format: Format) -> Result<(), CliError> {
                 "cancel"
             } else if args.claim {
                 "claim"
+            } else if args.renew {
+                "renew"
             } else {
                 "status"
             };
@@ -239,6 +260,9 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
     let result = start_session(
         sock,
         SessionStartOptions {
+            in_window: args.in_window,
+            tab_id: args.tab_id,
+            ephemeral: args.ephemeral,
             name: args.name,
             request_id: args.request_id,
             browser: args.browser,
@@ -257,6 +281,7 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
                         "session_id": reply.session_id,
                         "browser_instance_id": reply.browser_instance_id,
                         "agent_window_id": reply.agent_window_id,
+                        "container_mode": reply.container_mode,
                         "interaction": reply.interaction,
                     }))
                     .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
@@ -277,6 +302,9 @@ fn run_start(sock: PathBuf, args: SessionStartArgs, format: Format) -> Result<()
 #[derive(Debug, Default, Clone)]
 pub struct SessionStartOptions {
     pub request_id: Option<String>,
+    pub in_window: bool,
+    pub tab_id: Option<i64>,
+    pub ephemeral: bool,
     pub name: Option<String>,
     pub browser: Option<String>,
     pub width: Option<u32>,
@@ -286,6 +314,26 @@ pub struct SessionStartOptions {
 
 /// Start a session and open the Agent Window. Used by `session start` and `record start`.
 pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartReply, CliError> {
+    if opts.in_window {
+        let status: bsk_protocol::StatusResult = call(
+            sock.clone(),
+            Method::SystemStatus,
+            None::<serde_json::Value>,
+            Duration::from_secs(10),
+        )?;
+        if !bsk_protocol::tools::session::supports_shared_window(&status.protocol_version) {
+            return Err(CliError::from_rpc(bsk_protocol::RpcError {
+                code: bsk_protocol::ErrorCode::Unsupported,
+                message:
+                    "Shared sessions require daemon protocol 1.4; restart or update the daemon"
+                        .into(),
+                data: Some(serde_json::json!({
+                    "reason": "unsupported_feature", "component": "daemon",
+                    "required_protocol": "1.4", "actual_protocol": status.protocol_version,
+                })),
+            }));
+        }
+    }
     call(
         sock,
         if opts.request_id.is_some() {
@@ -294,6 +342,9 @@ pub fn start_session(sock: PathBuf, opts: SessionStartOptions) -> Result<StartRe
             Method::SessionStart
         },
         Some(StartParams {
+            in_window: opts.in_window,
+            tab_id: opts.tab_id,
+            ephemeral: opts.ephemeral,
             request_id: opts.request_id,
             task_name: opts.name,
             browser_instance_id: opts.browser,
@@ -542,7 +593,11 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                 println!("(no active sessions)");
                 return Ok(());
             }
-            let headers = ("SESSION", "BROWSER", "AGENT WINDOW");
+            let headers = (
+                "SESSION",
+                "BROWSER",
+                "WINDOW / MODE / OWNER / STATE / LEASE EXPIRY",
+            );
             let session_w = reply
                 .sessions
                 .iter()
@@ -567,8 +622,15 @@ fn run_list(sock: PathBuf, format: Format) -> Result<(), CliError> {
                     .map(|w| w.to_string())
                     .unwrap_or_else(|| "-".into());
                 println!(
-                    "{:<session_w$}  {:<browser_w$}  {}",
-                    s.session_id, s.browser_instance_id, window,
+                    "{:<session_w$}  {:<browser_w$}  {} / {} / {} / {} / {}",
+                    s.session_id,
+                    s.browser_instance_id,
+                    window,
+                    s.container_mode.as_deref().unwrap_or("window"),
+                    s.owner_kind.as_deref().unwrap_or("unmanaged"),
+                    s.lifecycle_state.as_deref().unwrap_or("active"),
+                    s.lease_expires_at_ms
+                        .map_or_else(|| "-".into(), |ms| ms.to_string()),
                 );
             }
         }
@@ -631,6 +693,9 @@ mod start_params_tests {
     fn start_params_send_task_name_without_policy_overrides() {
         for task_name in [None, Some("Check settings".to_string())] {
             let params = StartParams {
+                in_window: false,
+                tab_id: None,
+                ephemeral: false,
                 request_id: None,
                 task_name: task_name.clone(),
                 browser_instance_id: None,

@@ -167,6 +167,12 @@
         "browser_instance_id": {
           "type": "string"
         },
+        "container_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at_ms": {
           "description": "Unix epoch milliseconds.",
           "type": "integer",
@@ -180,6 +186,26 @@
             {
               "type": "null"
             }
+          ]
+        },
+        "lease_expires_at_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "lifecycle_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner_kind": {
+          "type": [
+            "string",
+            "null"
           ]
         },
         "session_id": {

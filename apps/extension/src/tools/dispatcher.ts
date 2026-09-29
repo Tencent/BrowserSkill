@@ -444,6 +444,7 @@ export class ToolDispatcher {
         return handleSessionStart(this.sessions, req.params as SessionStartParams, {
           signal,
           preferences: this.interactionPreferences,
+          approveBorrow: this.approveBorrow,
         });
       case "tool.session_stop": {
         this.debug?.releaseSession((req.params as SessionStopParams).session_id);

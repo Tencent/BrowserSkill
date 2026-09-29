@@ -135,7 +135,7 @@ impl DaemonStatus {
             .sessions
             .snapshot()
             .into_iter()
-            .map(|s| s.status_entry())
+            .map(|s| session_status_entry(state, s))
             .collect();
         StatusResult {
             daemon_version: self.daemon_version.to_string(),
@@ -876,6 +876,12 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub in_window: bool,
+    #[serde(default)]
+    pub tab_id: Option<i64>,
+    #[serde(default)]
+    pub ephemeral: bool,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -887,6 +893,8 @@ struct CliSessionStartParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub session_id: String,
@@ -993,6 +1001,9 @@ pub(super) async fn handle_session_start(
     let cancel = abort_guard.token().clone();
     let params: CliSessionStartParams = if params.is_null() {
         CliSessionStartParams {
+            in_window: false,
+            tab_id: None,
+            ephemeral: false,
             browser_instance_id: None,
             width: None,
             height: None,
@@ -1005,6 +1016,13 @@ pub(super) async fn handle_session_start(
             data: None,
         })?
     };
+    if params.ephemeral && !recoverable {
+        return Err(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "ephemeral sessions require a managed request_id".into(),
+            data: None,
+        });
+    }
     // `--width` without `--height` (or vice versa) is rejected: the
     // extension only accepts a complete size pair.
     let window_size = match (params.width, params.height) {
@@ -1024,6 +1042,8 @@ pub(super) async fn handle_session_start(
         &state.tool_queues,
         params.browser_instance_id.as_deref(),
         AgentWindowOptions {
+            in_window: params.in_window,
+            tab_id: params.tab_id,
             size: window_size,
             focused: params.focused,
         },
@@ -1039,6 +1059,7 @@ pub(super) async fn handle_session_start(
                 state.audit.set_name(&session.id.0, &name);
             }
             let result = CliSessionStartResult {
+                container_mode: session.container_mode.clone(),
                 interaction: session.interaction,
                 session_id: session.id.0.clone(),
                 browser_instance_id: session.browser_id.0.clone(),
@@ -1047,7 +1068,7 @@ pub(super) async fn handle_session_start(
             Ok(serde_json::to_value(result).unwrap_or(Value::Null))
         }
         Err(err) => {
-            if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
+            if let StartSessionError::CleanupFailed { session_id, .. } = &err {
                 state.tool_queues.spawn(session_id.clone());
             }
             Err(map_start_error(err))
@@ -1301,14 +1322,27 @@ async fn handle_session_stop_all(
     Ok(serde_json::to_value(result).unwrap_or(Value::Null))
 }
 
-fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
+pub(super) fn handle_session_list(state: &Arc<DaemonState>) -> ResponseBody {
     let sessions: Vec<_> = state
         .sessions
         .snapshot()
         .into_iter()
-        .map(|s| s.status_entry())
+        .map(|s| session_status_entry(state, s))
         .collect();
     ResponseBody::Ok(serde_json::to_value(SessionListResult { sessions }).unwrap_or(Value::Null))
+}
+
+fn session_status_entry(
+    state: &DaemonState,
+    session: super::sessions::Session,
+) -> SessionStatusEntry {
+    let (owner_kind, lifecycle_state, lease_expires_at_ms) =
+        state.session_requests.describe_session(&session);
+    let mut entry = session.status_entry();
+    entry.owner_kind = Some(owner_kind);
+    entry.lifecycle_state = Some(lifecycle_state);
+    entry.lease_expires_at_ms = lease_expires_at_ms;
+    entry
 }
 
 async fn handle_browser_list(state: &Arc<DaemonState>, params: Value) -> Result<Value, RpcError> {

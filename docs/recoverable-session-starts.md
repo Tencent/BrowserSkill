@@ -16,6 +16,15 @@ bsk session request <token> --json
 bsk session request <token> --cancel --json
 ```
 
+An owner that wants automatic cleanup adds `--ephemeral` to the start command
+and renews the claimed request with `bsk session request <token> --renew --json`.
+The lease lasts 45 seconds from claim or renewal. The DSH plugin renews active
+sessions every 10 seconds and starts cleanup when the owning agent becomes idle.
+The daemon reaper closes expired leases and retries failed stops. `session list`
+shows owner kind, lifecycle state, and lease expiry without exposing the token.
+Ordinary starts also retain late startup cleanup failures in the session registry
+so `session list` and `session stop` can reach them after the CLI has returned.
+
 A token is `<expiry-unix-ms>:<UUID>`, generated with a random UUID. Admission deadlines must be in the next ten minutes; the plugin uses five minutes. Treat tokens as ownership handles: they are not labels, task names, or short session IDs. Ordinary `session start` remains unchanged and does not require these calls. Managed starts do not sync unrelated CLI harness skills; the plugin carries its own instructions.
 
 Preparation creates no browser window. Start transitions from prepared to starting, then ready. Claim happens after the plugin durably records the returned session and finishes initial navigation/emulation; it changes ready to active. A repeated start with the same token and parameters returns the existing result instead of opening another window; different parameters are rejected. Expired tokens cannot start again.
@@ -26,7 +35,7 @@ Cleanup failures retain the exact session/window identity and can be retried. Th
 
 The extension captures the initial tab IDs directly from window creation, before initialization or cancellation can fail. Those IDs remain owned throughout failed compensation and subsequent stops. Retry closes only agent-created tabs; later user tabs are preserved. If an agent tab cannot close beside a user tab, stop reports a cleanup failure and retains the session binding instead of releasing a leaking window.
 
-The existing daemon reaper cancels unclaimed requests after their admission deadline (normally within the next 30-second tick), retries failed cleanup, and removes expired terminal tombstones. Claimed sessions retain the existing session idle policy. Browser disconnection still follows the existing session teardown behavior. An unresponsive browser can delay confirmed cleanup; that state remains owned and visible as pending rather than being reported as closed.
+The existing daemon reaper cancels unclaimed requests after their admission deadline (normally within the next 30-second tick), retries failed cleanup, and removes expired terminal tombstones. Claimed non-ephemeral sessions retain the existing session idle policy. Ephemeral renewals refresh both the owner lease and session activity. Browser disconnection still follows the existing session teardown behavior. An unresponsive browser can delay confirmed cleanup; that state remains owned and visible as pending rather than being reported as closed.
 
 ## Plugin recovery
 

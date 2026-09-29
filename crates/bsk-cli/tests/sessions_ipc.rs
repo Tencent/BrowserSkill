@@ -19,7 +19,6 @@ use bsk_protocol::{
     BrowserPeerInfo, ErrorCode, Frame, Method, RequestFrame, ResponseBody, ResponseFrame, RpcError,
 };
 use futures_util::{SinkExt, StreamExt};
-use rand::Rng;
 use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -28,17 +27,180 @@ use support::{wait_for_browser_count, wait_for_no_sessions};
 
 const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
 
+#[tokio::test]
+async fn shared_session_rejects_legacy_extension_before_start_request() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_with_protocol(&mut ws, "1.3").await;
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let result = ipc
+        .call::<_, serde_json::Value>(
+            "shared-old",
+            Method::SessionStart,
+            Some(serde_json::json!({"in_window":true})),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap_err().code, ErrorCode::Unsupported);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), next_extension_request(&mut ws))
+            .await
+            .is_err()
+    );
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn shared_mode_round_trips_and_tabs_closed_removes_only_its_session() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let ext = tokio::spawn(async move {
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let req = next_extension_request(&mut ws).await;
+            assert_eq!(req.method, Method::ToolSessionStart);
+            let params: SessionStartParams = serde_json::from_value(req.params.unwrap()).unwrap();
+            assert!(params.in_window);
+            ids.push(params.session_id);
+            send_extension_response(
+                &mut ws,
+                ResponseFrame {
+                    id: req.id,
+                    body: ResponseBody::Ok(
+                        serde_json::json!({"agent_window_id":10,"container_mode":"in_window"}),
+                    ),
+                },
+            )
+            .await;
+        }
+        ws.send(Message::Text(serde_json::json!({"event":"session.tabs_closed","payload":{"session_id":ids[0],"reason":"no_controlled_tabs"}}).to_string())).await.unwrap();
+        ws
+    });
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let mut starts = Vec::new();
+    for id in ["shared-a", "shared-b"] {
+        let result: serde_json::Value = ipc
+            .call(
+                id,
+                Method::SessionStart,
+                Some(serde_json::json!({"in_window":true})),
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(result["container_mode"], "in_window");
+        starts.push(result);
+    }
+    let _ws = ext.await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let status: StatusResult = ipc
+                .call::<(), _>(
+                    "shared-status",
+                    Method::SystemStatus,
+                    None,
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            if status.sessions.len() == 1 {
+                assert_eq!(
+                    status.sessions[0].session_id,
+                    starts[1]["session_id"].as_str().unwrap()
+                );
+                assert_eq!(
+                    status.sessions[0].container_mode.as_deref(),
+                    Some("in_window")
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn existing_tab_start_requires_extension_confirmation() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let extension = tokio::spawn(async move {
+        let first = next_extension_request(&mut ws).await;
+        let params: SessionStartParams = serde_json::from_value(first.params.unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(7));
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: first.id,
+                body: ResponseBody::Ok(serde_json::json!({
+                    "agent_window_id": 10, "container_mode": "in_window", "claimed_tab_id": 7
+                })),
+            },
+        )
+        .await;
+        let second = next_extension_request(&mut ws).await;
+        let params: SessionStartParams = serde_json::from_value(second.params.unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(8));
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: second.id,
+                body: ResponseBody::Ok(serde_json::json!({
+                    "agent_window_id": 10, "container_mode": "in_window"
+                })),
+            },
+        )
+        .await;
+        let rollback = next_extension_request(&mut ws).await;
+        assert_eq!(rollback.method, Method::ToolSessionStop);
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: rollback.id,
+                body: ResponseBody::Ok(serde_json::json!({})),
+            },
+        )
+        .await;
+    });
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let accepted: serde_json::Value = ipc
+        .call(
+            "existing-tab-ok",
+            Method::SessionStart,
+            Some(serde_json::json!({"in_window":true,"tab_id":7})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted["container_mode"], "in_window");
+    let rejected = ipc
+        .call::<_, serde_json::Value>(
+            "existing-tab-old-extension",
+            Method::SessionStart,
+            Some(serde_json::json!({"in_window":true,"tab_id":8})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::ProtocolError);
+    extension.await.unwrap();
+    handle.shutdown().await;
+}
+
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 fn tempfile_path(prefix: &str) -> PathBuf {
-    let mut p = std::env::temp_dir();
-    let mut rng = rand::thread_rng();
-    let suffix: String = (0..8)
-        .map(|_| char::from_digit(rng.gen_range(0..16), 16).unwrap())
-        .collect();
-    p.push(format!("{prefix}-{}-{suffix}.sock", std::process::id()));
-    p
+    support::ipc_endpoint(prefix)
 }
 
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
@@ -178,6 +340,8 @@ async fn respond_to_aborted_start(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    claimed_tab_id: None,
+                    container_mode: None,
                     interaction: None,
                     agent_window_id: Some(agent_window_id),
                 })
@@ -214,6 +378,8 @@ async fn respond_to_aborted_stop(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    claimed_tab_id: None,
+                    container_mode: None,
                     interaction: None,
                     agent_window_id: Some(4242),
                 })
@@ -278,6 +444,8 @@ async fn session_start_stop_round_trip_via_ipc() {
                             serde_json::from_value(req.params.clone().unwrap()).unwrap();
                         assert_eq!(params.focused, Some(false));
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(4242),
                         };
@@ -445,6 +613,132 @@ async fn cancelling_session_start_rolls_back_a_late_extension_success() {
 
     let _ = release_tx.send(());
     responder.await.unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_start_keeps_failed_cleanup_reachable_before_cli_timeout() {
+    cancelled_start_keeps_failed_cleanup_reachable(Duration::ZERO).await;
+}
+
+#[tokio::test]
+async fn cancelled_start_keeps_failed_cleanup_reachable_after_cli_timeout() {
+    cancelled_start_keeps_failed_cleanup_reachable(Duration::from_millis(2_100)).await;
+}
+
+async fn cancelled_start_keeps_failed_cleanup_reachable(delay: Duration) {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let start_sock = sock.clone();
+    let mut start_call = tokio::spawn(async move {
+        IpcClient::connect(&start_sock)
+            .await
+            .unwrap()
+            .call_with_id::<_, serde_json::Value>(
+                "cancelled-start".into(),
+                Method::SessionStart,
+                Some(serde_json::json!({})),
+                Duration::from_secs(8),
+            )
+            .await
+            .unwrap()
+    });
+    let start = next_extension_request(&mut ws).await;
+    let session_id = start.params.as_ref().unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut cancel_ipc = IpcClient::connect(&sock).await.unwrap();
+    let cancelled: CancelResult = cancel_ipc
+        .call(
+            "cancel-start-request",
+            Method::Cancel,
+            Some(CancelParams {
+                rpc_id: "cancelled-start".into(),
+            }),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cancelled.cancelled);
+    let cancel = next_extension_request(&mut ws).await;
+    acknowledge_extension_cancel(&mut ws, cancel, &start.id).await;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+        assert_eq!(
+            (&mut start_call).await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+    }
+    send_extension_response(
+        &mut ws,
+        ResponseFrame {
+            id: start.id,
+            body: ResponseBody::Err(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "Agent Window cleanup failed".into(),
+                data: Some(serde_json::json!({
+                    "reason":"cleanup_failed", "resource_type":"agent_window", "resource_id":4242
+                })),
+            }),
+        },
+    )
+    .await;
+    if delay.is_zero() {
+        assert_eq!(
+            (&mut start_call).await.unwrap().unwrap_err().code,
+            ErrorCode::ProtocolError
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+            if handle
+                .state()
+                .sessions
+                .get(&sid)
+                .is_some_and(|session| session.agent_window_id == Some(4242))
+                && handle.state().tool_queues.is_accepting(&sid)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let stop = tokio::spawn({
+        let sock = sock.clone();
+        let session_id = session_id.clone();
+        async move {
+            IpcClient::connect(&sock)
+                .await
+                .unwrap()
+                .call::<_, serde_json::Value>(
+                    "stop-after-failed-start",
+                    Method::SessionStop,
+                    Some(serde_json::json!({"session_id":session_id})),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    });
+    let stop_request = next_extension_request(&mut ws).await;
+    assert_eq!(stop_request.method, Method::ToolSessionStop);
+    send_extension_response(
+        &mut ws,
+        ResponseFrame {
+            id: stop_request.id,
+            body: ResponseBody::Ok(serde_json::to_value(SessionStopResult::default()).unwrap()),
+        },
+    )
+    .await;
+    stop.await.unwrap();
+    assert!(handle.state().sessions.is_empty());
     handle.shutdown().await;
 }
 
@@ -623,6 +917,7 @@ async fn session_idle_timeout_stops_and_unregisters_session() {
     let state = handle.state();
     let session_id = bsk::daemon::sessions::SessionId("idle".into());
     state.sessions.insert(bsk::daemon::sessions::Session {
+        container_mode: None,
         interaction: None,
 
         id: session_id.clone(),
@@ -714,6 +1009,8 @@ async fn session_start_waits_for_late_extension_handshake() {
                 continue;
             }
             let result = SessionStartResult {
+                claimed_tab_id: None,
+                container_mode: None,
                 interaction: None,
                 agent_window_id: Some(4242),
             };
@@ -854,6 +1151,8 @@ async fn session_start_with_browser_instance_id_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    claimed_tab_id: None,
+                    container_mode: None,
                     interaction: None,
                     agent_window_id: Some(123),
                 };
@@ -959,6 +1258,8 @@ async fn session_start_label_match_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    claimed_tab_id: None,
+                    container_mode: None,
                     interaction: None,
                     agent_window_id: Some(456),
                 };
@@ -1047,6 +1348,7 @@ async fn session_window_closed_event_purges_session() {
     let _ = handshake_as_ext(&mut ws).await;
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        container_mode: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
@@ -1086,6 +1388,7 @@ async fn browser_disconnect_purges_sessions() {
     // post-start state without bothering with the round-trip.
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        container_mode: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("zzzz".into()),
@@ -1117,6 +1420,7 @@ async fn session_stop_self_heals_when_extension_reports_not_found() {
     // restart from the daemon's point of view).
     let state = handle.state();
     let session = bsk::daemon::sessions::Session {
+        container_mode: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("yyyy".into()),
@@ -1218,6 +1522,7 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
     let state = handle.state();
     // Pretend ext A registered a real session.
     let session = bsk::daemon::sessions::Session {
+        container_mode: None,
         interaction: None,
 
         id: bsk::daemon::sessions::SessionId("xxxx".into()),
@@ -1355,6 +1660,7 @@ fn interaction_updates_follow_the_owning_browser_in_both_directions() {
     let owner = BrowserId("owner".into());
     let id = SessionId("existing".into());
     registry.insert(Session {
+        container_mode: None,
         id: id.clone(),
         browser_id: owner.clone(),
         agent_window_id: Some(100),
@@ -1395,6 +1701,7 @@ async fn borrow_deadline_cancels_the_extension_and_preserves_a_committed_result(
         let state = handle.state();
         let session_id = SessionId("borrow-deadline".into());
         state.sessions.insert(Session {
+            container_mode: None,
             id: session_id.clone(),
             browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
             agent_window_id: Some(100),
@@ -1466,6 +1773,7 @@ async fn borrow_reports_unknown_outcome_when_cancel_cleanup_never_finishes() {
     let state = handle.state();
     let sid = SessionId("borrow-unknown".into());
     state.sessions.insert(Session {
+        container_mode: None,
         id: sid.clone(),
         browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
         agent_window_id: Some(100),
@@ -1636,6 +1944,7 @@ mod recoverable_starts {
             .unwrap();
         assert_eq!(conflicting.unwrap_err().code, ErrorCode::InvalidParams);
         let foreign = bsk::daemon::sessions::Session {
+            container_mode: None,
             id: bsk::daemon::sessions::SessionId("foreign".into()),
             browser_id: bsk::daemon::browsers::BrowserId(TEST_EXT_ID.into()),
             agent_window_id: Some(999),

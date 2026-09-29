@@ -147,6 +147,8 @@ bsk session stop <id>
 
 通过 `bsk --help` 或 `bsk <命令> --help` 查看参数。完成或失败后都应结束会话；借用的标签页会归还到原窗口。
 
+本地会话可用 `bsk session start --in-window --json` 在最近聚焦的用户窗口中新建会话页签。停止时只关闭会话页签，不关闭用户窗口；已有用户页签仍需显式借用。此选项不支持窗口尺寸参数或远程连接。
+
 </details>
 
 如果 Agent 沙盒会在每条命令后回收后台进程，请使用[沙盒配置指南](docs/sandboxed-agents.md)：在宿主环境保持 daemon 运行，Agent 通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。

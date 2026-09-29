@@ -736,6 +736,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = AuditStore::new(Some(temp.path().join("中文 user").join("audit")));
         let session = Session {
+            container_mode: None,
             id: SessionId("abcd".into()),
             browser_id: BrowserId("browser-a".into()),
             agent_window_id: Some(1),

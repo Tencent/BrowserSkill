@@ -41,6 +41,7 @@ fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc
 
 fn fake_session(session_id: &str, browser_id: &str) -> Session {
     Session {
+        container_mode: None,
         interaction: None,
 
         id: SessionId(session_id.into()),

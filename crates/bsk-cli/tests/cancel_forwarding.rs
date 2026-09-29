@@ -203,6 +203,8 @@ async fn cancel_forwards_to_extension_when_tool_is_inflight() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
@@ -427,6 +429,8 @@ async fn cancel_arriving_during_promote_critical_section_keeps_request_cancel_in
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };
@@ -627,6 +631,8 @@ async fn cancel_keeps_session_busy_until_delayed_extension_cleanup_finishes() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
                         };

@@ -318,7 +318,7 @@ describe("action dispatch", () => {
 
     expect(registry.current()).toBe("s1");
     expect(calls.map(({ args }) => args)).toEqual([
-      ["session", "start", "--request-id", expect.any(String)],
+      ["session", "start", "--request-id", expect.any(String), "--ephemeral"],
       ["navigate", "--session", "s1", "https://example.test/"],
       ["observe", "--session", "s1"],
       ["fill", "--session", "s1", "--value", "hello", "@e1"],
@@ -336,6 +336,24 @@ describe("action dispatch", () => {
 });
 
 describe("session.start", () => {
+  it("forwards existing-tab startup without requesting a new window", async () => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await tools.get("session.start")?.execute({ inWindow: true, tabId: 7 }, makeExec());
+    expect(calls[0].args).toEqual([
+      "session",
+      "start",
+      "--request-id",
+      expect.any(String),
+      "--ephemeral",
+      "--in-window",
+      "--tab-id",
+      "7",
+    ]);
+    await expect(tools.get("session.start")?.execute({ tabId: 7 }, makeExec())).rejects.toThrow(
+      "tabId requires inWindow",
+    );
+  });
+
   it("maps the start reply and tracks the session as current", async () => {
     const { tools, registry } = setup({ "session start": START_REPLY("s1") });
     const value = await startSession(tools);
@@ -364,6 +382,7 @@ describe("session.start", () => {
       "start",
       "--request-id",
       expect.any(String),
+      "--ephemeral",
       "--width",
       "1280",
       "--height",

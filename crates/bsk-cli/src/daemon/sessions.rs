@@ -47,6 +47,7 @@ impl std::fmt::Display for SessionId {
 
 #[derive(Debug, Clone)]
 pub struct Session {
+    pub container_mode: Option<String>,
     pub interaction: Option<bsk_protocol::tools::InteractionPolicy>,
     pub id: SessionId,
     pub browser_id: BrowserId,
@@ -57,11 +58,15 @@ pub struct Session {
 impl Session {
     pub fn status_entry(&self) -> SessionStatusEntry {
         SessionStatusEntry {
+            container_mode: self.container_mode.clone(),
             interaction: self.interaction,
             session_id: self.id.0.clone(),
             browser_instance_id: self.browser_id.0.clone(),
             agent_window_id: self.agent_window_id,
             created_at_ms: self.created_at_ms,
+            owner_kind: None,
+            lifecycle_state: None,
+            lease_expires_at_ms: None,
         }
     }
 }
@@ -73,7 +78,7 @@ pub struct SessionRegistry {
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
     last_activity: Mutex<HashMap<SessionId, Instant>>,
-    /// Managed creates whose original extension operation has not settled.
+    /// Creates whose original extension operation has not settled.
     starting: Mutex<HashSet<SessionId>>,
 }
 
@@ -153,6 +158,7 @@ impl SessionRegistry {
             guard.insert(
                 candidate.clone(),
                 Session {
+                    container_mode: None,
                     interaction: None,
                     id: candidate.clone(),
                     browser_id: browser_id.clone(),
@@ -454,6 +460,8 @@ const SESSION_ID_MAX_RESERVE_ATTEMPTS: u32 = 64;
 /// (focused window, browser-chosen size).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AgentWindowOptions {
+    pub in_window: bool,
+    pub tab_id: Option<i64>,
     /// Optional outer size as `(width, height)` CSS pixels.
     pub size: Option<(u32, u32)>,
     /// Optional focus hint (`None` = extension default: focused).
@@ -527,6 +535,29 @@ pub(crate) async fn start_session_recoverable(
             instance_ids,
         },
     })?;
+    if window.in_window
+        && !bsk_protocol::tools::session::supports_shared_window(&client.extension_protocol_version)
+    {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::Unsupported,
+            message: "Shared sessions require extension protocol 1.4".into(),
+            data: None,
+        }));
+    }
+    if window.in_window && window.size.is_some() {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "Shared sessions do not accept window dimensions".into(),
+            data: None,
+        }));
+    }
+    if window.tab_id.is_some_and(|id| id <= 0) || (window.tab_id.is_some() && !window.in_window) {
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::InvalidParams,
+            message: "tab_id requires in_window and must be positive".into(),
+            data: None,
+        }));
+    }
     let session_id = sessions
         .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
         .ok_or(StartSessionError::IdExhausted)?;
@@ -534,6 +565,8 @@ pub(crate) async fn start_session_recoverable(
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
     let params = SessionStartParams {
+        in_window: window.in_window,
+        tab_id: window.tab_id,
         session_id: session_id.0.clone(),
         browser_instance_id: Some(client.id.0.clone()),
         width: window.size.map(|(width, _)| width),
@@ -593,6 +626,7 @@ pub(crate) async fn start_session_recoverable(
         StartWaitOutcome::WaiterClosed => {
             client.pending.lock().unwrap().cancel(&rpc_id);
             if preserve_cleanup {
+                sessions.commit_reservation(&session_id, None);
                 return Err(StartSessionError::CleanupFailed {
                     session_id,
                     agent_window_id: None,
@@ -606,6 +640,7 @@ pub(crate) async fn start_session_recoverable(
             return Err(finish_aborted_start(
                 &client,
                 sessions,
+                queues,
                 &session_id,
                 &rpc_id,
                 waiter,
@@ -618,6 +653,7 @@ pub(crate) async fn start_session_recoverable(
             return Err(finish_aborted_start(
                 &client,
                 sessions,
+                queues,
                 &session_id,
                 &rpc_id,
                 waiter,
@@ -631,28 +667,18 @@ pub(crate) async fn start_session_recoverable(
         ResponseBody::Ok(v) => match serde_json::from_value::<SessionStartResult>(v) {
             Ok(parsed) => parsed,
             Err(_) => {
-                if preserve_cleanup {
-                    sessions.commit_reservation(&session_id, None);
-                    return Err(StartSessionError::CleanupFailed {
-                        session_id,
-                        agent_window_id: None,
-                        message: "invalid tool.session_start payload; cleanup required".into(),
-                    });
-                }
-                sessions.cancel_reservation(&session_id);
-                return Err(StartSessionError::ExtensionError(RpcError {
-                    code: bsk_protocol::ErrorCode::ProtocolError,
-                    message: "invalid tool.session_start payload".into(),
-                    data: None,
-                }));
+                sessions.commit_reservation(&session_id, None);
+                return Err(StartSessionError::CleanupFailed {
+                    session_id,
+                    agent_window_id: None,
+                    message: "invalid tool.session_start payload; cleanup required".into(),
+                });
             }
         },
         ResponseBody::Err(err) => {
-            if preserve_cleanup
-                && err.data.as_ref().is_some_and(|d| {
-                    d.get("reason").and_then(serde_json::Value::as_str) == Some("cleanup_failed")
-                })
-            {
+            if err.data.as_ref().is_some_and(|d| {
+                d.get("reason").and_then(serde_json::Value::as_str) == Some("cleanup_failed")
+            }) {
                 let agent_window_id = err
                     .data
                     .as_ref()
@@ -669,10 +695,30 @@ pub(crate) async fn start_session_recoverable(
             return Err(StartSessionError::ExtensionError(err));
         }
     };
+    if (window.in_window && start_result.container_mode.as_deref() != Some("in_window"))
+        || (window.tab_id.is_some() && start_result.claimed_tab_id != window.tab_id)
+    {
+        let cleanup = rollback_extension_session(&client, &session_id).await;
+        if let Err(message) = cleanup {
+            sessions.commit_reservation(&session_id, start_result.agent_window_id);
+            return Err(StartSessionError::CleanupFailed {
+                session_id,
+                agent_window_id: start_result.agent_window_id,
+                message,
+            });
+        }
+        sessions.cancel_reservation(&session_id);
+        return Err(StartSessionError::ExtensionError(RpcError {
+            code: ErrorCode::ProtocolError,
+            message: "Extension did not confirm the requested session container and tab".into(),
+            data: None,
+        }));
+    }
     {
         let mut guard = sessions.inner.lock().expect("session registry poisoned");
         if let Some(session) = guard.get_mut(&session_id) {
             session.interaction = session.interaction.or(start_result.interaction);
+            session.container_mode = start_result.container_mode.clone();
         }
     }
     let session = sessions
@@ -709,15 +755,13 @@ impl StartAbortReason {
 async fn finish_aborted_start(
     client: &Arc<BrowserClient>,
     sessions: &Arc<SessionRegistry>,
+    queues: &Arc<ToolQueueRegistry>,
     session_id: &SessionId,
     rpc_id: &RpcId,
     mut waiter: tokio::sync::oneshot::Receiver<bsk_protocol::ResponseFrame>,
     reason: StartAbortReason,
     preserve_cleanup: bool,
 ) -> StartSessionError {
-    if !preserve_cleanup {
-        sessions.cancel_reservation(session_id);
-    }
     let cancel = Frame::Request(RequestFrame {
         id: format!("cancel-{rpc_id}"),
         method: Method::Cancel,
@@ -725,6 +769,11 @@ async fn finish_aborted_start(
     });
     if client.sink.send(cancel).is_err() {
         client.pending.lock().unwrap().cancel(rpc_id);
+        if preserve_cleanup {
+            sessions.commit_reservation(session_id, None);
+        } else {
+            sessions.cancel_reservation(session_id);
+        }
         return if preserve_cleanup {
             StartSessionError::CleanupFailed {
                 session_id: session_id.clone(),
@@ -736,9 +785,9 @@ async fn finish_aborted_start(
         };
     }
 
-    // Managed starts outlive the receiving CLI. Keep the original waiter until
-    // the extension settles: an early stop/not_found is not proof that a slow
-    // chrome.windows.create cannot still produce a window.
+    // Managed starts wait for the extension to settle. Ordinary starts use a
+    // bounded wait and then retain the waiter in a daemon-owned task: an early
+    // stop/not_found is not proof that a slow create cannot still produce a window.
     let settled = if preserve_cleanup {
         Ok((&mut waiter).await)
     } else {
@@ -750,6 +799,21 @@ async fn finish_aborted_start(
                 if matches!(err.code, ErrorCode::Cancelled | ErrorCode::UserAborted) =>
             {
                 reason.error()
+            }
+            ResponseBody::Err(err)
+                if err.data.as_ref().is_some_and(|data| {
+                    data.get("reason").and_then(serde_json::Value::as_str) == Some("cleanup_failed")
+                }) =>
+            {
+                StartSessionError::CleanupFailed {
+                    session_id: session_id.clone(),
+                    agent_window_id: err
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("resource_id"))
+                        .and_then(serde_json::Value::as_i64),
+                    message: err.message,
+                }
             }
             ResponseBody::Err(err) if preserve_cleanup => StartSessionError::CleanupFailed {
                 session_id: session_id.clone(),
@@ -784,25 +848,63 @@ async fn finish_aborted_start(
             }
         }
         Err(_) => {
-            // The cancel frame is already queued behind session_start. Even
-            // if chrome.windows.create is still blocked, the extension will
-            // observe the aborted signal and compensate before replying.
-            client.pending.lock().unwrap().cancel(rpc_id);
-            reason.error()
+            // Keep the original reply alive after the ordinary CLI's bounded
+            // wait. A late cleanup failure must retain the session identity.
+            let client = Arc::clone(client);
+            let sessions = Arc::clone(sessions);
+            let queues = Arc::clone(queues);
+            let session_id = session_id.clone();
+            sessions.starting.lock().unwrap().insert(session_id.clone());
+            tokio::spawn(async move {
+                let failed_window = match waiter.await {
+                    Ok(response) => match response.body {
+                        ResponseBody::Ok(value) => {
+                            let window_id = serde_json::from_value::<SessionStartResult>(value)
+                                .ok()
+                                .and_then(|result| result.agent_window_id);
+                            rollback_extension_session(&client, &session_id)
+                                .await
+                                .err()
+                                .map(|_| window_id)
+                        }
+                        ResponseBody::Err(err)
+                            if err.data.as_ref().is_some_and(|data| {
+                                data.get("reason").and_then(serde_json::Value::as_str)
+                                    == Some("cleanup_failed")
+                            }) =>
+                        {
+                            Some(
+                                err.data
+                                    .as_ref()
+                                    .and_then(|data| data.get("resource_id"))
+                                    .and_then(serde_json::Value::as_i64),
+                            )
+                        }
+                        ResponseBody::Err(_) => None,
+                    },
+                    Err(_) => Some(None),
+                };
+                if let Some(window_id) = failed_window {
+                    if sessions
+                        .commit_reservation(&session_id, window_id)
+                        .is_some()
+                    {
+                        queues.spawn(session_id);
+                    }
+                } else {
+                    sessions.cancel_reservation(&session_id);
+                }
+            });
+            return reason.error();
         }
     };
-    if preserve_cleanup {
-        match &outcome {
-            StartSessionError::Cancelled | StartSessionError::Timeout => {
-                sessions.cancel_reservation(session_id);
-            }
-            StartSessionError::CleanupFailed {
-                agent_window_id, ..
-            } => {
-                sessions.commit_reservation(session_id, *agent_window_id);
-            }
-            _ => {}
+    match &outcome {
+        StartSessionError::CleanupFailed {
+            agent_window_id, ..
+        } => {
+            sessions.commit_reservation(session_id, *agent_window_id);
         }
+        _ => sessions.cancel_reservation(session_id),
     }
     outcome
 }
@@ -982,4 +1084,107 @@ fn drop_session_local(
 ) {
     queues.remove(session_id);
     interrupts.drop_session(session_id);
+}
+
+#[cfg(test)]
+mod cancelled_start_tests {
+    use super::*;
+    use crate::daemon::browsers::{BrowserSink, Pending};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn cleanup_failure_keeps_an_ordinary_cancelled_start_before_and_after_wait_timeout() {
+        for delay in [
+            Duration::ZERO,
+            CANCEL_CLEANUP_TIMEOUT + Duration::from_millis(50),
+        ] {
+            let (tx, mut outbound) = mpsc::unbounded_channel();
+            let client = Arc::new(BrowserClient {
+                id: BrowserId("test".into()),
+                browser_name: "chrome".into(),
+                browser_version: "1".into(),
+                extension_version: "1".into(),
+                extension_protocol_version: "1.4".into(),
+                label: "test".into(),
+                sink: BrowserSink { tx },
+                pending: Mutex::new(Pending::default()),
+                generation: 1,
+                connected_at_ms: 0,
+                version_skew: false,
+                last_seen: Mutex::new(Instant::now()),
+                heartbeat_seen: AtomicBool::new(false),
+            });
+            let sessions = Arc::new(SessionRegistry::new());
+            let session_id = sessions.reserve_id(client.id.clone(), 1, || 1).unwrap();
+            let queues = Arc::new(ToolQueueRegistry::new(
+                Arc::new(BrowserRegistry::new()),
+                sessions.clone(),
+            ));
+            let rpc_id = "start".to_string();
+            let waiter = client.pending.lock().unwrap().register(rpc_id.clone());
+            let mut task = tokio::spawn({
+                let client = client.clone();
+                let sessions = sessions.clone();
+                let queues = queues.clone();
+                let session_id = session_id.clone();
+                async move {
+                    finish_aborted_start(
+                        &client,
+                        &sessions,
+                        &queues,
+                        &session_id,
+                        &rpc_id,
+                        waiter,
+                        StartAbortReason::Cancelled,
+                        false,
+                    )
+                    .await
+                }
+            });
+            assert!(matches!(outbound.recv().await, Some(Frame::Request(_))));
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+                assert!(matches!(
+                    (&mut task).await.unwrap(),
+                    StartSessionError::Cancelled
+                ));
+            }
+            client
+                .pending
+                .lock()
+                .unwrap()
+                .resolve(bsk_protocol::ResponseFrame {
+                    id: "start".into(),
+                    body: ResponseBody::Err(RpcError {
+                        code: ErrorCode::ProtocolError,
+                        message: "window cleanup failed".into(),
+                        data: Some(serde_json::json!({"reason":"cleanup_failed","resource_id":42})),
+                    }),
+                });
+            if delay.is_zero() {
+                assert!(matches!(
+                    (&mut task).await.unwrap(),
+                    StartSessionError::CleanupFailed { .. }
+                ));
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if sessions
+                        .get(&session_id)
+                        .is_some_and(|session| session.agent_window_id == Some(42))
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if !delay.is_zero() {
+                assert!(queues.is_accepting(&session_id));
+            }
+        }
+    }
 }
