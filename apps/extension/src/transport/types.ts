@@ -768,6 +768,35 @@ export interface WaitForNavigationResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+/**
+ * Element states `wait-for-element` can wait on. `visible` / `hidden` ask about
+ * visibility; `attached` / `detached` ask about presence in the DOM.
+ * `hidden` means present-but-not-visible — an element that was never
+ * there does not satisfy it (use `detached` for that).
+ */
+export type ElementState = "visible" | "hidden" | "attached" | "detached";
+
+export interface WaitForElementParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  state: ElementState;
+  tab_id?: number;
+  timeout_ms?: number;
+  poll_ms?: number;
+}
+
+export interface WaitForElementResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  satisfied: boolean;
+  attached: boolean;
+  visible: boolean;
+  elapsed_ms: number;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
 // --------------------------------------------------------------------------
 // Human-in-loop payloads — request_help (mirror bsk-protocol)
 // --------------------------------------------------------------------------

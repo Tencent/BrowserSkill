@@ -2,6 +2,21 @@
 //! "timing helper" CLI commands. `wait-for-navigation` hops through
 //! the extension via the session queue; `wait-ms` is answered entirely
 //! by the daemon (no extension involvement; no session needed).
+//!
+//! `bsk wait-for-element` is the element-level counterpart of
+//! `wait-for-navigation`: one RPC that answers "is `#mask` hidden yet?"
+//! instead of a caller-side `evaluate` + `wait-ms` polling loop. The
+//! re-checking runs inside the extension
+//! (`apps/extension/src/tools/waits.ts`), so a ten-second wait costs one
+//! IPC round trip instead of one per probe — and it does not depend on
+//! the page's own timers, which a background tab has throttled to a
+//! second or worse.
+//!
+//! A `wait-for-element` timeout is **reported, not raised**: the result
+//! carries the evidence (`attached` / `visible`) so the caller can tell
+//! "it never appeared" from "it is there but still hidden". Exit code
+//! stays 0 and the reason goes to stderr, exactly like
+//! `wait-for-navigation`'s `reached: "timeout"`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,13 +24,15 @@ use std::time::Duration;
 use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
-    WaitForNavigationParams, WaitForNavigationResult, WaitMsParams, WaitMsResult,
+    ElementState, WaitForElementParams, WaitForElementResult, WaitForNavigationParams,
+    WaitForNavigationResult, WaitMsParams, WaitMsResult,
 };
-use clap::Args;
+use clap::{Args, ValueEnum};
 
 use crate::cli::dialogs::print_dialog_summaries;
 use crate::cli::ensure_daemon::ensure_daemon;
 use crate::cli::error::{CliError, Format};
+use crate::cli::interaction::split_target;
 use crate::cli::navigate::{CliWaitUntil, parse_timeout_ms};
 
 // ---------------------------------------------------------------------------
@@ -90,6 +107,141 @@ fn render_wait_for_navigation(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bsk wait-for-element (element state)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliElementState {
+    Visible,
+    Hidden,
+    Attached,
+    Detached,
+}
+
+impl CliElementState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+            Self::Attached => "attached",
+            Self::Detached => "detached",
+        }
+    }
+}
+
+impl From<CliElementState> for ElementState {
+    fn from(value: CliElementState) -> Self {
+        match value {
+            CliElementState::Visible => Self::Visible,
+            CliElementState::Hidden => Self::Hidden,
+            CliElementState::Attached => Self::Attached,
+            CliElementState::Detached => Self::Detached,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WaitForElementArgs {
+    /// Snapshot ref (`@e3`, `e3`) or CSS selector.
+    #[arg(value_name = "TARGET")]
+    pub target: Option<String>,
+
+    #[arg(long = "ref")]
+    pub ref_: Option<String>,
+
+    #[arg(long = "selector")]
+    pub selector: Option<String>,
+
+    /// State to wait for: `visible`, `hidden`, `attached`, `detached`.
+    /// `hidden` means present-but-not-visible; use `detached` when the
+    /// element is expected to leave the DOM entirely.
+    #[arg(long, value_enum, default_value_t = CliElementState::Visible)]
+    pub state: CliElementState,
+
+    /// Hard timeout (default 10s). Accepts `30s`, `1m`, `1500ms`.
+    #[arg(long, default_value = "10s", value_parser = parse_timeout_ms)]
+    pub timeout: u32,
+
+    /// Delay between two state probes (default 100ms).
+    #[arg(long = "poll-ms", default_value = "100")]
+    pub poll_ms: u32,
+
+    #[arg(long)]
+    pub session: String,
+
+    /// Target tab. Defaults to the Agent Window's active tab.
+    #[arg(long = "tab-id")]
+    pub tab_id: Option<i64>,
+}
+
+pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Result<(), CliError> {
+    let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
+    // Validate here so a bad flag fails locally instead of spending a daemon
+    // round trip; the extension applies the same bounds.
+    if args.poll_ms == 0 {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--poll-ms must be at least 1"
+        )));
+    }
+    let state: ElementState = args.state.into();
+    let info = ensure_daemon().context("ensure daemon is running")?;
+    let params = WaitForElementParams {
+        session_id: args.session,
+        ref_,
+        selector,
+        state,
+        tab_id: args.tab_id,
+        timeout_ms: Some(args.timeout),
+        poll_ms: Some(args.poll_ms),
+    };
+    let reply: WaitForElementResult = crate::cli::business_rpc::call(
+        info.sock_path,
+        "wait-for-element",
+        Method::ToolWaitForElement,
+        Some(params),
+        ipc_timeout(args.timeout),
+    )?;
+    match format {
+        Format::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&reply)
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?
+        ),
+        Format::Human => {
+            let target =
+                format_used_target(reply.used_ref.as_deref(), reply.used_selector.as_deref());
+            println!(
+                "wait-for-element ok tab={} target={target} state={} satisfied={} attached={} visible={} elapsed_ms={}",
+                reply.tab_id,
+                state.as_str(),
+                reply.satisfied,
+                reply.attached,
+                reply.visible,
+                reply.elapsed_ms
+            );
+            if !reply.satisfied {
+                eprintln!(
+                    "warning: {target} did not become {} within {}ms (attached={}, visible={})",
+                    state.as_str(),
+                    args.timeout,
+                    reply.attached,
+                    reply.visible
+                );
+            }
+            print_dialog_summaries(&reply.dialogs);
+        }
+    }
+    Ok(())
+}
+
+fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> String {
+    used_ref
+        .map(|r| format!("@{r}"))
+        .or_else(|| used_selector.map(str::to_string))
+        .unwrap_or_else(|| "?".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +339,7 @@ fn ipc_timeout(timeout_ms: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
 
     #[test]
     fn parses_duration_strings() {
@@ -199,5 +352,113 @@ mod tests {
         assert!(parse_duration_ms("nope").is_err());
         assert!(parse_duration_ms("").is_err());
         assert!(parse_duration_ms("-1").is_err());
+    }
+
+    #[test]
+    fn cli_state_maps_onto_the_wire_enum() {
+        for (cli, wire, wire_name) in [
+            (CliElementState::Visible, ElementState::Visible, "visible"),
+            (CliElementState::Hidden, ElementState::Hidden, "hidden"),
+            (
+                CliElementState::Attached,
+                ElementState::Attached,
+                "attached",
+            ),
+            (
+                CliElementState::Detached,
+                ElementState::Detached,
+                "detached",
+            ),
+        ] {
+            let mapped: ElementState = cli.into();
+            assert_eq!(mapped, wire);
+            assert_eq!(cli.as_str(), wire_name);
+            assert_eq!(mapped.as_str(), wire_name);
+        }
+    }
+
+    /// `--state` defaults to `visible` and the timeout grammar is the same
+    /// one the other wait commands accept.
+    #[test]
+    fn parses_state_and_durations() {
+        let cli = crate::cli::Cli::try_parse_from([
+            "bsk",
+            "wait-for-element",
+            "#mask",
+            "--session",
+            "s1",
+        ])
+        .unwrap();
+        let crate::cli::Command::WaitForElement(args) = cli.command else {
+            panic!("expected wait-for");
+        };
+        assert_eq!(args.state, CliElementState::Visible);
+        assert_eq!(args.timeout, 10_000);
+        assert_eq!(args.poll_ms, 100);
+        assert_eq!(args.target.as_deref(), Some("#mask"));
+
+        let cli = crate::cli::Cli::try_parse_from([
+            "bsk",
+            "wait-for-element",
+            "--selector",
+            ".el-loading-mask",
+            "--state",
+            "detached",
+            "--timeout",
+            "1500ms",
+            "--poll-ms",
+            "50",
+            "--session",
+            "s1",
+        ])
+        .unwrap();
+        let crate::cli::Command::WaitForElement(args) = cli.command else {
+            panic!("expected wait-for");
+        };
+        assert_eq!(args.state, CliElementState::Detached);
+        assert_eq!(args.timeout, 1_500);
+        assert_eq!(args.poll_ms, 50);
+        assert_eq!(args.selector.as_deref(), Some(".el-loading-mask"));
+    }
+
+    /// Bad flags must fail before a daemon is spawned.
+    #[test]
+    fn dispatch_rejects_bad_flags_before_starting_a_daemon() {
+        for argv in [
+            // 目标一个都没给
+            vec!["bsk", "wait-for-element", "--session", "s1"],
+            // 目标给了两个
+            vec![
+                "bsk",
+                "wait-for-element",
+                "#a",
+                "--selector",
+                "#b",
+                "--session",
+                "s1",
+            ],
+            // poll 为 0
+            vec![
+                "bsk",
+                "wait-for-element",
+                "#a",
+                "--poll-ms",
+                "0",
+                "--session",
+                "s1",
+            ],
+        ] {
+            let cli = crate::cli::Cli::try_parse_from(argv.clone()).unwrap();
+            let crate::cli::Command::WaitForElement(args) = cli.command else {
+                panic!("expected wait-for for {argv:?}");
+            };
+            assert!(
+                matches!(
+                    dispatch_wait_for_element(args, Format::Json),
+                    Err(CliError::Local(_))
+                ),
+                "{argv:?} should have failed locally"
+            );
+        }
     }
 }

@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "WaitForElementParams",
+  "type": "object",
+  "required": [
+    "session_id",
+    "state"
+  ],
+  "properties": {
+    "poll_ms": {
+      "description": "Delay between two state probes. Defaults to 100ms; the extension clamps it into `[16, 2000]` so a caller cannot turn the wait into a busy loop against the renderer.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    },
+    "ref": {
+      "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`. Mutually exclusive with `selector`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "state": {
+      "description": "State to wait for.",
+      "allOf": [
+        {
+          "$ref": "#/definitions/ElementState"
+        }
+      ]
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the wait. Defaults to 10s.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 1.0
+    }
+  },
+  "definitions": {
+    "ElementState": {
+      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` / `Detached` ask about **presence in the DOM**. They are deliberately not collapsed into one pair: a page that keeps its spinner mounted and merely hides it satisfies `Hidden` long before it satisfies `Detached`, and a caller that cares about \"the mask is really gone from the tree\" needs to be able to say so.\n\n`Hidden` means *present but not visible* — an element that was never there does **not** satisfy it (use `Detached` for that). Keeping those two apart is what makes a timeout report useful: \"it is still there but hidden\" and \"it never appeared\" are different bugs.",
+      "type": "string",
+      "enum": [
+        "visible",
+        "hidden",
+        "attached",
+        "detached"
+      ]
+    }
+  }
+}
