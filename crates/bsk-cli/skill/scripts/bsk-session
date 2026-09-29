@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# bsk-session — shared BrowserSkill session manager.
+#
+# Ensures all agents on the same machine reuse one Agent Window instead of each
+# opening a new one, and cleans up orphaned Chrome windows that `bsk session stop`
+# leaves behind.
+#
+# Usage:
+#   bsk-session start [--name <name>] [--no-focus] [--json]
+#       → prints SESSION_ID (or JSON) on stdout; reuses or creates the shared session
+#   bsk-session stop [--force]
+#       → stop the shared session
+#   bsk-session cleanup
+#       → borrow + close orphaned single-tab user windows whose session is dead
+#   bsk-session status
+#       → session_id / locker pid / browser info as JSON
+#
+# Configuration (env):
+#   BSK_SESSION_LOCKFILE      lock dir path (default /tmp/bsk-session.lock)
+#   BSK_SESSION_PIDFILE       session-id storage (default /tmp/bsk-session.pid)
+#   BSK_SESSION_NAMEFILE      human name storage (default /tmp/bsk-session.name)
+#   BSK_SESSION_BROWSERFILE   browser instance id storage
+#                             (default /tmp/bsk-session.browser)
+#   BSK_SESSION_NO_FOCUS      default --no-focus (1/0)
+#   BSK_SESSION_VERBOSE       log to stderr (1/0)
+#
+# All commands are safe to run concurrently — the lock dir serialises start/stop.
+# Dependencies: bash 4+ (export -f), jq, sleep, date, mkdir, rmdir.
+
+set -euo pipefail
+
+LOCKFILE="${BSK_SESSION_LOCKFILE:-/tmp/bsk-session.lock}"
+PIDFILE="${BSK_SESSION_PIDFILE:-/tmp/bsk-session.pid}"
+NAMEFILE="${BSK_SESSION_NAMEFILE:-/tmp/bsk-session.name}"
+BROWSERFILE="${BSK_SESSION_BROWSERFILE:-/tmp/bsk-session.browser}"
+NO_FOCUS="${BSK_SESSION_NO_FOCUS:-0}"
+VERBOSE="${BSK_SESSION_VERBOSE:-0}"
+
+log() { [[ "$VERBOSE" == "1" ]] && echo "[bsk-session] $*" >&2 || true; }
+die() { echo "bsk-session: $*" >&2; exit 1; }
+
+# --- lock ------------------------------------------------------------------
+
+# The lock is a directory created atomically by mkdir. The holder writes its pid
+# into $LOCKFILE/holder and removes the dir on exit via EXIT trap.
+#
+# IMPORTANT: functions called inside $(...) or pipes run in subshells. Bash does
+# not inherit functions into subshells unless exported with `export -f`, so every
+# helper below is exported. Without that, Phase 1 never finds an existing session.
+
+is_locked() { [[ -d "$LOCKFILE" ]] && [[ -f "$LOCKFILE/holder" ]]; }
+export -f is_locked
+
+wait_for_lock() {
+  local deadline now
+  deadline=$(( $(date +%s) + 10 ))
+  while ! mkdir "$LOCKFILE" 2>/dev/null; do
+    now=$(date +%s)
+    if [[ "$now" -ge "$deadline" ]]; then
+      die "timeout waiting on session lock ($LOCKFILE)"
+    fi
+    sleep 0.2
+  done
+}
+export -f wait_for_lock
+
+obtain_lock() {
+  if is_locked; then
+    wait_for_lock
+    if is_locked; then
+      wait_for_lock
+    fi
+  fi
+  mkdir "$LOCKFILE" 2>/dev/null || true
+  echo "$$" > "$LOCKFILE/holder"
+  trap 'rm -rf "$LOCKFILE" 2>/dev/null || true' EXIT
+}
+export -f obtain_lock
+
+# --- session helpers -------------------------------------------------------
+
+session_list() { bsk session list --json 2>/dev/null || echo '[]'; }
+export -f session_list
+
+# Extract session ids from the live list as plain text lines.
+session_ids() {
+  session_list | jq -r '.[]? | .session_id // empty' 2>/dev/null || true
+}
+export -f session_ids
+
+# Check whether a specific session id is currently live.
+session_is_alive() {
+  local sid="$1"
+  session_list | jq -e --arg s "$sid" \
+    '[.[]? | select(.session_id == $s)] | length > 0' >/dev/null 2>&1
+}
+export -f session_is_alive
+
+# Persist the chosen session id + optional name + browser instance.
+record_session() {
+  local sid="$1" name="${2:-}" browser="${3:-}"
+  echo "$sid" > "$PIDFILE"
+  if [[ -n "$name" ]]; then
+    echo "$name" > "$NAMEFILE"
+  fi
+  if [[ -n "$browser" ]]; then
+    echo "$browser" > "$BROWSERFILE"
+  fi
+}
+
+# Return the recorded session id if it is still alive; otherwise return 1.
+read_recorded_session() {
+  if [[ -f "$PIDFILE" ]] && [[ -s "$PIDFILE" ]] && session_is_alive "$(cat "$PIDFILE")"; then
+    cat "$PIDFILE"
+    return 0
+  fi
+  return 1
+}
+
+# Prefer a previously recorded browser instance; fall back to the first connected one.
+browser_instance() {
+  if [[ -f "$BROWSERFILE" ]] && [[ -s "$BROWSERFILE" ]]; then
+    local cached
+    cached="$(cat "$BROWSERFILE")"
+    if bsk browsers --json 2>/dev/null | jq -e --arg id "$cached" \
+      'any(.[]; .instance_id == $id or .label == $id)' >/dev/null 2>&1; then
+      echo "$cached"
+      return
+    fi
+  fi
+  bsk browsers --json 2>/dev/null | jq -r '.[0].instance_id // empty' 2>/dev/null || true
+}
+export -f browser_instance
+
+# --- start -----------------------------------------------------------------
+
+do_start() {
+  local name="" no_focus=0 json_out=0 browser=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)      name="$2"; shift 2 ;;
+      --no-focus)  no_focus=1; shift ;;
+      --json)      json_out=1; shift ;;
+      --browser)   browser="$(browser_instance)"; shift ;;
+      *)           die "unknown argument: $1" ;;
+    esac
+  done
+
+  # Phase 1: look for an existing live session to reuse — read-only, no lock.
+  local existing=""
+  existing="$(session_ids | head -n1 || true)"
+  if [[ -n "$existing" ]] && \
+     session_list | jq -e --arg s "$existing" \
+       '[.[]? | select(.session_id == $s)] | length > 0' >/dev/null 2>&1; then
+    record_session "$existing" "$name" "${browser:-}"
+    emit_start_result "$existing" "$name" "${browser:-}" "$json_out"
+    return 0
+  fi
+
+  # Phase 2: no usable session — serialise with the lock, then double-check.
+  obtain_lock
+
+  existing="$(session_ids | head -n1 || true)"
+  if [[ -n "$existing" ]] && \
+     session_list | jq -e --arg s "$existing" \
+       '[.[]? | select(.session_id == $s)] | length > 0' >/dev/null 2>&1; then
+    record_session "$existing" "$name" "${browser:-}"
+    emit_start_result "$existing" "$name" "${browser:-}" "$json_out"
+    return 0
+  fi
+
+  local target="${browser:-$(browser_instance)}"
+  [[ -z "$target" ]] && die "no connected browser instance found"
+
+  local opts=()
+  [[ -n "$name" ]] && opts+=(--name "$name")
+  [[ "$no_focus" == "1" || "$NO_FOCUS" == "1" ]] && opts+=(--no-focus)
+  opts+=(--browser "$target")
+
+  log "starting new session against browser $target"
+  local sid
+  sid="$(bsk session start --json "${opts[@]}" 2>/dev/null \
+    | jq -r '.session_id // empty')"
+  [[ -z "$sid" ]] && die "bsk session start returned no session_id"
+
+  record_session "$sid" "$name" "$target"
+  emit_start_result "$sid" "$name" "$target" "$json_out"
+}
+
+emit_start_result() {
+  local sid="$1" name="${2:-}" browser="${3:-}" json="$4"
+  if [[ "$json" == "1" ]]; then
+    jq -n --arg session_id "$sid" --arg name "$name" --arg browser "$browser" \
+      '{session_id: $session_id, name: $name, browser_instance: $browser}'
+  else
+    echo "$sid"
+  fi
+}
+export -f emit_start_result
+
+# --- stop ------------------------------------------------------------------
+
+do_stop() {
+  local force=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in --force) force=1; shift ;; *) shift ;; esac
+  done
+
+  obtain_lock
+
+  local sid=""
+  if read_recorded_session >/dev/null 2>&1; then
+    sid="$(cat "$PIDFILE")"
+  fi
+
+  # fall back: pick a session matching our recorded browser
+  if [[ -z "$sid" ]] && [[ -f "$BROWSERFILE" ]] && [[ -s "$BROWSERFILE" ]]; then
+    local brows
+    brows="$(cat "$BROWSERFILE")"
+    sid="$(session_list | jq -r --arg b "$brows" \
+      '[.[]? | select(.instance_id == $b or .label == $b)] | last .session_id // empty' \
+      2>/dev/null || true)"
+  fi
+
+  if [[ -z "$sid" ]]; then
+    if [[ "$force" == "1" ]]; then
+      log "force stop: stopping all sessions"
+      bsk session stop --all 2>/dev/null || true
+    else
+      log "no active session to stop"
+    fi
+    rm -f "$PIDFILE" "$NAMEFILE" "$BROWSERFILE"
+    return 0
+  fi
+
+  log "stopping session $sid"
+  bsk session stop "$sid" 2>/dev/null || true
+  rm -f "$PIDFILE" "$NAMEFILE" "$BROWSERFILE"
+}
+
+# --- cleanup ---------------------------------------------------------------
+
+do_cleanup() {
+  log "scanning for orphan user tabs"
+
+  # Pick any live session as a probe; user tab lists are the same from every
+  # session, so one is enough.
+  local probe_sid="" s
+  for s in $(session_ids); do
+    if session_list | jq -e --arg sid "$s" \
+      '[.[]? | select(.session_id == $sid)] | length > 0' >/dev/null 2>&1; then
+      probe_sid="$s"
+      break
+    fi
+  done
+
+  if [[ -z "$probe_sid" ]]; then
+    log "no live session to query user tabs from"
+    return 0
+  fi
+
+  # Collect agent-window tab ids across every live session so we don't borrow a
+  # tab that's already owned.
+  local owned="" sid tabs t
+  for sid in $(session_ids); do
+    if session_list | jq -e --arg sid "$sid" \
+      '[.[]? | select(.session_id == $sid)] | length > 0' >/dev/null 2>&1; then
+      tabs="$(bsk tab list --scope agent --session "$sid" --json 2>/dev/null \
+        | jq -r '.tab_id[]? // empty' 2>/dev/null || true)"
+      for t in $tabs; do
+        [[ -n "$t" ]] && owned="${owned}${t}\n"
+      done
+    fi
+  done
+
+  # List user tabs from the probe session.
+  local user_tabs=""
+  user_tabs="$(bsk tab list --scope user --session "$probe_sid" --json 2>/dev/null \
+    | jq -r '.[]? | "\(.tab_id)\t\(.title // "")\t\(.url // "")" // empty' 2>/dev/null || true)"
+
+  if [[ -z "$user_tabs" ]]; then
+    log "no user tabs found"
+    return 0
+  fi
+
+  # Borrow + close tabs that are unowned and look abandoned (empty title or
+  # about:blank url). Closing a tab collapses its window if it was the last one.
+  local tid title url closed_count=0
+  while IFS=$'\t' read -r tid title url; do
+    [[ -z "$tid" ]] && continue
+    # skip tabs owned by a live session
+    if printf "%s" "$owned" | grep -qF "$tid"; then
+      continue
+    fi
+    # skip tabs that look actively used (real url + title)
+    if [[ -n "$url" && "$url" != "about:blank" && -n "$title" ]]; then
+      continue
+    fi
+
+    log "borrowing orphan tab $tid"
+    if bsk tab borrow "$tid" --session "$probe_sid" 2>/dev/null; then
+      log "closing orphan tab $tid"
+      if bsk tab close "$tid" --session "$probe_sid" 2>/dev/null; then
+        closed_count=$((closed_count + 1))
+      fi
+    fi
+  done <<< "$user_tabs"
+
+  log "cleanup closed $closed_count orphan tab(s)"
+}
+
+# --- status ----------------------------------------------------------------
+
+do_status() {
+  local sid="" name="" browser=""
+  [[ -f "$PIDFILE" ]] && sid="$(cat "$PIDFILE")"
+  [[ -f "$NAMEFILE" ]] && name="$(cat "$NAMEFILE")"
+  [[ -f "$BROWSERFILE" ]] && browser="$(cat "$BROWSERFILE")"
+
+  local alive_json="null"
+  if [[ -n "$sid" ]] && session_is_alive "$sid"; then
+    alive_json="$(session_list | jq -c --arg s "$sid" \
+      '[.[]? | select(.session_id == $s)] | if length > 0 then .[0] else null end' \
+      2>/dev/null || echo null)"
+  fi
+
+  jq -n \
+    --arg session_id "$sid" \
+    --arg name "$name" \
+    --arg browser "$browser" \
+    --argjson alive "$alive_json" \
+    '{
+      session_id: $session_id,
+      name: $name,
+      browser_instance: $browser,
+      active: ($alive | type == "object"),
+      active_session: $alive
+    }'
+}
+
+# --- main ------------------------------------------------------------------
+
+case "${1:-}" in
+  start)   shift; do_start "$@" ;;
+  stop)    shift; do_stop "$@" ;;
+  cleanup) do_cleanup ;;
+  status)  do_status ;;
+  *)       echo "Usage: bsk-session {start|stop|cleanup|status} [args]" >&2; exit 1 ;;
+esac
