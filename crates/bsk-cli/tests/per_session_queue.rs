@@ -178,6 +178,7 @@ async fn run_fake_extension_with_reply(
                                 id: req.id.clone(),
                                 body: ResponseBody::Ok(
                                     serde_json::to_value(SessionStartResult {
+                                        claimed_tab_id: None,
                                         container_mode: None,
                                         interaction: None,
                                         agent_window_id: Some(id),

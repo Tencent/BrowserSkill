@@ -7,6 +7,57 @@ import { DiskStartJournal, memoryStartJournal } from "../src/start-journal";
 import { cleanups, exec, failed, harness, ok } from "./session-lifecycle-harness";
 
 describe("recoverable plugin starts", () => {
+  it("renews an active ephemeral session while its agent is running", async () => {
+    vi.useFakeTimers();
+    const h = harness(async (args) => {
+      if (args[1] === "start") return ok({ session_id: "live", browser_instance_id: "browser" });
+      if (args.includes("--claim") || args.includes("--renew")) return ok({ state: "active" });
+      return ok({ state: "closed" });
+    });
+    await h.session({ action: "start" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.calls.some(({ args }) => args.includes("--renew"))).toBe(true);
+    expect(h.registry.stateFor("live")).toBe("active");
+  });
+
+  it("keeps a live session after one renewal failure and renews it on the next tick", async () => {
+    vi.useFakeTimers();
+    let renewals = 0;
+    const h = harness(async (args) => {
+      if (args[1] === "start") return ok({ session_id: "live", browser_instance_id: "browser" });
+      if (args.includes("--claim")) return ok({ state: "active" });
+      if (args.includes("--renew")) {
+        renewals += 1;
+        return renewals === 1 ? failed("temporary renewal failure") : ok({ state: "active" });
+      }
+      return ok({ state: "closed" });
+    });
+    await h.session({ action: "start" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(renewals).toBe(2);
+    expect(h.registry.stateFor("live")).toBe("active");
+    expect(h.calls.some(({ args }) => args.includes("--cancel"))).toBe(false);
+  });
+
+  it("ends only the finished agent's sessions, leaving a running child's session intact", async () => {
+    let next = 0;
+    const h = harness(async (args) => {
+      if (args[1] === "start")
+        return ok({ session_id: ++next === 1 ? "root" : "child", browser_instance_id: "browser" });
+      if (args.includes("--claim")) return ok({ state: "active" });
+      return ok({ state: "closed" });
+    });
+    await h.session({ action: "start" }, { ...exec(), agent: { id: "root" } } as never);
+    await h.session({ action: "start" }, { ...exec(), agent: { id: "child" } } as never);
+    const child = [...h.journal.records.values()].find(
+      (record) => record.session?.sessionId === "child",
+    )!;
+    child.owners.push("root");
+    h.starts.turnEnded("root");
+    await vi.waitFor(() => expect(h.registry.isOwned("root")).toBe(false));
+    expect(h.registry.stateFor("child")).toBe("active");
+  });
+
   it("publishes a session only after both initialization and claim succeed", async () => {
     let finishNavigation!: (result: BskRunResult) => void;
     let finishClaim!: (result: BskRunResult) => void;

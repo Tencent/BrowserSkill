@@ -20,9 +20,42 @@ use super::state::DaemonState;
 
 const MAX_ADMISSION_MS: u64 = 10 * 60 * 1000;
 const MAX_REQUESTS: usize = 8192;
+const OWNER_LEASE_MS: u64 = 45_000;
 
 #[derive(Debug, Default)]
 pub struct SessionRequests(Mutex<HashMap<String, Arc<StartRequest>>>);
+
+impl SessionRequests {
+    pub(super) fn describe_session(&self, session: &Session) -> (String, String, Option<u64>) {
+        let requests: Vec<_> = self.0.lock().unwrap().values().cloned().collect();
+        for request in requests {
+            let data = request.data.lock().unwrap();
+            if data.session.as_ref().is_some_and(|owned| {
+                owned.id == session.id
+                    && owned.browser_id == session.browser_id
+                    && owned.created_at_ms == session.created_at_ms
+                    && owned.agent_window_id == session.agent_window_id
+            }) {
+                let kind = if data.ephemeral {
+                    "ephemeral"
+                } else {
+                    "managed"
+                };
+                let state = if data.cleanup_error.is_some() {
+                    "cleanup_failed"
+                } else if data.cancelled {
+                    "cancelling"
+                } else if data.claimed {
+                    "active"
+                } else {
+                    "starting"
+                };
+                return (kind.into(), state.into(), data.lease_expires_at_ms);
+            }
+        }
+        ("unmanaged".into(), "active".into(), None)
+    }
+}
 
 #[derive(Debug)]
 struct StartRequest {
@@ -40,6 +73,8 @@ struct StartRequest {
 struct RequestData {
     cancelled: bool,
     claimed: bool,
+    ephemeral: bool,
+    lease_expires_at_ms: Option<u64>,
     closed: bool,
     session: Option<Session>,
     result: Option<ResponseBody>,
@@ -121,6 +156,7 @@ impl StartRequest {
             "request_id": self.id, "state": phase,
             "session": data.session.as_ref().map(Session::status_entry),
             "cleanup_error": data.cleanup_error,
+            "lease_expires_at_ms": data.lease_expires_at_ms,
         })
     }
 }
@@ -159,6 +195,7 @@ pub(super) async fn start(
         );
     }
     params.as_object_mut().unwrap().remove("request_id");
+    let ephemeral = params.get("ephemeral").and_then(Value::as_bool) == Some(true);
     let (entry, fresh) = {
         let requests = state.session_requests.0.lock().unwrap();
         let Some(entry) = requests.get(&id) else {
@@ -172,6 +209,7 @@ pub(super) async fn start(
         let mut original = entry.params.lock().unwrap();
         if fresh {
             *original = params.clone();
+            entry.data.lock().unwrap().ephemeral = ephemeral;
         } else if !cancelled && *original != params {
             return error(
                 ErrorCode::InvalidParams,
@@ -253,10 +291,10 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
         .get("action")
         .and_then(Value::as_str)
         .unwrap_or("status");
-    if !matches!(action, "status" | "prepare" | "cancel" | "claim") {
+    if !matches!(action, "status" | "prepare" | "cancel" | "claim" | "renew") {
         return error(
             ErrorCode::InvalidParams,
-            "action must be status, prepare, cancel, or claim",
+            "action must be status, prepare, cancel, claim, or renew",
         );
     }
     let entry = {
@@ -285,7 +323,7 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
         }
     };
     let Some(entry) = entry else {
-        return if action == "claim" {
+        return if matches!(action, "claim" | "renew") {
             error(ErrorCode::NotFound, "start request not found")
         } else {
             ResponseBody::Ok(
@@ -301,6 +339,9 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
         if data.cancelled
             || data.closed
             || (entry.expires <= now_ms() && !data.claimed)
+            || data
+                .lease_expires_at_ms
+                .is_some_and(|deadline| deadline <= now_ms())
             || !matches!(data.result, Some(ResponseBody::Ok(_)))
             || !data
                 .session
@@ -309,7 +350,31 @@ pub(super) async fn operate(state: &Arc<DaemonState>, params: Value) -> Response
         {
             return error(ErrorCode::Cancelled, "start request cannot be claimed");
         }
+        if data.ephemeral && !data.claimed {
+            data.lease_expires_at_ms = Some(now_ms().saturating_add(OWNER_LEASE_MS));
+        }
         data.claimed = true;
+    }
+    if action == "renew" {
+        let mut data = entry.data.lock().unwrap();
+        if !data.claimed
+            || !data.ephemeral
+            || data.cancelled
+            || data.closed
+            || data
+                .lease_expires_at_ms
+                .is_none_or(|deadline| deadline <= now_ms())
+            || !data
+                .session
+                .as_ref()
+                .is_some_and(|s| same_session(state, s))
+        {
+            return error(ErrorCode::Cancelled, "session lease is not active");
+        }
+        data.lease_expires_at_ms = Some(now_ms().saturating_add(OWNER_LEASE_MS));
+        if let Some(session) = &data.session {
+            state.sessions.touch(&session.id);
+        }
     }
     ResponseBody::Ok(entry.snapshot(state))
 }
@@ -380,11 +445,17 @@ pub(super) fn reap(state: &Arc<DaemonState>) {
     for entry in entries {
         entry.snapshot(state);
         let (closed, needs_cleanup) = {
-            let data = entry.data.lock().unwrap();
-            (
-                data.closed,
-                !data.closed && (data.cancelled || (!data.claimed && entry.expires <= now)),
-            )
+            let mut data = entry.data.lock().unwrap();
+            let expired = (!data.claimed && entry.expires <= now)
+                || (data.ephemeral
+                    && data.claimed
+                    && data
+                        .lease_expires_at_ms
+                        .is_some_and(|deadline| deadline <= now));
+            if expired && !data.closed {
+                data.cancelled = true;
+            }
+            (data.closed, !data.closed && data.cancelled)
         };
         if closed && entry.expires <= now {
             state.session_requests.0.lock().unwrap().remove(&entry.id);
@@ -513,6 +584,61 @@ mod ownership_tests {
             created_at_ms: window,
             interaction: None,
         }
+    }
+
+    #[tokio::test]
+    async fn ephemeral_claim_is_renewable_and_expired_lease_enters_cleanup() {
+        let state = Arc::new(DaemonState::new(DaemonConfig::new(0)));
+        let session = session("live", 7);
+        state.sessions.insert(session.clone());
+        let expires = now_ms() + 60_000;
+        let id = format!("{expires}:{}", uuid::Uuid::new_v4());
+        let entry = Arc::new(StartRequest::new(id.clone(), expires, Value::Null, false));
+        entry.started.store(true, Ordering::SeqCst);
+        entry.finished.send_replace(true);
+        {
+            let mut data = entry.data.lock().unwrap();
+            data.ephemeral = true;
+            data.session = Some(session);
+            data.result = Some(ResponseBody::Ok(json!({})));
+        }
+        state
+            .session_requests
+            .0
+            .lock()
+            .unwrap()
+            .insert(id.clone(), entry.clone());
+        let ResponseBody::Ok(claimed) =
+            operate(&state, json!({"request_id":id,"action":"claim"})).await
+        else {
+            panic!("claim failed")
+        };
+        assert_eq!(claimed["state"], "active");
+        let first_deadline = entry.data.lock().unwrap().lease_expires_at_ms.unwrap();
+        let ResponseBody::Ok(renewed) =
+            operate(&state, json!({"request_id":id,"action":"renew"})).await
+        else {
+            panic!("renew failed")
+        };
+        assert_eq!(renewed["state"], "active");
+        let renewed_deadline = entry.data.lock().unwrap().lease_expires_at_ms.unwrap();
+        assert!(renewed_deadline >= first_deadline);
+        let ResponseBody::Ok(listed) = super::super::ipc::handle_session_list(&state) else {
+            panic!("session list failed")
+        };
+        let session = &listed["sessions"][0];
+        assert_eq!(session["session_id"], "live");
+        assert_eq!(session["owner_kind"], "ephemeral");
+        assert_eq!(session["lifecycle_state"], "active");
+        assert_eq!(session["lease_expires_at_ms"], renewed_deadline);
+        entry.data.lock().unwrap().lease_expires_at_ms = Some(now_ms() - 1);
+        reap(&state);
+        tokio::task::yield_now().await;
+        assert!(entry.data.lock().unwrap().cancelled);
+        assert!(matches!(
+            operate(&state, json!({"request_id":id,"action":"renew"})).await,
+            ResponseBody::Err(_)
+        ));
     }
 
     #[tokio::test]

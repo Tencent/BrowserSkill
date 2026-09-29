@@ -34,6 +34,13 @@
     "session_id": {
       "type": "string"
     },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
     "width": {
       "description": "Optional Agent Window outer width in CSS pixels (100..=7680).",
       "type": [

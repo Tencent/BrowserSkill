@@ -10,6 +10,7 @@ import {
 } from "@/tools/tabs";
 import { attachSessionEventHandler } from "../event-handler";
 import { SessionManager } from "../manager";
+import { chromeSharedWindowApi } from "../shared-window";
 
 function fixture() {
   let nextId = 20;
@@ -26,7 +27,8 @@ function fixture() {
     ],
   ]);
   const host = vi.fn(
-    async () => ({ id: 10, type: "normal", incognito: false }) as chrome.windows.Window,
+    async (_excluded: ReadonlySet<number>, preferredWindowId?: number) =>
+      ({ id: preferredWindowId ?? 10, type: "normal", incognito: false }) as chrome.windows.Window,
   );
   const get = vi.fn(async (id: number) => {
     const tab = pages.get(id);
@@ -61,6 +63,97 @@ function fixture() {
 }
 
 describe("shared user window sessions (#243)", () => {
+  it("skips the focused Agent Window when another normal user window exists", async () => {
+    const agent = { id: 99, type: "normal", incognito: false } as chrome.windows.Window;
+    const user = { id: 10, type: "normal", incognito: false } as chrome.windows.Window;
+    const getLastFocused = vi.fn(async () => agent);
+    const getAll = vi.fn(async () => [agent, user]);
+    const getWindow = vi.fn(async () => user);
+    vi.stubGlobal("chrome", { windows: { getLastFocused, getAll, get: getWindow } });
+    try {
+      expect(await chromeSharedWindowApi.host(new Set([99]))).toBe(user);
+      expect(getAll).toHaveBeenCalledWith({ windowTypes: ["normal"] });
+      expect(await chromeSharedWindowApi.host(new Set([99]), 10)).toBe(user);
+      expect(getWindow).toHaveBeenCalledWith(10);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("starts on an approved existing tab and releases it without creating or closing a tab", async () => {
+    const f = fixture();
+    const approveBorrow = vi.fn(async () => true);
+    expect(
+      await handleSessionStart(
+        f.manager,
+        { session_id: "a", in_window: true, tab_id: 1 },
+        { approveBorrow },
+      ),
+    ).toMatchObject({ claimed_tab_id: 1, agent_window_id: 10 });
+    const ctx = f.manager.get("a")!;
+    expect(ctx.activeTabId).toBe(1);
+    expect(ctx.borrowedTabs.has(1)).toBe(true);
+    expect(ctx.agentCreatedTabs.size).toBe(0);
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.windows.create).not.toHaveBeenCalled();
+    expect(approveBorrow).toHaveBeenCalledWith({ sessionId: "a", tabId: 1 });
+    const move = vi.fn();
+    expect(
+      await handleSessionStop(
+        f.manager,
+        { session_id: "a" },
+        {
+          cdp: { releaseSessionTab: vi.fn(async () => {}), detachSession: vi.fn(async () => {}) },
+          tabManagement: {
+            tabs: { get: f.get, create: vi.fn(), remove: f.remove, move, update: vi.fn() },
+          },
+        },
+      ),
+    ).toMatchObject({ returned_tab_ids: [1] });
+    expect(f.pages.has(1)).toBe(true);
+    expect(f.remove).not.toHaveBeenCalled();
+    expect(move).not.toHaveBeenCalled();
+    expect(f.windows.remove).not.toHaveBeenCalled();
+  });
+
+  it("claims a selected user tab outside the last-focused window", async () => {
+    const f = fixture();
+    f.pages.set(2, {
+      id: 2,
+      windowId: 11,
+      active: true,
+      index: 0,
+      url: "https://other.example/",
+    } as chrome.tabs.Tab);
+    expect(
+      await handleSessionStart(
+        f.manager,
+        { session_id: "other", in_window: true, tab_id: 2 },
+        { approveBorrow: vi.fn(async () => true) },
+      ),
+    ).toMatchObject({ claimed_tab_id: 2, agent_window_id: 11 });
+    expect(f.host).toHaveBeenCalledWith(expect.any(Set), 11);
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.windows.create).not.toHaveBeenCalled();
+  });
+
+  it("does not claim or mutate an existing tab when borrow confirmation is denied", async () => {
+    const f = fixture();
+    expect(
+      await handleSessionStart(
+        f.manager,
+        { session_id: "a", in_window: true, tab_id: 1 },
+        {
+          approveBorrow: vi.fn(async () => false),
+        },
+      ),
+    ).toMatchObject({ code: "cancelled" });
+    expect(f.manager.has("a")).toBe(false);
+    expect(f.pages.has(1)).toBe(true);
+    expect(f.create).not.toHaveBeenCalled();
+    expect(f.remove).not.toHaveBeenCalled();
+  });
+
   it("creates a new inactive page without claiming user pages or indexing the host as owned", async () => {
     const f = fixture();
     const ctx = await f.manager.start("a", { inWindow: true, focused: false });

@@ -176,7 +176,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
     defineTool({
       name: "session.start",
       description:
-        "Start a new browser session: opens an Agent Window in the connected browser and returns " +
+        "Start a new browser session in an Agent Window, a user window, or an existing tab and return " +
         "its session id. The new session becomes the current session for subsequent browser_* calls. " +
         "Optionally navigate to an initial URL and/or apply a mobile device emulation preset.",
       parameters: {
@@ -195,6 +195,15 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         noFocus: {
           type: "boolean",
           description: "Open the Agent Window in the background without stealing focus.",
+        },
+        inWindow: {
+          type: "boolean",
+          description: "Use a normal user window without creating an Agent Window.",
+        },
+        tabId: {
+          type: "integer",
+          description:
+            "Reuse this existing tab in its user window after borrow confirmation. Requires inWindow.",
         },
         browser: BROWSER_PARAM,
         device: {
@@ -231,12 +240,21 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
         if ((args.width === undefined) !== (args.height === undefined)) {
           throw new Error("width and height must be given together");
         }
+        if (
+          args.tabId !== undefined &&
+          (args.inWindow !== true || !Number.isSafeInteger(args.tabId) || args.tabId <= 0)
+        )
+          throw new Error("tabId requires inWindow and must be a positive integer");
+        if (args.inWindow === true && args.width !== undefined)
+          throw new Error("inWindow cannot be combined with window dimensions");
         // Reserve the slot BEFORE spawning: check-and-reserve is synchronous,
         // so concurrent starts can never both pass the cap and leak a session.
         const starts = (deps.starts ??= new SessionStarts(deps));
         await starts.reconcile();
         const record = starts.begin(ownerSessionIds(deps.ctx, exec.agent?.id));
-        const startArgs = ["session", "start", "--request-id", record.requestId];
+        const startArgs = ["session", "start", "--request-id", record.requestId, "--ephemeral"];
+        if (args.inWindow === true) startArgs.push("--in-window");
+        if (args.tabId !== undefined) startArgs.push("--tab-id", String(args.tabId));
         if (args.width !== undefined && args.height !== undefined) {
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }

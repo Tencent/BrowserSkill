@@ -15,7 +15,12 @@ import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
-import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
+import {
+  chromeAgentOverlayResetApi,
+  returnBorrowedTab,
+  type BorrowConfirmationApprover,
+  type TabManagementDeps,
+} from "./tabs";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -58,6 +63,7 @@ export function validateWindowSize(
 
 export interface SessionStartParams {
   in_window?: boolean;
+  tab_id?: number;
   session_id: string;
   browser_instance_id?: string;
   /** Optional Agent Window outer width in CSS pixels (100..=7680). */
@@ -74,11 +80,19 @@ export interface SessionStartResult {
   container_mode?: "window" | "in_window";
   interaction?: InteractionPolicy;
   agent_window_id?: number;
+  claimed_tab_id?: number;
 }
 
 export interface SessionStartDeps {
   preferences?: InteractionPreferenceStore;
   signal?: AbortSignal;
+  approveBorrow?: BorrowConfirmationApprover;
+}
+
+class ExistingTabApprovalError extends Error {
+  constructor(readonly response: RpcError) {
+    super(response.message);
+  }
 }
 
 export interface SessionStopParams {
@@ -142,6 +156,15 @@ export async function handleSessionStart(
   if (params.in_window !== undefined && typeof params.in_window !== "boolean") {
     return { code: "invalid_params", message: "in_window must be a boolean" };
   }
+  if (
+    params.tab_id !== undefined &&
+    (!params.in_window || !Number.isSafeInteger(params.tab_id) || params.tab_id <= 0)
+  ) {
+    return {
+      code: "invalid_params",
+      message: "tab_id requires in_window and must be a positive integer",
+    };
+  }
   if (params.in_window && (params.width !== undefined || params.height !== undefined)) {
     return {
       code: "invalid_params",
@@ -160,13 +183,25 @@ export async function handleSessionStart(
       focused: params.focused,
       signal: deps.signal,
       inWindow: params.in_window,
+      existingTabId: params.tab_id,
+      approveExistingTab: async (sessionId, tabId, signal) => {
+        const result = await deps.approveBorrow?.({
+          sessionId,
+          tabId,
+          ...(signal ? { signal } : {}),
+        });
+        if (result && typeof result === "object") throw new ExistingTabApprovalError(result);
+        return result === true;
+      },
     });
     return {
       agent_window_id: sessionWindowId(ctx),
+      ...(params.tab_id !== undefined ? { claimed_tab_id: params.tab_id } : {}),
       ...(ctx.container.mode === "in_window" ? { container_mode: ctx.container.mode } : {}),
       interaction: interactionPolicy(deps.preferences?.get() ?? DEFAULT_INTERACTION_PREFERENCES),
     };
   } catch (err) {
+    if (err instanceof ExistingTabApprovalError) return err.response;
     if (err instanceof SharedSessionStartCleanupError) {
       return rpcError("protocol_error", "cleanup_failed", err.message, {
         resource_type: "tab",

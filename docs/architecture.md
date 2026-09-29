@@ -101,12 +101,17 @@ mutation for session queueing and user-interruption gating.
 
 - **Session** = opaque ID + window container + session-scoped ref-store and tab ownership.
   The default container is a dedicated **Agent Window**. Local `session start --in-window`
-  creates a controlled tab in the last-focused normal user window (protocol 1.4).
+  creates a controlled tab in a normal user window, skipping Agent Windows (protocol 1.4).
+  Adding `--tab-id <id>` instead claims an existing tab in its user window after the
+  existing borrow confirmation; startup creates no window or tab in that mode.
 - **Write scope**: dedicated sessions use their Agent Window. Shared sessions require
   both explicit tab ownership (created or borrowed) and location in their host window.
   Sharing a host never grants control of user pages or another session's pages.
-- **Session stop is mandatory** in agent workflows (`bsk session stop`); idle timeout
-  (default 5 min) is a safety net only.
+- **Lifecycle**: unmanaged CLI sessions require `bsk session stop`; the default
+  5-minute idle timeout is their safety net. Managed `--ephemeral` sessions have
+  a 45-second owner lease. The DSH plugin renews it while its agent runs and
+  stops its own sessions when that agent becomes idle. The daemon reaps expired
+  leases and retries failed cleanup.
 - Multiple sessions may use separate Agent Windows or share a local user window;
   controlled pages remain isolated by session. Shared cleanup returns borrowed pages
   and removes its created pages without actively closing the host window.

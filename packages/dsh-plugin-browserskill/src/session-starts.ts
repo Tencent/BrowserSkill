@@ -40,6 +40,8 @@ export interface StopResult {
 export class SessionStarts {
   private closing = false;
   private timer?: ReturnType<typeof setTimeout>;
+  private leaseTimer?: ReturnType<typeof setInterval>;
+  private renewing = false;
   private readonly cleaning = new Map<string, Promise<void>>();
   private readonly reserved = new Set<string>();
 
@@ -153,6 +155,7 @@ export class SessionStarts {
     this.assertStarting(record);
     this.deps.registry.activate(record.session.sessionId);
     this.deps.observation.endAction(record.session.sessionId);
+    this.startLeaseRenewal();
   }
 
   /** Accept a durable stop; aborting its caller only cancels waiting, never cleanup. */
@@ -358,6 +361,15 @@ export class SessionStarts {
       this.deps.observation.removeSession(record.session.sessionId);
     }
     if (this.reserved.delete(record.requestId)) this.deps.registry.abandonStart();
+    if (
+      ![...this.journal.records.values()].some(
+        (r) =>
+          !r.cleanup && r.session && this.deps.registry.stateFor(r.session.sessionId) === "active",
+      )
+    ) {
+      if (this.leaseTimer) clearInterval(this.leaseTimer);
+      this.leaseTimer = undefined;
+    }
   }
 
   private completeCleanup(record: StartRecord): void {
@@ -407,6 +419,12 @@ export class SessionStarts {
     }
   }
 
+  turnEnded(owner: string): void {
+    for (const record of this.journal.records.values()) {
+      if (record.owners[0] === owner) void this.fail(record).catch(() => {});
+    }
+  }
+
   private schedule(): void {
     if (this.closing || this.timer || this.pendingCleanup() === 0) return;
     this.timer = setTimeout(() => {
@@ -419,9 +437,42 @@ export class SessionStarts {
     this.timer.unref();
   }
 
+  private startLeaseRenewal(): void {
+    if (this.leaseTimer || this.closing) return;
+    this.leaseTimer = setInterval(() => {
+      if (this.renewing) return;
+      this.renewing = true;
+      void Promise.allSettled(
+        [...this.journal.records.values()]
+          .filter(
+            (record) =>
+              !record.cleanup &&
+              record.session &&
+              this.deps.registry.stateFor(record.session.sessionId) === "active",
+          )
+          .map(async (record) => {
+            try {
+              const result = await this.deps.runner.run(
+                ["session", "request", record.requestId, "--renew"],
+                { timeoutMs: 15_000 },
+              );
+              const status = parseBskJson(result, "session lease renewal") as RequestStatus;
+              if (status.state !== "active") throw new Error("browser session lease is not active");
+            } catch (error) {
+              console.warn("Browser session lease renewal failed", error);
+            }
+          }),
+      ).finally(() => {
+        this.renewing = false;
+      });
+    }, 10_000);
+    this.leaseTimer.unref();
+  }
+
   async dispose(): Promise<void> {
     this.closing = true;
     if (this.timer) clearTimeout(this.timer);
+    if (this.leaseTimer) clearInterval(this.leaseTimer);
     this.deps.runner.killAll();
     await Promise.allSettled([...this.journal.records.values()].map((r) => this.fail(r)));
     this.journal.release();

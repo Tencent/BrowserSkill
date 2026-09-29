@@ -42,6 +42,8 @@ pub struct InteractionPolicy {
 pub struct SessionStartParams {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_window: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub browser_instance_id: Option<String>,
@@ -69,6 +71,8 @@ pub struct SessionStartResult {
     pub interaction: Option<InteractionPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_window_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_tab_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

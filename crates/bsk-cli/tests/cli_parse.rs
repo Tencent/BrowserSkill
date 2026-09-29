@@ -47,6 +47,31 @@ fn shared_window_is_opt_in_and_rejects_dimensions() {
 }
 
 #[test]
+fn existing_tab_and_ephemeral_start_require_explicit_modes() {
+    let cli = parse(&[
+        "bsk",
+        "session",
+        "start",
+        "--in-window",
+        "--tab-id",
+        "42",
+        "--request-id",
+        "123:00000000-0000-0000-0000-000000000001",
+        "--ephemeral",
+    ]);
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = cli.command
+    else {
+        panic!("session start expected")
+    };
+    assert_eq!(args.tab_id, Some(42));
+    assert!(args.ephemeral);
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--tab-id", "42"]).is_err());
+    assert!(Cli::try_parse_from(["bsk", "session", "start", "--ephemeral"]).is_err());
+}
+
+#[test]
 fn parses_unattended_session_without_changing_normal_defaults() {
     for unattended in [false, true] {
         let mut argv = vec!["bsk", "session", "start"];

@@ -126,6 +126,76 @@ async fn shared_mode_round_trips_and_tabs_closed_removes_only_its_session() {
     handle.shutdown().await;
 }
 
+#[tokio::test]
+async fn existing_tab_start_requires_extension_confirmation() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let extension = tokio::spawn(async move {
+        let first = next_extension_request(&mut ws).await;
+        let params: SessionStartParams = serde_json::from_value(first.params.unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(7));
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: first.id,
+                body: ResponseBody::Ok(serde_json::json!({
+                    "agent_window_id": 10, "container_mode": "in_window", "claimed_tab_id": 7
+                })),
+            },
+        )
+        .await;
+        let second = next_extension_request(&mut ws).await;
+        let params: SessionStartParams = serde_json::from_value(second.params.unwrap()).unwrap();
+        assert_eq!(params.tab_id, Some(8));
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: second.id,
+                body: ResponseBody::Ok(serde_json::json!({
+                    "agent_window_id": 10, "container_mode": "in_window"
+                })),
+            },
+        )
+        .await;
+        let rollback = next_extension_request(&mut ws).await;
+        assert_eq!(rollback.method, Method::ToolSessionStop);
+        send_extension_response(
+            &mut ws,
+            ResponseFrame {
+                id: rollback.id,
+                body: ResponseBody::Ok(serde_json::json!({})),
+            },
+        )
+        .await;
+    });
+    let mut ipc = IpcClient::connect(&sock).await.unwrap();
+    let accepted: serde_json::Value = ipc
+        .call(
+            "existing-tab-ok",
+            Method::SessionStart,
+            Some(serde_json::json!({"in_window":true,"tab_id":7})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted["container_mode"], "in_window");
+    let rejected = ipc
+        .call::<_, serde_json::Value>(
+            "existing-tab-old-extension",
+            Method::SessionStart,
+            Some(serde_json::json!({"in_window":true,"tab_id":8})),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(rejected.code, ErrorCode::ProtocolError);
+    extension.await.unwrap();
+    handle.shutdown().await;
+}
+
 type TestWs =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -270,6 +340,7 @@ async fn respond_to_aborted_start(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    claimed_tab_id: None,
                     container_mode: None,
                     interaction: None,
                     agent_window_id: Some(agent_window_id),
@@ -307,6 +378,7 @@ async fn respond_to_aborted_stop(
             id: start.id,
             body: ResponseBody::Ok(
                 serde_json::to_value(SessionStartResult {
+                    claimed_tab_id: None,
                     container_mode: None,
                     interaction: None,
                     agent_window_id: Some(4242),
@@ -372,6 +444,7 @@ async fn session_start_stop_round_trip_via_ipc() {
                             serde_json::from_value(req.params.clone().unwrap()).unwrap();
                         assert_eq!(params.focused, Some(false));
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
                             container_mode: None,
                             interaction: None,
                             agent_window_id: Some(4242),
@@ -540,6 +613,132 @@ async fn cancelling_session_start_rolls_back_a_late_extension_success() {
 
     let _ = release_tx.send(());
     responder.await.unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_start_keeps_failed_cleanup_reachable_before_cli_timeout() {
+    cancelled_start_keeps_failed_cleanup_reachable(Duration::ZERO).await;
+}
+
+#[tokio::test]
+async fn cancelled_start_keeps_failed_cleanup_reachable_after_cli_timeout() {
+    cancelled_start_keeps_failed_cleanup_reachable(Duration::from_millis(2_100)).await;
+}
+
+async fn cancelled_start_keeps_failed_cleanup_reachable(delay: Duration) {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let start_sock = sock.clone();
+    let mut start_call = tokio::spawn(async move {
+        IpcClient::connect(&start_sock)
+            .await
+            .unwrap()
+            .call_with_id::<_, serde_json::Value>(
+                "cancelled-start".into(),
+                Method::SessionStart,
+                Some(serde_json::json!({})),
+                Duration::from_secs(8),
+            )
+            .await
+            .unwrap()
+    });
+    let start = next_extension_request(&mut ws).await;
+    let session_id = start.params.as_ref().unwrap()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut cancel_ipc = IpcClient::connect(&sock).await.unwrap();
+    let cancelled: CancelResult = cancel_ipc
+        .call(
+            "cancel-start-request",
+            Method::Cancel,
+            Some(CancelParams {
+                rpc_id: "cancelled-start".into(),
+            }),
+            Duration::from_secs(3),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cancelled.cancelled);
+    let cancel = next_extension_request(&mut ws).await;
+    acknowledge_extension_cancel(&mut ws, cancel, &start.id).await;
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+        assert_eq!(
+            (&mut start_call).await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+    }
+    send_extension_response(
+        &mut ws,
+        ResponseFrame {
+            id: start.id,
+            body: ResponseBody::Err(RpcError {
+                code: ErrorCode::ProtocolError,
+                message: "Agent Window cleanup failed".into(),
+                data: Some(serde_json::json!({
+                    "reason":"cleanup_failed", "resource_type":"agent_window", "resource_id":4242
+                })),
+            }),
+        },
+    )
+    .await;
+    if delay.is_zero() {
+        assert_eq!(
+            (&mut start_call).await.unwrap().unwrap_err().code,
+            ErrorCode::ProtocolError
+        );
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+            if handle
+                .state()
+                .sessions
+                .get(&sid)
+                .is_some_and(|session| session.agent_window_id == Some(4242))
+                && handle.state().tool_queues.is_accepting(&sid)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let stop = tokio::spawn({
+        let sock = sock.clone();
+        let session_id = session_id.clone();
+        async move {
+            IpcClient::connect(&sock)
+                .await
+                .unwrap()
+                .call::<_, serde_json::Value>(
+                    "stop-after-failed-start",
+                    Method::SessionStop,
+                    Some(serde_json::json!({"session_id":session_id})),
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    });
+    let stop_request = next_extension_request(&mut ws).await;
+    assert_eq!(stop_request.method, Method::ToolSessionStop);
+    send_extension_response(
+        &mut ws,
+        ResponseFrame {
+            id: stop_request.id,
+            body: ResponseBody::Ok(serde_json::to_value(SessionStopResult::default()).unwrap()),
+        },
+    )
+    .await;
+    stop.await.unwrap();
+    assert!(handle.state().sessions.is_empty());
     handle.shutdown().await;
 }
 
@@ -810,6 +1009,7 @@ async fn session_start_waits_for_late_extension_handshake() {
                 continue;
             }
             let result = SessionStartResult {
+                claimed_tab_id: None,
                 container_mode: None,
                 interaction: None,
                 agent_window_id: Some(4242),
@@ -951,6 +1151,7 @@ async fn session_start_with_browser_instance_id_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    claimed_tab_id: None,
                     container_mode: None,
                     interaction: None,
                     agent_window_id: Some(123),
@@ -1057,6 +1258,7 @@ async fn session_start_label_match_picks_target() {
                 && req.method == Method::ToolSessionStart
             {
                 let result = SessionStartResult {
+                    claimed_tab_id: None,
                     container_mode: None,
                     interaction: None,
                     agent_window_id: Some(456),

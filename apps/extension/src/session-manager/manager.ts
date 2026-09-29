@@ -74,6 +74,8 @@ export interface SessionManagerOptions {
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
   inWindow?: boolean;
+  existingTabId?: number;
+  approveExistingTab?: (sessionId: string, tabId: number, signal?: AbortSignal) => Promise<boolean>;
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
@@ -412,8 +414,13 @@ export class SessionManager {
     let tabId: number | undefined;
     let ctx: SessionContext | undefined;
     let reclaimed = false;
+    let reservation: BorrowReservation | undefined;
     try {
-      const host = await this.sharedWindow.host();
+      const target =
+        opts.existingTabId !== undefined
+          ? await this.sharedWindow.get(opts.existingTabId)
+          : undefined;
+      const host = await this.sharedWindow.host(new Set(this.windowIndex.keys()), target?.windowId);
       if (
         host.id === undefined ||
         host.incognito ||
@@ -423,6 +430,38 @@ export class SessionManager {
         throw new Error("Focus a normal user window before starting an in-window session");
       }
       throwIfSessionStartAborted(opts.signal);
+      if (opts.existingTabId !== undefined) {
+        if (target?.windowId !== host.id)
+          throw new Error("Existing tab must be in the selected user window");
+        const claim = this.tryReserveBorrow(opts.existingTabId, sessionId);
+        if ("borrowedBy" in claim)
+          throw new Error(`Tab is controlled by session ${claim.borrowedBy}`);
+        reservation = claim;
+        if (
+          !opts.approveExistingTab ||
+          !(await opts.approveExistingTab(sessionId, opts.existingTabId, opts.signal))
+        )
+          throw new DOMException("Tab borrow denied", "AbortError");
+        throwIfSessionStartAborted(opts.signal);
+        const current = await this.sharedWindow.get(opts.existingTabId);
+        if (current.windowId !== host.id) throw new Error("Existing tab moved during startup");
+        ctx = {
+          sessionId,
+          container: { mode: "in_window", hostWindowId: host.id },
+          activeTabId: opts.existingTabId,
+          refStore: new RefStore(),
+          borrowedTabs: new Map(),
+          agentCreatedTabs: new Set(),
+          createdAtMs: this.now(),
+        };
+        this.sessions.set(sessionId, ctx);
+        reservation.commit({
+          tabId: opts.existingTabId,
+          originalWindowId: host.id,
+          originalIndex: typeof current.index === "number" ? current.index : 0,
+        });
+        return ctx;
+      }
       tabId = await this.sharedWindow.create(host.id, opts.focused !== false);
       ctx = {
         sessionId,
@@ -449,6 +488,7 @@ export class SessionManager {
       this.sessions.set(sessionId, ctx);
       return ctx;
     } catch (error) {
+      if (opts.existingTabId !== undefined) this.sessions.delete(sessionId);
       if (tabId !== undefined && !reclaimed) {
         try {
           await this.sharedWindow.remove(tabId);
@@ -461,6 +501,7 @@ export class SessionManager {
       }
       throw error;
     } finally {
+      reservation?.release();
       this.starting.delete(sessionId);
     }
   }

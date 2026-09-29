@@ -533,6 +533,12 @@ pub struct SessionStatusEntry {
     pub agent_window_id: Option<i64>,
     /// Unix epoch milliseconds.
     pub created_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at_ms: Option<u64>,
 }
 
 /// `system.status` request payload.

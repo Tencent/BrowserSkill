@@ -158,6 +158,7 @@ async fn session_user_interrupt_event_cancels_inflight_with_user_aborted() {
                 match req.method {
                     Method::ToolSessionStart => {
                         let result = SessionStartResult {
+                            claimed_tab_id: None,
                             container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
@@ -336,6 +337,7 @@ async fn assert_idle_interrupt_rejects(method: Method) {
             if let Frame::Request(req) = frame {
                 if req.method == Method::ToolSessionStart {
                     let result = SessionStartResult {
+                        claimed_tab_id: None,
                         container_mode: None,
                         interaction: None,
                         agent_window_id: Some(1),
@@ -466,6 +468,7 @@ async fn read_only_tool_passes_through_without_consuming_interrupt_marker() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            claimed_tab_id: None,
                             container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
@@ -626,6 +629,7 @@ async fn user_interrupt_marker_survives_long_delay_before_next_tool() {
                 let body = match req.method {
                     Method::ToolSessionStart => ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            claimed_tab_id: None,
                             container_mode: None,
                             interaction: None,
                             agent_window_id: Some(1),
