@@ -71,6 +71,7 @@ pub mod reason {
     pub const FILE_DROP_TARGET_UNAVAILABLE: &str = "file_drop_target_unavailable";
     pub const FILE_DROP_FAILED: &str = "file_drop_failed";
     pub const DOWNLOAD_CAPTURE_FAILED: &str = "download_capture_failed";
+    pub const DOWNLOAD_PATH_MISMATCH: &str = "download_path_mismatch";
     pub const TRANSFER_OUTCOME_UNKNOWN: &str = "transfer_outcome_unknown";
     pub const TRANSFER_TIMEOUT: &str = "transfer_timeout";
     pub const SESSION_BUSY: &str = crate::rpc_reason::SESSION_BUSY;
@@ -570,6 +571,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
             ),
             exit_code: base.exit_code,
         },
+        (ErrorCode::CdpFailed, reason::DOWNLOAD_PATH_MISMATCH) => RenderInfo {
+            summary: "the browser did not use the requested download directory",
+            hint: Some(
+                "find the saved file in the browser's Downloads list; check for a competing rename, a browser-rejected filename, or a different save location before retrying",
+            ),
+            exit_code: base.exit_code,
+        },
         _ => base,
     }
 }
@@ -837,6 +845,15 @@ mod tests {
         let download = serde_json::json!({ "reason": reason::DOWNLOAD_CAPTURE_FAILED });
         let info = info_for_error(ErrorCode::CdpFailed, Some(&download));
         assert!(info.summary.contains("download could not be attributed"));
+
+        let path_mismatch = serde_json::json!({
+            "reason": reason::DOWNLOAD_PATH_MISMATCH,
+            "effect_state": "committed",
+            "phase": "download"
+        });
+        let info = info_for_error(ErrorCode::CdpFailed, Some(&path_mismatch));
+        assert!(info.summary.contains("requested download directory"));
+        assert!(info.hint.unwrap().contains("browser-rejected filename"));
 
         let unknown = serde_json::json!({ "reason": reason::TRANSFER_OUTCOME_UNKNOWN });
         let info = info_for_error(ErrorCode::ProtocolError, Some(&unknown));

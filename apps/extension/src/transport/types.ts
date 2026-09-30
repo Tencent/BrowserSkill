@@ -74,6 +74,7 @@ export type RpcErrorReason =
   | "file_drop_target_unavailable"
   | "file_drop_failed"
   | "download_capture_failed"
+  | "download_path_mismatch"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
   | "cleanup_failed";
