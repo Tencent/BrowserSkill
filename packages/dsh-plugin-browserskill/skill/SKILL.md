@@ -39,7 +39,7 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    open is part of the user's request. Stopping returns borrowed tabs, leaving them
    open in the user's window.
 
-JS dialogs: confirm/prompt need `browser_page(action=dialog)`; alert/beforeunload auto-accept. See [interaction details](references/interaction-details.md).
+JS dialogs: confirm/prompt need `browser_page(action=dialog)`; alert/beforeunload auto-accept.
 
 ## Read and interact
 
@@ -70,13 +70,13 @@ Do not invent tools or bypass these limits.
 
 ## Read details only when needed
 
-Resolve references from the skill resource directory provided by the harness, not
-the working directory. Read the matching file before acting; do not preload all files.
+Resolve references from the harness's skill resource directory, not the working
+directory. Read matching files before acting; do not preload them all.
 
 | When | Read |
 | --- | --- |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
+| Dialogs, hover, scroll, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |
