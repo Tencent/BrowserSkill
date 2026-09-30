@@ -24,6 +24,8 @@ pub enum ErrorCode {
     NotFound,
     PermissionDenied,
     Timeout,
+    /// The original operation is still running and needs an agent dialog decision.
+    DialogPending,
     CdpFailed,
     ProtocolError,
     Cancelled,

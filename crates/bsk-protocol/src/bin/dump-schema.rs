@@ -28,6 +28,10 @@ macro_rules! dump {
 }
 
 fn main() {
+    dump!(PendingJavaScriptDialog, "pending_javascript_dialog");
+    dump!(DialogStatusParams, "tool_dialog_status_params");
+    dump!(DialogHandleParams, "tool_dialog_handle_params");
+    dump!(OperationParams, "tool_operation_params");
     dump!(HandshakeParams, "handshake_params");
     dump!(HandshakeResult, "handshake_result");
 

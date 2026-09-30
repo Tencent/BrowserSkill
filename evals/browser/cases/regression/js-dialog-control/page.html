@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>BrowserSkill Dialog Control</title>
+<style>
+  body { font: 17px system-ui; background: #edf2f8; color: #19233b; margin: 0; }
+  main { max-width: 1080px; margin: 40px auto; padding: 28px; }
+  h1 { font-size: 34px; margin: 8px 0; }
+  .label { color: #52658a; text-transform: uppercase; letter-spacing: 2px; font-size: 13px; }
+  .card { background: white; border: 1px solid #d7dfec; border-radius: 16px; padding: 22px; margin: 20px 0; }
+  button { background: #234cb3; color: white; padding: 12px 20px; border: 0; border-radius: 8px; font: inherit; margin: 8px; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f4f7fc; border-radius: 10px; padding: 18px; font: 15px ui-monospace, monospace; }
+  li { padding: 7px 0; }
+</style>
+<main>
+  <div class="label">Real Chrome · CLI → daemon → installed extension → native dialog</div>
+  <h1>BrowserSkill Dialog Control</h1>
+  <p>The agent chooses each answer. The original action runs once.</p>
+  <section class="card">
+    <button id="confirm" onclick="runConfirm()">Delete test rows?</button>
+    <button id="prompt" onclick="runPrompt()">Choose a display name</button>
+    <button id="alert" onclick="runAlert()">Acknowledge an alert</button>
+    <button id="arm" onclick="window.onbeforeunload = () => true; record('beforeunload armed with a real click')">Protect this page</button>
+    <pre id="state"></pre>
+  </section>
+  <section class="card"><b>Observed page results</b><ol id="results"></ol></section>
+</main>
+<script>
+  window.proofState = { confirmCalls: 0, promptCalls: 0, alertCalls: 0, chainCalls: 0, deleted: false, name: null };
+  function render() { document.querySelector('#state').textContent = JSON.stringify(proofState, null, 2); }
+  function record(text) { const item = document.createElement('li'); item.textContent = text; document.querySelector('#results').append(item); render(); }
+  window.runConfirm = () => { proofState.confirmCalls++; render(); const answer = confirm('Delete all 200 test rows?'); proofState.deleted = answer; record('confirm decision: ' + answer + ' · calls=' + proofState.confirmCalls); return answer; };
+  window.runPrompt = () => { proofState.promptCalls++; render(); const answer = prompt('Choose a display name', 'anonymous'); proofState.name = answer; record('prompt value: ' + JSON.stringify(answer) + ' · calls=' + proofState.promptCalls); return answer; };
+  window.runAlert = () => { proofState.alertCalls++; render(); alert('Agent acknowledgement required'); record('alert explicitly handled · calls=' + proofState.alertCalls); return null; };
+  window.runChain = () => { proofState.chainCalls++; const answer = confirm('First decision'); const text = prompt('Second decision', 'default'); record('chained result: ' + JSON.stringify({ answer, text, calls: proofState.chainCalls })); return { answer, text, calls: proofState.chainCalls }; };
+  render();
+</script>
+</html>

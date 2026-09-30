@@ -395,7 +395,9 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
       parsed?.message ?? (result.stderr.trim() || body || `bsk ${commandLabel} failed`);
     // Surface the envelope's actionable hint in the model-facing message; a
     // hint the model cannot see cannot be followed.
-    const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    let withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    if (parsed?.code === "dialog_pending" && parsed.data !== undefined)
+      withHint += `\nPending dialog and original operation: ${JSON.stringify(parsed.data)}`;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
       hint: parsed?.hint,

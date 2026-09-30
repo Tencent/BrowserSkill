@@ -500,6 +500,26 @@ describe("parseBskJson", () => {
     expect(() => parseBskJson({ ...base, code: 1, stderr: "boom" }, "x")).toThrow(/boom/);
   });
 
+  it("keeps dialog and operation identities in the model-visible error and never retries the action", async () => {
+    const reply = {
+      ...base,
+      code: 6,
+      stdout: JSON.stringify({
+        code: "dialog_pending",
+        message: "Choose an answer; do not repeat the action",
+        data: {
+          operation_id: "op-original",
+          dialog: { id: "dlg", type: "prompt", message: "Name", default_prompt: "anonymous" },
+        },
+      }),
+    };
+    const run = vi.fn(async () => reply);
+    const result = await runWithSessionBusyRetry(run);
+    expect(run).toHaveBeenCalledOnce();
+    expect(() => parseBskJson(result, "click")).toThrow("op-original");
+    expect(() => parseBskJson(result, "click")).toThrow('"default_prompt":"anonymous"');
+  });
+
   it("surfaces fill recovery guidance to the model without retrying", async () => {
     const hint =
       "observe the field before retrying; the page may have formatted the value. Continue if the visible result satisfies the user's intent";

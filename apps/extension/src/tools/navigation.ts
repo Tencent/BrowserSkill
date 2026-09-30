@@ -203,6 +203,7 @@ interface WaitOutcome {
 interface LifecycleWait {
   promise: Promise<WaitOutcome>;
   refresh(): void;
+  dialogDecision(): Promise<boolean | undefined>;
   tryProbe(mode: LifecycleProbeMode, beforeReadyState?: string | null): Promise<void>;
 }
 
@@ -243,6 +244,8 @@ function startLifecycleWait(
   guard?: LifecycleWaitGuard,
 ): LifecycleWait {
   let refresh = () => {};
+  let beforeUnloadDecision: Promise<boolean | undefined> | undefined;
+  let resolveBeforeUnload: ((accepted: boolean | undefined) => void) | undefined;
   let tryProbe = async (_mode: LifecycleProbeMode, _beforeReadyState?: string | null) => {};
   const promise = new Promise<WaitOutcome>((resolve) => {
     let settled = false;
@@ -255,6 +258,8 @@ function startLifecycleWait(
     let pendingLifecycle: { name: string; frameId?: string; loaderId?: string } | null = null;
     let listenerSub: { dispose(): void } | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let dialogBudgetUsed = false;
+    let beforeUnloadPending = false;
     let abortHandler: (() => void) | null = null;
 
     let observedMainFrameId = "";
@@ -301,7 +306,8 @@ function startLifecycleWait(
     };
 
     const finish = (outcome: WaitOutcome) => {
-      if (settled) return;
+      if (settled || (beforeUnloadPending && outcome.reached === "match")) return;
+      if (beforeUnloadPending) resolveBeforeUnload?.(undefined);
       settled = true;
       cleanup();
       resolve(outcome);
@@ -370,6 +376,29 @@ function startLifecycleWait(
         (source: chrome.debugger.Debuggee, method: string, params: unknown) => {
           if (settled) return;
           if (source.tabId !== expectedTabId) return;
+          if (method === "Page.javascriptDialogOpening") {
+            beforeUnloadPending = (params as { type?: string })?.type === "beforeunload";
+            if (beforeUnloadPending)
+              beforeUnloadDecision = new Promise((resolve) => {
+                resolveBeforeUnload = resolve;
+              });
+            if (!dialogBudgetUsed) {
+              dialogBudgetUsed = true;
+              if (timer) clearTimeout(timer);
+              timer = setTimeout(
+                () => finish({ reached: "timeout", lastLifecycle }),
+                timeoutMs + 60000,
+              );
+            }
+            return;
+          }
+          if (method === "Page.javascriptDialogClosed" && beforeUnloadPending) {
+            beforeUnloadPending = false;
+            resolveBeforeUnload?.(!!(params as { result?: boolean })?.result);
+            if (!(params as { result?: boolean })?.result)
+              finish({ reached: "cancelled", lastLifecycle: "dialog_dismissed" });
+            return;
+          }
 
           if (guard?.followNavigations) {
             if (method === "Page.frameRequestedNavigation") {
@@ -512,6 +541,7 @@ function startLifecycleWait(
   return {
     promise,
     refresh: () => refresh(),
+    dialogDecision: () => beforeUnloadDecision ?? Promise.resolve(undefined),
     tryProbe: (mode, beforeReadyState) => tryProbe(mode, beforeReadyState),
   };
 }
@@ -840,18 +870,41 @@ export async function handleNavigate(
         { url: params.url },
       );
     } catch (err) {
+      const refused = (await wait.dialogDecision()) === false;
+      waitAbort.abort();
+      const stopped = await waitPromise;
+      waitAbort.cleanup();
+      if (refused || stopped.lastLifecycle === "dialog_dismissed")
+        return {
+          code: "cancelled",
+          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
+          data: { reason: "user_cancelled" },
+        };
+      throw err;
+    }
+    if ((await wait.dialogDecision()) === false) {
       waitAbort.abort();
       await waitPromise;
       waitAbort.cleanup();
-      throw err;
+      return {
+        code: "cancelled",
+        message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
+        data: { reason: "user_cancelled" },
+      };
     }
     frameId = nav.frameId ?? "";
     loaderId = nav.loaderId ?? "";
     wait.refresh();
     if (nav.errorText) {
       waitAbort.abort();
-      await waitPromise;
+      const stopped = await waitPromise;
       waitAbort.cleanup();
+      if (stopped.lastLifecycle === "dialog_dismissed")
+        return {
+          code: "cancelled",
+          message: "Agent dismissed beforeunload; navigation cancelled and the page was kept",
+          data: { reason: "user_cancelled" },
+        };
       return {
         code: "cdp_failed",
         message: `Page.navigate rejected: ${nav.errorText}`,
@@ -860,7 +913,13 @@ export async function handleNavigate(
     const outcome = await finishLifecycleWait(wait, waitPromise, beforeReadyState);
     waitAbort.cleanup();
     if (outcome.reached === "cancelled") {
-      return { code: "cancelled", message: "navigate aborted" };
+      return {
+        code: "cancelled",
+        message:
+          outcome.lastLifecycle === "dialog_dismissed"
+            ? "Agent dismissed beforeunload; navigation cancelled and the page was kept"
+            : "navigate aborted",
+      };
     }
     const finalUrl = await readTabUrl(deps.tabsApi, target.tabId);
     if (outcome.reached === "match") {

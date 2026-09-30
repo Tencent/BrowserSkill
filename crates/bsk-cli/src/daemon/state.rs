@@ -17,7 +17,7 @@ use super::start::DaemonConfig;
 use super::ws::WsHandle;
 
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const PROTOCOL_VERSION: &str = "1.3";
+pub const PROTOCOL_VERSION: &str = "1.4";
 /// Base wire compatibility. New interaction semantics are checked per operation.
 pub const MIN_COMPATIBLE_PROTOCOL: &str = "1.0";
 /// Legacy app-semver floor used only when `HandshakeResult.min_compatible_peer`
@@ -46,6 +46,7 @@ pub struct DaemonState {
     /// translated into a WS-side cancel frame addressed to the
     /// matching browser (M10.2).
     pub tool_inflight: Arc<ToolInflightRegistry>,
+    pub dialog_operations: Arc<super::dialog_operations::DialogOperations>,
     /// Per-session "pending interrupt" signal. The WS event handler
     /// `mark`s the session when the user clicks the agent-window
     /// mask's stop button; the IPC tool-dispatch handler
@@ -86,6 +87,7 @@ impl DaemonState {
             tool_queues,
             abort_registry,
             tool_inflight,
+            dialog_operations: Default::default(),
             session_interrupts,
             transfers,
         }

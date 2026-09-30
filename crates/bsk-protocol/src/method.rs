@@ -120,6 +120,16 @@ pub enum Method {
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
+    #[serde(rename = "tool.dialog_status")]
+    ToolDialogStatus,
+    #[serde(rename = "tool.dialog_accept")]
+    ToolDialogAccept,
+    #[serde(rename = "tool.dialog_dismiss")]
+    ToolDialogDismiss,
+    #[serde(rename = "tool.operation_await")]
+    ToolOperationAwait,
+    #[serde(rename = "tool.operation_cancel")]
+    ToolOperationCancel,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
     #[serde(rename = "tool.wait_ms")]
@@ -202,6 +212,7 @@ impl Method {
             | Method::ToolUpload
             | Method::ToolDownload
             | Method::ToolEvaluate
+            | Method::ToolDialogAccept
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
             | Method::ToolRecordStart => MethodEffect::BrowserMutation,
@@ -226,6 +237,10 @@ impl Method {
             | Method::ToolRequestHelp
             | Method::ToolRecordStop
             | Method::ToolRecordAwait => MethodEffect::PassiveRead,
+
+            Method::ToolDialogStatus | Method::ToolOperationAwait => MethodEffect::PassiveRead,
+            // Rejecting a modal / cancelling an operation must remain possible after stop.
+            Method::ToolDialogDismiss | Method::ToolOperationCancel => MethodEffect::ControlPlane,
 
             // Session lifecycle — not gated.
             Method::SessionStart

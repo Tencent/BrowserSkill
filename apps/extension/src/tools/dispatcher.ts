@@ -49,6 +49,7 @@ import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
+import { handleDialog } from "./dialog-control";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
@@ -192,6 +193,11 @@ export class ToolDispatcher {
   private subscription: { dispose(): void } | null = null;
   private readonly hoverBypassTabs = new Map<number, string>();
   private readonly hoverLatches = new Map<number, HoverLatch>();
+  private readonly activeDialogOperations = new Map<
+    string,
+    { request: RequestFrame; operationId: string }
+  >();
+  private dialogSubscription: { dispose(): void } | null = null;
   private pendingSessionStarts = 0;
   private idleOperationInProgress = false;
   /**
@@ -219,6 +225,27 @@ export class ToolDispatcher {
 
   start(): void {
     if (this.subscription) return;
+    this.dialogSubscription =
+      this.cdp?.onDialogChanged?.((tabId, dialog, reason) => {
+        const sessionId = this.sessions.findControllingSession(tabId);
+        if (!sessionId) return;
+        const active = this.activeDialogOperations.get(sessionId);
+        if (reason === "decision_timeout" && active)
+          this.inflightAbortControllers.get(active.request.id)?.abort();
+        try {
+          this.transport.send({
+            event: "dialog.changed",
+            payload: {
+              session_id: sessionId,
+              tab_id: tabId,
+              dialog,
+              ...(active ? { operation_id: active.operationId } : {}),
+            },
+          });
+        } catch {
+          /* Disconnect invalidates the daemon's operation, never replay it. */
+        }
+      }) ?? null;
     this.subscription = this.transport.onMessage((msg) => {
       void this.dispatch(msg);
     });
@@ -253,6 +280,11 @@ export class ToolDispatcher {
     this.subscription = null;
     // Trip every outstanding controller so dependent waits unblock
     // before the dispatcher is GC'd.
+    this.dialogSubscription?.dispose();
+    this.dialogSubscription = null;
+    for (const active of this.activeDialogOperations.values())
+      this.dismissOperationDialogs(active.request);
+    this.activeDialogOperations.clear();
     for (const ac of this.inflightAbortControllers.values()) {
       try {
         ac.abort();
@@ -278,6 +310,10 @@ export class ToolDispatcher {
       const target = typeof params.rpc_id === "string" ? params.rpc_id : "";
       const ac = target ? this.inflightAbortControllers.get(target) : undefined;
       if (ac) {
+        const active = [...this.activeDialogOperations.values()].find(
+          (item) => item.request.id === target,
+        );
+        if (active) this.dismissOperationDialogs(active.request);
         try {
           ac.abort();
         } catch (err) {
@@ -301,6 +337,15 @@ export class ToolDispatcher {
     if (startsSession) this.pendingSessionStarts += 1;
     const ac = new AbortController();
     this.inflightAbortControllers.set(req.id, ac);
+    const operationParams = req.params as
+      | { session_id?: string; _operation_id?: string }
+      | undefined;
+    if (operationParams?.session_id && operationParams._operation_id) {
+      this.activeDialogOperations.set(operationParams.session_id, {
+        request: req,
+        operationId: operationParams._operation_id,
+      });
+    }
     let body: ResponseFrame;
     let startedSession: string | null = null;
     let debugTicket: DebugTicket | undefined;
@@ -308,38 +353,54 @@ export class ToolDispatcher {
       if (startsSession && this.idleOperationInProgress) {
         throw new Error("Browser settings are updating; retry session start.");
       }
-      const sessionId = sessionIdForBrowserControlMethod(req);
-      if (sessionId) this.onBrowserControlResumed?.(sessionId);
-      // Best-effort context must never prevent the requested operation.
-      try {
-        const context = await auditContext(req, this.sessions);
-        if (context) this.transport.send({ event: "audit.context", payload: context });
-      } catch {
-        /* The daemon still has the original operation metadata. */
-      }
-      try {
-        debugTicket = await this.debug?.before(req, ac.signal);
-      } catch {
-        /* Evidence must not block the operation. */
-      }
-      throwIfDispatchAborted(ac.signal);
-      const result = OPENS_TABS.has(req.method)
-        ? await withTaskPopups(
-            this.sessions,
-            (req.params ?? {}) as { session_id?: string; tab_id?: number },
-            (inputSent) => this.invoke(req, ac.signal, inputSent),
-            this.onAgentTabClaimed,
-            ac.signal,
-          )
-        : await this.invoke(req, ac.signal);
-      this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
-      debugTicket = undefined;
-      if (isRpcError(result)) {
-        body = { id: req.id, error: classifyCdpError(result) };
+      const dialogControl = req.method.startsWith("tool.dialog_");
+      const blocked = operationParams?.session_id
+        ? this.pendingForSession(operationParams.session_id)
+        : undefined;
+      if (!dialogControl && blocked) {
+        body = {
+          id: req.id,
+          error: {
+            code: "dialog_pending",
+            message:
+              "Resolve the pending dialog before starting another action; this action was not dispatched",
+            data: { dispatched: false, dialog: blocked, session_id: operationParams?.session_id },
+          },
+        };
       } else {
-        body = { id: req.id, result };
-        if (req.method === "tool.session_start") {
-          startedSession = (req.params as SessionStartParams | undefined)?.session_id ?? null;
+        const sessionId = sessionIdForBrowserControlMethod(req);
+        if (sessionId) this.onBrowserControlResumed?.(sessionId);
+        // Best-effort context must never prevent the requested operation.
+        try {
+          const context = await auditContext(req, this.sessions);
+          if (context) this.transport.send({ event: "audit.context", payload: context });
+        } catch {
+          /* The daemon still has the original operation metadata. */
+        }
+        try {
+          if (!dialogControl) debugTicket = await this.debug?.before(req, ac.signal);
+        } catch {
+          /* Evidence must not block the operation. */
+        }
+        throwIfDispatchAborted(ac.signal);
+        const result = OPENS_TABS.has(req.method)
+          ? await withTaskPopups(
+              this.sessions,
+              (req.params ?? {}) as { session_id?: string; tab_id?: number },
+              (inputSent) => this.invoke(req, ac.signal, inputSent),
+              this.onAgentTabClaimed,
+              ac.signal,
+            )
+          : await this.invoke(req, ac.signal);
+        this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
+        debugTicket = undefined;
+        if (isRpcError(result)) {
+          body = { id: req.id, error: classifyCdpError(result) };
+        } else {
+          body = { id: req.id, result };
+          if (req.method === "tool.session_start") {
+            startedSession = (req.params as SessionStartParams | undefined)?.session_id ?? null;
+          }
         }
       }
     } catch (err) {
@@ -361,6 +422,12 @@ export class ToolDispatcher {
       if (startsSession) this.pendingSessionStarts -= 1;
       this.debug?.after(debugTicket, "operation failed");
       this.inflightAbortControllers.delete(req.id);
+      if (
+        operationParams?.session_id &&
+        this.activeDialogOperations.get(operationParams.session_id)?.request.id === req.id
+      ) {
+        this.activeDialogOperations.delete(operationParams.session_id);
+      }
     }
     let sent = true;
     try {
@@ -400,6 +467,23 @@ export class ToolDispatcher {
     }
   }
 
+  private pendingForSession(sessionId: string) {
+    const ctx = this.sessions.get(sessionId);
+    if (!ctx) return undefined;
+    return this.cdp
+      ?.pendingDialogs?.()
+      .find((dialog) => this.sessions.findControllingSession(dialog.tab_id) === sessionId);
+  }
+
+  private dismissOperationDialogs(request: RequestFrame): void {
+    const sessionId = (request.params as { session_id?: string } | undefined)?.session_id;
+    if (!sessionId) return;
+    for (const dialog of this.cdp?.pendingDialogs?.() ?? []) {
+      if (this.sessions.findControllingSession(dialog.tab_id) === sessionId)
+        void this.cdp?.resolveDialog?.(dialog.id, false).catch(() => {});
+    }
+  }
+
   private async invoke(
     req: RequestFrame,
     signal: AbortSignal,
@@ -417,6 +501,16 @@ export class ToolDispatcher {
         code: "unsupported",
         message: "Remote connections do not support upload or download",
       };
+    }
+    if (req.method.startsWith("tool.dialog_")) {
+      if (!this.cdp) return { code: "unsupported", message: "Dialog control requires CDP" };
+      return handleDialog(
+        this.sessions,
+        req.method,
+        req.params as import("@/transport/types").DialogHandleParams,
+        this.cdp,
+        signal,
+      );
     }
     const preparationError = await prepareBackgroundExecution(
       this.sessions,

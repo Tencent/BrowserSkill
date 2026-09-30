@@ -686,74 +686,172 @@ describe("ChromiumCdp", () => {
     expect(enableCalls).toHaveLength(2);
   });
 
-  it("records javascriptDialogOpening and auto-accepts", async () => {
+  it.each([
+    "alert",
+    "confirm",
+    "prompt",
+    "beforeunload",
+  ])("holds %s until an explicit agent decision", async (type) => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);
     await cdp.ensureAttached(3);
-    const cursor = cdp.dialogCursor(3);
+    vi.mocked(api.sendCommand).mockClear();
     onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
-      type: "alert",
-      message: "hello",
-      url: "https://example.com/",
-      hasBrowserHandler: false,
+      type,
+      message: "Decide",
+      defaultPrompt: "anonymous",
+      hasBrowserHandler: true,
     });
-    await Promise.resolve();
-    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
-      accept: true,
+    const dialog = cdp.pendingDialogs(3)[0];
+    expect(dialog).toMatchObject({ type, message: "Decide", default_prompt: "anonymous" });
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(cdp.dialogsSince(3, 0)).toEqual([]);
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.handleJavaScriptDialog")
+        onEvent.fire({ tabId: 3 }, "Page.javascriptDialogClosed", { result: false });
     });
-    await vi.waitFor(() => expect(cdp.dialogsSince(3, cursor)).toHaveLength(1));
-    const dialogs = cdp.dialogsSince(3, cursor);
-    expect(dialogs).toHaveLength(1);
-    expect(dialogs[0]).toMatchObject({
-      tab_id: 3,
-      type: "alert",
-      message: "hello",
-      handled: "accepted",
-      sequence: 1,
+    expect(await cdp.resolveDialog(dialog.id, false)).toMatchObject({
+      type,
+      handled: "dismissed",
+      has_browser_handler: true,
     });
+    expect(cdp.pendingDialogs(3)).toEqual([]);
+    expect(cdp.dialogsSince(3, 0)).toHaveLength(1);
+    await expect(cdp.resolveDialog(dialog.id, true)).rejects.toThrow("no longer pending");
   });
 
-  it("unblocks a pending send after dialog is handled", async () => {
+  it.each(["Agent input", ""])("supplies the agent's exact prompt text: %j", async (text) => {
     const { api, onEvent } = fakeApi();
-    let releaseEvaluate!: () => void;
-    const evaluateGate = new Promise<void>((resolve) => {
-      releaseEvaluate = resolve;
-    });
-    (api.sendCommand as ReturnType<typeof vi.fn>).mockImplementation(
-      async (_target, method: string) => {
-        if (method === "Runtime.evaluate") {
-          await evaluateGate;
-          return { result: { value: 2 } };
-        }
-        return {};
-      },
-    );
     const cdp = new ChromiumCdp(api);
-    await cdp.ensureAttached(5);
-    const pending = cdp.send(5, "Runtime.evaluate", { expression: "1+1" });
-    await Promise.resolve();
-    onEvent.fire({ tabId: 5 }, "Page.javascriptDialogOpening", {
-      type: "alert",
-      message: "blocked",
-      url: "https://example.com/",
+    await cdp.ensureAttached(3);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "prompt",
+      message: "Name",
+      defaultPrompt: "anonymous",
     });
-    releaseEvaluate();
-    await expect(pending).resolves.toEqual({ result: { value: 2 } });
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method, params) => {
+      if (method === "Page.handleJavaScriptDialog")
+        onEvent.fire({ tabId: 3 }, "Page.javascriptDialogClosed", {
+          result: (params as { accept: boolean }).accept,
+        });
+    });
+    await cdp.resolveDialog(cdp.pendingDialogs(3)[0].id, true, text);
+    expect(api.sendCommand).toHaveBeenLastCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
+      accept: true,
+      promptText: text,
+    });
   });
 
-  it("clears dialog state on detach", async () => {
+  it("clears pending dialog identities on detach and never attaches for a stale decision", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);
     await cdp.ensureAttached(11);
     onEvent.fire({ tabId: 11 }, "Page.javascriptDialogOpening", {
-      type: "alert",
-      message: "x",
-      url: "https://example.com/",
+      type: "confirm",
+      message: "Old",
+    });
+    const id = cdp.pendingDialogs(11)[0].id;
+    await cdp.detach(11);
+    vi.mocked(api.sendCommand).mockClear();
+    await expect(cdp.resolveDialog(id, true)).rejects.toThrow("no longer pending");
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(cdp.pendingDialogs(11)).toEqual([]);
+    expect(cdp.dialogCursor(11)).toBe(0);
+  });
+
+  it("rejects simultaneous decisions after an asynchronous scope check", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api, { canControlDialog: async () => true });
+    await cdp.ensureAttached(3);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Decide",
     });
     await Promise.resolve();
-    await vi.waitFor(() => expect(cdp.dialogsSince(11, 0)).toHaveLength(1));
-    await cdp.detach(11);
-    expect(cdp.dialogsSince(11, 0)).toHaveLength(0);
+    vi.mocked(api.sendCommand).mockClear();
+    const id = cdp.pendingDialogs(3)[0].id;
+    const first = cdp.resolveDialog(id, true);
+    const second = cdp.resolveDialog(id, false);
+    await expect(second).rejects.toThrow("already in progress");
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogClosed", { result: false });
+    expect(await first).toMatchObject({ handled: "dismissed" });
+    expect(api.sendCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the browser's prompt default when the agent omits text, including a bounded status preview", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(3);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "prompt",
+      message: "Name",
+      defaultPrompt: "x".repeat(10000),
+    });
+    expect(cdp.pendingDialogs(3)[0].default_prompt?.length).toBeLessThan(10000);
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.handleJavaScriptDialog")
+        onEvent.fire({ tabId: 3 }, "Page.javascriptDialogClosed", { result: true });
+    });
+    await cdp.resolveDialog(cdp.pendingDialogs(3)[0].id, true);
+    expect(api.sendCommand).toHaveBeenLastCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
+      accept: true,
+      promptText: "x".repeat(10000),
+    });
+  });
+
+  it("rejects an unanswered modal at its decision deadline and reports timeout before closure", async () => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(3);
+    const changed = vi.fn();
+    cdp.onDialogChanged(changed);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "prompt",
+      message: "Name",
+      defaultPrompt: "anonymous",
+    });
+    vi.mocked(api.sendCommand).mockClear();
+    vi.mocked(api.sendCommand).mockImplementation(async (_target, method) => {
+      if (method === "Page.handleJavaScriptDialog")
+        onEvent.fire({ tabId: 3 }, "Page.javascriptDialogClosed", { result: false });
+    });
+    await vi.advanceTimersByTimeAsync(59999);
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(changed).toHaveBeenNthCalledWith(
+      2,
+      3,
+      expect.objectContaining({ type: "prompt" }),
+      "decision_timeout",
+    );
+    expect(api.sendCommand).toHaveBeenCalledWith({ tabId: 3 }, "Page.handleJavaScriptDialog", {
+      accept: false,
+    });
+    expect(cdp.pendingDialogs()).toEqual([]);
+    cdp.dispose();
+  });
+
+  it.each([
+    "detachAll",
+    "dispose",
+  ] as const)("%s clears pending timers and invalidates native decisions", async (cleanup) => {
+    vi.useFakeTimers();
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(3);
+    onEvent.fire({ tabId: 3 }, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Decide",
+    });
+    const id = cdp.pendingDialogs(3)[0].id;
+    await cdp[cleanup]();
+    vi.mocked(api.sendCommand).mockClear();
+    await vi.advanceTimersByTimeAsync(60000);
+    await expect(cdp.resolveDialog(id, true)).rejects.toThrow("no longer pending");
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(cdp.pendingDialogs()).toEqual([]);
+    cdp.dispose();
   });
 
   it("records Runtime console calls with bounded text and optional stack frames", async () => {
@@ -1052,54 +1150,35 @@ describe("ChromiumCdp", () => {
     expect(api.detach).toHaveBeenCalledTimes(newOwner ? 0 : 1);
   });
 
-  it("stops accepting dialogs on a returned tab even when another session keeps CDP attached", async () => {
+  it("does not decide dialogs after control is returned", async () => {
     const { api, onEvent } = fakeApi();
     let controlled = true;
-    const cdp = new ChromiumCdp(api, { shouldAutoAcceptDialog: () => controlled });
-    cdp.trackSessionTab("aa11", 1);
-    cdp.trackSessionTab("bb22", 1);
+    const cdp = new ChromiumCdp(api, { canControlDialog: () => controlled });
     await cdp.ensureAttached(1);
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", {
       type: "confirm",
-      message: "before return",
+      message: "Decision",
     });
-    await vi.waitFor(() => expect(cdp.dialogsSince(1, 0)).toHaveLength(1));
-    vi.mocked(api.sendCommand).mockClear();
-
+    await vi.waitFor(() => expect(cdp.pendingDialogs()).toHaveLength(1));
+    const id = cdp.pendingDialogs()[0].id;
     controlled = false;
-    await cdp.releaseSessionTab("aa11", 1);
-    expect(cdp.isAttached(1)).toBe(true);
-    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", {
-      type: "confirm",
-      message: "after return",
-    });
-    await Promise.resolve();
+    vi.mocked(api.sendCommand).mockClear();
+    await expect(cdp.resolveDialog(id, true)).rejects.toThrow("no longer agent controlled");
     expect(api.sendCommand).not.toHaveBeenCalled();
-    expect(cdp.dialogsSince(1, 0)).toHaveLength(1);
-
-    controlled = true;
-    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", {
-      type: "alert",
-      message: "borrowed again",
-    });
-    await vi.waitFor(() => expect(cdp.dialogsSince(1, 0)).toHaveLength(2));
-    expect(api.sendCommand).toHaveBeenCalledExactlyOnceWith(
-      { tabId: 1 },
-      "Page.handleJavaScriptDialog",
-      { accept: true },
-    );
+    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogClosed", { result: false });
+    expect(cdp.dialogsSince(1, 0)[0].handled).toBe("dismissed");
   });
 
   it("ignores dialog events after detach, including a pending eligibility check", async () => {
     const { api, onEvent } = fakeApi();
     let resolveEligibility!: (value: boolean) => void;
-    const shouldAutoAcceptDialog = vi.fn(
+    const canControlDialog = vi.fn(
       () =>
         new Promise<boolean>((resolve) => {
           resolveEligibility = resolve;
         }),
     );
-    const cdp = new ChromiumCdp(api, { shouldAutoAcceptDialog });
+    const cdp = new ChromiumCdp(api, { canControlDialog });
     await cdp.ensureAttached(1);
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "alert" });
     await cdp.detach(1);
@@ -1107,7 +1186,7 @@ describe("ChromiumCdp", () => {
     await Promise.resolve();
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "alert" });
 
-    expect(shouldAutoAcceptDialog).toHaveBeenCalledOnce();
+    expect(canControlDialog).toHaveBeenCalledOnce();
     expect(api.sendCommand).not.toHaveBeenCalledWith(
       expect.anything(),
       "Page.handleJavaScriptDialog",
@@ -1118,40 +1197,30 @@ describe("ChromiumCdp", () => {
 
   it("does not accept dialogs when the tab's current scope cannot be determined", async () => {
     const { api, onEvent } = fakeApi();
-    const shouldAutoAcceptDialog = vi.fn(async () => {
+    const canControlDialog = vi.fn(async () => {
       throw new Error("tab is gone");
     });
-    const cdp = new ChromiumCdp(api, { shouldAutoAcceptDialog });
+    const cdp = new ChromiumCdp(api, { canControlDialog });
     await cdp.ensureAttached(1);
     vi.mocked(api.sendCommand).mockClear();
 
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "confirm" });
     await Promise.resolve();
 
-    expect(shouldAutoAcceptDialog).toHaveBeenCalledWith(1);
+    expect(canControlDialog).toHaveBeenCalledWith(1);
     expect(api.sendCommand).not.toHaveBeenCalled();
     expect(cdp.dialogsSince(1, 0)).toEqual([]);
   });
 
-  it("does not restore dialog state when an acceptance completes after detach", async () => {
+  it("ignores a delayed closed event from a detached tab", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);
     await cdp.ensureAttached(1);
-    let finishAccept!: () => void;
-    vi.mocked(api.sendCommand).mockImplementationOnce(
-      () =>
-        new Promise<void>((resolve) => {
-          finishAccept = resolve;
-        }),
-    );
-
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "alert" });
     await cdp.detach(1);
-    finishAccept();
-    await Promise.resolve();
-
+    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogClosed", { result: true });
+    expect(cdp.pendingDialogs()).toEqual([]);
     expect(cdp.dialogsSince(1, 0)).toEqual([]);
-    expect(cdp.dialogCursor(1)).toBe(0);
   });
 
   it("detachSession only detaches tabs no other session owns", async () => {

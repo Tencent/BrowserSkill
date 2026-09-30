@@ -159,6 +159,12 @@ export async function handleEvaluate(
       returnByValue: params.return_by_value ?? true,
       throwOnSideEffect: false,
     });
+    if (deps.signal?.aborted)
+      return {
+        code: "cancelled",
+        message: "evaluate cancelled after dispatch; page effects may have occurred",
+        data: { effect_state: "unknown" },
+      };
     if (reply.exceptionDetails) {
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         ok: false,

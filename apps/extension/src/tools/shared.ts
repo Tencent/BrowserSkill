@@ -14,7 +14,12 @@ import {
   type SessionManager,
 } from "@/session-manager/manager";
 import { normaliseRef } from "@/session-manager/ref-store";
-import type { ConsoleResult, JavaScriptDialogInfo, RpcError } from "@/transport/types";
+import type {
+  ConsoleResult,
+  JavaScriptDialogInfo,
+  PendingJavaScriptDialog,
+  RpcError,
+} from "@/transport/types";
 import { rpcError } from "./errors";
 
 const DEFAULT_BUFFERED_READ_LIMIT = 50;
@@ -81,6 +86,20 @@ export interface CdpRunner {
   };
   dialogCursor?(tabId: number): DialogCursor;
   dialogsSince?(tabId: number, cursor: DialogCursor): JavaScriptDialogInfo[];
+  pendingDialogs?(tabId?: number): PendingJavaScriptDialog[];
+  resolveDialog?(
+    id: string,
+    accept: boolean,
+    text?: string,
+    signal?: AbortSignal,
+  ): Promise<JavaScriptDialogInfo>;
+  onDialogChanged?(
+    handler: (
+      tabId: number,
+      dialog: PendingJavaScriptDialog | null,
+      reason?: "decision_timeout",
+    ) => void,
+  ): { dispose(): void };
   ensureConsoleCapture?(tabId: number): Promise<void>;
   consoleEntriesSince?(
     tabId: number,
