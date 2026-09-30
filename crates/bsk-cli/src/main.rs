@@ -50,13 +50,13 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
             };
             cli::status::run(output).map(|_| ())
         }
-        Command::Doctor => {
+        Command::Doctor { no_wait } => {
             let output = if cli.flags.json {
                 Output::Json
             } else {
                 Output::Human
             };
-            let checks = cli::doctor::run(output).map_err(CliError::Local)?;
+            let checks = cli::doctor::run(output, no_wait).map_err(CliError::Local)?;
             if cli::doctor::has_failures(&checks) {
                 Err(CliError::RenderedExit { exit_code: 1 })
             } else {
