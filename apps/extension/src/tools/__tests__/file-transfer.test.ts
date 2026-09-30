@@ -80,10 +80,16 @@ function popupDownloadFakes() {
       new Promise<chrome.downloads.DownloadFilenameSuggestion | undefined>((resolve) => {
         onDeterminingFilename.emit(item, resolve);
       }),
-    finish: (item: chrome.downloads.DownloadItem) => {
+    /**
+     * Completes the download, storing it at `finalPath` (defaults to flat in
+     * the download dir). Tests that care about the trace folder pass the stored
+     * path explicitly: honouring it, or losing it to a coexisting extension that
+     * won the `onDeterminingFilename` race.
+     */
+    finish: (item: chrome.downloads.DownloadItem, finalPath?: string) => {
       const done = {
         ...item,
-        filename: `/profile/Downloads/${item.filename}`,
+        filename: finalPath ?? `/profile/Downloads/${item.filename}`,
         state: "complete",
         fileSize: 4,
       } as chrome.downloads.DownloadItem;
@@ -1291,6 +1297,68 @@ describe("file transfer tools", () => {
     expect(result).toMatchObject({
       code: "cdp_failed",
       data: { effect_state: "unknown", phase: "trigger" },
+    });
+  });
+
+  it.each([
+    ["Chrome honours the trace folder", "/profile/Downloads/BrowserSkill/tr_60/report-60.csv"],
+    // The uniquify suffix lands on the basename, so it must not mask an intact folder.
+    [
+      "Chrome uniquifies the repeated name",
+      "/profile/Downloads/BrowserSkill/tr_60/report-60 (1).csv",
+    ],
+  ])("reports no dropped suggestion when %s", async (_label, finalPath) => {
+    const fakes = popupDownloadFakes();
+    const download = fakes.item(60, "https://example.test/export?id=60");
+    let suggested: Promise<chrome.downloads.DownloadFilenameSuggestion | undefined> | undefined;
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_60",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        fakes.popup(4, download.url);
+        suggested = fakes.offer(download);
+        fakes.finish(download, finalPath);
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    await expect(suggested).resolves.toEqual({
+      filename: "BrowserSkill/tr_60/report-60.csv",
+      conflictAction: "overwrite",
+    });
+    expect(result).toMatchObject({ item: { filename: finalPath } });
+    expect(result).not.toHaveProperty("suggestionDropped");
+  });
+
+  it("flags a dropped trace folder when another extension wins the name", async () => {
+    const fakes = popupDownloadFakes();
+    const download = fakes.item(61, "https://example.test/export?id=61");
+
+    const result = await captureBrowserDownload({
+      cdp: silentCdp(),
+      target: { tabId: 4 },
+      downloads: fakes.downloads,
+      navigationTargets: fakes.navigationTargets,
+      browserRelativeDir: "BrowserSkill/tr_61",
+      timeoutMs: 1_000,
+      trigger: async (markDispatched) => {
+        markDispatched();
+        fakes.popup(4, download.url);
+        fakes.offer(download);
+        fakes.finish(download, "/profile/Downloads/report-61.csv");
+        return { tab_id: 4, x: 10, y: 10 };
+      },
+    });
+
+    expect(result).toMatchObject({
+      item: { filename: "/profile/Downloads/report-61.csv" },
+      suggestionDropped: true,
     });
   });
 });

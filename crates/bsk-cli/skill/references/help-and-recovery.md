@@ -33,6 +33,7 @@ substring is enough.
 | Unknown tab/session | List current tabs/sessions; never guess IDs or use another task's session. |
 | Timeout or unknown effect | Inspect current state before retrying; the action may already have happened. |
 | `fill_value_mismatch` | Read the field: formatting may still satisfy the request. Correct only a remaining difference; no blind refill or immediate handoff. |
+| Download `note` about the trace folder | The file downloaded fine but landed outside the per-call folder: another extension took over `chrome.downloads.onDeterminingFilename`. Trust the reported path; do not assume the folder layout. Ask the user to disable that extension's download renaming to restore it. |
 | Unsupported operation | Use available capabilities; suggest updating only if the missing feature is needed. |
 
 Navigation alone (including deprecated help outcome `navigated`) is not completion.

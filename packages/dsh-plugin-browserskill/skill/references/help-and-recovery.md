@@ -44,4 +44,8 @@ backends to bypass limits. Borrow confirmation still applies.
 - Timeout/unknown effect: inspect before retrying; the action may have happened.
 - Unconfirmed fill: read the field. Formatting may satisfy the goal; correct only a
   remaining difference instead of blindly refilling or requesting help.
+- Download `note` about the trace folder: the file downloaded fine but landed outside
+  the per-call folder, because another extension took over
+  `chrome.downloads.onDeterminingFilename`. Trust the reported path; do not assume
+  the folder layout. Ask the user to disable that extension's download renaming.
 - Other errors: follow the hint; on unrecoverable failure, report and stop the owned session.

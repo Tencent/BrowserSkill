@@ -16,6 +16,15 @@ import { enforceAgentWindow, isRpcError, lookupSession, resolveTargetTab } from 
 
 let downloadActive = false;
 
+/**
+ * Result note explaining that the completed file landed outside the trace-scoped
+ * folder. Chromium lets only one extension answer
+ * `chrome.downloads.onDeterminingFilename` and never tells the losers they lost,
+ * so a coexisting download-manager extension silently overrides the suggestion.
+ */
+export const DOWNLOAD_SUGGESTION_DROPPED_NOTE =
+  "the completed download is not under the trace folder: another extension took over chrome.downloads.onDeterminingFilename, so the per-call folder grouping was dropped (the file itself downloaded fine) — disable that extension's download renaming to restore it";
+
 export type { DownloadsApi, NavigationTargetsApi } from "./download-capture";
 
 export interface DownloadDeps extends InteractionDeps {
@@ -71,6 +80,7 @@ export async function handleDownload(
       mime: item.mime || undefined,
       danger: item.danger,
       browser_path: item.filename,
+      ...(capture.suggestionDropped ? { note: DOWNLOAD_SUGGESTION_DROPPED_NOTE } : {}),
     };
   } finally {
     downloadActive = false;

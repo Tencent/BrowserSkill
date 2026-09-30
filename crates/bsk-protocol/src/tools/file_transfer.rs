@@ -104,6 +104,12 @@ pub struct DownloadResult {
     /// Opaque id returned by the daemon to the CLI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_id: Option<String>,
+    /// Set when the completed file is not under the trace-scoped
+    /// `browserRelativeDir`, meaning another extension won the
+    /// `chrome.downloads.onDeterminingFilename` race. The download succeeded;
+    /// only the per-call folder grouping was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -209,5 +215,33 @@ mod tests {
         .unwrap();
         assert!(value.get("browser_relative_dir").is_none());
         assert!(value.get("max_byte_size").is_none());
+    }
+
+    fn download_result(note: Option<String>) -> DownloadResult {
+        DownloadResult {
+            tab_id: 4,
+            used_ref: None,
+            used_selector: None,
+            suggested_filename: "report.csv".into(),
+            byte_size: 12,
+            mime: None,
+            danger: None,
+            browser_path: Some("/profile/Downloads/BrowserSkill/tr_1/report.csv".into()),
+            transfer_id: None,
+            note,
+        }
+    }
+
+    #[test]
+    fn download_result_omits_the_note_when_the_suggestion_was_honoured() {
+        let value = serde_json::to_value(download_result(None)).unwrap();
+        assert!(value.get("note").is_none());
+    }
+
+    #[test]
+    fn download_result_carries_the_note_when_the_suggestion_was_dropped() {
+        let value =
+            serde_json::to_value(download_result(Some("another extension won".into()))).unwrap();
+        assert_eq!(value["note"], "another extension won");
     }
 }
