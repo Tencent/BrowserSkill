@@ -2,6 +2,15 @@ use crate::cli::error::CliError;
 use bsk_protocol::{ErrorCode, RpcError};
 use std::{path::Path, time::Duration};
 
+pub(crate) fn require_dialog_support(sock: &Path) -> Result<(), CliError> {
+    require_daemon_support(
+        sock,
+        "JavaScript dialog control",
+        bsk_protocol::tools::DIALOG_CONTROL_PROTOCOL,
+        bsk_protocol::tools::supports_dialog_control,
+    )
+}
+
 /// An old daemon can return locally without letting the browser decide. Limit
 /// this operation, while ordinary sessions and browsing remain available.
 pub(crate) fn require_help_support(sock: &Path) -> Result<(), CliError> {

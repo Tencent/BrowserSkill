@@ -9,6 +9,7 @@ pub mod business_rpc;
 pub mod console;
 pub mod daemon;
 pub mod debug;
+pub mod dialog;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
@@ -214,6 +215,8 @@ pub enum Command {
 
     /// Evaluate a JavaScript expression inside the Agent Window.
     Evaluate(EvaluateArgs),
+    /// Inspect, accept or dismiss a native JavaScript dialog.
+    Dialog(dialog::DialogCmd),
 
     /// Wait for a page-lifecycle event.
     #[command(name = "wait-for-navigation")]

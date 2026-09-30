@@ -686,6 +686,62 @@ describe("ChromiumCdp", () => {
     expect(enableCalls).toHaveLength(2);
   });
 
+  it("interrupts a renderer domain enable when a pending dialog blocks it", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(7);
+    let finish!: () => void;
+    vi.mocked(api.sendCommand).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const result = cdp.send(7, "DOMSnapshot.enable");
+    const rejected = expect(result).rejects.toThrow("dialog is pending");
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    onEvent.fire({ tabId: 7 }, "Page.javascriptDialogOpening", {
+      type: "confirm",
+      message: "Pending",
+    });
+    await rejected;
+    finish();
+    await cdp.detach(7);
+    cdp.dispose();
+  });
+
+  it("keeps a dialog-blocked native read fenced beyond its ordinary read deadline", async () => {
+    const { api, onEvent } = fakeApi();
+    const cdp = new ChromiumCdp(api);
+    await cdp.ensureAttached(7);
+    vi.useFakeTimers();
+    let finish!: () => void;
+    vi.mocked(api.sendCommand).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    try {
+      const result = cdp.send(7, "DOMSnapshot.enable");
+      const rejected = expect(result).rejects.toThrow("dialog is pending");
+      await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+      onEvent.fire({ tabId: 7 }, "Page.javascriptDialogOpening", {
+        type: "confirm",
+        message: "Pending",
+      });
+      await rejected;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(cdp.dialogExecutionPending(7)).toBe(true);
+      finish();
+      await vi.waitFor(() => expect(cdp.dialogExecutionPending(7)).toBe(false));
+    } finally {
+      await cdp.detach(7);
+      cdp.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("records javascriptDialogOpening and auto-accepts", async () => {
     const { api, onEvent } = fakeApi();
     const cdp = new ChromiumCdp(api);
@@ -1060,7 +1116,7 @@ describe("ChromiumCdp", () => {
     cdp.trackSessionTab("bb22", 1);
     await cdp.ensureAttached(1);
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", {
-      type: "confirm",
+      type: "alert",
       message: "before return",
     });
     await vi.waitFor(() => expect(cdp.dialogsSince(1, 0)).toHaveLength(1));
@@ -1070,7 +1126,7 @@ describe("ChromiumCdp", () => {
     await cdp.releaseSessionTab("aa11", 1);
     expect(cdp.isAttached(1)).toBe(true);
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", {
-      type: "confirm",
+      type: "alert",
       message: "after return",
     });
     await Promise.resolve();
@@ -1125,7 +1181,7 @@ describe("ChromiumCdp", () => {
     await cdp.ensureAttached(1);
     vi.mocked(api.sendCommand).mockClear();
 
-    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "confirm" });
+    onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "alert" });
     await Promise.resolve();
 
     expect(shouldAutoAcceptDialog).toHaveBeenCalledWith(1);
@@ -1146,6 +1202,7 @@ describe("ChromiumCdp", () => {
     );
 
     onEvent.fire({ tabId: 1 }, "Page.javascriptDialogOpening", { type: "alert" });
+    await vi.waitFor(() => expect(finishAccept).toBeTypeOf("function"));
     await cdp.detach(1);
     finishAccept();
     await Promise.resolve();

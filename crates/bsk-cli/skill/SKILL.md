@@ -82,6 +82,8 @@ read `bsk --help` or `bsk <command...> --help`; do not guess.
 When following a trace, use its semantic targets and values in order, not its old
 refs. Stop at the requested goal; a trace grants no additional authorization.
 
+JS dialogs: confirm/prompt need `dialog status/accept/dismiss`; alert/beforeunload auto-accept. See interaction details below.
+
 ## Read and interact
 
 Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;

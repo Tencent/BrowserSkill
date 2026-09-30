@@ -54,7 +54,7 @@ Key modules:
 - Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
 - Validates `Origin: chrome-extension://…` on handshake.
 - Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
-- **Per-session queue** serializes tool calls targeting one session.
+- **Per-session queue** permits one ordinary tool call per session; concurrent calls fail with `session_busy`. Dialog control and recording stop can reach the extension while an ordinary call is blocked.
 - Forwards `tool.*` RPCs to the correct extension connection.
 
 State files under `~/.bsk/`:
@@ -122,7 +122,7 @@ mutation for session queueing and user-interruption gating.
 
 | Scope | Policy |
 | --- | --- |
-| Same session | Daemon serializes RPCs (ref-store safety) |
+| Same session | One ordinary RPC at a time; dialog control and recording stop bypass the busy lock |
 | Different sessions | Parallel |
 | Multiple browsers | `bsk session start --browser <id>` when >1 extension connected |
 

@@ -21,6 +21,8 @@ export type ErrorCode =
 
 /** Stable `RpcError.data.reason` values for CLI hint selection. */
 export type RpcErrorReason =
+  | "dialog_pending"
+  | "dialog_execution_pending"
   | "ui_lookup_failed"
   | "task_unavailable"
   | "target_unavailable"
@@ -192,6 +194,28 @@ export interface JavaScriptDialogInfo {
   has_browser_handler?: boolean;
   handled: JavaScriptDialogHandledAction;
   sequence: number;
+}
+
+/** A live dialog; unlike the history entry it has not been answered. */
+export interface PendingJavaScriptDialog extends Omit<JavaScriptDialogInfo, "handled"> {
+  id: string;
+}
+
+export interface DialogParams {
+  session_id: string;
+  tab_id?: number;
+  action: "status" | "accept" | "dismiss";
+  prompt_text?: string;
+  /** Reject a stale decision after a user or another caller changes the dialog. */
+  dialog_id?: string;
+}
+
+export interface DialogResult {
+  tab_id: number;
+  pending: PendingJavaScriptDialog | null;
+  /** A previously dispatched native command may still be finishing. */
+  execution_pending: boolean;
+  handled?: JavaScriptDialogInfo;
 }
 
 export type ConsoleEntryKind = "console" | "exception" | "log";

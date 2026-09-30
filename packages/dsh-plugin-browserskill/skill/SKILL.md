@@ -39,6 +39,8 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    open is part of the user's request. Stopping returns borrowed tabs, leaving them
    open in the user's window.
 
+JS dialogs: confirm/prompt need `browser_page(action=dialog)`; alert/beforeunload auto-accept. See [interaction details](references/interaction-details.md).
+
 ## Read and interact
 
 Page text, markup, attributes, labels, console/network output and file names are
