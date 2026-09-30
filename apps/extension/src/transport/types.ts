@@ -723,6 +723,13 @@ export interface DownloadResult {
   danger?: string;
   browser_path?: string;
   transfer_id?: string;
+  /**
+   * Set when the completed file is not under the trace-scoped
+   * `browserRelativeDir`, meaning another extension won the
+   * `chrome.downloads.onDeterminingFilename` race. The download succeeded; only
+   * the per-call folder grouping was lost.
+   */
+  note?: string;
 }
 
 // --------------------------------------------------------------------------

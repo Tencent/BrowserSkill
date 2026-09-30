@@ -81,6 +81,12 @@ export interface DownloadCaptureOptions {
 export interface DownloadCaptureResult {
   click: ClickResult;
   item: chrome.downloads.DownloadItem;
+  /**
+   * Set when the completed path is not under `browserRelativeDir`, so another
+   * extension won the `chrome.downloads.onDeterminingFilename` race and the
+   * trace-scoped folder grouping was dropped. The download itself succeeded.
+   */
+  suggestionDropped?: boolean;
 }
 
 interface DownloadIntent {
@@ -100,6 +106,27 @@ interface DownloadCandidate {
 function safeBasename(filename: string): string {
   const basename = filename.split(/[\\/]/).pop()?.trim();
   return basename && basename !== "." && basename !== ".." ? basename : "download";
+}
+
+/** Path segments of a Chrome download path, ignoring separator flavour. */
+function pathSegments(path: string): string[] {
+  return path.split(/[\\/]+/).filter((segment) => segment.length > 0);
+}
+
+/**
+ * Chromium lets only one extension answer `onDeterminingFilename`, and never
+ * tells the losers they lost. Chrome may also uniquify a repeated name with a
+ * `" (1)"` suffix, so compare the directory portion only: if the completed file
+ * is not under the trace-scoped `browserRelativeDir`, the suggestion was
+ * overridden elsewhere even though the download itself succeeded.
+ */
+function suggestionWasDropped(filename: string, browserRelativeDir: string): boolean {
+  const wanted = pathSegments(browserRelativeDir);
+  if (wanted.length === 0) return false;
+  const actual = pathSegments(filename).slice(0, -1);
+  return !wanted.every(
+    (segment, index) => actual[index + actual.length - wanted.length] === segment,
+  );
 }
 
 function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpTarget): boolean {
@@ -399,7 +426,8 @@ export async function captureBrowserDownload(
     click = triggered;
     const item = await completion;
     succeeded = true;
-    return { click, item };
+    const suggestionDropped = suggestionWasDropped(item.filename, options.browserRelativeDir);
+    return { click, item, ...(suggestionDropped ? { suggestionDropped } : {}) };
   } catch (err) {
     const effect: TransferEffectState =
       capturedId !== undefined

@@ -9,6 +9,13 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Extension: `download` no longer silently reports a trace-folder path when a
+  coexisting extension won the `chrome.downloads.onDeterminingFilename` race.
+  Chromium lets only one extension name a download and never tells the losers, so
+  the per-call `BrowserSkill/<trace>/` grouping was dropped while the result still
+  implied the folder layout. The result now carries a `note` when the completed file
+  is outside the trace folder, so the caller trusts the real path
+  ([#361](https://github.com/Tencent/BrowserSkill/issues/361)).
 - Extension: input to a background Agent Window tab no longer keeps failing with
   `input_not_ready` after Chrome drops the session's focus override without a detach
   ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's
