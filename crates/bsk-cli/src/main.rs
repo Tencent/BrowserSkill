@@ -88,6 +88,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
         Command::Console(args) => cli::console::dispatch(args, format),
         Command::Debug(args) => cli::debug::dispatch(*args, format),
         Command::Network(args) => cli::network::dispatch(args, format),
+        Command::Preflight(args) => cli::preflight::dispatch(args, format),
         Command::GetHtml(args) => cli::get_html::dispatch(args, format),
         Command::Navigate(args) => cli::navigate::dispatch_navigate_command(args, format),
         Command::NavigateBack(args) => cli::navigate::dispatch_navigate_back(args, format),
