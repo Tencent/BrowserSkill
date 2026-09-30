@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::http::Request;
 use tokio_tungstenite::tungstenite::protocol::Message;
 
-const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const TEST_EXT_ID: &str = "hhcmgoofomhgciiibhipgmgkgnoenaoi";
 
 type Ws =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;

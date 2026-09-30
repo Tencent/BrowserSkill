@@ -328,7 +328,13 @@ async fn handle(
             serde_json::json!({"error": "not_found"}),
         ));
     }
-    if !one_header(&request, "origin").is_some_and(|origin| origin_allowed(origin, false)) {
+    // Same origin policy as the local listener: BrowserSkill's store IDs
+    // plus explicitly admitted extras. The real gate here is the
+    // subprotocol credential checked below.
+    let extra_ids = gateway.state.config.extra_allowed_extension_ids.clone();
+    if !one_header(&request, "origin")
+        .is_some_and(|origin| origin_allowed(origin, &extra_ids, false))
+    {
         return Ok(denied());
     }
     let Some(protocol) = one_header(&request, "sec-websocket-protocol").map(str::to_owned) else {

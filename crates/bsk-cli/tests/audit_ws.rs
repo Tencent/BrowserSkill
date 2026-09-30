@@ -36,7 +36,7 @@ async fn connect(addr: std::net::SocketAddr, instance: &str, enabled: bool) -> W
     let mut request = format!("ws://{addr}/").into_client_request().unwrap();
     request.headers_mut().insert(
         "Origin",
-        "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+        "chrome-extension://hhcmgoofomhgciiibhipgmgkgnoenaoi"
             .parse()
             .unwrap(),
     );

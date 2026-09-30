@@ -113,7 +113,7 @@ async fn start_with_protocol(protocol: &str) -> (tempfile::TempDir, Child, Ws) {
         .header("Sec-WebSocket-Key", generate_key())
         .header(
             "Origin",
-            "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+            "chrome-extension://hhcmgoofomhgciiibhipgmgkgnoenaoi",
         )
         .body(())
         .unwrap();

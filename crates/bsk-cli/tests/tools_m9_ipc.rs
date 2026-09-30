@@ -39,7 +39,7 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 
 use support::wait_for_abort_registered;
 
-const TEST_EXT_ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+const TEST_EXT_ID: &str = "hhcmgoofomhgciiibhipgmgkgnoenaoi";
 
 fn tempfile_path(prefix: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
