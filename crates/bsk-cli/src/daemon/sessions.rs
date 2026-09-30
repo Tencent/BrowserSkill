@@ -69,12 +69,37 @@ impl Session {
 #[derive(Debug, Default)]
 pub struct SessionRegistry {
     audit: Option<Arc<super::audit::AuditStore>>,
+    /// Held briefly when reserving a session or claiming an idle installation.
+    updating: Mutex<bool>,
     inner: Mutex<HashMap<SessionId, Session>>,
     /// Operational metadata kept outside the public `Session` wire/domain
     /// shape so idle enforcement does not break external struct users.
     last_activity: Mutex<HashMap<SessionId, Instant>>,
     /// Managed creates whose original extension operation has not settled.
     starting: Mutex<HashSet<SessionId>>,
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum UpdateBlocked {
+    #[error("{0} agent session(s) active")]
+    ActiveSessions(usize),
+    #[error("an automatic update is already installing")]
+    Updating,
+}
+
+/// Keeps session admission closed without holding a mutex during installation.
+#[derive(Debug)]
+#[must_use = "hold session admission through installation and handover or rollback"]
+pub(crate) struct UpdateGuard(Arc<SessionRegistry>);
+
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        *self
+            .0
+            .updating
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = false;
+    }
 }
 
 impl SessionRegistry {
@@ -86,6 +111,19 @@ impl SessionRegistry {
     }
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn try_begin_update(self: &Arc<Self>) -> Result<UpdateGuard, UpdateBlocked> {
+        let mut updating = self.updating.lock().expect("session admission poisoned");
+        if *updating {
+            return Err(UpdateBlocked::Updating);
+        }
+        let active = self.len();
+        if active > 0 {
+            return Err(UpdateBlocked::ActiveSessions(active));
+        }
+        *updating = true;
+        Ok(UpdateGuard(Arc::clone(self)))
     }
 
     pub fn snapshot(&self) -> Vec<Session> {
@@ -126,8 +164,8 @@ impl SessionRegistry {
 
     /// Reserve a fresh, collision-free [`SessionId`] under the registry
     /// lock by inserting a placeholder [`Session`]. Returns `None`
-    /// after `max_attempts` failed random draws so callers can surface
-    /// a deterministic error instead of looping forever.
+    /// while an update is installing, or after `max_attempts` failed random
+    /// draws so callers can surface a deterministic error instead of looping forever.
     ///
     /// The 4-letter id space is `26^4 = 456_976`; with even a small
     /// number of live sessions the birthday probability of a collision
@@ -144,6 +182,20 @@ impl SessionRegistry {
         max_attempts: u32,
         now_ms_fn: impl Fn() -> i64,
     ) -> Option<SessionId> {
+        self.reserve_id_for_start(browser_id, max_attempts, now_ms_fn)
+            .ok()
+    }
+
+    fn reserve_id_for_start(
+        &self,
+        browser_id: BrowserId,
+        max_attempts: u32,
+        now_ms_fn: impl Fn() -> i64,
+    ) -> Result<SessionId, StartSessionError> {
+        let updating = self.updating.lock().expect("session admission poisoned");
+        if *updating {
+            return Err(StartSessionError::DaemonUpdating);
+        }
         let mut guard = self.inner.lock().expect("session registry poisoned");
         for _ in 0..max_attempts {
             let candidate = SessionId::random();
@@ -164,9 +216,9 @@ impl SessionRegistry {
                 .lock()
                 .expect("session activity registry poisoned")
                 .insert(candidate.clone(), Instant::now());
-            return Some(candidate);
+            return Ok(candidate);
         }
-        None
+        Err(StartSessionError::IdExhausted)
     }
 
     /// Replace a previously [`reserve_id`](Self::reserve_id) placeholder
@@ -367,6 +419,8 @@ fn next_rpc_id(prefix: &str) -> RpcId {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StartSessionError {
+    #[error("the daemon is installing an update; retry session start after the update finishes")]
+    DaemonUpdating,
     #[error("no browser is currently connected")]
     NoBrowserConnected,
     #[error("more than one browser is online — pass --browser <id-or-label>")]
@@ -407,6 +461,7 @@ pub enum StartSessionError {
 impl StartSessionError {
     pub fn code(&self) -> &'static str {
         match self {
+            StartSessionError::DaemonUpdating => "protocol_error",
             StartSessionError::NoBrowserConnected => "no_browser_connected",
             StartSessionError::MultipleBrowsersOnline { .. } => "multiple_browsers_online",
             StartSessionError::BrowserNotFound => "not_found",
@@ -536,9 +591,11 @@ pub(crate) async fn start_session_recoverable(
     if client.is_unresponsive() {
         return Err(StartSessionError::ExtensionUnresponsive);
     }
-    let session_id = sessions
-        .reserve_id(client.id.clone(), SESSION_ID_MAX_RESERVE_ATTEMPTS, now_ms)
-        .ok_or(StartSessionError::IdExhausted)?;
+    let session_id = sessions.reserve_id_for_start(
+        client.id.clone(),
+        SESSION_ID_MAX_RESERVE_ATTEMPTS,
+        now_ms,
+    )?;
     if preserve_cleanup {
         sessions.starting.lock().unwrap().insert(session_id.clone());
     }
@@ -1117,6 +1174,67 @@ mod link_tests {
         {
             Frame::Request(request) => request,
             other => panic!("expected a request, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn update_admission_counts_pending_and_completed_starts() {
+        let harness = Harness::new();
+        let (client, mut rx) = harness.connect(Liveness::default());
+        let start = harness.start(Duration::from_secs(30), true);
+        let request = next_request(&mut rx).await;
+        assert!(matches!(
+            harness.sessions.try_begin_update(),
+            Err(super::UpdateBlocked::ActiveSessions(1))
+        ));
+        answer(
+            &client,
+            &request,
+            ResponseBody::Ok(serde_json::json!({"agent_window_id": 71})),
+        );
+        let session = start.await.unwrap().unwrap();
+        assert!(matches!(
+            harness.sessions.try_begin_update(),
+            Err(super::UpdateBlocked::ActiveSessions(1))
+        ));
+        harness.sessions.remove(&session.id);
+        let _admission = harness
+            .sessions
+            .try_begin_update()
+            .expect("stopped sessions do not block updates");
+    }
+
+    #[tokio::test]
+    async fn update_admission_rejects_starts_before_dispatch_and_reopens_on_drop() {
+        for recoverable in [false, true] {
+            let harness = Harness::new();
+            let (client, mut rx) = harness.connect(Liveness::default());
+            let admission = harness.sessions.try_begin_update().unwrap();
+            assert!(matches!(
+                harness.sessions.try_begin_update(),
+                Err(super::UpdateBlocked::Updating)
+            ));
+            let error = start_error(harness.start(Duration::from_secs(30), recoverable)).await;
+            assert!(matches!(error, StartSessionError::DaemonUpdating));
+            assert_eq!(error.code(), "protocol_error");
+            assert!(error.to_string().contains("retry session start"));
+            assert!(
+                rx.try_recv().is_err(),
+                "a refused start must not create an Agent Window"
+            );
+            assert!(
+                harness.sessions.is_empty(),
+                "a refused start must not reserve an id"
+            );
+            drop(admission);
+            let start = harness.start(Duration::from_secs(30), recoverable);
+            let request = next_request(&mut rx).await;
+            answer(
+                &client,
+                &request,
+                ResponseBody::Ok(serde_json::json!({"agent_window_id": 71})),
+            );
+            start.await.unwrap().unwrap();
         }
     }
 
