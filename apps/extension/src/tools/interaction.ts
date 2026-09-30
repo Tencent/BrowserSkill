@@ -1344,8 +1344,14 @@ export function parseKeySpec(spec: string): { key: string; modifiers: KeyModifie
     .split("+")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
-  // The final '+' is the base key in chords such as Ctrl++.
-  if (/\+\s*\+\s*$/.test(spec)) parts.push("+");
+  // The final '+' is a base key only when every preceding token is a modifier.
+  if (
+    /\+\s*\+\s*$/.test(spec) &&
+    parts.length > 0 &&
+    parts.every((part) => normaliseModifier(part))
+  ) {
+    parts.push("+");
+  }
   if (parts.length <= 1) {
     return { key: spec.trim(), modifiers: [] };
   }

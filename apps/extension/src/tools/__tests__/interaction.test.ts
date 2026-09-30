@@ -1322,6 +1322,13 @@ describe("parseKeySpec", () => {
   ])("preserves the plus key in $spec", ({ spec, modifiers }) => {
     expect(parseKeySpec(spec)).toEqual({ key: "+", modifiers });
   });
+  it.each([
+    { spec: "Crtl++", key: "Crtl++", modifiers: [] },
+    { spec: "Ctrl+Bogus++", key: "Bogus", modifiers: ["ctrl"] },
+    { spec: "Ctrl+A++", key: "A", modifiers: ["ctrl"] },
+  ])("does not replace the existing key in $spec", ({ spec, key, modifiers }) => {
+    expect(parseKeySpec(spec)).toEqual({ key, modifiers });
+  });
 });
 
 describe("resolveKeyDescriptor", () => {
@@ -1445,6 +1452,41 @@ describe("handlePress", () => {
       events.push(dispatched);
     }
     expect(events[0]).toEqual(events[1]);
+  });
+
+  it.each([
+    "Crtl++",
+    "Ctrl+Bogus++",
+  ])("rejects an unknown prefix in %s without dispatching keys", async (key) => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({});
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expect(res).toMatchObject({ code: "invalid_params" });
+    expect(fake.sent.some((call) => call.method === "Input.dispatchKeyEvent")).toBe(false);
+  });
+
+  it("keeps the existing base key in Ctrl+A++", async () => {
+    const sm = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
+    await sm.start("aa11");
+    const fake = makeFakeCdp({ "Input.dispatchKeyEvent": () => ({}) });
+    const res = await handlePress(
+      sm,
+      { session_id: "aa11", key: "Ctrl+A++" },
+      { cdp: fake.cdp, tabsApi: fake.tabsApi },
+    );
+    expectPressOk(res);
+    expect(res).toMatchObject({ key: "A", code: "KeyA", modifiers: ["ctrl"] });
+    const keyDown = fake.sent.find(
+      (call) =>
+        call.method === "Input.dispatchKeyEvent" &&
+        (call.params as { type?: string }).type === "rawKeyDown",
+    );
+    expect(keyDown?.params).toMatchObject({ key: "A", code: "KeyA", modifiers: 2 });
   });
 
   it("focuses an optional target before dispatch", async () => {
