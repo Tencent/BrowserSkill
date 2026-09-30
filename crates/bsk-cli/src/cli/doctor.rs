@@ -348,6 +348,10 @@ fn describe_update(
         }
         UpdateResult::Skipped => {
             details.push(match record.skip_reason {
+                Some(SkipReason::ActiveSessions) => format!(
+                    "bsk {} is available; automatic installation was postponed because agent sessions are active",
+                    record.target_version
+                ),
                 Some(SkipReason::HostManaged) => format!(
                     "bsk {} is available; this daemon belongs to its terminal or supervisor",
                     record.target_version
@@ -365,6 +369,10 @@ fn describe_update(
             });
             if !superseded {
                 hints.push(match record.skip_reason {
+                    Some(SkipReason::ActiveSessions) => {
+                        "the daemon retries on its next update check once sessions are idle"
+                            .to_string()
+                    }
                     Some(SkipReason::HostManaged) => {
                         "run `bsk update`, then restart the daemon in its terminal or supervisor"
                             .to_string()
@@ -921,6 +929,27 @@ mod m2_tests {
                 .unwrap()
                 .contains("installer or package manager")
         );
+    }
+
+    #[test]
+    fn active_sessions_postpone_updates_without_installation_advice() {
+        let record = UpdateRecord::skipped(
+            UpdateSource::Daemon,
+            &"0.3.2".parse().unwrap(),
+            std::path::Path::new("bsk"),
+            SkipReason::ActiveSessions,
+            None,
+        );
+        let check = update_check(Some(&record), Some("0.3.1"));
+        assert!(
+            check
+                .detail
+                .contains("postponed because agent sessions are active")
+        );
+        assert!(!check.detail.contains("cannot write"));
+        let hint = check.hint.unwrap();
+        assert!(hint.contains("next update check"));
+        assert!(!hint.contains("installer or package manager"));
     }
 
     #[test]
