@@ -407,8 +407,8 @@ impl ToolQueueRegistry {
     }
 
     /// Forward a tool RPC to the extension without taking the
-    /// per-session busy lock. Used by `tool.record_stop` so a second
-    /// CLI can finish an in-flight `tool.record_await` (extension
+    /// per-session busy lock. Used by `tool.dialog` and `tool.record_stop` so a
+    /// second CLI can resolve a modal or finish an in-flight recording (extension
     /// dispatch already runs concurrent `void dispatch(msg)` handlers).
     pub async fn dispatch_unlocked(
         &self,

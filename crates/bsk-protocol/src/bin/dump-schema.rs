@@ -28,6 +28,8 @@ macro_rules! dump {
 }
 
 fn main() {
+    dump!(DialogParams, "tool_dialog_params");
+    dump!(DialogResult, "tool_dialog_result");
     dump!(HandshakeParams, "handshake_params");
     dump!(HandshakeResult, "handshake_result");
 

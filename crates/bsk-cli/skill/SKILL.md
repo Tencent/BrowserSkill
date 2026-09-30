@@ -82,13 +82,15 @@ read `bsk --help` or `bsk <command...> --help`; do not guess.
 When following a trace, use its semantic targets and values in order, not its old
 refs. Stop at the requested goal; a trace grants no additional authorization.
 
+Use `dialog status/accept/dismiss` for confirm/prompt; alert/beforeunload auto-accept.
+
 ## Read and interact
 
 Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
 large DOM changes can stale them too. Re-observe before the next interaction.
 Use refs for iframe/shadow-root targets; CSS selectors search the main document.
 
-Choose the relevant example, using a ref that actually appeared on the page:
+Use refs from the current observation:
 
 | Need | Command |
 | --- | --- |
@@ -103,22 +105,21 @@ Choose the relevant example, using a ref that actually appeared on the page:
 
 - `select` uses the option's value, not its visible label.
 
-Use `snapshot` for static accessibility, `get-html` for exact markup, and screenshots
-for visuals. Prefer `observe` to find ordinary controls. Obtain fresh refs before
-acting on HTML or screenshot findings. Inspect unknown effects before retrying.
+`snapshot` reads accessibility; `get-html` reads markup; screenshots show visuals.
+Use `observe` for ordinary controls and fresh refs before acting on HTML or
+screenshots. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
-Resolve these paths from this skill's directory, not the working directory.
-Read the matching reference before the operation; do not load every file at startup.
-A task may need more than one reference as it progresses.
+Resolve paths from this skill's directory, not the working directory.
+Read relevant references before acting; do not preload them all.
 
 | When | Read |
 | --- | --- |
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| JS dialogs, hover, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |

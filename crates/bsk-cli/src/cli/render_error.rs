@@ -221,6 +221,20 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (_, "dialog_pending") => RenderInfo {
+            summary: "a JavaScript dialog needs a decision",
+            hint: Some(
+                "use bsk dialog status/accept/dismiss --session <id> [--tab-id <id>]; after handling it, inspect the page before continuing. Do not repeat the original action",
+            ),
+            ..base
+        },
+        (_, "dialog_execution_pending") => RenderInfo {
+            summary: "the original browser command is still finishing after a dialog",
+            hint: Some(
+                "query bsk dialog status --session <id> until execution_pending is false; do not repeat the original action",
+            ),
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),
