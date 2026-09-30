@@ -48,6 +48,7 @@ export default defineConfig({
       "scripting",
       "tabs",
       "storage",
+      "tabGroups",
       "webNavigation",
       "windows",
     ],
