@@ -1326,12 +1326,11 @@ function successfulFillScript(params: unknown) {
   const args = script.arguments ?? [];
   return {
     result: {
-      value:
-        args.length === 2
-          ? { before: "", expected: args[0].value }
-          : script.functionDeclaration.startsWith("function(expected)")
-            ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-            : "ready",
+      value: script.functionDeclaration.startsWith("function(value, clearBefore")
+        ? { before: "", expected: args[0].value }
+        : script.functionDeclaration.startsWith("function(expected)")
+          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
+          : "ready",
     },
   };
 }
@@ -1356,7 +1355,7 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
       "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "DIV", attributes: [] },
+        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
       }),
     });
     const res = await handleFill(
@@ -1414,8 +1413,10 @@ describe("handleFill", () => {
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
-        const args = (p as { arguments?: Array<{ value: unknown }> }).arguments ?? [];
-        if (args.length === 2) expect(args[1].value).toBe(false);
+        const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
+        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+          expect(script.arguments?.[1].value).toBe(false);
+        }
         return successfulFillScript(p);
       },
       "Input.dispatchKeyEvent": () => ({}),

@@ -900,22 +900,47 @@ interface DescribedNode {
   attributes?: string[];
 }
 
+const NEVER_FILLABLE_TAGS = new Set([
+  "BUTTON",
+  "SELECT",
+  "OPTION",
+  "OPTGROUP",
+  "SCRIPT",
+  "STYLE",
+  "LINK",
+  "META",
+  "IMG",
+  "VIDEO",
+  "AUDIO",
+  "CANVAS",
+  "IFRAME",
+  "OBJECT",
+  "EMBED",
+  "SVG",
+  "BR",
+  "HR",
+]);
+
 /**
- * Decide whether a node can receive `tool.fill`: native `<input>` /
- * `<textarea>`, or any element flagged `contenteditable="true"`.
+ * Decide how a node can receive `tool.fill`. Native `<input>` /
+ * `<textarea>` and an element with its own contenteditable attribute
+ * are filled as themselves. Any other element may be a descendant of an
+ * editing host: `DOM.describeNode` only reports this node's attributes,
+ * so a `<p>` inside `[contenteditable]` is not rejected here, and the
+ * live `isContentEditable` check decides before anything is focused.
  * Exported via `__testing__` for unit coverage.
  */
-function isFillable(node: DescribedNode): boolean {
+function fillTargetKind(node: DescribedNode): "self" | "descendant" | null {
   const tag = (node.nodeName ?? "").toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA") return true;
+  if (tag === "INPUT" || tag === "TEXTAREA") return "self";
   const attrs = node.attributes ?? [];
   for (let i = 0; i + 1 < attrs.length; i += 2) {
     if (attrs[i].toLowerCase() === "contenteditable") {
       const value = attrs[i + 1].toLowerCase();
-      return value === "" || value === "true" || value === "plaintext-only";
+      return value === "" || value === "true" || value === "plaintext-only" ? "self" : null;
     }
   }
-  return false;
+  return NEVER_FILLABLE_TAGS.has(tag) ? null : "descendant";
 }
 
 type SelectMutationResult =
@@ -972,6 +997,15 @@ const FILL_EDITABLE_FUNCTION = `function() {
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
 
+// The editing host of an editable target: the outermost editable element
+// around it, which takes focus for it. null when the target is not editable.
+const FILL_EDITING_HOST_FUNCTION = `function() {
+  if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return null;
+  let host = this;
+  while (host.parentElement && host.parentElement.isContentEditable) host = host.parentElement;
+  return host;
+}`;
+
 // Chrome renders a trailing editable newline with an empty <div><br></div>.
 // innerText includes the padding break; it is not an extra typed character.
 const FILL_VALUE_FUNCTION = `function() {
@@ -1005,6 +1039,7 @@ export async function handleFill(
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
+  let kind: "self" | "descendant" | null = null;
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -1015,7 +1050,8 @@ export async function handleFill(
         backendNodeId: node.backendNodeId,
       },
     );
-    if (!described.node || !isFillable(described.node)) {
+    kind = described.node ? fillTargetKind(described.node) : null;
+    if (!kind) {
       return rpcError(
         "invalid_params",
         "target_not_fillable",
@@ -1045,13 +1081,46 @@ export async function handleFill(
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
   const objectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
+  // A descendant of an editing host is filled through that host: the host
+  // takes focus, and the selection is confined to the target, so neither
+  // clearing nor typing reaches the rest of the host's content.
+  let hostObjectId: string | undefined;
 
   try {
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
+    if (kind === "descendant") {
+      // Check the live target before focusing anything, so a target that is
+      // not editable is rejected without blurring the focused element.
+      const host = await nodeCdp.send<{
+        result?: { objectId?: string };
+        exceptionDetails?: unknown;
+      }>(target.tabId, "Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: FILL_EDITING_HOST_FUNCTION,
+        returnByValue: false,
+      });
+      hostObjectId = host.result?.objectId;
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+      if (host.exceptionDetails) {
+        return fillError("fill_failed", "fill editing host script failed");
+      }
+      if (!hostObjectId) {
+        return fillError(
+          "target_not_fillable",
+          "fill target is not editable or its input type is unsupported",
+        );
+      }
+    }
+    const focusTarget = hostObjectId
+      ? { objectId: hostObjectId }
+      : { backendNodeId: node.backendNodeId };
+    const hostArgument = hostObjectId ? { objectId: hostObjectId } : { value: null };
     try {
-      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+      await nodeCdp.send(target.tabId, "DOM.focus", focusTarget);
     } catch (error) {
       // Chrome rejects DOM.focus for disabled controls, including inherited
       // fieldset state. Classify the live target before treating this as a
@@ -1082,13 +1151,13 @@ export async function handleFill(
       "Runtime.callFunctionOn",
       {
         objectId,
-        functionDeclaration: `function(value, clearBefore) {
+        functionDeclaration: `function(value, clearBefore, host) {
           const tag = this.tagName.toLowerCase();
           const native = tag === 'input' || tag === 'textarea';
           if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill target is not editable or its input type is unsupported' };
-          if (this.getRootNode().activeElement !== this) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
-          const before = clearBefore ? '' : (${FILL_VALUE_FUNCTION}).call(this);
-          let expected = before + value;
+          if (this.getRootNode().activeElement !== (host || this)) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
+          const current = (${FILL_VALUE_FUNCTION}).call(this);
+          let expected = (clearBefore ? '' : current) + value;
           if (native) {
             // Use the browser's own value sanitization (e.g. textarea
             // line endings) without changing the live control.
@@ -1110,7 +1179,9 @@ export async function handleFill(
           } else {
             expected = expected.replace(/\\r\\n?/g, '\\n');
           }
-          if (clearBefore) {
+          // Inside an editing host the typed text replaces the selected
+          // contents of the target instead, unless nothing is typed.
+          if (clearBefore && (!host || value === '')) {
             if (native) {
               const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
               Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, '');
@@ -1118,10 +1189,11 @@ export async function handleFill(
               this.textContent = '';
             }
             this.dispatchEvent(new Event('input', { bubbles: true }));
+            return { before: '', expected };
           }
-          return { before, expected };
+          return { before: current, expected };
         }`,
-        arguments: [{ value: params.value }, { value: clearBefore }],
+        arguments: [{ value: params.value }, { value: clearBefore }, hostArgument],
         returnByValue: true,
       },
     );
@@ -1141,19 +1213,26 @@ export async function handleFill(
     // A separate call runs after the clearing event's microtasks drain.
     // DOM focus works in background tabs. Use document.hasFocus() only to
     // detect deferred focus events, never to reject background input.
-    const checkReady = async (): Promise<FillReadiness | RpcError> => {
+    // `confined` also requires the selection to lie inside the target.
+    const checkReady = async (confined = false): Promise<FillReadiness | RpcError> => {
       const reply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
           objectId,
-          functionDeclaration: `function(before) {
+          functionDeclaration: `function(before, host, confined) {
             if (!(${FILL_EDITABLE_FUNCTION}).call(this) ||
                 (${FILL_VALUE_FUNCTION}).call(this) !== before) return 'fill_target_changed';
-            if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+            const root = this.getRootNode();
+            if (root.activeElement !== (host || this)) return 'fill_focus_lost';
+            if (confined) {
+              const selection = root.getSelection ? root.getSelection() : this.ownerDocument.getSelection();
+              const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+              if (!range || !this.contains(range.startContainer) || !this.contains(range.endContainer)) return 'fill_focus_lost';
+            }
             return this.ownerDocument.hasFocus() ? 'ready' : 'background';
           }`,
-          arguments: [{ value: preparation.before }],
+          arguments: [{ value: preparation.before }, hostArgument, { value: confined }],
           returnByValue: true,
         },
       );
@@ -1179,7 +1258,7 @@ export async function handleFill(
     // Restore focus once only if clearing left this same target editable
     // and unchanged. Recheck after focus handlers have run.
     if (clearBefore && ready === "fill_focus_lost") {
-      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
+      await nodeCdp.send(target.tabId, "DOM.focus", focusTarget);
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
@@ -1217,6 +1296,42 @@ export async function handleFill(
       if (typeof ready !== "string") return ready;
       if (ready !== "ready" && ready !== "background") {
         return fillError(ready, "fill target changed or lost focus while positioning the caret");
+      }
+    }
+    if (hostObjectId && params.value !== "") {
+      // Select the target's contents to replace them, or put the caret at
+      // their end to append, after any focus handling above has run.
+      const selected = await nodeCdp.send<FillScriptReply<unknown>>(
+        target.tabId,
+        "Runtime.callFunctionOn",
+        {
+          objectId,
+          functionDeclaration: `function(clearBefore) {
+            const root = this.getRootNode();
+            const selection = root.getSelection ? root.getSelection() : this.ownerDocument.getSelection();
+            const range = this.ownerDocument.createRange();
+            range.selectNodeContents(this);
+            if (!clearBefore) range.collapse(false);
+            selection.removeAllRanges();
+            selection.addRange(range);
+          }`,
+          arguments: [{ value: clearBefore }],
+          returnByValue: true,
+        },
+      );
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+      if (selected.exceptionDetails) {
+        return fillError("fill_failed", "fill selection script failed");
+      }
+      ready = await checkReady(true);
+      if (throwIfAborted(deps.signal)) {
+        return { code: "cancelled", message: "fill aborted" };
+      }
+      if (typeof ready !== "string") return ready;
+      if (ready !== "ready" && ready !== "background") {
+        return fillError(ready, "fill target changed or lost focus while selecting its contents");
       }
     }
     // CDP `Input.insertText` handles IME / multi-byte input out of the
@@ -1292,6 +1407,11 @@ export async function handleFill(
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
   } finally {
     await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
+    if (hostObjectId) {
+      await nodeCdp
+        .send(target.tabId, "Runtime.releaseObject", { objectId: hostObjectId })
+        .catch(() => undefined);
+    }
   }
 }
 
@@ -1725,5 +1845,5 @@ export async function handleSelect(
 export const __testing__ = {
   DEFAULT_TIMEOUT_MS,
   resolveBackendNode,
-  isFillable,
+  fillTargetKind,
 };
