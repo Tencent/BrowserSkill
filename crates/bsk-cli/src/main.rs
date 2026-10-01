@@ -7,6 +7,11 @@ use bsk::cli::status::Output;
 use bsk::{Cli, Command, cli};
 
 fn main() -> ExitCode {
+    // A Windows console starts on an OEM code page, so the UTF-8 bytes bsk
+    // prints would reach a human as mojibake for any non-ASCII page text.
+    // The guard stays alive for the whole run and restores the code page on
+    // the way out; it is inert when output is redirected.
+    let _console = bsk::cli::console_encoding::Utf8Console::enable();
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {

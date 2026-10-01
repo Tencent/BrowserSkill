@@ -9,6 +9,10 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- CLI: switch the attached Windows console to UTF-8 for the lifetime of the
+  process, so non-ASCII page text is printed instead of mojibake on a console
+  with an OEM code page. The previous code page is restored on exit; redirected
+  streams, non-Windows hosts and consoles already using UTF-8 are left alone.
 - Extension: input to a background Agent Window tab no longer keeps failing with
   `input_not_ready` after Chrome drops the session's focus override without a detach
   ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's

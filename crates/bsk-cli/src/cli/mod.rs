@@ -7,6 +7,7 @@ pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
 pub mod console;
+pub mod console_encoding;
 pub mod daemon;
 pub mod debug;
 pub mod dialogs;
