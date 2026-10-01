@@ -3,17 +3,62 @@
 use std::fs;
 use std::path::PathBuf;
 
-use bsk_protocol::system::{
-    BrowserListParams, HandshakeParams, HandshakeResult, PingParams, PingResult, StatusParams,
-    StatusResult,
-};
-use bsk_protocol::tools::*;
-use bsk_protocol::{CancelParams, CancelResult};
-use schemars::schema_for;
+use bsk_protocol::catalog;
+use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 
-fn write_schema(name: &str, schema: impl serde::Serialize) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema");
-    fs::create_dir_all(&dir).expect("create schema dir");
+fn references(value: &Value, names: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(name) = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(|s| s.strip_prefix("#/definitions/"))
+            {
+                names.insert(name.to_owned());
+            }
+            for value in object.values() {
+                references(value, names);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                references(value, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn standalone(catalog: &Value, name: &str) -> Value {
+    let definitions = catalog["schema"]["definitions"]
+        .as_object()
+        .expect("definitions");
+    let mut root = definitions[name].clone();
+    let mut pending = BTreeSet::new();
+    let mut included = Map::new();
+    references(&root, &mut pending);
+    while let Some(next) = pending.pop_first() {
+        if included.contains_key(&next) {
+            continue;
+        }
+        let schema = definitions
+            .get(&next)
+            .expect("referenced definition")
+            .clone();
+        references(&schema, &mut pending);
+        included.insert(next, schema);
+    }
+    root["$schema"] = catalog["schema"]["$schema"].clone();
+    root["title"] = Value::String(name.to_owned());
+    if !included.is_empty() {
+        root["definitions"] = Value::Object(included);
+    }
+    root
+}
+
+fn write_schema(dir: &std::path::Path, name: &str, schema: impl serde::Serialize) {
+    fs::create_dir_all(dir).expect("create schema dir");
     let path = dir.join(format!("{name}.json"));
     let json = serde_json::to_string_pretty(&schema).expect("serialize schema");
     let mut json = json;
@@ -21,128 +66,50 @@ fn write_schema(name: &str, schema: impl serde::Serialize) {
     fs::write(&path, json).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
-macro_rules! dump {
-    ($ty:ty, $file:literal) => {
-        write_schema($file, schema_for!($ty));
-    };
-}
-
 fn main() {
-    dump!(HandshakeParams, "handshake_params");
-    dump!(HandshakeResult, "handshake_result");
-
-    dump!(PingParams, "system_ping_params");
-    dump!(PingResult, "system_ping_result");
-    dump!(StatusParams, "system_status_params");
-    dump!(StatusResult, "system_status_result");
-    dump!(BrowserListParams, "browser_list_params");
-
-    dump!(CancelParams, "cancel_params");
-    dump!(CancelResult, "cancel_result");
-
-    dump!(SessionStartParams, "tool_session_start_params");
-    dump!(SessionStartResult, "tool_session_start_result");
-    dump!(SessionStopParams, "tool_session_stop_params");
-    dump!(SessionStopResult, "tool_session_stop_result");
-
-    dump!(WindowResizeParams, "tool_window_resize_params");
-    dump!(WindowResizeResult, "tool_window_resize_result");
-
-    dump!(EmulateParams, "tool_emulate_params");
-    dump!(EmulateResult, "tool_emulate_result");
-    dump!(EmulateOverrides, "tool_emulate_overrides");
-    dump!(UserAgentMetadata, "tool_emulate_user_agent_metadata");
-
-    dump!(TabListParams, "tool_tab_list_params");
-    dump!(TabListResult, "tool_tab_list_result");
-    dump!(TabCreateParams, "tool_tab_create_params");
-    dump!(TabCreateResult, "tool_tab_create_result");
-    dump!(TabCloseParams, "tool_tab_close_params");
-    dump!(TabCloseResult, "tool_tab_close_result");
-    dump!(TabBorrowParams, "tool_tab_borrow_params");
-    dump!(TabBorrowResult, "tool_tab_borrow_result");
-    dump!(TabReturnParams, "tool_tab_return_params");
-    dump!(TabReturnResult, "tool_tab_return_result");
-    dump!(TabSelectParams, "tool_tab_select_params");
-    dump!(TabSelectResult, "tool_tab_select_result");
-
-    dump!(NavigateParams, "tool_navigate_params");
-    dump!(NavigateResult, "tool_navigate_result");
-    dump!(NavigateBackParams, "tool_navigate_back_params");
-    dump!(NavigateBackResult, "tool_navigate_back_result");
-    dump!(NavigateForwardParams, "tool_navigate_forward_params");
-    dump!(NavigateForwardResult, "tool_navigate_forward_result");
-    dump!(ReloadParams, "tool_reload_params");
-    dump!(ReloadResult, "tool_reload_result");
-
-    dump!(ClickParams, "tool_click_params");
-    dump!(ClickResult, "tool_click_result");
-    dump!(HoverParams, "tool_hover_params");
-    dump!(HoverResult, "tool_hover_result");
-    dump!(WheelParams, "tool_wheel_params");
-    dump!(WheelResult, "tool_wheel_result");
-    dump!(ScrollToParams, "tool_scroll_to_params");
-    dump!(ScrollToResult, "tool_scroll_to_result");
-    dump!(FocusParams, "tool_focus_params");
-    dump!(FocusResult, "tool_focus_result");
-    dump!(BlurParams, "tool_blur_params");
-    dump!(BlurResult, "tool_blur_result");
-    dump!(FillParams, "tool_fill_params");
-    dump!(FillResult, "tool_fill_result");
-    dump!(PressParams, "tool_press_params");
-    dump!(PressResult, "tool_press_result");
-    dump!(SelectParams, "tool_select_params");
-    dump!(SelectResult, "tool_select_result");
-    dump!(UploadParams, "tool_upload_params");
-    dump!(UploadResult, "tool_upload_result");
-    dump!(DownloadParams, "tool_download_params");
-    dump!(DownloadResult, "tool_download_result");
-
-    dump!(SnapshotParams, "tool_snapshot_params");
-    dump!(SnapshotResult, "tool_snapshot_result");
-    dump!(ObserveParams, "tool_observe_params");
-    dump!(ObserveResult, "tool_observe_result");
-    dump!(GetHtmlParams, "tool_get_html_params");
-    dump!(GetHtmlResult, "tool_get_html_result");
-    dump!(ScreenshotParams, "tool_screenshot_params");
-    dump!(ScreenshotResult, "tool_screenshot_result");
-    dump!(ScreenshotFullPageParams, "tool_screenshot_full_page_params");
-    dump!(ScreenshotFullPageResult, "tool_screenshot_full_page_result");
-    dump!(ScreenshotReadParams, "tool_screenshot_read_params");
-    dump!(ScreenshotReadResult, "tool_screenshot_read_result");
-    dump!(ScreenshotReleaseParams, "tool_screenshot_release_params");
-    dump!(ScreenshotReleaseResult, "tool_screenshot_release_result");
-    dump!(ConsoleParams, "tool_console_params");
-    dump!(ConsoleResult, "tool_console_result");
-    dump!(ConsoleEntry, "tool_console_entry");
-    dump!(ConsoleStackFrame, "tool_console_stack_frame");
-    dump!(DebugParams, "tool_debug_params");
-    dump!(DebugResult, "tool_debug_result");
-    dump!(NetworkParams, "tool_network_params");
-    dump!(NetworkResult, "tool_network_result");
-    dump!(NetworkEntry, "tool_network_entry");
-
-    dump!(EvaluateParams, "tool_evaluate_params");
-    dump!(EvaluateResult, "tool_evaluate_result");
-    dump!(EvaluateError, "tool_evaluate_error");
-
-    dump!(WaitForNavigationParams, "tool_wait_for_navigation_params");
-    dump!(WaitForNavigationResult, "tool_wait_for_navigation_result");
-    dump!(WaitMsParams, "tool_wait_ms_params");
-    dump!(WaitMsResult, "tool_wait_ms_result");
-    dump!(RequestHelpParams, "tool_request_help_params");
-    dump!(RequestHelpResult, "tool_request_help_result");
-
-    dump!(TraceV2, "trace_v2");
-    dump!(TraceV3, "trace_v3");
-    dump!(RecordedTrace, "trace");
-    dump!(StepV2, "trace_step_v2");
-    dump!(StepV3, "trace_step_v3");
-    dump!(RecordedStep, "trace_step");
-    dump!(RecordStartParams, "tool_record_start_params");
-    dump!(RecordStartResult, "tool_record_start_result");
-    dump!(RecordStopParams, "tool_record_stop_params");
-    dump!(RecordStopResult, "tool_record_stop_result");
-    dump!(RecordAwaitParams, "tool_record_await_params");
-    dump!(RecordAwaitResult, "tool_record_await_result");
+    let mut args = std::env::args_os().skip(1);
+    let dir = match args.next() {
+        None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("schema"),
+        Some(flag) if flag == "--out-dir" => {
+            let dir = PathBuf::from(args.next().expect("--out-dir requires a directory"));
+            assert!(args.next().is_none(), "usage: dump-schema [--out-dir DIR]");
+            dir
+        }
+        Some(_) => panic!("usage: dump-schema [--out-dir DIR]"),
+    };
+    let catalog = catalog::export();
+    for method in catalog["methods"].as_array().expect("method catalog") {
+        let wire = method["method"].as_str().expect("wire method");
+        let base = if wire == "system.handshake" {
+            "handshake".to_owned()
+        } else {
+            wire.replace('.', "_")
+        };
+        for part in ["params", "result"] {
+            let name = method[part].as_str().expect("contract name");
+            // Daemon-private payloads are intentionally not extension contracts.
+            if name == "Value" {
+                continue;
+            }
+            write_schema(&dir, &format!("{base}_{part}"), standalone(&catalog, name));
+        }
+    }
+    // Stable file aliases for reusable CLI/documentation schemas. Their shapes
+    // still come from the catalog; this list cannot hide a method from generation.
+    for (name, file) in [
+        ("EmulateOverrides", "tool_emulate_overrides"),
+        ("UserAgentMetadata", "tool_emulate_user_agent_metadata"),
+        ("ConsoleEntry", "tool_console_entry"),
+        ("ConsoleStackFrame", "tool_console_stack_frame"),
+        ("NetworkEntry", "tool_network_entry"),
+        ("EvaluateError", "tool_evaluate_error"),
+        ("TraceV2", "trace_v2"),
+        ("TraceV3", "trace_v3"),
+        ("RecordedTrace", "trace"),
+        ("StepV2", "trace_step_v2"),
+        ("StepV3", "trace_step_v3"),
+        ("RecordedStep", "trace_step"),
+    ] {
+        write_schema(&dir, file, standalone(&catalog, name));
+    }
 }

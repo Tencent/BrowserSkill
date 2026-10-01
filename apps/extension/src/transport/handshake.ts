@@ -1,3 +1,5 @@
+import { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
+import { decodeHandshakeResult } from "./protocol";
 import type { Transport } from "./transport";
 import type {
   HandshakeParams,
@@ -6,21 +8,15 @@ import type {
   RequestFrame,
   ResponseFrame,
 } from "./types";
+import { isResponseFrame } from "./types";
 
-export const PROTOCOL_VERSION = "1.3";
+export { MIN_COMPATIBLE_PROTOCOL, PROTOCOL_VERSION } from "./generated/methods";
 /**
  * Extension semver, injected at build time from `package.json` via
  * Vite's `define` (see `wxt.config.ts` and `vitest.config.ts`).
  */
 export const EXTENSION_VERSION: string =
   typeof __BSK_EXT_VERSION__ === "string" ? __BSK_EXT_VERSION__ : "0.0.0-unset";
-/**
- * Lowest **protocol** version this extension accepts (e.g. `"1.0"`).
- * Must stay in sync with daemon `MIN_COMPATIBLE_PROTOCOL`.
- */
-// New interaction semantics do not break the base wire protocol. Older peers
-// remain connected; the popup explains their local help-handling limitations.
-export const MIN_COMPATIBLE_PROTOCOL = "1.0";
 /**
  * **Deprecated** — legacy app-semver floor for wire compat with old
  * daemons. New code sends `"0.0.0"`; compat decisions ignore this.
@@ -100,8 +96,11 @@ export function performHandshake(
         );
         return;
       }
-      const result = r.result as HandshakeResult;
-      resolve({ params, result });
+      try {
+        resolve({ params, result: decodeHandshakeResult(r.result) });
+      } catch (error) {
+        reject(error);
+      }
     });
 
     function cleanup() {
@@ -126,11 +125,7 @@ export function performHandshake(
 }
 
 function isResponseFor(msg: ProtocolFrame, id: string): boolean {
-  return (
-    typeof (msg as ResponseFrame).id === "string" &&
-    (msg as ResponseFrame).id === id &&
-    ("result" in (msg as object) || "error" in (msg as object))
-  );
+  return isResponseFrame(msg) && msg.id === id;
 }
 
 /**

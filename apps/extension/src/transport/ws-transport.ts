@@ -1,5 +1,6 @@
 import type { ConnectionStateHandler, Disposable, FrameHandler, Transport } from "./transport";
 import type { ConnectionState, ProtocolFrame } from "./types";
+import { isProtocolFrame } from "./types";
 
 const DEFAULT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_MAX_DELAY_MS = 5_000;
@@ -202,12 +203,13 @@ export class WSTransport implements Transport {
 
   private handleInbound(data: unknown): void {
     if (typeof data !== "string") return;
-    let parsed: ProtocolFrame;
+    let parsed: unknown;
     try {
-      parsed = JSON.parse(data) as ProtocolFrame;
+      parsed = JSON.parse(data);
     } catch {
       return;
     }
+    if (!isProtocolFrame(parsed)) return;
     for (const h of this.messageHandlers) {
       try {
         h(parsed);

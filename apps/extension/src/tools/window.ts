@@ -1,3 +1,7 @@
+import type { WindowResizeParams, WindowResizeResult } from "@/transport/types";
+
+export type { WindowResizeParams, WindowResizeResult } from "@/transport/types";
+
 // Window-tool handlers: `tool.window_resize` resizes the session's
 // Agent Window via `chrome.windows.update`.
 
@@ -5,22 +9,6 @@ import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError } from "@/transport/types";
 import { validateWindowSize } from "./session";
 import { isRpcError, lookupSession } from "./shared";
-
-/**
- * Mirror of bsk-protocol `WindowResizeParams` /
- * `WindowResizeResult` (see crates/bsk-protocol/src/tools/window.rs).
- */
-export interface WindowResizeParams {
-  session_id: string;
-  width: number;
-  height: number;
-}
-
-export interface WindowResizeResult {
-  window_id: number;
-  width: number;
-  height: number;
-}
 
 /**
  * Subset of `chrome.windows` we depend on, injectable so unit tests

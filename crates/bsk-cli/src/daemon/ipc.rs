@@ -832,7 +832,8 @@ fn tool_dispatch_timeout(params: &Value) -> Result<Duration, RpcError> {
 }
 
 fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Duration, RpcError> {
-    if *method == Method::ToolTabBorrow {
+    let policy = super::tool_policy::execution_policy(method);
+    if policy.deadline == super::tool_policy::Deadline::BorrowConfirmation {
         let ms = params
             .get("confirmation_timeout_ms")
             .map_or(Some(60_000), Value::as_u64)
@@ -843,24 +844,15 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
         // Include the UI countdown/fade and Chrome move before deadline cancellation.
         return Ok(Duration::from_millis(ms).saturating_add(Duration::from_secs(15)));
     }
-    let timeout = if *method == Method::ToolScreenshotFullPage && params.get("timeout_ms").is_none()
+    let timeout = if policy.deadline == super::tool_policy::Deadline::FullPage
+        && params.get("timeout_ms").is_none()
     {
         Ok(Duration::from_secs(120))
     } else {
         tool_dispatch_timeout(params)
     };
     timeout.map(|timeout| {
-        if matches!(
-            method,
-            Method::ToolUpload
-                | Method::ToolDownload
-                | Method::ToolRequestHelp
-                | Method::ToolNavigate
-                | Method::ToolNavigateBack
-                | Method::ToolNavigateForward
-                | Method::ToolReload
-                | Method::ToolWaitForNavigation
-        ) {
+        if policy.response_grace {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {
             timeout

@@ -1,4 +1,38 @@
 import { withUiTeardown } from "@/session-manager/ui-activity";
+import type {
+  TabBorrowParams,
+  TabBorrowResult,
+  TabCloseParams,
+  TabCloseResult,
+  TabCreateParams,
+  TabCreateResult,
+  TabInfo,
+  TabListParams,
+  TabListResult,
+  TabReturnParams,
+  TabReturnResult,
+  TabScope,
+  TabSelectParams,
+  TabSelectResult,
+} from "@/transport/types";
+
+export type {
+  TabBorrowParams,
+  TabBorrowResult,
+  TabCloseParams,
+  TabCloseResult,
+  TabCreateParams,
+  TabCreateResult,
+  TabInfo,
+  TabListParams,
+  TabListResult,
+  TabReturnParams,
+  TabReturnResult,
+  TabScope,
+  TabSelectParams,
+  TabSelectResult,
+} from "@/transport/types";
+
 // Tab-tool handlers. M6 wired `tool.tab_list`; M8 adds the rest of
 // the tab namespace: `tab_create`, `tab_close`, `tab_select`,
 // `tab_borrow`, `tab_return`. The dispatcher routes each method to a
@@ -17,98 +51,6 @@ import {
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
-
-export type TabScope = "user" | "agent" | "all";
-
-/**
- * Mirror of bsk-protocol `TabInfo` (see
- * crates/bsk-protocol/src/tools/tabs.rs).
- */
-export interface TabInfo {
-  tab_id: number;
-  title?: string;
-  url?: string;
-  window_id?: number;
-  active?: boolean;
-  /**
-   * Where the tab sits relative to the requesting session: tabs in any
-   * window other than an Agent Window are `user`; tabs in this
-   * session's own Agent Window are `agent`. Tabs in *other* sessions'
-   * Agent Windows are filtered out entirely (cross-session isolation,
-   * design §6).
-   */
-  scope?: "user" | "agent";
-}
-
-export interface TabListParams {
-  session_id: string;
-  scope?: TabScope;
-}
-
-export interface TabListResult {
-  tabs: TabInfo[];
-}
-
-// --- M8 payload mirrors (bsk-protocol/src/tools/tabs.rs) ---
-
-export interface TabCreateParams {
-  session_id: string;
-  url?: string;
-  active?: boolean;
-  index?: number;
-}
-
-export interface TabCreateResult {
-  tab_id: number;
-  window_id: number;
-  url: string;
-}
-
-export interface TabCloseParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabCloseResult {
-  tab_id: number;
-}
-
-export interface TabSelectParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabSelectResult {
-  tab_id: number;
-  window_id: number;
-}
-
-export interface TabBorrowParams {
-  session_id: string;
-  tab_id: number;
-  /** Legacy input, ignored. The browser preference decides confirmation. */
-  confirm?: boolean;
-  confirmation_timeout_ms?: number;
-}
-
-export interface TabBorrowResult {
-  tab_id: number;
-  original_window_id: number;
-  original_index: number;
-  agent_window_id: number;
-}
-
-export interface TabReturnParams {
-  session_id: string;
-  tab_id: number;
-}
-
-export interface TabReturnResult {
-  tab_id: number;
-  returned_to_window_id: number;
-  returned_to_index: number;
-  fallback?: boolean;
-}
 
 const TAB_SCOPES = new Set<TabScope>(["user", "agent", "all"]);
 

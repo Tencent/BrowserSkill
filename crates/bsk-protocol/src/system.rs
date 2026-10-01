@@ -466,6 +466,26 @@ pub struct HandshakeResult {
     pub min_compatible_protocol: Option<String>,
 }
 
+/// Current handshake envelope. The flattened identity remains source-compatible
+/// with older Rust callers constructing `HandshakeParams` directly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HandshakeRequest {
+    #[serde(flatten)]
+    pub identity: HandshakeParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct HandshakeResponse {
+    #[serde(flatten)]
+    pub identity: HandshakeResult,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audit_ready: Option<bool>,
+}
+
 #[cfg(test)]
 mod handshake_payload_tests {
     use super::*;

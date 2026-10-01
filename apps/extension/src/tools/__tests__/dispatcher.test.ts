@@ -480,7 +480,9 @@ describe("ToolDispatcher", () => {
     // ...and the window is released rather than closed, so the user's tab survives.
     expect(closeWindow).not.toHaveBeenCalled();
     expect(sessions.has("aa11")).toBe(false);
-    expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+    await vi.waitFor(() =>
+      expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } }),
+    );
   });
 
   it("routes tool.console through the CDP console buffer", async () => {
@@ -1600,7 +1602,7 @@ it.each([
   });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10 } });
+    f.deliver({ id: "open", method, params: { session_id: "popup", tab_id: 10, key: "Enter" } });
     await vi.waitFor(() => expect(f.sent.some((r) => "id" in r && r.id === "open")).toBe(true));
     expect(task.observedTabs?.has(20)).toBe(true);
     expect(task.agentCreatedTabs.has(20)).toBe(false);
@@ -1660,7 +1662,11 @@ it("passes dispatcher cancellation to popup tracking before the tool settles", a
     });
   dispatcher.start();
   try {
-    f.deliver({ id: "open", method: "tool.press", params: { session_id: "popup", tab_id: 10 } });
+    f.deliver({
+      id: "open",
+      method: "tool.press",
+      params: { session_id: "popup", tab_id: 10, key: "Enter" },
+    });
     await vi.waitFor(() => expect(invoke).toHaveBeenCalled());
     f.deliver({ id: "cancel", method: "cancel", params: { rpc_id: "open" } });
     await vi.waitFor(() =>

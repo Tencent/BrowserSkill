@@ -114,46 +114,17 @@ impl<'de> Deserialize<'de> for RecordedTrace {
 }
 
 impl JsonSchema for RecordedTrace {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         "RecordedTrace".into()
     }
 
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
-        // Mirror classify_value: a numeric `version` selects v3; otherwise v2.
-        // TraceV2 stays open for unknown extension fields but forbids `states[]`
-        // and a numeric `version`. TraceV3 already denies `pages[]`.
-        let mut version_props = schemars::Map::new();
-        version_props.insert(
-            "version".into(),
-            schemars::schema::SchemaObject {
-                instance_type: Some(schemars::schema::InstanceType::Integer.into()),
-                ..Default::default()
-            }
-            .into(),
-        );
-        let mut required = schemars::Set::new();
-        required.insert("version".into());
-
-        schemars::schema::SchemaObject {
-            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
-                if_schema: Some(Box::new(
-                    schemars::schema::SchemaObject {
-                        object: Some(Box::new(schemars::schema::ObjectValidation {
-                            properties: version_props,
-                            required,
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    }
-                    .into(),
-                )),
-                then_schema: Some(Box::new(generator.subschema_for::<TraceV3>())),
-                else_schema: Some(Box::new(generator.subschema_for::<TraceV2>())),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // Keep the classifier identical to classify_value, including its v2 fallback.
+        schemars::json_schema!({
+            "if": {"properties": {"version": {"type": "integer"}}, "required": ["version"]},
+            "then": generator.subschema_for::<TraceV3>(),
+            "else": generator.subschema_for::<TraceV2>()
+        })
     }
 }
 
@@ -209,49 +180,17 @@ impl<'de> Deserialize<'de> for RecordedStep {
 }
 
 impl JsonSchema for RecordedStep {
-    fn schema_name() -> String {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
         "RecordedStep".into()
     }
 
-    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
-        // Mirror classify_value: `state` selects v3; otherwise v2.
-        // Mixed page + state is rejected at this layer because StepV2/StepV3
-        // still allow unknown extension fields.
-        let mut required = schemars::Set::new();
-        required.insert("state".into());
-        let mut mixed_keys = schemars::Set::new();
-        mixed_keys.insert("page".into());
-        mixed_keys.insert("state".into());
-
-        schemars::schema::SchemaObject {
-            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
-                if_schema: Some(Box::new(
-                    schemars::schema::SchemaObject {
-                        object: Some(Box::new(schemars::schema::ObjectValidation {
-                            required,
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    }
-                    .into(),
-                )),
-                then_schema: Some(Box::new(generator.subschema_for::<StepV3>())),
-                else_schema: Some(Box::new(generator.subschema_for::<StepV2>())),
-                not: Some(Box::new(
-                    schemars::schema::SchemaObject {
-                        object: Some(Box::new(schemars::schema::ObjectValidation {
-                            required: mixed_keys,
-                            ..Default::default()
-                        })),
-                        ..Default::default()
-                    }
-                    .into(),
-                )),
-                ..Default::default()
-            })),
-            ..Default::default()
-        }
-        .into()
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "if": {"required": ["state"]},
+            "then": generator.subschema_for::<StepV3>(),
+            "else": generator.subschema_for::<StepV2>(),
+            "not": {"required": ["page", "state"]}
+        })
     }
 }
 
@@ -597,7 +536,8 @@ mod tests {
 
     #[test]
     fn recorded_trace_schema_includes_v2_and_v3() {
-        let schema = serde_json::to_value(schemars::schema_for!(RecordStopResult)).unwrap();
+        let schema =
+            serde_json::to_value(crate::catalog::schema_for::<RecordStopResult>()).unwrap();
         assert_classifies_by_integer_version(&schema["definitions"]["RecordedTrace"]);
         assert_eq!(
             schema["definitions"]["TraceV3"]["properties"]["version"]["const"],
@@ -607,18 +547,20 @@ mod tests {
 
     #[test]
     fn recorded_trace_schema_follows_classify_value() {
-        let standalone = serde_json::to_value(schemars::schema_for!(RecordedTrace)).unwrap();
+        let standalone =
+            serde_json::to_value(crate::catalog::schema_for::<RecordedTrace>()).unwrap();
         assert_classifies_by_integer_version(&standalone);
         assert!(standalone["definitions"].get("TraceV2").is_some());
         assert!(standalone["definitions"].get("TraceV3").is_some());
 
-        let stop_result = serde_json::to_value(schemars::schema_for!(RecordStopResult)).unwrap();
+        let stop_result =
+            serde_json::to_value(crate::catalog::schema_for::<RecordStopResult>()).unwrap();
         assert_classifies_by_integer_version(&stop_result["definitions"]["RecordedTrace"]);
     }
 
     #[test]
     fn standalone_trace_schema_is_recorded_trace_union() {
-        let schema = serde_json::to_value(schemars::schema_for!(RecordedTrace)).unwrap();
+        let schema = serde_json::to_value(crate::catalog::schema_for::<RecordedTrace>()).unwrap();
         assert_eq!(schema["title"], "RecordedTrace");
         assert_classifies_by_integer_version(&schema);
         assert!(schema["definitions"].get("TraceV2").is_some());
@@ -699,7 +641,7 @@ mod tests {
 
     #[test]
     fn recorded_step_schema_follows_classify_value() {
-        let schema = serde_json::to_value(schemars::schema_for!(RecordedStep)).unwrap();
+        let schema = serde_json::to_value(crate::catalog::schema_for::<RecordedStep>()).unwrap();
         assert_eq!(schema["title"], "RecordedStep");
         assert_step_classifies_by_state(&schema);
         assert!(schema["definitions"].get("StepV2").is_some());
