@@ -88,7 +88,7 @@ Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
 large DOM changes can stale them too. Re-observe before the next interaction.
 Use refs for iframe/shadow-root targets; CSS selectors search the main document.
 
-Choose the relevant example, using a ref that actually appeared on the page:
+Use a ref from the current observation:
 
 | Need | Command |
 | --- | --- |
@@ -109,12 +109,12 @@ acting on HTML or screenshot findings. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
-Resolve these paths from this skill's directory, not the working directory.
-Read the matching reference before the operation; do not load every file at startup.
-A task may need more than one reference as it progresses.
+Resolve paths from this skill's directory. Read the relevant reference before
+acting; load others as the task requires.
 
 | When | Read |
 | --- | --- |
+| Tables/lists: JSON/CSV, columns, sources, coverage | [Extraction](references/extraction.md) |
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |

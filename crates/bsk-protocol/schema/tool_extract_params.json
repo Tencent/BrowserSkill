@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExtractParams",
+  "type": "object",
+  "required": [
+    "action",
+    "session_id"
+  ],
+  "properties": {
+    "action": {
+      "$ref": "#/definitions/ExtractAction"
+    },
+    "fields": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ExtractField"
+      }
+    },
+    "item_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "max_bytes": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_columns": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "max_rows": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "target_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ExtractAction": {
+      "type": "string",
+      "enum": [
+        "discover",
+        "table",
+        "list"
+      ]
+    },
+    "ExtractField": {
+      "type": "object",
+      "required": [
+        "key",
+        "read",
+        "selector"
+      ],
+      "properties": {
+        "attribute": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "read": {
+          "$ref": "#/definitions/ExtractRead"
+        },
+        "selector": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExtractRead": {
+      "type": "string",
+      "enum": [
+        "text",
+        "href",
+        "attribute"
+      ]
+    }
+  }
+}

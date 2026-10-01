@@ -68,11 +68,12 @@ Do not invent tools or bypass these limits.
 
 ## Read details only when needed
 
-Resolve references from the skill resource directory provided by the harness, not
-the working directory. Read the matching file before acting; do not preload all files.
+Resolve references from the harness's skill resource directory. Read the relevant
+file before acting; load others as needed.
 
 | When | Read |
 | --- | --- |
+| Tables/lists: JSON/CSV, columns, sources, coverage | [Extraction](references/extraction.md) |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |

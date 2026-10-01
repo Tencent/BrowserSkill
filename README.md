@@ -34,6 +34,7 @@ Use the `bsk` CLI with Cursor, Claude Code, Codex, OpenClaw, CodeBuddy, WorkBudd
 | **Debug websites with evidence** | Connect actions to requests, response bodies, console messages, and page changes. Inspect performance, slow APIs, and suspected duplicate requests; use explicit HTTP rules or request replay to test a hypothesis. |
 | **Choose the right browser** | Name browser instances, bind a task to a specific profile, or pair an agent running on a server with a browser on your computer. |
 | **Review what happened** | Reopen browser-local debugging history, export evidence as JSON, or enable a separate operation audit to review task activity. |
+| **Extract structured data** | Export loaded tables and lists as JSON/CSV with column names, page/frame sources, merged-cell metadata and explicit coverage. See [structured extraction](docs/structured-extraction.md). |
 
 Watch a browser task in action:
 

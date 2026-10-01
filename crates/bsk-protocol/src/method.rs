@@ -104,6 +104,8 @@ pub enum Method {
     ToolObserve,
     #[serde(rename = "tool.get_html")]
     ToolGetHtml,
+    #[serde(rename = "tool.extract")]
+    ToolExtract,
     #[serde(rename = "tool.screenshot")]
     ToolScreenshot,
     #[serde(rename = "tool.screenshot_full_page")]
@@ -217,6 +219,7 @@ impl Method {
             Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
+            | Method::ToolExtract
             | Method::ToolScreenshot
             | Method::ToolScreenshotRead
             | Method::ToolConsole
@@ -366,6 +369,8 @@ mod tests {
         assert!(!Method::ToolHover.is_mutating());
         assert!(!Method::ToolObserve.is_mutating());
         assert!(!Method::ToolGetHtml.is_mutating());
+        assert_eq!(Method::ToolExtract.effect(), MethodEffect::PassiveRead);
+        assert!(!Method::ToolExtract.is_mutating());
         assert!(!Method::ToolScreenshot.is_mutating());
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());

@@ -11,6 +11,18 @@ export PATH="${BSK_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 
 Documentation: [../../README.md](../../README.md) · [../../docs/architecture.md](../../docs/architecture.md)
 
+## Structured extraction
+
+```sh
+bsk extract discover --session <id>
+bsk extract table --session <id> --selector '#orders'
+bsk extract table --session <id> --target <target_id> --format csv --out orders.csv
+```
+
+Returns columns, rows, sources and coverage for loaded DOM data. CSV files include a
+metadata sidecar. See [structured extraction](../../docs/structured-extraction.md)
+for list field schemas, frame/shadow targets, limits and CSV options.
+
 ## Screenshots
 
 ```sh
