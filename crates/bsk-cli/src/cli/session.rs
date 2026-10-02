@@ -393,6 +393,22 @@ impl RenderExtras for StartExtras<'_> {
                 }
                 Ok(())
             }
+            ErrorCode::NotFound => {
+                // Same table as `multiple_browsers_online`, but for a
+                // selector that matched nothing. Absent / empty
+                // `browsers` data (an older daemon, or a miss against an
+                // empty registry) renders nothing, so unrelated
+                // `not_found` errors keep their current output.
+                let browsers = parse_browsers_data(data.as_ref());
+                if browsers.is_empty() {
+                    return Ok(());
+                }
+                writeln!(
+                    out,
+                    "no online browser matches the requested selector; connected browsers:"
+                )?;
+                write_browser_table(out, &browsers)
+            }
             _ => Ok(()),
         }
     }
@@ -765,6 +781,80 @@ mod i3_tests {
         assert!(!stderr.contains("connected browsers:"));
         assert!(!stderr.contains("matches multiple online browsers"));
         assert!(stderr.contains("hint:"));
+        assert!(stderr.contains("details: requested browser is not connected"));
+    }
+
+    /// A selector that matches nothing renders the connected-browser
+    /// table, so the user (or agent) can pick a real instance id or
+    /// label in one round trip instead of cycling through every
+    /// connected browser until one starts.
+    #[test]
+    fn selector_miss_extras_render_candidate_table() {
+        let data = serde_json::json!({
+            "browsers": [
+                {
+                    "instance_id": "alpha",
+                    "browser_name": "chrome",
+                    "browser_version": "131",
+                    "extension_version": "0.1.0-dev.0",
+                    "label": "Personal",
+                    "session_count": 0_u32,
+                    "connected_at_ms": 1_i64,
+                    "version_skew": false,
+                },
+                {
+                    "instance_id": "beta",
+                    "browser_name": "edge",
+                    "browser_version": "130",
+                    "extension_version": "0.1.0-dev.0",
+                    "label": "",
+                    "session_count": 1_u32,
+                    "connected_at_ms": 2_i64,
+                    "version_skew": false,
+                },
+            ]
+        });
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: "requested browser is not connected".into(),
+            data: Some(data),
+        });
+        let extras = StartExtras::new(&cli);
+        let stderr = render_human_to_string(&cli, Some(&extras));
+        assert!(stderr.contains("error: requested resource does not exist"));
+        assert!(
+            stderr.contains("no online browser matches the requested selector"),
+            "extras must explain the miss: {stderr}"
+        );
+        assert!(stderr.contains("INSTANCE"));
+        assert!(stderr.contains("alpha"));
+        assert!(stderr.contains("beta"));
+        assert!(stderr.contains("Personal"));
+        // Ordering contract unchanged: summary → extras → hint.
+        let summary_idx = stderr.find("error:").expect("summary line missing");
+        let table_idx = stderr
+            .find("connected browsers:")
+            .expect("candidate table missing");
+        let hint_idx = stderr.find("hint:").expect("hint line missing");
+        assert!(
+            summary_idx < table_idx && table_idx < hint_idx,
+            "stderr order must be summary → extras → hint, got:\n{stderr}"
+        );
+        assert!(stderr.contains("details: requested browser is not connected"));
+    }
+
+    /// An empty candidate list (miss against an empty registry) renders
+    /// no extras, so the change is additive for existing output.
+    #[test]
+    fn selector_miss_with_empty_candidates_renders_no_extras() {
+        let cli = CliError::from_rpc(RpcError {
+            code: ErrorCode::NotFound,
+            message: "requested browser is not connected".into(),
+            data: Some(serde_json::json!({ "browsers": [] })),
+        });
+        let extras = StartExtras::new(&cli);
+        let stderr = render_human_to_string(&cli, Some(&extras));
+        assert!(!stderr.contains("connected browsers:"));
         assert!(stderr.contains("details: requested browser is not connected"));
     }
 }
