@@ -28,6 +28,7 @@ export async function withTaskPopups<T>(
     active &&
     !signal?.aborted &&
     manager.get(task.sessionId) === task &&
+    !task.stopping &&
     !manager.isWindowCloseExpected(task);
   const validSource = async (id: number) => {
     if (

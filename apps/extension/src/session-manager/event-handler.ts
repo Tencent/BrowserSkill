@@ -50,10 +50,10 @@ export function attachSessionEventHandler(options: SessionEventHandlerOptions): 
 
   const onRemoved = (windowId: number): void => {
     for (const ctx of manager.sessionsInWindow(windowId)) {
-      // Chrome also emits onRemoved when session.stop removes the last tab or
-      // the window itself. Capture the cause before asynchronous cleanup so the
+      // Removing or moving a window's final tab also emits onRemoved.
+      // Capture the stop state before asynchronous cleanup so the
       // normal stop response, rather than a user-close event, ends the audit.
-      const expectedClose = manager.isWindowCloseExpected(ctx);
+      const expectedClose = ctx.stopping || manager.isWindowCloseExpected(ctx);
       if (ctx.container.mode === "in_window") ctx.stopping = true;
       const returnFailures = Array.from(ctx.borrowedTabs.keys()).map((tabId) => ({
         tab_id: tabId,

@@ -1,6 +1,11 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
-import { chromeSharedWindowApi, type SharedWindowApi } from "./shared-window";
+import {
+  chromeSharedWindowApi,
+  preserveHostIfEmptied,
+  removeUnusedSharedPlaceholder,
+  type SharedWindowApi,
+} from "./shared-window";
 
 export interface SessionContext {
   /** Remote connections retain dedicated windows, with explicit page ownership. */
@@ -170,13 +175,12 @@ export class SessionManager {
 
   /** Suppress close/empty callbacks while session.stop owns teardown. */
   async withExpectedWindowClose<T>(ctx: SessionContext, close: () => Promise<T>): Promise<T> {
-    const alreadyExpected = this.isWindowCloseExpected(ctx);
     this.expectedWindowClosures.add(ctx);
     try {
       return await close();
     } finally {
       // Failed teardown must not hide a later user-initiated close.
-      if (!alreadyExpected) this.expectedWindowClosures.delete(ctx);
+      this.expectedWindowClosures.delete(ctx);
     }
   }
 
@@ -488,29 +492,42 @@ export class SessionManager {
         if (ctx.borrowedTabs.size)
           throw new Error("Return borrowed tabs before stopping this session");
         const hostWindowId = ctx.container.hostWindowId;
+        let placeholderTabId: number | undefined;
         ctx.stopping = true;
         try {
-          await this.withExpectedWindowClose(ctx, async () => {
-            for (const tabId of [...ctx.agentCreatedTabs]) {
+          const ownedTabIds = [...ctx.agentCreatedTabs];
+          const preserved = await preserveHostIfEmptied(
+            this.sharedWindow,
+            hostWindowId,
+            ownedTabIds,
+          );
+          placeholderTabId = preserved.placeholderTabId;
+          const hostTabIds = new Set(preserved.hostTabs.map((tab) => tab.id));
+          for (const tabId of ownedTabIds) {
+            if (hostTabIds.has(tabId)) {
               try {
-                const tab = await this.sharedWindow.get(tabId);
-                // Moving a shared session page out is a user reclaim, including
-                // when onAttached has not yet reached the service worker.
-                if (tab.windowId === hostWindowId) {
-                  // Chrome closes a window when its final tab is removed.
-                  // Leave an unowned blank page to preserve the user's host.
-                  if ((await this.sharedWindow.query(hostWindowId)).length === 1)
-                    await this.sharedWindow.create(hostWindowId, false);
-                  await this.sharedWindow.remove(tabId);
-                }
+                await this.sharedWindow.remove(tabId);
               } catch (err) {
                 if (!/No tab with id|Invalid tab ID|not found/i.test(String(err))) throw err;
               }
-              ctx.agentCreatedTabs.delete(tabId);
             }
-          });
+            ctx.agentCreatedTabs.delete(tabId);
+          }
         } catch (err) {
           ctx.stopping = false;
+          if (placeholderTabId !== undefined) {
+            try {
+              await removeUnusedSharedPlaceholder(
+                this.sharedWindow,
+                hostWindowId,
+                placeholderTabId,
+              );
+            } catch (cleanupErr) {
+              throw new Error(
+                `Session cleanup failed (${String(err)}); rollback of placeholder tab ${placeholderTabId} failed: ${String(cleanupErr)}`,
+              );
+            }
+          }
           throw err;
         }
       }

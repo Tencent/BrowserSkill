@@ -432,7 +432,7 @@ async function stopSession(
 
     return result;
   };
-  // Shared sessions already mark the full stop transaction at the entry point.
+  // Shared sessions use ctx.stopping for the full stop transaction.
   return ctx.container.mode === "in_window"
     ? teardown()
     : manager.withExpectedWindowClose(ctx, teardown);
@@ -448,11 +448,9 @@ export async function handleSessionStop(
   if (ctx.stopping || ctx.pendingOperations)
     return { code: "cancelled", message: "Session has pending operations; retry stop" };
   ctx.stopping = true;
-  return manager.withExpectedWindowClose(ctx, async () => {
-    try {
-      return await handleSessionStopCore(manager, params, deps);
-    } finally {
-      if (manager.get(ctx.sessionId) === ctx) ctx.stopping = false;
-    }
-  });
+  try {
+    return await handleSessionStopCore(manager, params, deps);
+  } finally {
+    if (manager.get(ctx.sessionId) === ctx) ctx.stopping = false;
+  }
 }

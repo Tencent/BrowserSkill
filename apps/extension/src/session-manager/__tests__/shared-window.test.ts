@@ -43,7 +43,7 @@ function fixture() {
       windowId,
       active,
       index: id,
-      url: "https://agent.example/",
+      url: "about:blank",
     } as chrome.tabs.Tab);
     return id;
   });
@@ -60,7 +60,7 @@ function fixture() {
     sharedWindow: { host, get, create, remove, query: queryHost },
   });
   const query = vi.fn(async () => [...pages.values()]);
-  return { manager, pages, host, get, create, remove, windows, query };
+  return { manager, pages, host, get, create, remove, windows, query, queryHost };
 }
 
 describe("shared user window sessions (#243)", () => {
@@ -173,10 +173,10 @@ describe("shared user window sessions (#243)", () => {
       windowEvents: events,
     });
     let hostAlive = true;
-    const expectedDuringRemove: boolean[] = [];
+    const stoppingDuringRemove: boolean[] = [];
     const remove = f.remove.getMockImplementation()!;
     f.remove.mockImplementation(async (id) => {
-      expectedDuringRemove.push(f.manager.isWindowCloseExpected(ctx));
+      stoppingDuringRemove.push(ctx.stopping === true);
       await remove(id);
       f.manager.forgetClosedTab(id);
       if (![...f.pages.values()].some((tab) => tab.windowId === 10)) {
@@ -193,9 +193,194 @@ describe("shared user window sessions (#243)", () => {
       expect([...f.pages.values()]).toMatchObject([{ id: 21, windowId: 10, active: false }]);
       expect(f.manager.findByTabId(21)).toBeNull();
       expect(f.manager.has("a")).toBe(false);
-      expect(expectedDuringRemove).toEqual([true]);
+      expect(stoppingDuringRemove).toEqual([true]);
       expect(f.manager.isWindowCloseExpected(ctx)).toBe(false);
       expect(send).not.toHaveBeenCalled();
+    } finally {
+      handler.dispose();
+    }
+  });
+
+  it("queries the host once and removes only live owned tabs without individual lookups", async () => {
+    const f = fixture();
+    const ctx = await f.manager.start("a", { inWindow: true });
+    ctx.agentCreatedTabs.add(await f.create(10, false));
+    ctx.agentCreatedTabs.add(await f.create(10, false));
+    ctx.agentCreatedTabs.add(await f.create(10, false));
+    f.pages.get(21)!.windowId = 11;
+    f.pages.delete(22);
+    f.pages.delete(1);
+    f.get.mockClear();
+    await f.manager.stop("a");
+    expect(f.queryHost).toHaveBeenCalledExactlyOnceWith(10);
+    expect(f.get).not.toHaveBeenCalled();
+    expect(f.remove.mock.calls).toEqual([[20], [23]]);
+    expect(f.pages.get(21)?.windowId).toBe(11);
+    expect(f.pages.get(24)?.windowId).toBe(10);
+  });
+
+  it.each([
+    "url",
+    "pendingUrl",
+  ] as const)("keeps a placeholder used by the user during failed stop (%s)", async (urlField) => {
+    const f = fixture();
+    const ctx = await f.manager.start("a", { inWindow: true });
+    f.pages.delete(1);
+    f.remove.mockImplementationOnce(async () => {
+      f.pages.get(21)![urlField] = "https://user.example/";
+      throw new Error("remove denied");
+    });
+    await expect(f.manager.stop("a")).rejects.toThrow("remove denied");
+    expect(f.remove.mock.calls).toEqual([[20]]);
+    expect(f.pages.get(21)?.[urlField]).toBe("https://user.example/");
+    expect(f.manager.get("a")).toBe(ctx);
+    expect(ctx.stopping).toBe(false);
+  });
+
+  it.each([
+    "tab_return",
+    "session_stop",
+    "fallback",
+    "placeholder_failure",
+    "cancel_return",
+    "cancel_stop",
+    "move_failure",
+    "fallback_same_host",
+    "rollback_failure",
+  ] as const)("%s preserves a host containing only a cross-window borrowed tab", async (method) => {
+    const f = fixture();
+    const controller = new AbortController();
+    const ctx = await f.manager.start("a", { inWindow: true });
+    f.pages.get(1)!.windowId = 11;
+    f.pages.set(2, { id: 2, windowId: 11 } as chrome.tabs.Tab);
+    const move = vi.fn(async (id: number, props: chrome.tabs.MoveProperties) => {
+      const tab = f.pages.get(id)!;
+      tab.windowId = props.windowId!;
+      tab.index = props.index;
+      return tab;
+    });
+    const deps = {
+      tabs: {
+        get: f.get,
+        create: vi.fn(async (props: chrome.tabs.CreateProperties) =>
+          f.get(await f.create(props.windowId!, props.active ?? true)),
+        ),
+        remove: f.remove,
+        move,
+        update: vi.fn(async (id: number) => f.get(id)),
+      },
+      tabsQuery: { query: (props: chrome.tabs.QueryInfo) => f.queryHost(props.windowId!) },
+      windows: {
+        get: vi.fn(async () => {
+          if (method === "fallback" || method === "fallback_same_host")
+            throw new Error("No window with id: 11");
+          return { id: 11 } as chrome.windows.Window;
+        }),
+        getLastFocused: vi.fn(
+          async () =>
+            ({
+              id: method === "fallback_same_host" ? 10 : 12,
+              type: "normal",
+            }) as chrome.windows.Window,
+        ),
+        create: vi.fn(),
+        remove: vi.fn(),
+      },
+      approveBorrow: vi.fn(async () => true),
+      agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+      signal: controller.signal,
+    };
+    expect(await handleTabBorrow(f.manager, { session_id: "a", tab_id: 1 }, deps)).toMatchObject({
+      original_window_id: 11,
+    });
+    f.pages.delete(20);
+    f.manager.forgetClosedTab(20);
+    const send = vi.fn();
+    const handler = attachSessionEventHandler({
+      manager: f.manager,
+      transport: { send } as never,
+      windowEvents: { addListener: vi.fn(), removeListener: vi.fn() },
+    });
+    try {
+      if (method === "placeholder_failure")
+        f.create.mockRejectedValueOnce(new Error("create denied"));
+      if (method === "cancel_return" || method === "cancel_stop" || method === "rollback_failure") {
+        const create = deps.tabs.create.getMockImplementation()!;
+        deps.tabs.create.mockImplementationOnce(async (props) => {
+          const tab = await create(props);
+          controller.abort();
+          return tab;
+        });
+      }
+      if (method === "move_failure") move.mockRejectedValue(new Error("move denied"));
+      if (method === "rollback_failure")
+        f.remove.mockRejectedValueOnce(new Error("rollback denied"));
+      const result =
+        method === "session_stop" || method === "cancel_stop"
+          ? await handleSessionStop(
+              f.manager,
+              { session_id: "a" },
+              { tabManagement: deps, signal: controller.signal },
+            )
+          : await handleTabReturn(f.manager, { session_id: "a", tab_id: 1 }, deps);
+      if (method === "placeholder_failure") {
+        expect(result).toMatchObject({
+          code: "cdp_failed",
+          message: expect.stringContaining("create denied"),
+        });
+        expect(move).toHaveBeenCalledOnce();
+        expect(f.pages.get(1)?.windowId).toBe(10);
+        expect(ctx.borrowedTabs.has(1)).toBe(true);
+        expect(f.manager.has("a")).toBe(true);
+        expect(ctx.stopping).toBeFalsy();
+        return;
+      }
+      if (
+        method === "cancel_return" ||
+        method === "cancel_stop" ||
+        method === "move_failure" ||
+        method === "rollback_failure"
+      ) {
+        expect(result).toMatchObject({
+          code:
+            method === "move_failure"
+              ? "cdp_failed"
+              : method === "rollback_failure"
+                ? "protocol_error"
+                : "cancelled",
+        });
+        expect(
+          [...f.pages.values()].filter((tab) => tab.windowId === 10).map((tab) => tab.id),
+        ).toEqual(method === "rollback_failure" ? [1, 21] : [1]);
+        expect(ctx.borrowedTabs.has(1)).toBe(true);
+        expect(f.manager.has("a")).toBe(true);
+        expect(ctx.stopping).toBeFalsy();
+        if (method === "rollback_failure")
+          expect(result).toMatchObject({
+            data: { reason: "cleanup_failed", resource_type: "tab", resource_id: 21 },
+          });
+        else expect(f.remove).toHaveBeenCalledWith(21);
+        return;
+      }
+      expect(result).not.toHaveProperty("code");
+      if (method === "fallback_same_host") {
+        expect(f.pages.get(1)?.windowId).toBe(10);
+        expect(f.create).toHaveBeenCalledOnce();
+        await vi.waitFor(() => expect(f.manager.has("a")).toBe(false));
+        return;
+      }
+      expect(f.pages.get(1)?.windowId).toBe(method === "fallback" ? 12 : 11);
+      expect([...f.pages.values()].filter((tab) => tab.windowId === 10)).toMatchObject([
+        { id: 21 },
+      ]);
+      expect(f.create).toHaveBeenCalledTimes(2);
+      expect(f.create).toHaveBeenLastCalledWith(10, false);
+      expect(f.manager.findByTabId(21)).toBeNull();
+      await vi.waitFor(() => expect(f.manager.has("a")).toBe(false));
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: "session.window_closed" }),
+      );
+      expect(ctx.borrowedTabs.size).toBe(0);
     } finally {
       handler.dispose();
     }
@@ -207,12 +392,15 @@ describe("shared user window sessions (#243)", () => {
   ] as const)("direct %s keeps retryable state on deletion failure", async (method) => {
     const f = fixture();
     const ctx = await f.manager.start("a", { inWindow: true });
-    f.remove.mockRejectedValue(new Error("delete denied"));
+    f.pages.delete(1);
+    f.remove.mockRejectedValueOnce(new Error("delete denied"));
     await expect(method === "stop" ? f.manager.stop("a") : f.manager.stopAll()).rejects.toThrow(
       "delete denied",
     );
     expect(f.manager.get("a")).toBe(ctx);
     expect(ctx.agentCreatedTabs.has(20)).toBe(true);
+    expect([...f.pages.keys()]).toEqual([20]);
+    expect(f.remove).toHaveBeenCalledWith(21);
     expect(f.windows.remove).not.toHaveBeenCalled();
   });
 
@@ -289,10 +477,10 @@ describe("shared user window sessions (#243)", () => {
     expect(f.windows.remove).not.toHaveBeenCalled();
   });
 
-  it("preserves cleanup state when a live-page lookup fails", async () => {
+  it("preserves cleanup state when the host query fails", async () => {
     const f = fixture();
     const ctx = await f.manager.start("a", { inWindow: true });
-    f.get.mockRejectedValue(new Error("query denied"));
+    f.queryHost.mockRejectedValue(new Error("query denied"));
     await expect(f.manager.stop("a")).rejects.toThrow("query denied");
     expect(f.manager.get("a")).toBe(ctx);
     expect(ctx.agentCreatedTabs.has(20)).toBe(true);

@@ -1,4 +1,8 @@
 import { sessionWindowId } from "@/session-manager/manager";
+import {
+  preserveHostIfEmptied,
+  removeUnusedSharedPlaceholder,
+} from "@/session-manager/shared-window";
 import { withUiTeardown } from "@/session-manager/ui-activity";
 // Tab-tool handlers. M6 wired `tool.tab_list`; M8 adds the rest of
 // the tab namespace: `tab_create`, `tab_close`, `tab_select`,
@@ -294,6 +298,7 @@ export async function handleTabList(
 
 export interface TabManagementDeps {
   tabs?: TabMutationApi;
+  tabsQuery?: ChromeTabsApi;
   windows?: ChromeWindowsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
@@ -1226,7 +1231,12 @@ export async function returnBorrowedTab(
   tabId: number,
   deps: TabManagementDeps,
 ): Promise<ReturnOutcome | RpcError> {
-  return withUiTeardown(ctx, tabId, () => returnBorrowedTabCore(ctx, tabId, deps));
+  try {
+    return await withUiTeardown(ctx, tabId, () => returnBorrowedTabCore(ctx, tabId, deps));
+  } catch (err) {
+    if (isRpcError(err)) return err;
+    throw err;
+  }
 }
 
 async function returnBorrowedTabCore(
@@ -1264,112 +1274,167 @@ async function returnBorrowedTabCore(
   let targetIndex = entry.originalIndex;
   let fallback = false;
   let fallbackTarget: FallbackWindowTarget | null = null;
-
-  // Check the original window is still around.
-  let originalAlive = true;
-  try {
-    await windowsApi.get(entry.originalWindowId);
-  } catch (err) {
-    console.debug("[bsk tab_return] original window gone, falling back", err);
-    originalAlive = false;
-  }
-  const cancelledAfterLookup = aborted(deps.signal, "tab_return");
-  if (cancelledAfterLookup) return cancelledAfterLookup;
-  if (!originalAlive) {
-    fallback = true;
-    const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
-    if ("code" in target) return target;
-    fallbackTarget = target;
-    targetWindowId = target.windowId;
-    targetIndex = target.index;
-  }
-
-  const cancelledBeforeMove = aborted(deps.signal, "tab_return");
-  if (cancelledBeforeMove) {
-    if (fallbackTarget) {
-      const cleanupError = await cleanupUnusedFallbackWindow(
-        windowsApi,
-        fallbackTarget,
-        "tab_return aborted before moving the borrowed tab",
-      );
-      if (cleanupError) return cleanupError;
-    }
-    return cancelledBeforeMove;
-  }
+  let placeholderTabId: number | undefined;
+  let movedOut = false;
+  const hostWindowId = sessionWindowId(ctx);
 
   try {
-    const moved = await tabsApi.move(tabId, {
-      windowId: targetWindowId,
-      index: targetIndex,
-    });
-    const movedTab = Array.isArray(moved) ? moved[0] : moved;
-    const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
-    await releaseReturnedTabState(ctx, tabId, deps);
-    return {
-      tabId,
-      toWindowId: targetWindowId,
-      toIndex: finalIndex,
-      fallback,
-    };
-  } catch (err) {
-    if (fallbackTarget) {
-      const cleanupError = await cleanupUnusedFallbackWindow(
-        windowsApi,
-        fallbackTarget,
-        `tab_return could not move tab ${tabId}`,
-      );
-      if (cleanupError) return cleanupError;
+    // Check the original window is still around.
+    let originalAlive = true;
+    try {
+      await windowsApi.get(entry.originalWindowId);
+    } catch (err) {
+      console.debug("[bsk tab_return] original window gone, falling back", err);
+      originalAlive = false;
     }
-    const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
-    if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
-    if (!fallback) {
+    const cancelledAfterLookup = aborted(deps.signal, "tab_return");
+    if (cancelledAfterLookup) return cancelledAfterLookup;
+    if (!originalAlive) {
+      fallback = true;
       const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
-      if ("code" in target) {
+      if ("code" in target) return target;
+      fallbackTarget = target;
+      targetWindowId = target.windowId;
+      targetIndex = target.index;
+    }
+
+    if (ctx.container.mode === "in_window" && targetWindowId !== hostWindowId) {
+      try {
+        const preserved = await preserveHostIfEmptied(
+          {
+            query: (windowId) => (deps.tabsQuery ?? chromeTabsApi).query({ windowId }),
+            create: async (windowId, active) =>
+              (await tabsApi.create({ windowId, url: "about:blank", active })).id!,
+          },
+          hostWindowId,
+          [tabId],
+        );
+        placeholderTabId = preserved.placeholderTabId;
+      } catch (err) {
+        if (fallbackTarget) {
+          const cleanupError = await cleanupUnusedFallbackWindow(
+            windowsApi,
+            fallbackTarget,
+            "tab_return could not preserve the host window",
+          );
+          if (cleanupError) return cleanupError;
+        }
         return {
           code: "cdp_failed",
-          message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback failed: ${target.message}`,
+          message: `tab_return: could not preserve the host window: ${describeError(err)}`,
         };
       }
-      const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return");
-      if (cancelledBeforeFallbackMove) {
+    }
+
+    const cancelledBeforeMove = aborted(deps.signal, "tab_return");
+    if (cancelledBeforeMove) {
+      if (fallbackTarget) {
         const cleanupError = await cleanupUnusedFallbackWindow(
           windowsApi,
-          target,
-          "tab_return aborted before fallback move",
-        );
-        return cleanupError ?? cancelledBeforeFallbackMove;
-      }
-      try {
-        const moved = await tabsApi.move(tabId, {
-          windowId: target.windowId,
-          index: target.index,
-        });
-        const movedTab = Array.isArray(moved) ? moved[0] : moved;
-        const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : target.index;
-        await releaseReturnedTabState(ctx, tabId, deps);
-        return {
-          tabId,
-          toWindowId: target.windowId,
-          toIndex: finalIndex,
-          fallback: true,
-        };
-      } catch (fallbackErr) {
-        const cleanupError = await cleanupUnusedFallbackWindow(
-          windowsApi,
-          target,
-          `tab_return fallback move for tab ${tabId} failed`,
+          fallbackTarget,
+          "tab_return aborted before moving the borrowed tab",
         );
         if (cleanupError) return cleanupError;
-        return {
-          code: "cdp_failed",
-          message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,
-        };
+      }
+      return cancelledBeforeMove;
+    }
+
+    try {
+      const moved = await tabsApi.move(tabId, {
+        windowId: targetWindowId,
+        index: targetIndex,
+      });
+      const movedTab = Array.isArray(moved) ? moved[0] : moved;
+      const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : targetIndex;
+      movedOut = targetWindowId !== hostWindowId;
+      await releaseReturnedTabState(ctx, tabId, deps);
+      return {
+        tabId,
+        toWindowId: targetWindowId,
+        toIndex: finalIndex,
+        fallback,
+      };
+    } catch (err) {
+      if (fallbackTarget) {
+        const cleanupError = await cleanupUnusedFallbackWindow(
+          windowsApi,
+          fallbackTarget,
+          `tab_return could not move tab ${tabId}`,
+        );
+        if (cleanupError) return cleanupError;
+      }
+      const cancelledAfterMoveFailure = aborted(deps.signal, "tab_return");
+      if (cancelledAfterMoveFailure) return cancelledAfterMoveFailure;
+      if (!fallback) {
+        const target = await chooseFallbackWindow(ctx, windowsApi, isAgentWindowId, deps.signal);
+        if ("code" in target) {
+          return {
+            code: "cdp_failed",
+            message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback failed: ${target.message}`,
+          };
+        }
+        const cancelledBeforeFallbackMove = aborted(deps.signal, "tab_return");
+        if (cancelledBeforeFallbackMove) {
+          const cleanupError = await cleanupUnusedFallbackWindow(
+            windowsApi,
+            target,
+            "tab_return aborted before fallback move",
+          );
+          return cleanupError ?? cancelledBeforeFallbackMove;
+        }
+        try {
+          const moved = await tabsApi.move(tabId, {
+            windowId: target.windowId,
+            index: target.index,
+          });
+          const movedTab = Array.isArray(moved) ? moved[0] : moved;
+          const finalIndex = typeof movedTab?.index === "number" ? movedTab.index : target.index;
+          movedOut = target.windowId !== hostWindowId;
+          await releaseReturnedTabState(ctx, tabId, deps);
+          return {
+            tabId,
+            toWindowId: target.windowId,
+            toIndex: finalIndex,
+            fallback: true,
+          };
+        } catch (fallbackErr) {
+          const cleanupError = await cleanupUnusedFallbackWindow(
+            windowsApi,
+            target,
+            `tab_return fallback move for tab ${tabId} failed`,
+          );
+          if (cleanupError) return cleanupError;
+          return {
+            code: "cdp_failed",
+            message: `tab_return: chrome.tabs.move failed: ${describeError(err)}; fallback move failed: ${describeError(fallbackErr)}`,
+          };
+        }
+      }
+      return {
+        code: "cdp_failed",
+        message: `tab_return: chrome.tabs.move failed: ${describeError(err)}`,
+      };
+    }
+  } finally {
+    if (placeholderTabId !== undefined && !movedOut) {
+      try {
+        await removeUnusedSharedPlaceholder(
+          {
+            query: (windowId) => (deps.tabsQuery ?? chromeTabsApi).query({ windowId }),
+            remove: (id) => tabsApi.remove(id),
+          },
+          hostWindowId,
+          placeholderTabId,
+        );
+      } catch (cleanupErr) {
+        throw rpcError(
+          "protocol_error",
+          "cleanup_failed",
+          `tab_return: rollback of placeholder tab ${placeholderTabId} failed: ${describeError(cleanupErr)}`,
+          { resource_type: "tab", resource_id: placeholderTabId },
+        );
       }
     }
-    return {
-      code: "cdp_failed",
-      message: `tab_return: chrome.tabs.move failed: ${describeError(err)}`,
-    };
   }
 }
 
