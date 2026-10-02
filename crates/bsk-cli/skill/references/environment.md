@@ -16,33 +16,105 @@ For remote setup or pairing, follow the [remote guide](https://github.com/Tencen
 
 ## Local daemon startup
 
-Local commands normally auto-start the daemon. If the host terminates background
-children after each shell call, including on Windows, complete these steps first:
+Ordinary local commands auto-start the daemon. In WorkBuddy/CodeBuddy, or a host
+that reaps shell children, use the following workflow before session commands.
+This does not change the startup policy for other local agents.
 
-1. Reuse the host daemon's existing `BSK_HOME` (or its default if unset). Set
-   `BSK_AUTO_START=0` and run `bsk status --json`. Reuse a working daemon; an empty
-   `browsers` list means the extension still needs connecting. Permission errors,
-   timeouts or invalid replies do not prove the daemon is absent.
-2. Only if the check reports a missing daemon and no host task is already starting
-   it, run `bsk daemon start --foreground` with the same `BSK_HOME` in the host's
-   approved persistent background task outside the per-command sandbox. Keep that
-   task alive; `--foreground` alone cannot prevent host cleanup. The
-   [sandbox guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)
-   covers the normal host-terminal alternative and PowerShell examples.
-3. After launching, or if a host task is already starting the daemon, run
-   `bsk status --json` in a **separate shell tool call** with the same `BSK_HOME`
-   and `BSK_AUTO_START=0`. While startup is pending, make at most five
-   checks with one-second pauses for missing-endpoint or transient startup errors;
-   stop on permission/protocol errors. Proceed only after a successful status
-   response. If the host task exits (including a lock error) or readiness never
-   succeeds, inspect its output and `bsk logs`, then recheck status for another
-   daemon before deciding whether startup is still needed. Report unresolved
-   errors; do not loop on launches, delete runtime files or restart a shared daemon.
+### Reuse before starting
 
-Use the same `BSK_HOME` and `BSK_AUTO_START=0` on EVERY sandboxed command;
-environment settings may not persist between shell calls. Keep browser commands
-sandboxed. For other startup failures, retry once, then use `bsk doctor`.
+Use the same CLI executable and the host daemon's existing `BSK_HOME` (or its
+default if unset). Set `BSK_AUTO_START=0` and run `bsk status --json`:
+
+- **Status succeeds:** reuse the daemon. Empty `browsers` means the extension
+  needs connecting, not that another daemon is needed.
+- **Missing daemon / no listener:** check whether a host task is already starting
+  it. Inspect that task and wait for readiness; launch only if none exists.
+- **Permission error, timeout or invalid reply:** inspect the actual path and IPC
+  access. These errors do not establish that the daemon is absent.
+
+`BSK_AUTO_START=0` disables implicit startup only. It still allows explicit
+`daemon start`, including the managed task below. Repeat the same environment on
+**every** client tool call; shell environment assignments may not persist.
+Do not choose a new directory or change global `HOME` to work around a failure.
+For an externally managed service, preserve its configuration and owning supervisor.
+
+### WorkBuddy/CodeBuddy managed startup
+
+Use the current tool schema's managed background facility, typically Bash or
+PowerShell with `run_in_background: true`. The daemon runs in the foreground
+**inside** that background task. These are tool arguments, not shell commands:
+
+Bash, using the existing default daemon directory:
+
+```json
+{
+  "command": "BSK_AUTO_START=0 bsk daemon start --foreground",
+  "run_in_background": true
+}
+```
+
+PowerShell, using the existing default daemon directory:
+
+```json
+{
+  "command": "$env:BSK_AUTO_START = '0'; bsk daemon start --foreground",
+  "run_in_background": true
+}
+```
+
+For a custom directory, set its actual `BSK_HOME` in both startup and client
+calls. Bash uses `BSK_HOME='/actual/path' BSK_AUTO_START=0 bsk ...`; PowerShell
+uses `$env:BSK_HOME = 'C:\actual\path'; $env:BSK_AUTO_START = '0'; bsk ...`.
+Use the verified CLI path if needed. PowerShell's `& 'path/to/bsk.exe'` is a
+call operator, not the Unix trailing `&` used to background a command.
+
+- Retain the returned task ID. A running daemon task is expected: do not wait
+  for completion or cancel it as leftover work. Read its status/output with
+  `TaskOutput` or the tool's equivalent, using a nonblocking or short query.
+- Do not substitute `nohup`, `setsid`, `Start-Process`, trailing `&`, or a long
+  sleep for managed background execution. `--foreground` alone is insufficient.
+- Full access or disabling a sandbox does not establish process lifetime. Use
+  the host's supported execution mechanism; if isolation prevents IPC or task
+  survival, use an available, authorized per-launch exception. Do not invent
+  tool parameters or change global permissions. Keep browser calls sandboxed.
+
+Other hosts with child cleanup use their equivalent persistent task facility.
+If no background facility is available, or the tool rejects/degrades it, do not
+claim a task was started. If independent startup has not already failed and
+there is no evidence of child cleanup, try ordinary `bsk daemon start` once,
+then verify from a separate call with `BSK_AUTO_START=0`. Otherwise, use the
+[sandbox guide](https://github.com/Tencent/BrowserSkill/blob/main/docs/sandboxed-agents.md)
+for an independent-terminal fallback. Ask the user to launch it only after
+establishing that this host cannot provide a working persistent launch path;
+give the command for their actual shell, CLI path and daemon directory.
+
+### Verify across tool calls
+
+After launching, or if a startup task exists, query status in a **separate shell
+tool call**. For example, PowerShell client arguments are:
+
+```json
+{
+  "command": "$env:BSK_AUTO_START = '0'; bsk status --json"
+}
+```
+
+Repeat a custom `BSK_HOME` assignment if used above. During startup, make at most
+five checks with one-second pauses for missing endpoints, discovery races or
+transient timeouts; stop on permission/protocol errors. A task ID, PID or
+`daemon ready` log alone is not readiness. Proceed only after status succeeds.
+If the task exits (including a lock error) or readiness never succeeds, inspect
+its output and `bsk logs`, then recheck status: another caller may have started
+the daemon. Reuse it if reachable; otherwise report the observed error instead
+of looping on launches, deleting runtime files or restarting a shared daemon.
+
+Create the session and perform the next browser operation in separate tool calls
+using the returned session ID. On completion, stop only your session; keep the
+shared daemon task running. On later use, probe again rather than relying on an
+old task ID. Idle exit or host shutdown may require a new launch. If the daemon
+was replaced, check session state before continuing; do not blindly replay actions.
 A local process identity warning permits browser commands when IPC works.
+For other startup failures, retry once, then use `bsk doctor`.
 
 ## Extension connection
 

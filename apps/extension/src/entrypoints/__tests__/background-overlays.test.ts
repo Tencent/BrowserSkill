@@ -98,14 +98,20 @@ it.each([false, true])("hides an observed tab after detachment, remote=%s", asyn
   f.task.observedTabs = new Set([20]);
   f.deps.onAgentTabClaimed?.(20, 10);
   expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(true);
+  const claimed = f.sendMessage.mock.lastCall![1];
   f.onDetached.emit(20);
   expect(isAgentControlledTab(f.task, 20)).toBe(false);
-  expect(f.sendMessage).toHaveBeenLastCalledWith(20, {
+  const [tabId, released] = f.sendMessage.mock.lastCall!;
+  expect(tabId).toBe(20);
+  expect(released).toMatchObject({
     type: OVERLAY_AGENT_STATE,
     sessionId: null,
     mode: "hidden",
-    generation: 0,
   });
+  // The release is ordered after the claim, although no session changed.
+  expect(released.epoch).toEqual(expect.any(String));
+  expect(released.epoch).toBe(claimed.epoch);
+  expect(released.generation).toBeGreaterThan(claimed.generation);
   expect(shouldShowAgentControlOverlay(f.overlay.snapshot())).toBe(false);
   expect(f.deps.cdp?.releaseSessionTab).toHaveBeenCalledWith("one", 20);
 });

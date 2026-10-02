@@ -340,8 +340,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         generation,
         connected_at_ms,
         version_skew,
-        last_seen: std::sync::Mutex::new(std::time::Instant::now()),
-        heartbeat_seen: std::sync::atomic::AtomicBool::new(false),
+        liveness: super::browsers::Liveness::default(),
     });
     // Restore opt-in before making the browser available to CLI callers.
     let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
@@ -436,6 +435,13 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         let _ =
             tokio::time::timeout(Duration::from_secs(1), writer.send(Message::Close(None))).await;
     }
+    // Responses for this socket can only arrive on it, so calls still
+    // waiting here would otherwise sit until their own deadline.
+    client
+        .pending
+        .lock()
+        .expect("browser pending poisoned")
+        .close();
 
     // Cleanup: drop browser + purge its sessions, but only if the
     // registry still holds *this* generation. If a reconnect already

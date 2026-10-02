@@ -125,8 +125,12 @@ events continue to fold without repeated registration attempts or warnings.
   explicitly shared platform modules (React and `dsh-client-ui-primitives`) external,
   everything else inlined, CSS Modules compiled by lightningcss.
 - **Host compatibility**: development dependencies are pinned to the DSH `0.1.5-rc.3`
-  SDK shipped with DSH `0.1.5-rc.2`, including the current renderer, Session Controller,
-  and chat type contracts. Previously, tests used `0.1.0-rc.6`, which exported `MessageImage`
+  SDK as the minimum build baseline; peer requirements also admit `0.2.0-rc.1`
+  and the 0.2.x line. Keep the 0.3.x boundary closed until that host is verified.
+  Agent-scoped skills use the shared `agent/created` lifecycle event. History
+  recovery accepts both 0.1 tool-result blocks and 0.2 tool-result envelopes,
+  preserving call identity and success checks. Previously, tests used `0.1.0-rc.6`,
+  which exported `MessageImage`
   from the attachment client; the current attachment client exposes only plugin hooks.
   Importing the old component caused the screenshot-card expansion crash. Keep service
   contracts type-only and restrict runtime imports to the host's shared module table.

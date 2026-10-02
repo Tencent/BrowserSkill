@@ -189,12 +189,6 @@ export function ConnectionSettings({
 
   return (
     <>
-      <p
-        className="mt-2 break-all text-xs text-muted-foreground"
-        data-slot="popup-current-connection"
-      >
-        {address}
-      </p>
       {disconnected && !storageError && !statusKey && (
         <p
           className="mt-2 text-xs leading-snug text-muted-foreground"
@@ -217,13 +211,24 @@ export function ConnectionSettings({
         className="mt-3 border-t border-border/70 pt-2.5"
         data-slot="popup-connection-settings"
       >
-        <summary className="cursor-pointer text-sm font-medium">
-          {t("popup.connectionSettings")}
+        <summary className="cursor-pointer text-xs text-muted-foreground">
+          <span>{t("popup.connectionSettings")}</span>
+          {ready && !storageError && (
+            <span className="ml-2">
+              · {t(activeMode === "local" ? "popup.connectionLocal" : "popup.connectionRemote")}
+            </span>
+          )}
           {needsAttention && (
             <span className="ml-2 text-xs text-destructive">{t("popup.remoteNeedsAttention")}</span>
           )}
         </summary>
         <div className="mt-3 space-y-3">
+          <p
+            className="break-all text-xs text-muted-foreground"
+            data-slot="popup-current-connection"
+          >
+            {address}
+          </p>
           {connection?.expiresAt && !storageError && (
             <p className="text-xs text-muted-foreground">
               {t("popup.remoteExpires", { date: new Date(connection.expiresAt).toLocaleString() })}

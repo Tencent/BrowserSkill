@@ -18,6 +18,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::render_error;
+use crate::daemon::start_error::recovery_hint;
 
 /// Strongly-typed CLI error. Wraps either a structured daemon error or
 /// a transport / setup failure (`anyhow::Error`).
@@ -178,10 +179,11 @@ fn hint_for(
 ) -> Option<&'static str> {
     render_info
         .and_then(|info| info.hint)
-        .or(if matches!(err, CliError::Local(_)) {
-            Some("is the daemon running? try `bsk daemon start` or `bsk status`")
-        } else {
-            None
+        .or_else(|| match err {
+            CliError::Local(error) => recovery_hint(error).or(Some(
+                "is the daemon running? try `bsk daemon start` or `bsk status`",
+            )),
+            _ => None,
         })
 }
 
@@ -420,6 +422,72 @@ mod tests {
         assert_eq!(
             parsed.get("message"),
             Some(&serde_json::json!("daemon unreachable"))
+        );
+    }
+
+    #[test]
+    fn startup_recovery_survives_contexts_in_human_and_json_output() {
+        use crate::daemon::start_error::DaemonStartFailure;
+
+        assert_ne!(
+            DaemonStartFailure::AutoStartDisabled.hint(),
+            DaemonStartFailure::IndependentStartFailed.hint()
+        );
+        for (failure, recovery_action) in [
+            (
+                DaemonStartFailure::AutoStartDisabled,
+                "restore the daemon in its owning environment with its original configuration",
+            ),
+            (
+                DaemonStartFailure::IndependentStartFailed,
+                "use `bsk daemon start --foreground` in a persistent host task",
+            ),
+        ] {
+            let error = anyhow::Error::new(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "startup fixture cause",
+            ))
+            .context(failure)
+            .context("automatic daemon startup failed")
+            .context("ensure daemon is running");
+            let cli = CliError::Local(error);
+            let hint = hint_for(&cli, render_info_for(&cli).as_ref());
+            assert_eq!(hint, Some(failure.hint()));
+            let json: serde_json::Value =
+                serde_json::from_str(&json_error_string(&cli, cli.exit_code(), hint)).unwrap();
+            assert!(json["code"].is_null());
+            assert_eq!(json["exit_code"], 2);
+            assert_eq!(json["hint"], failure.hint());
+            assert!(
+                json["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("startup fixture cause")
+            );
+            // Message-only consumers must still receive an actionable recovery step.
+            assert!(json["message"].as_str().unwrap().contains(recovery_action));
+            assert!(!json.to_string().contains("run_in_background"));
+            assert!(json.get("data").is_none());
+            let human = render_human_to_string(&cli, None);
+            assert!(human.contains("startup fixture cause"));
+            assert!(human.contains(recovery_action));
+            assert!(!human.contains("run_in_background"));
+            assert!(human.contains(&format!("hint: {}", failure.hint())));
+            assert!(!human.contains("try `bsk daemon start` or `bsk status`"));
+        }
+    }
+
+    #[test]
+    fn ordinary_local_errors_keep_their_existing_hint() {
+        use crate::daemon::start_error::DaemonStartFailure;
+
+        // Even identical wording must not classify an untyped error as startup recovery.
+        let cli = CliError::Local(anyhow::anyhow!(
+            DaemonStartFailure::AutoStartDisabled.to_string()
+        ));
+        assert_eq!(
+            hint_for(&cli, None),
+            Some("is the daemon running? try `bsk daemon start` or `bsk status`")
         );
     }
 

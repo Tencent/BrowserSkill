@@ -110,7 +110,7 @@ describe("registerBskSkill", () => {
 });
 
 describe("armAgentScopedBskSkill", () => {
-  it("overrides a nearer legacy CLI skill when the DSH agent starts", async () => {
+  it("overrides a nearer legacy CLI skill when the DSH agent is created", async () => {
     const root = new Context();
     const skillFiber = root.plugin(SkillRegistry);
     await skillFiber;
@@ -143,10 +143,8 @@ describe("armAgentScopedBskSkill", () => {
     expect(before?.source).toBe("user-agents");
 
     const disarm = armAgentScopedBskSkill(pluginCtx);
-    pluginCtx.emit(scopeTarget(agent, agentKey), "agent/session-start", {
-      agent,
-      source: "startup",
-    });
+    const payload = { agent, source: "startup" as const };
+    await pluginCtx.serial(scopeTarget(agent, agentKey), "agent/created", payload);
 
     const after = await skillFiber.ctx.skills.get("browser-skill", { scope: agentKey });
     expect(after?.content).toMatch(/All browser work\s+must use the injected tools directly/);
@@ -188,7 +186,7 @@ describe("armAgentScopedBskSkill", () => {
     expect(registered).toHaveLength(1);
 
     // A later lifecycle notification for the same agent must not duplicate it.
-    listeners.get("agent/session-start")?.({ agent });
+    listeners.get("agent/created")?.({ agent });
     expect(registered).toHaveLength(1);
 
     disarm();

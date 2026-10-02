@@ -8,11 +8,10 @@
 //! alone (backward-compat guard).
 
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use bsk::daemon::browsers::{
-    BrowserClient, BrowserId, BrowserSink, Pending, next_browser_generation,
+    BrowserClient, BrowserId, BrowserSink, Liveness, Pending, next_browser_generation,
 };
 use bsk::daemon::sessions::{Session, SessionId};
 use bsk::daemon::{self, DaemonConfig};
@@ -22,6 +21,11 @@ use tokio::sync::mpsc;
 /// `idle_secs` back-dates its `last_seen` so it looks silent immediately.
 fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc<BrowserClient> {
     let (tx, _rx) = mpsc::unbounded_channel::<bsk_protocol::Frame>();
+    let liveness = Liveness::default();
+    if heartbeat_seen {
+        liveness.mark_heartbeat_seen();
+    }
+    liveness.__backdate_for_tests(Duration::from_secs(idle_secs));
     std::sync::Arc::new(BrowserClient {
         id: BrowserId(id.into()),
         browser_name: "chrome".into(),
@@ -34,8 +38,7 @@ fn fake_client(id: &str, heartbeat_seen: bool, idle_secs: u64) -> std::sync::Arc
         generation: next_browser_generation(),
         connected_at_ms: 0,
         version_skew: false,
-        last_seen: Mutex::new(Instant::now() - Duration::from_secs(idle_secs)),
-        heartbeat_seen: AtomicBool::new(heartbeat_seen),
+        liveness,
     })
 }
 

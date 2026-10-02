@@ -61,7 +61,9 @@
       "save": "Salva",
       "hint": "Usa un nome univoco per indicare questo browser al tuo agente. Il salvataggio riconnette brevemente BrowserSkill.",
       "busyHint": "Attendi che le attività del browser in corso terminino prima di modificare questo nome.",
-      "instanceIdError": "Scegli un nome diverso da un ID istanza esadecimale di 8 caratteri."
+      "instanceIdError": "Scegli un nome diverso da un ID istanza esadecimale di 8 caratteri.",
+      "edit": "Rinomina browser",
+      "cancel": "Annulla"
     },
     "record": {
       "sectionTitle": "Registrazione azioni",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "Informazioni sui permessi di connessione remota",
     "remotePermissionsHint": "Il server può controllare finestre di attività dedicate. La conferma per prendere in prestito schede esistenti segue le impostazioni di automazione riportate di seguito.",
     "profile": {
-      "hint": "Verifica che sia il profilo del browser desiderato, poi invia le istruzioni al tuo agente.",
-      "copyButton": "Copia istruzioni del profilo",
+      "hint": "Invia queste istruzioni al tuo agente per usare questo browser.",
+      "unavailableHint": "Collega questo profilo del browser a bsk per copiarne le istruzioni.",
+      "copyButton": "Copia istruzioni",
       "copyFailed": "Impossibile copiare le istruzioni. Riprova.",
-      "promptTemplate": "Per questa attività, usa BrowserSkill in questo profilo del browser. Avvia ogni nuova sessione di questa attività con l'interfaccia appropriata:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, chiama lo strumento senza eseguire separatamente il comando CLI.\nSe questa istanza non è connessa, fermati e chiedimi di riconnettere questo profilo. Non omettere --browser / browser e non passare a un'altra istanza."
+      "promptTemplate": "Per questa attività, usa BrowserSkill nel browser {{name}} (ID istanza: {{instanceId}}). Avvia ogni nuova sessione di questa attività con l'interfaccia appropriata:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, chiama lo strumento senza eseguire separatamente il comando CLI.\nSe questa istanza non è connessa, fermati e chiedimi di riconnettere questo profilo. Non omettere --browser / browser e non passare a un'altra istanza.",
+      "title": "Browser attuale",
+      "unnamed": "Browser senza nome"
     }
   },
   "controlOverlay": {

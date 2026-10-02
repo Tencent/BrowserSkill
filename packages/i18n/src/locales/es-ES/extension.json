@@ -61,7 +61,9 @@
       "save": "Guardar",
       "hint": "Usa un nombre único para indicar este navegador a tu agente. Al guardar, BrowserSkill se reconecta brevemente.",
       "busyHint": "Espera a que terminen las tareas activas del navegador antes de cambiar este nombre.",
-      "instanceIdError": "Elige un nombre que no tenga el formato de un ID de instancia hexadecimal de 8 caracteres."
+      "instanceIdError": "Elige un nombre que no tenga el formato de un ID de instancia hexadecimal de 8 caracteres.",
+      "edit": "Cambiar nombre del navegador",
+      "cancel": "Cancelar"
     },
     "record": {
       "sectionTitle": "Grabación de acciones",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "Acerca de los permisos de conexión remota",
     "remotePermissionsHint": "El servidor puede controlar ventanas de tareas dedicadas. La confirmación para tomar prestadas pestañas existentes sigue los ajustes de automatización que aparecen a continuación.",
     "profile": {
-      "hint": "Comprueba que este sea el perfil del navegador que quieres usar y envía las instrucciones a tu agente.",
-      "copyButton": "Copiar instrucciones del perfil",
+      "hint": "Envía estas instrucciones a tu agente para usar este navegador.",
+      "unavailableHint": "Conecta este perfil del navegador a bsk para copiar sus instrucciones.",
+      "copyButton": "Copiar instrucciones",
       "copyFailed": "No se pudieron copiar las instrucciones. Inténtalo de nuevo.",
-      "promptTemplate": "Para esta tarea, usa BrowserSkill en este perfil del navegador. Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia."
+      "promptTemplate": "Para esta tarea, usa BrowserSkill en el navegador {{name}} (ID de instancia: {{instanceId}}). Inicia cada nueva sesión de esta tarea con la interfaz correspondiente:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nEn DeepSeek Harness, llama a la herramienta sin ejecutar el comando CLI por separado.\nSi esta instancia no está conectada, detente y pídeme que vuelva a conectar este perfil. No omitas --browser / browser ni cambies a otra instancia.",
+      "title": "Navegador actual",
+      "unnamed": "Navegador sin nombre"
     }
   },
   "controlOverlay": {

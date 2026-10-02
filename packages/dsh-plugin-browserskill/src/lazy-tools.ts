@@ -20,8 +20,9 @@
  *   tool-skill's per-step catalog digest treats visibility changes as a
  *   first-class cache-invalidation input — the suite simply appears in the
  *   NEXT step's assembly.
- * - Durable results use message.source.callId and a tool-result content
- *   block. Older hosts stored callId/isError directly on the message.
+ * - DSH 0.2 stores toolCallId/isError on the message; DSH 0.1 uses a
+ *   tool-result content block. Both carry message.source.callId. Older hosts
+ *   stored callId/isError directly on the message.
  */
 
 import type { Context } from "@deepseek-ai/cordis";
@@ -61,6 +62,16 @@ function toolResultOf(data: unknown): { callId: string; isError: boolean } | und
   if (message === undefined) return;
   const source = record(message.source);
   if (source?.kind === "tool") {
+    if (message.role === "tool" && "toolCallId" in message) {
+      if (
+        isCallId(source.callId) &&
+        message.toolCallId === source.callId &&
+        typeof message.isError === "boolean"
+      ) {
+        return { callId: source.callId, isError: message.isError };
+      }
+      return;
+    }
     const blocks = message.content;
     const block = Array.isArray(blocks) && blocks.length === 1 ? record(blocks[0]) : undefined;
     if (

@@ -43,6 +43,7 @@ import {
   type OverlayAgentOverlayResetMessage,
   type OverlayAgentStateMessage,
   type OverlayAutomationBypassMessage,
+  OverlayVersionGate,
 } from "@/lib/overlay-bridge";
 import { sendInterrupt } from "@/lib/overlay-interrupt-client";
 import {
@@ -81,6 +82,7 @@ export default defineContentScript({
     let overlayHost: HTMLElement | null = null;
     let overlayContainer: HTMLElement | null = null;
     let activeAgentState: OverlayAgentStateMessage | null = null;
+    const overlayVersions = new OverlayVersionGate();
     let hostLossReported = false;
     let remountInProgress = false;
 
@@ -227,6 +229,10 @@ export default defineContentScript({
       resetAgentOverlayState(sessionId);
     }
 
+    function receiveOverlayState(state: OverlayAgentStateMessage): void {
+      if (overlayVersions.admit(state)) applyOverlayState(state);
+    }
+
     function applyOverlayState(state: OverlayAgentStateMessage): void {
       if (overlays.snapshot().activeSessionId !== state.sessionId) inputPassthrough.reset();
       activeAgentState = state;
@@ -331,12 +337,12 @@ export default defineContentScript({
       }
 
       if (isOverlayAgentStateMessage(message)) {
-        applyOverlayState(message);
+        receiveOverlayState(message);
         return false;
       }
 
       if (isOverlayAgentOverlayResetMessage(message)) {
-        resetAgentOverlayState(message.sessionId);
+        if (overlayVersions.admit(message)) resetAgentOverlayState(message.sessionId);
         return false;
       }
 
@@ -481,7 +487,7 @@ export default defineContentScript({
           kind: OVERLAY_MSG_READY,
         })) as OverlayAgentStateMessage | undefined;
         if (state && isOverlayAgentStateMessage(state)) {
-          applyOverlayState(state);
+          receiveOverlayState(state);
         }
         void refreshAuxiliaryOverlayState();
       } catch (err) {

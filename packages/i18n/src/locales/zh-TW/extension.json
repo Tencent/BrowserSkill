@@ -61,7 +61,9 @@
       "save": "儲存",
       "hint": "請使用唯一名稱，方便向 Agent 指定瀏覽器。儲存時 BrowserSkill 會短暫重新連線。",
       "busyHint": "目前瀏覽器有任務執行中，任務結束後即可修改名稱。",
-      "instanceIdError": "名稱不能使用 8 位十六進位執行個體 ID 格式。"
+      "instanceIdError": "名稱不能使用 8 位十六進位執行個體 ID 格式。",
+      "edit": "修改瀏覽器名稱",
+      "cancel": "取消"
     },
     "record": {
       "sectionTitle": "操作錄製",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "遠端連線權限說明",
     "remotePermissionsHint": "伺服器可操作專用的工作視窗。借用既有分頁時是否需要確認，取決於下方的「自動化設定」。",
     "profile": {
-      "hint": "確認這是你要使用的瀏覽器設定檔，再將指令傳給 Agent。",
-      "copyButton": "複製設定檔指令",
+      "hint": "複製後傳給 Agent，指定目前瀏覽器。",
+      "unavailableHint": "將此瀏覽器設定檔連線到 bsk 後即可複製指令。",
+      "copyButton": "複製指令",
       "copyFailed": "無法複製指令，請再試一次。",
-      "promptTemplate": "本次工作請使用此瀏覽器設定檔中的 BrowserSkill。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n使用 DeepSeek Harness 時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。"
+      "promptTemplate": "本次工作使用 BrowserSkill 的瀏覽器 {{name}}（實例 ID：{{instanceId}}）。每次為本工作建立新工作階段時，請依使用的介面執行：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n使用 DeepSeek Harness 時，請呼叫上述工具，不要另外執行 CLI 指令。\n若此實例未連線，請停止並要求我重新連線此設定檔。請勿省略 --browser / browser，也不要切換至其他實例。",
+      "title": "目前瀏覽器",
+      "unnamed": "未命名瀏覽器"
     }
   },
   "controlOverlay": {

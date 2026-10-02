@@ -61,7 +61,9 @@
       "save": "Enregistrer",
       "hint": "Utilisez un nom unique pour indiquer ce navigateur à votre agent. L'enregistrement reconnecte brièvement BrowserSkill.",
       "busyHint": "Attendez la fin des tâches actives du navigateur avant de modifier ce nom.",
-      "instanceIdError": "Choisissez un nom différent d'un ID d'instance hexadécimal de 8 caractères."
+      "instanceIdError": "Choisissez un nom différent d'un ID d'instance hexadécimal de 8 caractères.",
+      "edit": "Renommer le navigateur",
+      "cancel": "Annuler"
     },
     "record": {
       "sectionTitle": "Enregistrement d'actions",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "À propos des autorisations de connexion distante",
     "remotePermissionsHint": "Le serveur peut contrôler des fenêtres de tâche dédiées. La confirmation pour emprunter des onglets existants suit les paramètres d'automatisation ci-dessous.",
     "profile": {
-      "hint": "Vérifiez que c'est le bon profil de navigateur, puis envoyez les instructions à votre agent.",
-      "copyButton": "Copier les instructions du profil",
+      "hint": "Envoie ces instructions à ton agent pour utiliser ce navigateur.",
+      "unavailableHint": "Connectez ce profil de navigateur à bsk pour copier ses instructions.",
+      "copyButton": "Copier les instructions",
       "copyFailed": "Impossible de copier les instructions. Réessayez.",
-      "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans ce profil de navigateur. Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance."
+      "promptTemplate": "Pour cette tâche, utilise BrowserSkill dans le navigateur {{name}} (ID d’instance : {{instanceId}}). Démarre chaque nouvelle session de cette tâche avec l'interface appropriée :\nCLI : {{command}}\nDeepSeek Harness : {{toolCall}}\nDans DeepSeek Harness, appelle l'outil sans exécuter séparément la commande CLI.\nSi cette instance n'est pas connectée, arrête-toi et demande-moi de reconnecter ce profil. N'omets pas --browser / browser et ne passe pas à une autre instance.",
+      "title": "Navigateur actuel",
+      "unnamed": "Navigateur sans nom"
     }
   },
   "controlOverlay": {

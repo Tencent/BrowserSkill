@@ -17,6 +17,7 @@ use crate::cli::daemon::StartArgs;
 use crate::daemon::info::DaemonInfo;
 use crate::daemon::probe::{self, PROBE_TIMEOUT, Probe};
 use crate::daemon::start::start_background;
+use crate::daemon::start_error::DaemonStartFailure;
 
 /// Maximum time to wait for an auto-spawned daemon to become ready.
 pub const SPAWN_DEADLINE: Duration = Duration::from_millis(3_000);
@@ -27,9 +28,6 @@ pub(crate) fn auto_start_enabled() -> bool {
     std::env::var_os("BSK_AUTO_START").as_deref() != Some(std::ffi::OsStr::new("0"))
 }
 
-pub(crate) const AUTO_START_DISABLED_HINT: &str = "automatic daemon startup is disabled (BSK_AUTO_START=0); \
-    run `bsk daemon start` in the owning host environment with the same BSK_HOME, then retry";
-
 /// Return verified discovery info, starting a daemon only when its discovery
 /// file or IPC listener is absent and auto-start is enabled.
 pub fn ensure_daemon() -> Result<DaemonInfo> {
@@ -37,6 +35,6 @@ pub fn ensure_daemon() -> Result<DaemonInfo> {
     if let Probe::Ready(daemon) = probe::probe(PROBE_TIMEOUT)? {
         return Ok(daemon.info);
     }
-    ensure!(auto_start_enabled(), AUTO_START_DISABLED_HINT);
+    ensure!(auto_start_enabled(), DaemonStartFailure::AutoStartDisabled);
     start_background(&StartArgs::default(), deadline).context("automatic daemon startup failed")
 }

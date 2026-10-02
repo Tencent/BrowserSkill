@@ -9,8 +9,77 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
-- Protocol: preserve explicit `null` results when deserializing `ResponseFrame`,
-  restoring round-trip consistency while rejecting responses with both a result and an error.
+- Extension: input to a background Agent Window tab no longer keeps failing with
+  `input_not_ready` after Chrome drops the session's focus override without a detach
+  ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's
+  background-execution lease resends the override and waits for a rendered frame; the
+  input is sent only once the page reports `visible`, and otherwise still fails before
+  dispatch.
+
+## [0.3.2] - 2026-09-30
+
+### Changed
+
+- DSH Plugin: support DSH `0.2` hosts while retaining compatibility with the
+  `0.1.5-rc.3` SDK.
+- Extension: simplify browser profile controls and explain why profile
+  instructions are unavailable when they cannot be copied.
+- Daemons started with `--foreground` no longer install updates or replace
+  themselves with a detached process. `bsk update` leaves them running
+  (`"daemon": "left_to_host"` in JSON output); restart them in their owning
+  terminal or supervisor after updating.
+- A daemon that cannot write next to its executable reports new releases
+  instead of installing them. Update attempts, stages and errors are recorded
+  in `update-state.json` and shown by `bsk doctor`. Windows `bsk update --json`
+  now reports `"status": "updated"` instead of `"staged"`.
+- Installation and skill guidance document `BSK_AUTO_UPDATE=off`, daemon
+  startup in WorkBuddy and CodeBuddy, and shared-login checks for parallel tasks.
+- English and Chinese privacy policies clarify screenshot exports through
+  `downloads`, human-help notifications, and retention of exported files.
+
+### Fixed
+
+- CLI/Daemon: make updates recoverable across platforms
+  ([#336](https://github.com/Tencent/BrowserSkill/issues/336)). Auto-update
+  verifies the new executable and waits for its daemon to serve the same port
+  before the old daemon exits. If takeover fails or exceeds 20 seconds, the
+  previous executable and service are restored; auto-update retries after 6 hours.
+  Windows replaces the running executable without a detached update script.
+- `bsk update` verifies the replacement before stopping a background daemon,
+  restores the previous version if restart fails, and preserves the actual
+  serving port, including daemons started with `--port 0`. If the host cannot
+  restart the daemon, it is left running (`"daemon": "left_running"`).
+- Serialize updates to the same executable across bsk homes; retain the
+  executable path after rollback on Linux; and recover safely if a daemon
+  stops during auto-update.
+- Daemon: settle pending calls immediately when an extension connection closes
+  or is replaced, preserving unknown-outcome errors for inputs, transfers and
+  tab borrows. `bsk doctor` and `bsk browsers` report connected extensions that
+  have stopped sending heartbeats; closed connections report a disconnect.
+- Protocol: preserve explicit `null` results without silently turning invalid
+  responses into null results, and reject conflicting result/error fields and
+  null error fields.
+- Downloads: capture attachments opened through `target="_blank"` and attribute
+  them to the clicked tab. Correlate downloads with click dispatch, preserve
+  effects that already occurred when a trigger fails, and stop cancelled or
+  expired triggers from dispatching later input or leaving overlays behind.
+- Browser input: dispatch every press in DOM multi-click actions, honor
+  persistent background execution leases, and keep emulation overrides scoped
+  to their session and debugger attachment.
+- Recording: finish recordings after navigation to blob or restricted pages
+  that cannot host the overlay, and clear stale CLI recording state only for
+  the session that owns it.
+- Human help: bound URL regular-expression work and prevent overlapping
+  completion polling so checks cannot block the extension worker.
+- Extension overlays: ignore stale state from earlier generations and worker
+  instances.
+- Website debugging: redact HTML-encoded sensitive input attributes before
+  retaining evidence.
+- DSH Plugin: reconnect failed observation streams, show outages in the
+  observation view and collapsed capsule, and allow new browser sessions after
+  an ancestor session is archived.
+- `bsk doctor` compares installed skills against the CLI's bundled version;
+  skill entry points also fit their size budget on CRLF checkouts.
 
 ## [0.3.1] - 2026-09-23
 

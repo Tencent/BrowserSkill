@@ -90,6 +90,34 @@ export async function flushInputRendering(
   if (!shot.data) throw new Error("Renderer did not produce an input readiness frame");
 }
 
+/** Two animation frames on a visible page: the renderer completed a rendering update. */
+async function waitForRendererFrames(
+  cdp: CdpRunner,
+  tabId: number,
+  failure: string,
+  signal?: AbortSignal,
+  deadline?: number,
+): Promise<void> {
+  if (signal?.aborted) throw new DOMException("input aborted", "AbortError");
+  const reply = await waitForInputReply(
+    cdp.send<{ result?: { value?: boolean } }>(tabId, "Runtime.evaluate", {
+      expression: `new Promise(resolve => {
+      let frame;
+      const timer = setTimeout(() => { cancelAnimationFrame(frame); resolve(false); }, 4000);
+      frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => {
+        clearTimeout(timer); resolve(true);
+      }); });
+    })`,
+      awaitPromise: true,
+      returnByValue: true,
+    }),
+    signal,
+    5000,
+    deadline,
+  );
+  if (reply.result?.value !== true) throw new Error(failure);
+}
+
 /** After waking, wait for wheel scrolling to reach the renderer before hiding it again. */
 export async function waitForInputPaint(
   cdp: CdpRunner,
@@ -98,27 +126,68 @@ export async function waitForInputPaint(
   deadline?: number,
 ): Promise<void> {
   try {
-    if (signal?.aborted) throw new DOMException("input aborted", "AbortError");
-    const reply = await waitForInputReply(
-      cdp.send<{ result?: { value?: boolean } }>(tabId, "Runtime.evaluate", {
-        expression: `new Promise(resolve => {
-        let frame;
-        const timer = setTimeout(() => { cancelAnimationFrame(frame); resolve(false); }, 4000);
-        frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => {
-          clearTimeout(timer); resolve(true);
-        }); });
-      })`,
-        awaitPromise: true,
-        returnByValue: true,
-      }),
+    await waitForRendererFrames(
+      cdp,
+      tabId,
+      "Renderer did not finish painting input",
       signal,
-      5000,
       deadline,
     );
-    if (reply.result?.value !== true) throw new Error("Renderer did not finish painting input");
   } catch (error) {
     // This helper runs only after the wheel dispatch was acknowledged.
     throw new InputPaintUnconfirmedError(error);
+  }
+}
+
+function sampleVisibility(tabId: number, deps: InputReadinessDeps): Promise<string | undefined> {
+  return waitForInputReply(
+    deps.cdp.send<{ result: { value?: string } }>(tabId, "Runtime.evaluate", {
+      expression: "document.visibilityState",
+      returnByValue: true,
+    }),
+    deps.signal,
+    5000,
+    deps.deadline,
+  ).then((reply) => reply.result.value);
+}
+
+/** Recover an owned lease whose override Chrome dropped outside the applied-state cache.
+ * Only the lease owner changes focus emulation; its override stays enabled for later tools.
+ * Wait on animation frames, not a surface read: after a re-show, Chrome can leave
+ * `Page.captureScreenshot({ fromSurface })` pending while frames already run. */
+async function restoreLeasedInput(
+  ctx: SessionContext,
+  tabId: number,
+  deps: InputReadinessDeps,
+): Promise<RpcError | undefined> {
+  const notReady = (message: string): RpcError => ({
+    code: "cdp_failed",
+    message,
+    data: { reason: "input_not_ready", effect_state: "none" },
+  });
+  const restore = deps.cdp.restoreBackgroundExecution?.bind(deps.cdp);
+  if (!restore)
+    return notReady("Input target is hidden despite an owned background-execution lease");
+  try {
+    await waitForInputReply(restore(ctx.sessionId, tabId), deps.signal, 5000, deps.deadline);
+    // Frames stay suspended while hidden, so check visibility before waiting on them.
+    if ((await sampleVisibility(tabId, deps)) !== "visible")
+      return notReady("Input target is not visible after restoring its background-execution lease");
+    await waitForRendererFrames(
+      deps.cdp,
+      tabId,
+      "Renderer did not produce a frame after restoring its background-execution lease",
+      deps.signal,
+      deps.deadline,
+    );
+    return;
+  } catch (error) {
+    // Cancellation and deadlines keep their own codes in the caller.
+    if (isAbortError(error) || (error instanceof Error && error.name === "TimeoutError"))
+      throw error;
+    return notReady(
+      `Could not restore the owned background-execution lease: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -147,19 +216,18 @@ export async function withInputReady<T extends object>(
   try {
     checkActive();
     deps.cdp.trackSessionTab?.(ctx.sessionId, tabId);
-    const visibility = await waitForInputReply(
-      deps.cdp.send<{ result: { value?: string } }>(tabId, "Runtime.evaluate", {
-        expression: "document.visibilityState",
-        returnByValue: true,
-      }),
-      deps.signal,
-      5000,
-      deps.deadline,
-    );
+    // A persistent lease owns focus emulation for dispatcher-controlled tools;
+    // unowned direct-handler paths retain the bounded 0.3.0 fallback below.
+    const persistentLease = deps.cdp.ownsBackgroundExecution?.(ctx.sessionId, tabId) === true;
+    const visibility = await sampleVisibility(tabId, deps);
     const cancelled = abortError(deps.signal);
     if (cancelled) return cancelled;
     checkActive();
-    if (visibility.result.value === "hidden") {
+    if (visibility === "hidden" && persistentLease) {
+      const notReady = await restoreLeasedInput(ctx, tabId, deps);
+      if (notReady) return notReady;
+      checkActive();
+    } else if (visibility === "hidden") {
       attachmentId = deps.cdp.getAttachmentId?.(tabId);
       // Mark ownership before awaiting: a failed reply may still have enabled it.
       restoreFocus = true;
@@ -171,7 +239,7 @@ export async function withInputReady<T extends object>(
       );
       checkActive();
       await flushInputRendering(deps.cdp, tabId, deps.signal, deps.deadline);
-    } else if (visibility.result.value !== "visible") {
+    } else if (visibility !== "visible") {
       throw new Error("Could not determine input target visibility");
     }
     const cancelledAfterEnable = abortError(deps.signal);

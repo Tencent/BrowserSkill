@@ -61,7 +61,9 @@
       "save": "保存",
       "hint": "使用唯一名称，方便向 Agent 指定浏览器。保存时 BrowserSkill 会短暂重连。",
       "busyHint": "当前浏览器有任务运行，任务结束后可修改名称。",
-      "instanceIdError": "名称不能使用 8 位十六进制实例 ID 格式。"
+      "instanceIdError": "名称不能使用 8 位十六进制实例 ID 格式。",
+      "edit": "修改浏览器名称",
+      "cancel": "取消"
     },
     "record": {
       "sectionTitle": "操作录制",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "远程连接权限说明",
     "remotePermissionsHint": "服务器可操作独立任务窗口。借用已有标签页时，是否请求确认取决于下方的“自动化设置”。",
     "profile": {
-      "hint": "确认当前是你要使用的浏览器个人资料，再将此处的指令发给 Agent。",
-      "copyButton": "复制此 Profile 的指令",
+      "hint": "复制后发给 Agent，指定当前浏览器。",
+      "unavailableHint": "将此浏览器个人资料连接到 bsk 后即可复制指令。",
+      "copyButton": "复制指令",
       "copyFailed": "复制指令失败，请重试。",
-      "promptTemplate": "本次任务请使用此浏览器个人资料中的 BrowserSkill。为本次任务创建每个新会话时，请使用对应接口：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n在 DeepSeek Harness 中请使用工具调用，不要另行执行 CLI 命令。\n如果此实例未连接，请停止并让我重新连接此 Profile。不要省略 --browser / browser，也不要切换到其他实例。"
+      "promptTemplate": "本次任务使用 BrowserSkill 的浏览器 {{name}}（实例 ID：{{instanceId}}）。为本次任务创建每个新会话时，请使用对应接口：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n在 DeepSeek Harness 中请使用工具调用，不要另行执行 CLI 命令。\n如果此实例未连接，请停止并让我重新连接此 Profile。不要省略 --browser / browser，也不要切换到其他实例。",
+      "title": "当前浏览器",
+      "unnamed": "未命名浏览器"
     }
   },
   "controlOverlay": {

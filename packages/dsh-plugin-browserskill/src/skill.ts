@@ -67,8 +67,8 @@ export function registerBskSkill(ctx: Context): () => void {
  * Registering the embedded skill through `agent.ctx` makes the DSH protocol
  * contract authoritative for that agent without touching the shared CLI skill.
  *
- * New agents are handled at `agent/session-start`, the first supported startup
- * injection point and still before the first prompt assembly. Existing agents
+ * New agents are handled at `agent/created`, supported by both DSH 0.1 and 0.2
+ * after agent setup and before the first prompt assembly. Existing agents
  * are registered immediately so plugin reloads take effect without recreating
  * the conversation. Returns a disposer for all plugin-owned registrations.
  */
@@ -81,11 +81,12 @@ export function armAgentScopedBskSkill(ctx: Context): () => void {
     registrations.set(agent, registerBskSkill(agent.ctx));
   };
 
-  let stopSessionStart = () => {};
+  let stopCreated = () => {};
   let stopDisposed = () => {};
   if (typeof ctx.on === "function") {
-    stopSessionStart = ctx.on("agent/session-start", ({ agent }) => {
+    stopCreated = ctx.on("agent/created", ({ agent }) => {
       registerForAgent(agent);
+      return undefined;
     });
     stopDisposed = ctx.on("agent/disposed", ({ agent }) => {
       // Agent-scoped effects have already unwound at this lifecycle edge. Drop
@@ -103,7 +104,7 @@ export function armAgentScopedBskSkill(ctx: Context): () => void {
     if (!active) return;
     active = false;
     stopDisposed();
-    stopSessionStart();
+    stopCreated();
     for (const unregister of [...registrations.values()].reverse()) unregister();
     registrations.clear();
   };

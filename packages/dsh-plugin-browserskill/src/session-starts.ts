@@ -53,7 +53,9 @@ export class SessionStarts {
     const archived = this.deps.ctx.get("workspaceRegistry") as
       | { archivedSessionIds?: string[] }
       | undefined;
-    if (owners.some((id) => archived?.archivedSessionIds?.includes(id)))
+    // The caller is first; ancestors own cleanup but do not block new starts.
+    const caller = owners[0];
+    if (caller !== undefined && archived?.archivedSessionIds?.includes(caller))
       throw new Error("browser conversation is archived");
     // Recovered requests may still own windows even without a returned session
     // ID. Count them before admitting more work into this plugin's capacity.

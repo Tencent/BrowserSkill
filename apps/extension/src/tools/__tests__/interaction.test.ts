@@ -50,6 +50,11 @@ function makeFakeCdp(
     if (method === "Page.captureScreenshot") return { data: (await rendered()) ? "pixel" : "" };
     if (
       method === "Runtime.evaluate" &&
+      String((params as { expression?: string })?.expression).includes("requestAnimationFrame")
+    )
+      return { result: { value: await rendered() } };
+    if (
+      method === "Runtime.evaluate" &&
       String((params as { expression?: string })?.expression).includes('return "absent"')
     )
       return overlayHit();
@@ -732,6 +737,8 @@ describe("click input readiness", () => {
       rendered?: () => boolean | Promise<boolean>;
       defaultTimeoutMs?: number;
       onCommand?: (method: string, params: Record<string, unknown>) => void;
+      ownsBackgroundExecution?: boolean;
+      restoreBackgroundExecution?: () => void | Promise<void>;
     } = {},
   ) {
     const manager = new SessionManager({ agentWindow: fakeAgentWindow([100]) });
@@ -754,6 +761,16 @@ describe("click input readiness", () => {
     );
     let attachmentId: string | undefined = "original";
     fake.cdp.getAttachmentId = () => attachmentId;
+    if (options.ownsBackgroundExecution !== undefined) {
+      fake.cdp.ownsBackgroundExecution = vi.fn(() => options.ownsBackgroundExecution as boolean);
+    }
+    const restore = options.restoreBackgroundExecution;
+    if (restore) {
+      fake.cdp.restoreBackgroundExecution = vi.fn(async () => {
+        fake.sent.push({ tabId: 4, method: "restoreBackgroundExecution" });
+        await restore();
+      });
+    }
     return {
       ...fake,
       ctx,
@@ -783,6 +800,133 @@ describe("click input readiness", () => {
     expect(await f.click()).not.toHaveProperty("code");
     expect(f.focusCommands()).toEqual([]);
     expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it("samples visibility without changing an existing persistent background lease", async () => {
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "visible",
+    });
+    expect(await f.click()).not.toHaveProperty("code");
+    expect(f.cdp.ownsBackgroundExecution).toHaveBeenCalledWith("aa11", 4);
+    expect(
+      f.sent.some(
+        (c) =>
+          c.method === "Runtime.evaluate" &&
+          (c.params as { expression?: string }).expression === "document.visibilityState",
+      ),
+    ).toBe(true);
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+    expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it("rejects hidden leased input before dispatch without toggling its focus override", async () => {
+    const f = await fixture({ ownsBackgroundExecution: true, visibility: () => "hidden" });
+    expect(await f.click()).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.sent.some((c) => c.method === "Page.captureScreenshot")).toBe(false);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("restores a hidden leased target through its owner and waits for a frame", async () => {
+    let visibility = "hidden";
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => visibility,
+      restoreBackgroundExecution: () => {
+        visibility = "visible";
+      },
+    });
+    expect(await f.click()).not.toHaveProperty("code");
+    expect(f.cdp.restoreBackgroundExecution).toHaveBeenCalledWith("aa11", 4);
+    expect(f.focusCommands()).toEqual([]);
+    const expression = (c: { params?: object }) =>
+      String((c.params as { expression?: string } | undefined)?.expression);
+    const steps = f.sent.map((c) =>
+      c.method === "Runtime.evaluate" && expression(c) === "document.visibilityState"
+        ? "visibility"
+        : c.method === "Runtime.evaluate" && expression(c).includes("requestAnimationFrame")
+          ? "frames"
+          : c.method,
+    );
+    const restored = steps.indexOf("restoreBackgroundExecution");
+    expect(steps.slice(0, restored)).toEqual(["visibility"]);
+    expect(steps.slice(restored, restored + 3)).toEqual([
+      "restoreBackgroundExecution",
+      "visibility",
+      "frames",
+    ]);
+    expect(steps.indexOf("Input.dispatchMouseEvent")).toBeGreaterThan(restored + 2);
+    expect(steps).not.toContain("Page.captureScreenshot");
+    expect(steps).not.toContain("Page.bringToFront");
+    expect(f.mouseCommands()).toHaveLength(3);
+  });
+
+  it.each([
+    ["stays hidden", () => {}, "not visible"],
+    [
+      "fails",
+      () => {
+        throw new Error("resend failed");
+      },
+      "resend failed",
+    ],
+  ])("reports input_not_ready before dispatch when a restored lease %s", async (_case, restore, message) => {
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "hidden",
+      restoreBackgroundExecution: restore,
+    });
+    const result = await f.click();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect((result as { message: string }).message).toContain(message);
+    expect(f.cdp.restoreBackgroundExecution).toHaveBeenCalledOnce();
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("reports input_not_ready when a restored lease produces no frame", async () => {
+    let visibility = "hidden";
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => visibility,
+      rendered: () => false,
+      restoreBackgroundExecution: () => {
+        visibility = "visible";
+      },
+    });
+    const result = await f.click();
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      data: { reason: "input_not_ready", effect_state: "none" },
+    });
+    expect((result as { message: string }).message).toContain("did not produce a frame");
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toEqual([]);
+  });
+
+  it("cancels a pending lease restore without dispatching input", async () => {
+    const controller = new AbortController();
+    const f = await fixture({
+      ownsBackgroundExecution: true,
+      visibility: () => "hidden",
+      restoreBackgroundExecution: () => {
+        controller.abort();
+        return new Promise<void>(() => {});
+      },
+    });
+    const result = await f.click(controller.signal);
+    expect(result).toMatchObject({ code: "cancelled", data: { effect_state: "none" } });
+    expect(result).not.toHaveProperty("data.reason");
+    expect(f.focusCommands()).toEqual([]);
+    expect(f.mouseCommands()).toEqual([]);
   });
 
   it("wakes even an active-but-hidden page before geometry, then restores after release", async () => {

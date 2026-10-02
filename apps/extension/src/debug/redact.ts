@@ -14,6 +14,34 @@ function secretField(key: string): boolean {
     .some((part) => SECRET.test(part) || /(?:^|[_-])(?:password|passwd|pwd)(?:[_-]|$)/i.test(part));
 }
 
+const HTML_FIELD_SEPARATORS: Record<string, string> = {
+  period: ".",
+  lowbar: "_",
+  UnderBar: "_",
+  lbrack: "[",
+  lsqb: "[",
+  rbrack: "]",
+  rsqb: "]",
+};
+
+function htmlField(value: string): string {
+  // Normalize only references that can form our ASCII secret fields. A single
+  // pass avoids treating escaped references as markup; retained bytes stay intact.
+  return value.replace(
+    /&(?:#(?:[xX]([\da-fA-F]+)|(\d+));?|(period|lowbar|UnderBar|lbrack|lsqb|rbrack|rsqb);)/g,
+    (
+      reference,
+      hex: string | undefined,
+      decimal: string | undefined,
+      named: string | undefined,
+    ) => {
+      if (named) return HTML_FIELD_SEPARATORS[named];
+      const code = Number.parseInt(hex ?? decimal!, hex === undefined ? 10 : 16);
+      return code > 0 && code < 128 ? String.fromCharCode(code) : reference;
+    },
+  );
+}
+
 export function redactText(value: string, cap = 4096): string {
   return value
     .slice(0, cap)
@@ -159,9 +187,10 @@ export function redactBody(
           /\b(type|name|id|autocomplete)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/gi,
         );
         for (const match of attributes) {
-          const value = match[2] ?? match[3] ?? match[4];
+          const value = htmlField(match[2] ?? match[3] ?? match[4]);
           if (
             secretField(value) ||
+            secretField(value.toLowerCase()) ||
             /^(?:current-password|new-password|one-time-code|cc-.+)$/i.test(value)
           )
             return '<input data-bsk-redacted="true">';

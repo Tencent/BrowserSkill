@@ -151,7 +151,7 @@ For a local session in the last-focused user window, start with `bsk session sta
 
 </details>
 
-If your agent sandbox removes background processes after each command, use the [sandbox setup guide](docs/sandboxed-agents.md). It explains how to keep the daemon in a persistent host environment and connect with shared `BSK_HOME` and `BSK_AUTO_START=0`.
+In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.
 
 ## DeepSeek Harness plugin
 
@@ -250,7 +250,11 @@ Finish active browser tasks, then update the CLI:
 bsk update --yes
 ```
 
-For the default local setup, this restarts a running daemon when an update is installed. If Windows reports a staged update, wait for replacement to finish. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
+For the default local setup, this installs the new executable and checks that it runs while the daemon keeps serving, then restarts the daemon from it on the same port. If the restarted daemon does not become ready, the previous executable is put back and the daemon is restarted from it. A daemon started with `--foreground` is left running on the previous version; restart it in its terminal or supervisor. So is a background daemon when `bsk update` runs where it could not start one again, such as inside a sandbox whose Windows Job forbids breakaway; restart it with `bsk daemon restart` outside the sandbox. If you use the installer to replace the binary, restart the daemon afterwards with `bsk daemon restart`.
+
+A daemon that `bsk` started in the background also checks for a new release every 30 minutes and, while no agent session is active, installs it the same way. It then starts a daemon from the new executable and exits only once a daemon of the new version serves the same port. If the new daemon exits or is not ready within 20 seconds, it is stopped, and the running daemon puts the previous executable back, serves again on the same port, and retries that release after 6 hours. Browser connections drop for a moment during a handover and reconnect. A daemon that stops for another reason during an update, such as going idle, puts the previous executable back first. A daemon started with `--foreground` belongs to its terminal or supervisor, so it only reports new releases: run `bsk update`, then restart the daemon there. If bsk cannot write next to its executable, it only reports new releases; update it with the installer or package manager you used. Set `BSK_AUTO_UPDATE=off` to disable daemon-side auto-update while keeping manual `bsk update` available.
+
+`bsk doctor` shows the last update attempt; `update-state.json` in the bsk home keeps its stage, result and error. Updates of one executable run one at a time, even from different bsk homes, through `.bsk.update.lock` (`.bsk.exe.update.lock` on Windows), which stays next to it. Until an update is confirmed, the previous executable stays next to the new one as `.bsk.old-*` (`.bsk.exe.old-*` on Windows); one that is still running remains until its process exits, and a later daemon start removes it. On Windows, self-update renames the running executable, which NTFS supports; where the file system refuses, the update fails and leaves the installation unchanged. bsk supports Windows 10 and Windows Server 2016 or later.
 
 Update the extension through its browser store. Update the DSH plugin separately, then restart its profile:
 

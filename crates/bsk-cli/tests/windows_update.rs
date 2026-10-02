@@ -1,6 +1,8 @@
 //! Exercise self-update with a real executable and a local release server.
 #![cfg(windows)]
 
+mod release_fixture;
+
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -14,8 +16,6 @@ use std::time::{Duration, Instant};
 
 use bsk::daemon::info::DaemonInfo;
 use sha2::{Digest, Sha256};
-
-const MARKER: &[u8] = b"windows-update-regression-fixture";
 
 struct ReleaseServer {
     url: String,
@@ -40,7 +40,7 @@ impl ReleaseServer {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let manifest = serde_json::to_vec(&serde_json::json!({
-            "version": "999.0.0",
+            "version": release_fixture::newer_version(),
             "assets": {"windows-x64": {
                 "url": format!("{url}/bsk.zip"),
                 "sha256": Sha256::digest(&archive).iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
@@ -138,7 +138,7 @@ fn release_server_waits_for_delayed_and_fragmented_request_headers() {
     assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
     let (_, body) = response.split_once("\r\n\r\n").unwrap();
     let manifest: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(manifest["version"], "999.0.0");
+    assert_eq!(manifest["version"], release_fixture::newer_version());
 }
 
 struct Fixture {
@@ -159,10 +159,8 @@ impl Fixture {
         let home = tmp.path().join("home");
         fs::create_dir(&home).unwrap();
         fs::copy(env!("CARGO_BIN_EXE_bsk"), &exe).unwrap();
-        // A PE overlay distinguishes the replacement without requiring a
-        // second build or changing the executable's behavior/version.
-        let mut binary = fs::read(&exe).unwrap();
-        binary.extend_from_slice(MARKER);
+        // The same program reporting a newer version, as a release must.
+        let binary = release_fixture::newer_bsk(tmp.path());
         let server = ReleaseServer::new(&binary);
         Self {
             _tmp: tmp,
@@ -196,18 +194,7 @@ impl Fixture {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        let diagnostics: Vec<_> = fs::read_dir(self.exe.parent().unwrap())
-            .unwrap()
-            .flatten()
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
-            .map(|entry| {
-                (
-                    entry.path(),
-                    String::from_utf8_lossy(&fs::read(entry.path()).unwrap_or_default())
-                        .into_owned(),
-                )
-            })
-            .collect();
+        let leftovers = self.leftovers();
         let home_logs: Vec<_> = fs::read_dir(&self.home)
             .unwrap()
             .flatten()
@@ -221,7 +208,7 @@ impl Fixture {
             })
             .collect();
         panic!(
-            "timed out waiting for {description}; helper logs: {diagnostics:?}; daemon logs: {home_logs:?}"
+            "timed out waiting for {description}; files next to bsk.exe: {leftovers:?}; daemon logs: {home_logs:?}"
         );
     }
 
@@ -232,6 +219,17 @@ impl Fixture {
     fn updated(&self) -> bool {
         // A locked executable may briefly reject reads during replacement.
         fs::read(&self.exe).is_ok_and(|binary| binary == self.binary)
+    }
+
+    /// Files next to the executable other than the executable itself and
+    /// the update lock, which stays.
+    fn leftovers(&self) -> Vec<String> {
+        fs::read_dir(self.exe.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "bsk.exe" && name != ".bsk.exe.update.lock")
+            .collect()
     }
 }
 
@@ -247,8 +245,148 @@ impl Drop for Fixture {
     }
 }
 
+/// A Job that forbids breakaway, like the one a sandboxed agent runs
+/// commands in.
+struct RestrictiveJob(std::os::windows::io::OwnedHandle);
+
+impl RestrictiveJob {
+    fn new() -> Self {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::JobObjects::{
+            CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        // SAFETY: no name or inheritable security descriptor; this test owns it.
+        let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        assert!(!handle.is_null(), "{}", std::io::Error::last_os_error());
+        let job = unsafe { OwnedHandle::from_raw_handle(handle) };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        assert_ne!(
+            unsafe {
+                SetInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        Self(job)
+    }
+
+    fn assign(&self, child: &Child) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+        assert_ne!(
+            unsafe { AssignProcessToJobObject(self.0.as_raw_handle(), child.as_raw_handle()) },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+/// Runs `bsk --json update --yes` once its parent has put it in a Job, and
+/// writes the outcome to `BSK_GATED_OUTPUT`.
 #[test]
-fn manual_update_replaces_the_running_executable_after_cli_exit() {
+#[ignore = "subprocess entry point"]
+fn gated_update_process() {
+    let mut go = String::new();
+    std::io::stdin().read_line(&mut go).unwrap();
+    let output = Command::new(std::env::var_os("BSK_GATED_EXE").unwrap())
+        .args(["--json", "update", "--yes"])
+        .stdin(Stdio::null())
+        .creation_flags(0x0800_0000)
+        .output()
+        .unwrap();
+    let result = serde_json::json!({
+        "code": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+    });
+    fs::write(
+        std::env::var_os("BSK_GATED_OUTPUT").unwrap(),
+        serde_json::to_vec(&result).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn update_from_a_restrictive_job_leaves_a_background_daemon_running() {
+    let fixture = Fixture::new();
+    let port = unused_port();
+    let start = fixture
+        .command()
+        .args(["daemon", "start", "--port", &port.to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let before = fixture.info().unwrap();
+    let job = RestrictiveJob::new();
+    let result_path = fixture._tmp.path().join("gated-update.json");
+
+    let mut gated = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "gated_update_process", "--ignored", "--quiet"])
+        .env("BSK_GATED_EXE", &fixture.exe)
+        .env("BSK_GATED_OUTPUT", &result_path)
+        .env("BSK_HOME", &fixture.home)
+        .env("BSK_UPDATE_MANIFEST_URL", &fixture.server.url)
+        .env("BSK_AUTO_UPDATE", "off")
+        .env("RUST_LOG", "info")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env_remove("BSK_DAEMONIZED")
+        .env_remove("BSK_DAEMON_REPLACES_PID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .unwrap();
+    job.assign(&gated);
+    gated.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    assert!(gated.wait().unwrap().success());
+
+    let result: serde_json::Value =
+        serde_json::from_slice(&fs::read(&result_path).unwrap()).unwrap();
+    assert_eq!(result["code"], 0, "{result}");
+    let report: serde_json::Value =
+        serde_json::from_str(result["stdout"].as_str().unwrap()).unwrap();
+    assert_eq!(report["daemon"], "left_running", "{report}");
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot start an independent daemon"),
+        "{report}"
+    );
+    assert!(fixture.updated(), "the release is installed");
+    // The daemon it could not have started again keeps serving.
+    let after = fixture.info().expect("the daemon keeps serving");
+    assert_eq!(after.pid, before.pid);
+    assert_eq!(after.ws_port, port);
+    let status = fixture
+        .command()
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+}
+
+#[test]
+fn manual_update_replaces_the_running_executable_in_place() {
     let fixture = Fixture::new();
     let out = fixture
         .command()
@@ -261,15 +399,34 @@ fn manual_update_replaces_the_running_executable_after_cli_exit() {
         String::from_utf8_lossy(&out.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(report["status"], "staged");
-    fixture.wait_for("CLI replacement and helper cleanup", || {
-        fixture.updated() && fs::read_dir(fixture.exe.parent().unwrap()).unwrap().count() == 1
-    });
+    assert_eq!(report["status"], "updated");
+    assert!(
+        fixture.updated(),
+        "the new binary must be in place when the command returns"
+    );
     assert!(
         fixture.info().is_none(),
         "an update must not start a previously absent daemon"
     );
     assert_eq!(fixture.server.requests.load(Ordering::SeqCst), 1);
+
+    // The CLI ran from the image it moved aside; the next daemon removes it.
+    let leftovers = fixture.leftovers();
+    assert!(
+        leftovers.len() == 1 && leftovers[0].starts_with(".bsk.exe.old-"),
+        "{leftovers:?}"
+    );
+    let start = fixture
+        .command()
+        .args(["daemon", "start", "--port", &unused_port().to_string()])
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    fixture.wait_for("leftover cleanup", || fixture.leftovers().is_empty());
 }
 
 #[test]
@@ -304,19 +461,21 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
                 .info()
                 .is_some_and(|info| info.pid != old_pid && info.ws_port == port)
     });
-    assert!(
-        fixture
-            .daemon
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_some(),
-        "old daemon must exit"
-    );
-    fixture.wait_for("helper cleanup", || {
-        fs::read_dir(fixture.exe.parent().unwrap()).unwrap().count() == 1
-    });
+    // The old daemon exits only after it has seen the replacement serve.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fixture
+        .daemon
+        .as_mut()
+        .unwrap()
+        .try_wait()
+        .unwrap()
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "old daemon must exit");
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The replacement removes the image its predecessor ran from.
+    fixture.wait_for("leftover cleanup", || fixture.leftovers().is_empty());
     let status = fixture
         .command()
         .args(["--json", "status"])
@@ -330,7 +489,7 @@ fn automatic_update_exits_old_daemon_and_restarts_on_the_same_port() {
     assert_eq!(
         fixture.server.requests.load(Ordering::SeqCst),
         1,
-        "the replacement must not stage another update immediately"
+        "the replacement must not download another update immediately"
     );
 }
 

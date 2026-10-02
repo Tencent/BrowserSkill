@@ -518,6 +518,11 @@ pub struct BrowserStatusEntry {
     /// Protocol version the extension advertised at handshake.
     #[serde(default)]
     pub extension_protocol_version: String,
+    /// The socket is still registered, but a call failed after this
+    /// heartbeat-capable extension missed two heartbeats. Cleared when any
+    /// frame arrives.
+    #[serde(default)]
+    pub unresponsive: bool,
 }
 
 /// Snapshot of a single live session.

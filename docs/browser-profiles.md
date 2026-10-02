@@ -9,9 +9,10 @@ not launch Chrome or accept Chrome's `--profile-directory` argument.
 1. Open the required profile in Chrome. If you need to verify its directory, open
    `chrome://version` in that window and check **Profile Path**.
 2. Open BrowserSkill's popup in that same profile and ensure it is connected.
-3. Choose **Copy profile instructions** and send the instructions along with your
-   task to the agent. The copied instruction includes this profile's extension
-   instance ID and requires it on every new session for the task.
+3. Choose **Copy instructions** next to the current browser name and send the
+   instructions along with your task to the agent. The copied instruction identifies
+   the browser by its saved name and requires its extension instance ID on every
+   new session for the task. Renaming changes the description, not the routing ID.
 
 You can also copy the **Instance ID** from the popup and use it directly:
 
@@ -25,7 +26,8 @@ profile display name or directory name. An existing, verified unique BrowserSkil
 label also works; labels are not populated from Chrome profile names automatically.
 The instruction only copies text: it does not start a session or change settings.
 
-For a reusable human-readable selector, set **Browser name** in the extension popup,
+For a reusable human-readable selector, use the pencil beside the current browser
+name in the extension popup to edit and save **Browser name**,
 then confirm it appears in `bsk browsers`. Keep names unique among connected browsers;
 label matching is exact and duplicate labels are rejected as ambiguous. Saving a name
 briefly reconnects BrowserSkill so the daemon sees it immediately. Renaming is disabled
@@ -56,7 +58,7 @@ Use the verified popup instance ID in the plugin's session tool:
 browser_session({ action: "start", browser: "<verified-instance-id>" })
 ```
 
-**Copy profile instructions** includes this tool call alongside the CLI command.
+**Copy instructions** includes this tool call alongside the CLI command.
 Use the DeepSeek Harness call instead of running a separate CLI session. The plugin
 manages its own sessions. Supply the same selector on every new session for the task, even if
 only one browser is connected. If the mapping is unknown or the target is offline,

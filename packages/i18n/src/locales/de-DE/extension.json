@@ -61,7 +61,9 @@
       "save": "Speichern",
       "hint": "Verwende einen eindeutigen Namen, um deinem Agenten diesen Browser anzugeben. Beim Speichern verbindet sich BrowserSkill kurz neu.",
       "busyHint": "Warte, bis die laufenden Browser-Aufgaben beendet sind, bevor du diesen Namen änderst.",
-      "instanceIdError": "Wähle einen Namen, der nicht wie eine achtstellige hexadezimale Instanz-ID aussieht."
+      "instanceIdError": "Wähle einen Namen, der nicht wie eine achtstellige hexadezimale Instanz-ID aussieht.",
+      "edit": "Browser umbenennen",
+      "cancel": "Abbrechen"
     },
     "record": {
       "sectionTitle": "Aktionsaufzeichnung",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "Über Berechtigungen für Remote-Verbindungen",
     "remotePermissionsHint": "Der Server kann dedizierte Aufgabenfenster steuern. Ob beim Ausleihen bestehender Tabs eine Bestätigung erforderlich ist, richtet sich nach den Automatisierungseinstellungen unten.",
     "profile": {
-      "hint": "Prüfen Sie, ob dies das gewünschte Browserprofil ist, und senden Sie die Anweisungen an Ihren Agenten.",
-      "copyButton": "Profilanweisungen kopieren",
+      "hint": "Sende diese Anweisungen an deinen Agenten, um diesen Browser zu verwenden.",
+      "unavailableHint": "Verbinden Sie dieses Browserprofil mit bsk, um die Anweisungen zu kopieren.",
+      "copyButton": "Anweisungen kopieren",
       "copyFailed": "Die Anweisungen konnten nicht kopiert werden. Bitte versuchen Sie es erneut.",
-      "promptTemplate": "Nutze für diese Aufgabe BrowserSkill in diesem Browserprofil. Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz."
+      "promptTemplate": "Nutze für diese Aufgabe BrowserSkill im Browser {{name}} (Instanz-ID: {{instanceId}}). Starte jede neue Sitzung für diese Aufgabe über die passende Schnittstelle:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nNutze in DeepSeek Harness den Tool-Aufruf. Führe den CLI-Befehl nicht zusätzlich aus.\nWenn diese Instanz nicht verbunden ist, halte an und bitte mich, dieses Profil wieder zu verbinden. Lasse --browser / browser nicht weg und wechsle nicht zu einer anderen Instanz.",
+      "title": "Aktueller Browser",
+      "unnamed": "Unbenannter Browser"
     }
   },
   "controlOverlay": {

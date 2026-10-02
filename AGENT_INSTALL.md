@@ -68,24 +68,27 @@ may retain its old PATH even after a new terminal picks up the installation.
 Check the install result and destination. Existing files are skipped; inspect
 them before deciding whether to keep them or restore the bundled skill with
 `--force`, which overwrites the file. Doctor explains paused automatic updates;
-custom instructions are preserved. Verify discovery in Step 5.
+custom instructions are preserved. Confirm the main skill and its references
+were installed/synced for the intended harness. Session-start skill sync happens
+only after daemon discovery succeeds, so a startup failure cannot repair an old
+skill through that path. Verify discovery in Step 5, using a new chat if the
+current one still has the old skill loaded.
 
 ## 3. Run `bsk doctor`
 
-If this environment reaps child processes after every shell command, first follow
-the [sandbox setup guide](docs/sandboxed-agents.md), including its PowerShell examples
-for Windows. Reuse the host daemon's existing `BSK_HOME` (or its default if unset),
-set `BSK_AUTO_START=0`, and check `bsk status --json`. Reuse a working daemon; a
-permission error or timeout is not evidence that it is absent. Only when it is
-missing and no host task is already starting it, launch
-`bsk daemon start --foreground` in a persistent host task, or use a normal host
-terminal as described in the guide. In another shell tool call, confirm status
-succeeds before continuing; allow up to five checks with one-second pauses for
-transient startup errors. If the task exits or never becomes ready, inspect its
-output and `bsk logs`, then recheck for an existing daemon before another launch.
-Use the same `BSK_HOME` and `BSK_AUTO_START=0` for every sandboxed command, including
-`doctor` and session commands. Keep browser commands sandboxed; environment settings
-may not persist across shell calls. Report unresolved errors instead of looping.
+In WorkBuddy/CodeBuddy, or hosts that reap command children, first follow the
+[host setup guide](docs/sandboxed-agents.md). Reuse the existing `BSK_HOME` and
+probe with `BSK_AUTO_START=0`. If the daemon is missing and no task is starting
+it, use the host's managed background facility (`run_in_background: true` when
+supported) to run `bsk daemon start --foreground`. Keep that task running and
+verify status from a separate tool call before continuing. A permission error
+or timeout does not establish absence; inspect the actual error rather than
+launching again. The guide covers PowerShell, unavailable background facilities
+and the independent-terminal fallback.
+
+Repeat the same `BSK_HOME` and `BSK_AUTO_START=0` for every client call in this
+workflow, including doctor and sessions; do not rely on earlier shell exports.
+Ordinary local hosts retain their normal automatic startup.
 
 ```bash
 bsk doctor
@@ -129,6 +132,12 @@ returned session ID, then navigate and observe using `--session <id>`. Stop that
 session with `bsk session stop <id>` on success or failure. With multiple browsers,
 use `bsk browsers` and add `--browser <id>` when starting the session.
 For dsh, use its injected `browser_*` tools instead.
+
+For the WorkBuddy/CodeBuddy or child-reaping-host workflow, use separate tool
+calls for startup, status, session creation, navigation/observation and final
+status after session cleanup. Confirm the daemon remains reachable and its
+managed task (if used) stays running. A single successful doctor call, or running all
+commands in one shell, does not verify this lifetime requirement.
 
 Report success only after the page is read and the test session is stopped.
 If a step remains blocked, report which part is ready and what remains unverified.

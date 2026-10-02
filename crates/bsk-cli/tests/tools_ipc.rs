@@ -225,6 +225,67 @@ async fn tab_list_round_trips_through_ipc_queue_and_ws() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_in_flight_when_the_extension_disconnects_names_the_disconnect() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = do_handshake(&mut ws).await;
+    // Answers session start, then drops the socket instead of answering the
+    // tool call, as a crashed service worker would.
+    let extension = tokio::spawn(async move {
+        while let Some(Ok(Message::Text(text))) = ws.next().await {
+            let Ok(Frame::Request(req)) = serde_json::from_str::<Frame>(&text) else {
+                continue;
+            };
+            match req.method {
+                Method::ToolSessionStart => {
+                    let resp = ResponseFrame {
+                        id: req.id,
+                        body: ResponseBody::Ok(
+                            serde_json::to_value(SessionStartResult {
+                                container_mode: None,
+                                interaction: None,
+                                agent_window_id: Some(100),
+                            })
+                            .unwrap(),
+                        ),
+                    };
+                    ws.send(Message::Text(serde_json::to_string(&resp).unwrap()))
+                        .await
+                        .unwrap();
+                }
+                Method::ToolTabList => {
+                    let _ = ws.close(None).await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let session_id = ipc_session_start(&sock).await;
+    let started = std::time::Instant::now();
+    let err = ipc_tool_call::<_, TabListResult>(
+        &sock,
+        Method::ToolTabList,
+        TabListParams {
+            session_id,
+            scope: TabScope::User,
+        },
+    )
+    .await
+    .expect_err("the socket closed before answering");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the disconnect must settle the call, elapsed {:?}",
+        started.elapsed()
+    );
+    assert_eq!(err.code, ErrorCode::ProtocolError);
+    assert_eq!(err.data.unwrap()["reason"], "extension_disconnected");
+    extension.await.unwrap();
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn screenshot_returns_image_base64_with_dimensions() {
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;

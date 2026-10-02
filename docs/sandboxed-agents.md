@@ -7,8 +7,11 @@ In such an environment, keep the daemon in a persistent host execution context
 and run browser commands inside the sandbox over shared local IPC.
 The same setup applies to Windows agents whose shell tasks terminate child processes.
 
-Ordinary local use still auto-starts the daemon. No sandbox detection, service
-installation or global change to home-directory resolution is required.
+In WorkBuddy/CodeBuddy, follow the reuse/startup checks below before the first
+session command. Other local agents retain normal automatic startup unless their
+host reaps children. No runtime host detection or global configuration change is
+required. Full access, sandbox isolation and task lifetime are separate settings:
+disabling isolation does not ensure a command's children survive its completion.
 
 ## Windows background startup
 
@@ -24,10 +27,11 @@ error with setup instructions instead of retrying as a host-owned background
 process. An already reachable daemon is still reused, even from a restrictive
 Job. Use the persistent host setup below when breakaway is unavailable.
 
-`--foreground` deliberately remains owned by its host task. Run that task
-outside the per-command Job and keep it alive; the flag does not bypass Job
-termination. Breakaway is also not a guarantee against an explicit process-tree
-kill or host shutdown. Windows Job termination does not give a daemon an
+`--foreground` deliberately remains owned by its host task. A persistent host
+Job can own it even when breakaway is forbidden; keep that task alive across
+client calls. It must not share a short-lived client's cleanup lifetime. The flag
+does not bypass termination of its owning Job. Breakaway is also not a guarantee
+against an explicit process-tree kill or host shutdown. Windows Job termination does not give a daemon an
 opportunity to log a shutdown reason.
 
 Query commands retain their existing automatic-start behavior. Set
@@ -92,31 +96,52 @@ successful check lets you skip Step 3 and continue with Step 4.
 
 ## 3. Start only when needed, then verify readiness
 
-If the agent host provides a persistent background-task facility, let that task
-own the foreground daemon outside the per-command sandbox, using the directory
-checked above:
+Use the host's managed background-task facility to own the foreground daemon.
+For WorkBuddy/CodeBuddy tools that expose `run_in_background`, these are Bash
+**tool arguments**, using the actual directory checked above:
 
-```bash
-BSK_HOME=/absolute/shared/bsk bsk daemon start --foreground
+```json
+{
+  "command": "BSK_HOME='/absolute/shared/bsk' BSK_AUTO_START=0 bsk daemon start --foreground",
+  "run_in_background": true
+}
 ```
 
-For Windows hosts using PowerShell, set the same directory in that host task:
+For PowerShell tools:
 
-```powershell
-$env:BSK_HOME = 'C:\path\to\shared\bsk'
-bsk daemon start --foreground
+```json
+{
+  "command": "$env:BSK_HOME = 'C:\\path\\to\\shared\\bsk'; $env:BSK_AUTO_START = '0'; bsk daemon start --foreground",
+  "run_in_background": true
+}
 ```
 
-Keep the host task running across subsequent browser commands. `--foreground`
-keeps the daemon attached to that task; it does not make an ordinary short-lived
-shell persistent. If no persistent task facility is available, the user can
-instead start the daemon from a normal host terminal:
+If using the existing default directory, omit only the `BSK_HOME` assignment.
+Use the verified executable path if `bsk` is not on PATH. PowerShell's `&` call
+operator for a quoted executable path is distinct from a Unix trailing `&`.
+
+Keep the returned task ID and leave the task running. Inspect status/output with
+`TaskOutput` or its equivalent without waiting for daemon completion. Do not use
+`nohup`, `setsid`, `Start-Process`, trailing `&`, or a long sleep as a substitute
+for a managed task. The tool's background flag keeps a task available to later
+calls; `--foreground` keeps bsk attached to that task. Neither alone establishes
+that the host will keep it alive.
+
+Read the current tool schema: availability depends on the host version and mode.
+Do not assume an unsupported or downgraded background request succeeded. If no
+persistent task facility is available and independent startup has not failed or
+been observed to be reaped, try ordinary `bsk daemon start` once and verify it
+from another call with `BSK_AUTO_START=0`. If the host has no working persistent
+launch path, give the user an independent-terminal command using the actual CLI
+path and the same daemon directory, for example:
 
 ```bash
 BSK_HOME=/absolute/shared/bsk bsk daemon start
 ```
 
-In PowerShell, set `BSK_HOME` as above and run `bsk daemon start`.
+In PowerShell, set `$env:BSK_HOME` to that directory, then run `bsk daemon start`.
+A configured service or server must instead be restored through its owning
+supervisor with its original flags; do not replace it with the local defaults.
 
 **Verify readiness in a separate shell tool call.** Repeat Step 2's status check
 from the agent environment. During startup, allow at most five checks with
@@ -133,16 +158,23 @@ startup does not reuse a discovered daemon. Reuse it if the recheck succeeds;
 otherwise resolve or report the observed error instead of repeatedly launching.
 Keep runtime files and shared daemons intact.
 
-Use the host's approved mechanism for that launch to run outside the sandbox.
-CodeBuddy's [tool reference](https://www.codebuddy.ai/docs/cli/tools-reference)
-documents background tasks and per-command sandbox exceptions; availability
-depends on the host's settings. Do not turn off sandbox protection for all
-browser commands. Verify that the chosen host task survives subsequent shell
-commands. Cancelling that task or shutting down its host can still stop the
-daemon; bsk cannot make a process outlive the environment that owns it.
+If isolation prevents IPC access or task survival, use an available, authorized
+per-launch exception supplied by the host. Do not invent unsupported parameters
+or disable sandbox protection for all browser commands. CodeBuddy's
+[tool reference](https://www.codebuddy.ai/docs/cli/tools-reference) documents
+managed background tasks and per-command exceptions. Its
+[headless-mode guide](https://www.codebuddy.ai/docs/cli/headless) also describes
+modes that disable background tasks. Verify actual behavior: cancelling the
+owning task or shutting down its host can still stop the daemon.
 
 Start and stop the shared daemon in this owning environment. Browser task
 cleanup is `bsk session stop`, which leaves other sessions and the daemon alone.
+Do not cancel the shared daemon's background task at the end of a browser task.
+On later use, probe again instead of relying on a remembered task ID.
+A foreground daemon never replaces itself: when a new release is available it
+logs the version and the CLI suggests `bsk update`. `bsk update` installs the
+release but leaves a foreground daemon running on the previous version, so
+restart the host task afterwards to use it.
 The daemon's existing idle-exit behavior is unchanged: with no connected
 browsers, active sessions or IPC clients, its default idle timeout is 10 minutes.
 If the host workflow needs a longer idle window, pass the existing `--daemon-idle`
@@ -214,12 +246,19 @@ checks or delete lock files to work around a refused stop.
    checks above. Confirm status works from a separate sandboxed tool call with
    the same `BSK_HOME` and `BSK_AUTO_START=0`.
 2. Create a browser session, let that shell invocation finish, then navigate and
-   take a snapshot in another invocation using the same session ID. Confirm the
-   daemon instance in `daemon.json` has not changed.
-3. Stop only that session. Confirm another status call still reaches the daemon.
+   observe in another invocation using the same session ID. With successful IPC,
+   compare the PID, start time and endpoint in `daemon.json` to confirm the same
+   instance is serving; a PID alone is not sufficient evidence.
+3. Stop only that session. Confirm another status call still reaches the daemon
+   and its managed task (if used) remains running. Repeat a browser task in a later turn.
 4. In a controlled setup with no other active sessions, stop the daemon from its
    owning environment. The next sandboxed command must report it unavailable
    without starting a new daemon. Restart it from the host when needed.
+
+Record the host version, CLI path/version, tool startup arguments and task status
+while testing. Run startup, status, session creation, browser operations and final
+status as separate tool calls, not one combined shell command. The agent or
+maintainer collects these details; ordinary users need not diagnose Job Objects.
 
 This check validates the host's actual process lifetime and IPC permissions.
 Successful local CLI tests alone do not establish that a particular WorkBuddy

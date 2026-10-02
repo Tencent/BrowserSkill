@@ -1360,6 +1360,98 @@ async fn reconnect_with_same_instance_id_purges_stale_sessions_but_keeps_new_bro
     handle.shutdown().await;
 }
 
+fn spawn_long_start(
+    state: &Arc<bsk::daemon::state::DaemonState>,
+) -> tokio::task::JoinHandle<
+    Result<bsk::daemon::sessions::Session, bsk::daemon::sessions::StartSessionError>,
+> {
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        bsk::daemon::sessions::start_session(
+            &state.browsers,
+            &state.sessions,
+            &state.tool_queues,
+            None,
+            bsk::daemon::sessions::AgentWindowOptions::default(),
+            Duration::ZERO,
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+    })
+}
+
+#[tokio::test]
+async fn reconnect_settles_a_start_waiting_on_the_old_socket_without_replaying_it() {
+    let (handle, _sock) = spawn_daemon().await;
+    let state = handle.state();
+    let mut ws_a = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws_a).await;
+    let start = spawn_long_start(&state);
+    assert_eq!(
+        next_extension_request(&mut ws_a).await.method,
+        Method::ToolSessionStart
+    );
+
+    let mut ws_b = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws_b).await;
+
+    let result = tokio::time::timeout(Duration::from_secs(5), start)
+        .await
+        .expect("the reconnect must settle the start, not its 30s deadline")
+        .unwrap();
+    match result {
+        Err(bsk::daemon::sessions::StartSessionError::ExtensionError(err)) => {
+            assert_eq!(err.data.unwrap()["reason"], "extension_reconnected");
+        }
+        other => panic!("expected the reconnect to be reported, got {other:?}"),
+    }
+    assert!(state.sessions.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), ws_b.next())
+            .await
+            .is_err(),
+        "the start must not be replayed on the new socket"
+    );
+
+    let _ = ws_a.close(None).await;
+    drop(ws_a);
+    wait_for_browser_count(&state, 1).await;
+    assert_eq!(
+        state.browsers.len(),
+        1,
+        "the old socket's teardown must leave the new registration alone"
+    );
+
+    let _ = ws_b.close(None).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnect_settles_a_start_waiting_on_the_socket() {
+    let (handle, _sock) = spawn_daemon().await;
+    let state = handle.state();
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    let _ = handshake_as_ext(&mut ws).await;
+    let start = spawn_long_start(&state);
+    next_extension_request(&mut ws).await;
+
+    let _ = ws.close(None).await;
+    drop(ws);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), start)
+        .await
+        .expect("the disconnect must settle the start, not its 30s deadline")
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(bsk::daemon::sessions::StartSessionError::TransportClosed)
+    ));
+    assert!(state.sessions.is_empty());
+
+    handle.shutdown().await;
+}
+
 #[tokio::test]
 async fn reserve_id_loops_until_vacant_and_caps_attempts() {
     // Pre-fill the registry with a known id and verify reserve_id

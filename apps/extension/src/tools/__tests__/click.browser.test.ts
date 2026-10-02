@@ -241,7 +241,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             if (event.method === "DOM.documentUpdated") documentUpdates++;
             for (const listener of listeners) listener({ tabId: 4 }, event.method, event.params);
           };
-          const readinessCommands: { method: string; elapsedMs?: number; state: string }[] = [];
+          const cdpCommands: { method: string; elapsedMs?: number; state: string }[] = [];
           const api: CdpDebuggerApi = {
             // page() already attached the root debugger session.
             attach: async () => {},
@@ -250,7 +250,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             },
             sendCommand: async (debuggee, method, params) => {
               const call = { method, state: "pending", elapsedMs: undefined as number | undefined };
-              readinessCommands.push(call);
+              cdpCommands.push(call);
               const started = performance.now();
               try {
                 const result = await send(method, params, debuggee.sessionId ?? target.sessionId);
@@ -314,19 +314,54 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
             expect(ref).toBeDefined();
             expect(documentChanges).toBe(0);
             expect(await prepare("tool.click")).toBeUndefined();
-            readinessCommands.length = 0;
+            expect(cdp.ownsBackgroundExecution(ctx.sessionId, 4)).toBe(true);
+            cdpCommands.length = 0;
             const clicked = await handleClick(
               manager,
               { session_id: ctx.sessionId, tab_id: 4, ref: ref! },
               { cdp, tabsApi },
             );
-            expect(
-              clicked,
-              JSON.stringify({ clicked, commands: readinessCommands }),
-            ).not.toHaveProperty("code");
+            expect(clicked, JSON.stringify({ clicked, commands: cdpCommands })).not.toHaveProperty(
+              "code",
+            );
             expect(await target.evaluate("window.clicks")).toEqual([true]);
+            expect(
+              cdpCommands.some(
+                (command) =>
+                  command.method === "Emulation.setFocusEmulationEnabled" ||
+                  command.method === "Page.captureScreenshot",
+              ),
+            ).toBe(false);
             expect(documentChanges).toBe(0);
             expect(ctx.refStore.resolve(ref!, { tabId: 4 })).not.toBeNull();
+
+            // Drop the override on the same debugger session, bypassing the applied-state
+            // cache as a service-worker command would. The lease owner must restore it.
+            await send("Emulation.setFocusEmulationEnabled", { enabled: false }, target.sessionId);
+            expect(await target.evaluate("document.visibilityState")).toBe("hidden");
+            expect(await prepare("tool.click")).toBeUndefined();
+            cdpCommands.length = 0;
+            const recovered = await handleClick(
+              manager,
+              { session_id: ctx.sessionId, tab_id: 4, ref: ref! },
+              { cdp, tabsApi },
+            );
+            expect(
+              recovered,
+              JSON.stringify({ recovered, commands: cdpCommands }),
+            ).not.toHaveProperty("code");
+            expect(await target.evaluate("window.clicks")).toEqual([true, true]);
+            expect(
+              cdpCommands.filter(
+                (command) => command.method === "Emulation.setFocusEmulationEnabled",
+              ),
+            ).toHaveLength(1);
+            expect(cdpCommands.some((command) => command.method === "Page.captureScreenshot")).toBe(
+              false,
+            );
+            expect(await target.evaluate("document.visibilityState")).toBe("visible");
+            expect(cdp.ownsBackgroundExecution(ctx.sessionId, 4)).toBe(true);
+            expect(await foreground.evaluate("document.visibilityState")).toBe("visible");
             await cdp.send(4, "Page.navigate", { url: `${url}/next` });
             await vi.waitFor(() => expect(documentUpdates).toBeGreaterThan(0), { timeout: 5000 });
             expect(documentChanges).toBeGreaterThan(0);
@@ -344,6 +379,7 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser click readiness", (
               flatten: true,
             });
             await cdp.detachSession(ctx.sessionId);
+            expect(cdp.ownsBackgroundExecution(ctx.sessionId, 4)).toBe(false);
             const focus = await send<{ result: { value: boolean } }>(
               "Runtime.evaluate",
               { expression: "document.hasFocus()", returnByValue: true },

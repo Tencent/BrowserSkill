@@ -33,7 +33,7 @@ interface ViewModel {
   readonly title: string;
 }
 
-const TERMINAL_LABELS: TerminalBlockLabels = {
+const TERMINAL_LABELS: TerminalBlockLabels & { noExitCode: string } = {
   signal: (signal) => `Signal ${signal}`,
   exitCode: (exitCode) => `Exit code ${exitCode}`,
   running: "Running",
@@ -42,6 +42,7 @@ const TERMINAL_LABELS: TerminalBlockLabels = {
   copy: "Copy",
   copied: "Copied",
   noOutput: "No output",
+  noExitCode: "No exit code",
   collapseAria: "Collapse output",
   collapse: "Collapse",
   expandAria: (hidden) => `Expand the remaining ${hidden} output lines`,
@@ -128,7 +129,8 @@ function commandOf(argsRaw: string, callId: string): { command: string; title: s
 /** Derive the display model from the frozen block only. */
 export function viewModelOf(block: ToolCallViewProps["block"]): ViewModel {
   const settled = "kind" in block;
-  const argsRaw = (settled ? block.call?.argsRaw : block.argsRaw) ?? "";
+  // DSH 0.2 can render a preparing call before arguments have been dispatched.
+  const argsRaw = (settled ? block.call?.argsRaw : "argsRaw" in block ? block.argsRaw : "") ?? "";
   const { command, title } = commandOf(argsRaw, block.callId);
   if (!settled) {
     return { state: "running", command, output: null, image: null, summary: command, title };

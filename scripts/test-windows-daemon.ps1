@@ -37,6 +37,8 @@ public static class DaemonTestHost {
         Set-Location -LiteralPath $manifest.workspace
         $env:CI = 'true' # Default-port cold startup must execute, never skip.
         if ($manifest.runnerTrackingId) { $env:RUNNER_TRACKING_ID = $manifest.runnerTrackingId }
+        # Update tests compile stand-ins for broken releases.
+        $env:RUSTC = $manifest.rustc
         for ($round = 1; $round -le $manifest.repeat; $round++) {
             foreach ($suite in $manifest.suites) {
                 $name = "$($suite.name)-$round"
@@ -47,18 +49,29 @@ public static class DaemonTestHost {
                 $process.StartInfo.CreateNoWindow = $true
                 $process.StartInfo.RedirectStandardOutput = $true
                 $process.StartInfo.RedirectStandardError = $true
+                # The suite's copies of bsk and the daemons they start live in
+                # its own temporary directory, so a timeout stops exactly those.
+                $suiteTemp = Join-Path $runDir "temp/$name"
+                $null = New-Item -ItemType Directory -Path $suiteTemp -Force
+                $suiteTemp = (Resolve-Path -LiteralPath $suiteTemp).Path.TrimEnd('\') + '\'
+                $process.StartInfo.EnvironmentVariables['TEMP'] = $suiteTemp
+                $process.StartInfo.EnvironmentVariables['TMP'] = $suiteTemp
                 $exitCode = -1
                 $errorText = $null
+                $stdout = $null
+                $stderr = $null
+                $timedOut = $false
                 $watch = [Diagnostics.Stopwatch]::StartNew()
                 try {
                     if (-not $process.Start()) { throw 'Test process did not start' }
                     $stdout = $process.StandardOutput.ReadToEndAsync()
                     $stderr = $process.StandardError.ReadToEndAsync()
-                    if (-not $process.WaitForExit(180000)) { throw 'Test process exceeded 180 seconds' }
+                    if (-not $process.WaitForExit($manifest.suiteSeconds * 1000)) {
+                        $timedOut = $true
+                        throw "Test process exceeded $($manifest.suiteSeconds) seconds"
+                    }
                     $exitCode = $process.ExitCode
                     if (-not $stdout.Wait(5000) -or -not $stderr.Wait(5000)) { throw 'Test process exited without pipe EOF' }
-                    $stdout.Result | Set-Content -LiteralPath "$runDir/$name.stdout.log" -Encoding utf8
-                    $stderr.Result | Set-Content -LiteralPath "$runDir/$name.stderr.log" -Encoding utf8
                 } catch {
                     $exitCode = -1
                     $errorText = $_.ToString()
@@ -66,6 +79,22 @@ public static class DaemonTestHost {
                     try {
                         if (-not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(5000) }
                     } catch { }
+                    if ($timedOut) {
+                        # Daemons the tests started run outside the test's process
+                        # tree; stop those running from this suite's copies.
+                        Get-CimInstance Win32_Process | Where-Object {
+                            $_.ExecutablePath -and $_.ExecutablePath.StartsWith($suiteTemp, [StringComparison]::OrdinalIgnoreCase)
+                        } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+                    }
+                    # Keep the logs, not the copies of bsk, for the artifact upload.
+                    Get-ChildItem -LiteralPath $suiteTemp -Recurse -Filter '*.exe' -ErrorAction SilentlyContinue |
+                        Remove-Item -Force -ErrorAction SilentlyContinue
+                    # Keep what the suite printed, also after a timeout.
+                    foreach ($stream in @(@{ task=$stdout; file="$runDir/$name.stdout.log" }, @{ task=$stderr; file="$runDir/$name.stderr.log" })) {
+                        try {
+                            if ($stream.task -and $stream.task.Wait(5000)) { $stream.task.Result | Set-Content -LiteralPath $stream.file -Encoding utf8 }
+                        } catch { }
+                    }
                     $process.Dispose()
                 }
                 $results += [pscustomobject]@{ name=$name; exitCode=$exitCode; seconds=$watch.Elapsed.TotalSeconds; error=$errorText }
@@ -88,7 +117,7 @@ Push-Location -LiteralPath $workspace
 try {
     # Build in the normal runner environment; the WMI host needs no inherited
     # Cargo PATH, credentials or toolchain environment. Use Cargo's exact paths.
-    $artifacts = @(& cargo test -p bsk --lib --test windows_daemon_start --test windows_update --no-run --locked --message-format=json-render-diagnostics)
+    $artifacts = @(& cargo test -p bsk --lib --test windows_daemon_start --test windows_update --test auto_update_handover --no-run --locked --message-format=json-render-diagnostics)
     if ($LASTEXITCODE -ne 0) { throw 'Could not build Windows lifecycle tests' }
     $tests = @{}
     foreach ($line in $artifacts) {
@@ -101,13 +130,21 @@ try {
     $suites = @(
         @{ name='startup'; executable=$tests['windows_daemon_start']; arguments=@('--test-threads=1','--nocapture') },
         @{ name='launcher-lifetime'; executable=$tests['bsk']; arguments=@('daemon::start::tests','--test-threads=1','--nocapture') },
-        @{ name='update'; executable=$tests['windows_update']; arguments=@('--test-threads=1','--nocapture') }
+        @{ name='update'; executable=$tests['windows_update']; arguments=@('--test-threads=1','--nocapture') },
+        @{ name='update-handover'; executable=$tests['auto_update_handover']; arguments=@('--test-threads=1','--nocapture') }
     )
     foreach ($suite in $suites) {
         if (-not $suite.executable -or -not (Test-Path -LiteralPath $suite.executable)) { throw "Missing executable for $($suite.name)" }
     }
+    $sysroot = (& rustc --print sysroot).Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Could not locate rustc' }
+    $rustc = Join-Path $sysroot 'bin/rustc.exe'
+    if (-not (Test-Path -LiteralPath $rustc)) { throw "Missing $rustc" }
+    # Update suites wait on 20-second handover deadlines and take several
+    # minutes on slower machines.
+    $suiteSeconds = 480
     $manifest = @{
-        workspace=$workspace; repeat=$Repeat; suites=$suites
+        workspace=$workspace; repeat=$Repeat; suites=$suites; rustc=$rustc; suiteSeconds=$suiteSeconds
         userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
         runnerTrackingId=$env:RUNNER_TRACKING_ID
     }
@@ -122,7 +159,8 @@ try {
     try {
         $workerProcess = [Diagnostics.Process]::GetProcessById($created.ProcessId)
         $null = $workerProcess.Handle # Retain identity for timeout cleanup.
-        $deadline = [DateTime]::UtcNow.AddSeconds(600 * $Repeat)
+        # Every suite may use its whole budget, plus time to start the host.
+        $deadline = [DateTime]::UtcNow.AddSeconds(($suites.Count * $suiteSeconds + 120) * $Repeat)
         while (-not $workerProcess.WaitForExit(1000)) {
             if ([DateTime]::UtcNow -ge $deadline) { throw 'Independent test host timed out' }
         }
@@ -132,7 +170,7 @@ try {
         $report = Get-Content -LiteralPath "$runDir/result.json" -Raw | ConvertFrom-Json
         $report.results | Format-Table -AutoSize | Out-Host
         if ($report.error) { throw $report.error }
-        if (@($report.results).Count -ne (3 * $Repeat)) { throw 'Not all lifecycle suites executed' }
+        if (@($report.results).Count -ne ($suites.Count * $Repeat)) { throw 'Not all lifecycle suites executed' }
         if (@($report.results | Where-Object exitCode -ne 0).Count) { throw "Lifecycle regression failed; logs: $runDir" }
         Write-Output "All lifecycle suites passed; logs: $runDir"
     } finally {

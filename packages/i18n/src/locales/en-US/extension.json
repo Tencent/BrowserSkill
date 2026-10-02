@@ -61,7 +61,9 @@
       "save": "Save",
       "hint": "Use a unique name when talking to your agent. Saving briefly reconnects BrowserSkill.",
       "busyHint": "Wait for active browser tasks to finish before changing this name.",
-      "instanceIdError": "Choose a name other than an 8-character hexadecimal instance ID."
+      "instanceIdError": "Choose a name other than an 8-character hexadecimal instance ID.",
+      "edit": "Rename browser",
+      "cancel": "Cancel"
     },
     "record": {
       "sectionTitle": "Action recording",
@@ -124,10 +126,13 @@
     "remotePermissionsInfo": "About remote connection permissions",
     "remotePermissionsHint": "The server can control dedicated task windows. Confirmation for borrowing existing tabs follows the Automation settings below.",
     "profile": {
-      "hint": "Check that this is the browser profile you want to use, then send its instructions to your agent.",
-      "copyButton": "Copy profile instructions",
+      "hint": "Send these instructions to your agent to use this browser.",
+      "unavailableHint": "Connect this browser profile to bsk to copy its instructions.",
+      "copyButton": "Copy instructions",
       "copyFailed": "Could not copy the instructions. Please try again.",
-      "promptTemplate": "Use BrowserSkill in this browser profile for this task. Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance."
+      "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
+      "title": "Current browser",
+      "unnamed": "Unnamed browser"
     }
   },
   "controlOverlay": {

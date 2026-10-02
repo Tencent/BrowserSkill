@@ -20,11 +20,12 @@ advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
 - If a browser profile is required, read [tabs and profiles](references/tabs-and-profiles.md)
   before starting. Verify its instance mapping, bind every new session explicitly,
   and never substitute another instance or omit the selector to recover.
-- Installing this skill does not install the `bsk` CLI or browser extension.
-  For a missing CLI, startup or connection failure, or remote pairing, read
-  [environment setup](references/environment.md). Commands normally auto-start the
-  daemon; if the host cleans up background children, read that guide before any
-  session command. Never restart a shared daemon or delete runtime files to recover.
+- Parallel work: [parallel tasks](references/tabs-and-profiles.md).
+- In WorkBuddy/CodeBuddy or hosts that reap children, read [environment](references/environment.md)
+  before sessions: reuse a reachable daemon or run `--foreground` in a managed background task.
+  Read it also for missing CLI, startup/connection failures or remote pairing.
+  Skill installation excludes the CLI/extension. Never restart shared daemons or
+  delete runtime files to recover.
 - Borrow confirmation and human help follow the extension's Automation settings.
   Never change settings or switch browser backends to bypass them.
 

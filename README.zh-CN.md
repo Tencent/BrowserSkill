@@ -151,7 +151,7 @@ bsk session stop <id>
 
 </details>
 
-如果 Agent 沙盒会在每条命令后回收后台进程，请使用[沙盒配置指南](docs/sandboxed-agents.md)：在宿主环境保持 daemon 运行，Agent 通过共享的 `BSK_HOME` 和 `BSK_AUTO_START=0` 连接。
+在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。
 
 ## DeepSeek Harness 插件
 
@@ -250,7 +250,11 @@ BrowserSkill 没有必须使用的云服务，也不收集产品遥测。自动�
 bsk update --yes
 ```
 
-默认本地配置下，安装更新后会重启正在运行的 daemon。Windows 如果提示更新已暂存，请等待替换完成。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+默认本地配置下，这条命令会在 daemon 继续服务的同时安装新版本并检查它能否运行，然后用新版本在原端口重启 daemon。重启后的 daemon 没有就绪时，会放回旧版本并用它重启 daemon。通过 `--foreground` 启动的 daemon 不会被停止，会继续运行旧版本，请在它所在的终端或进程管理器中重启。如果 `bsk update` 运行在无法重新启动后台 daemon 的环境里（例如 Windows Job 禁止 breakaway 的沙盒），后台 daemon 同样不会被停止，请在沙盒外执行 `bsk daemon restart`。如果使用安装脚本替换了二进制，请随后执行 `bsk daemon restart`。
+
+由 `bsk` 在后台启动的 daemon 还会每 30 分钟检查一次新版本。没有 Agent 会话时，它按同样方式安装新版本，再用新版本启动一个 daemon，确认新版本的 daemon 已在原端口服务后才退出。新 daemon 退出，或 20 秒内没有就绪时，它会被停止，当前 daemon 放回旧版本，在原端口继续服务，6 小时后再尝试这个版本。交接期间浏览器连接会短暂断开并自动重连。更新过程中 daemon 因其他原因（例如空闲超时）停止时，会先放回旧版本再退出。通过 `--foreground` 启动的 daemon 归所在终端或进程管理器管理，只提示新版本：执行 `bsk update`，再在那里重启 daemon。bsk 无法在可执行文件所在目录写入时，也只提示新版本，请用原来的安装脚本或包管理器升级。设置 `BSK_AUTO_UPDATE=off` 可关闭 daemon 自动升级，手动 `bsk update` 仍然可用。
+
+`bsk doctor` 会显示最近一次更新的结果；bsk home 下的 `update-state.json` 记录了它的阶段、结果和错误原因。同一个可执行文件的更新会依次进行，即使来自不同的 bsk home 也是如此，靠的是它旁边的 `.bsk.update.lock`（Windows 上为 `.bsk.exe.update.lock`），这个文件会一直保留。更新确认成功前，旧版本会以 `.bsk.old-*`（Windows 上为 `.bsk.exe.old-*`）的名字留在新版本旁边；仍在运行的旧版本会保留到对应进程退出，之后再启动 daemon 时会清理。Windows 上的自更新依赖重命名正在运行的可执行文件，NTFS 支持这一操作；文件系统不支持时，更新会失败，已安装的版本保持不变。bsk 支持 Windows 10 和 Windows Server 2016 及以上版本。
 
 扩展通过浏览器商店更新。DSH 插件需要单独更新，完成后重启对应 profile：
 

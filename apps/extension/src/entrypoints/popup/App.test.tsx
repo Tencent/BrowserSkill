@@ -235,6 +235,23 @@ describe("App", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("true");
   });
 
+  it("uses the real connection state for profile copying while the status label stays stable", () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: { ...baseSnapshot, state: "connecting", instanceId: "a1234567", label: "工作" },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    render(<App />);
+    expect(screen.getByText("已连接")).toBeTruthy();
+    expect(screen.queryByText("READY")).toBeNull();
+    expect(screen.getByText("工作")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "复制指令" }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByText(i18n.t("extension:popup.profile.unavailableHint"))).toBeTruthy();
+    const launcher = screen.getByRole("button", { name: "快捷功能" });
+    expect(launcher.querySelector('[data-slot="popup-launcher-icon"]')).toBeTruthy();
+  });
+
   it("calls setConnectionEnabled(false) when the toggle is turned off", () => {
     mockUseConnectionState.mockReturnValue({
       snapshot: { ...baseSnapshot, state: "connected" },

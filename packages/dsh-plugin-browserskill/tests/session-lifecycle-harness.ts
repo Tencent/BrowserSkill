@@ -52,7 +52,7 @@ export function harness(
         return () => {};
       },
     },
-    get: () => undefined,
+    get: vi.fn((_key: string): unknown => undefined),
   };
   const prepare = vi.fn(async () => ok({ state: "prepared" }));
   const runner = {
@@ -97,5 +97,17 @@ export function harness(
     await starts.dispose();
     observation.dispose();
   });
-  return { starts, registry, journal, calls, session, runner, prepare, tools, observation, queue };
+  return {
+    ctx,
+    starts,
+    registry,
+    journal,
+    calls,
+    session,
+    runner,
+    prepare,
+    tools,
+    observation,
+    queue,
+  };
 }

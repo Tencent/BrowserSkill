@@ -37,6 +37,11 @@ In a conversation, try:
 
 By default, the browser tools become available when the skill is invoked.
 
+The plugin declares support for DSH `^0.1.5-rc.3 || ^0.2.0-rc.1`.
+DSH 0.2 checks these peer requirements before loading the plugin; versions outside
+this range are not declared compatible. The range preserves the existing 0.1.x
+baseline and admits 0.2.x without opting into future 0.3.x hosts.
+
 ## Updating
 
 Installed plugins do not update automatically. To upgrade this plugin to npm's

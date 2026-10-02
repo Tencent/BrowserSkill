@@ -258,6 +258,21 @@ export class ChromiumCdp {
     }
   }
 
+  /** True when this session owns the persistent focus/visibility override for the tab. */
+  ownsBackgroundExecution(sessionId: string, tabId: number): boolean {
+    return this.backgroundExecution.has(sessionId, tabId);
+  }
+
+  /** Resend this session's override when Chrome lost it without clearing the applied-state cache. */
+  async restoreBackgroundExecution(sessionId: string, tabId: number): Promise<void> {
+    if (!this.backgroundExecution.has(sessionId, tabId))
+      throw new Error("Background execution is not owned by this session");
+    await this.ensureRawAttached(tabId);
+    await this.backgroundExecution.reapply(tabId);
+    if (!this.backgroundExecution.has(sessionId, tabId))
+      throw new Error("Background execution was released during restore");
+  }
+
   private async ensureRawAttached(tabId: number): Promise<void> {
     // Returning a tab clears the cache before Chrome finishes detaching.
     // New observers must wait before opening the next connection to that tab.

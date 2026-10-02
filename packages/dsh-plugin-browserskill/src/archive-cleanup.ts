@@ -39,7 +39,7 @@ const MAX_LINEAGE_DEPTH = 16;
 
 /**
  * The DSH session ids that own a tool call's browser sessions: the calling
- * agent's own session plus every ancestor along the seed lineage. Empty
+ * agent's own session first, followed by ancestors along the seed lineage. Empty
  * when the call carried no agent identity (those sessions outlive any
  * archive cleanup by design — nothing can name their owner).
  */

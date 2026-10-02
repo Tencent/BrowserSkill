@@ -57,6 +57,14 @@ const PATH_TEXT = "[session s1] screenshot saved to /tmp/shot.png (800x457px, 8 
 afterEach(cleanup);
 
 describe("viewModelOf", () => {
+  it("keeps a DSH 0.2 preparing call renderable before arguments exist", () => {
+    const model = viewModelOf({ callId: "c1", name: "browser_inspect" } as never);
+    expect(model.state).toBe("running");
+    expect(model.command).toBe("browser_inspect (c1)");
+    expect(model.image).toBeNull();
+    expect(model.output).toBeNull();
+  });
+
   it("derives the running model from the call frame", () => {
     const model = viewModelOf(runningBlock('{"action":"screenshot","session":"s1"}'));
     expect(model.state).toBe("running");

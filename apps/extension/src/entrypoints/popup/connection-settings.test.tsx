@@ -95,6 +95,18 @@ function submit() {
   fireEvent.submit(document.querySelector("form")!);
 }
 
+it("keeps the connection mode visible and the address inside the collapsed settings", async () => {
+  const { container } = render(<ConnectionSettings connectionEnabled />);
+  const details = container.querySelector("details")!;
+  const summary = details.querySelector("summary")!;
+  await waitFor(() => expect(summary.textContent).toContain("本机"));
+  expect(details.open).toBe(false);
+  expect(summary.textContent).not.toContain("ws://");
+  expect(details.querySelector('[data-slot="popup-current-connection"]')?.textContent).toBe(
+    "本机 · ws://127.0.0.1:52800",
+  );
+});
+
 it("only changes the form until saved, and cancels both mode and port drafts without writes", async () => {
   render(<ConnectionSettings connectionEnabled />);
   fireEvent.click(screen.getByText("连接设置"));
