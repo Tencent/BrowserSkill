@@ -95,6 +95,7 @@ describe("task-scoped debug lifecycle", () => {
         host: async () => ({ id: 200, type: "normal", incognito: false }) as chrome.windows.Window,
         create: async () => 8,
         get: async () => ({ id: 8, windowId: 200 }) as chrome.tabs.Tab,
+        query: async () => [{ id: 8, windowId: 200 }] as chrome.tabs.Tab[],
         remove: async () => {},
       },
     });

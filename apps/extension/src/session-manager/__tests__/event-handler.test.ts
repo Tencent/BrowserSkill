@@ -147,6 +147,7 @@ describe("attachSessionEventHandler", () => {
         host: async () => ({ id: 4242, type: "normal", incognito: false }) as chrome.windows.Window,
         create: async () => 1,
         get: async () => ({ id: 1, windowId: 4242 }) as chrome.tabs.Tab,
+        query: async () => [{ id: 1, windowId: 4242 }] as chrome.tabs.Tab[],
         remove: removeTab,
       },
     });

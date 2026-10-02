@@ -52,9 +52,12 @@ function fixture() {
     ensureActiveTab: vi.fn(async () => 90),
     remove: vi.fn(async () => {}),
   };
+  const queryHost = vi.fn(async (windowId: number) =>
+    [...pages.values()].filter((tab) => tab.windowId === windowId),
+  );
   const manager = new SessionManager({
     agentWindow: windows,
-    sharedWindow: { host, get, create, remove },
+    sharedWindow: { host, get, create, remove, query: queryHost },
   });
   const query = vi.fn(async () => [...pages.values()]);
   return { manager, pages, host, get, create, remove, windows, query };
@@ -137,7 +140,7 @@ describe("shared user window sessions (#243)", () => {
     ).toMatchObject({ tabId: 20 });
   });
 
-  it("normal tool stop never queries or removes the host window", async () => {
+  it("normal tool stop preserves user pages without dedicated-window cleanup", async () => {
     const f = fixture();
     await f.manager.start("a", { inWindow: true });
     f.query.mockRejectedValue(new Error("query denied"));
@@ -151,6 +154,51 @@ describe("shared user window sessions (#243)", () => {
     expect(f.query).not.toHaveBeenCalled();
     expect(f.windows.remove).not.toHaveBeenCalled();
     expect(f.pages.has(1)).toBe(true);
+    expect(f.create).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    "tool",
+    "stop",
+    "stopAll",
+  ] as const)("%s preserves the host when only the session tab remains, without a close event", async (method) => {
+    const f = fixture();
+    const ctx = await f.manager.start("a", { inWindow: true });
+    f.pages.delete(1);
+    const send = vi.fn();
+    const events = { addListener: vi.fn(), removeListener: vi.fn() };
+    const handler = attachSessionEventHandler({
+      manager: f.manager,
+      transport: { send } as never,
+      windowEvents: events,
+    });
+    let hostAlive = true;
+    const expectedDuringRemove: boolean[] = [];
+    const remove = f.remove.getMockImplementation()!;
+    f.remove.mockImplementation(async (id) => {
+      expectedDuringRemove.push(f.manager.isWindowCloseExpected(ctx));
+      await remove(id);
+      f.manager.forgetClosedTab(id);
+      if (![...f.pages.values()].some((tab) => tab.windowId === 10)) {
+        hostAlive = false;
+        events.addListener.mock.calls[0][0](10);
+      }
+    });
+    try {
+      if (method === "tool")
+        expect(await handleSessionStop(f.manager, { session_id: "a" })).toEqual({});
+      else if (method === "stopAll") await f.manager.stopAll();
+      else await f.manager.stop("a");
+      expect(hostAlive).toBe(true);
+      expect([...f.pages.values()]).toMatchObject([{ id: 21, windowId: 10, active: false }]);
+      expect(f.manager.findByTabId(21)).toBeNull();
+      expect(f.manager.has("a")).toBe(false);
+      expect(expectedDuringRemove).toEqual([true]);
+      expect(f.manager.isWindowCloseExpected(ctx)).toBe(false);
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      handler.dispose();
+    }
   });
 
   it.each([

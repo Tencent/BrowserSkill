@@ -3,6 +3,7 @@ export interface SharedWindowApi {
   host(): Promise<chrome.windows.Window>;
   create(windowId: number, focused: boolean): Promise<number>;
   get(tabId: number): Promise<chrome.tabs.Tab>;
+  query(windowId: number): Promise<chrome.tabs.Tab[]>;
   remove(tabId: number): Promise<void>;
   focus?(windowId: number): Promise<void>;
 }
@@ -15,6 +16,7 @@ export const chromeSharedWindowApi: SharedWindowApi = {
     return tab.id;
   },
   get: (tabId) => chrome.tabs.get(tabId),
+  query: (windowId) => chrome.tabs.query({ windowId }),
   remove: (tabId) => chrome.tabs.remove(tabId),
   focus: async (windowId) => {
     await chrome.windows.update(windowId, { focused: true });
