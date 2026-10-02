@@ -480,7 +480,9 @@ describe("ToolDispatcher", () => {
     // ...and the window is released rather than closed, so the user's tab survives.
     expect(closeWindow).not.toHaveBeenCalled();
     expect(sessions.has("aa11")).toBe(false);
-    expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+    await vi.waitFor(() => {
+      expect(sent[0]).toEqual({ id: "r-1", result: { window_released: true } });
+    });
   });
 
   it("routes tool.console through the CDP console buffer", async () => {

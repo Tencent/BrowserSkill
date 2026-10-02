@@ -81,11 +81,12 @@ function fakeManager() {
       id === "abcd"
         ? {
             sessionId: "abcd",
-            agentWindowId: AGENT_WINDOW_ID,
+            container: { mode: "window", agentWindowId: AGENT_WINDOW_ID },
             refStore: { resolve: () => null, replace: () => {} },
             borrowedTabs: new Map(),
           }
         : null,
+    findByTabId: () => null,
     findByWindowId: (windowId: number) =>
       windowId === AGENT_WINDOW_ID ? { sessionId: "abcd" } : null,
   } as unknown as SessionManager;

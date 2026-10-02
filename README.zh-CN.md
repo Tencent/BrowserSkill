@@ -147,6 +147,8 @@ bsk session stop <id>
 
 通过 `bsk --help` 或 `bsk <命令> --help` 查看参数。完成或失败后都应结束会话；借用的标签页会归还到原窗口。
 
+本地会话可用 `bsk session start --in-window --json` 在最近聚焦的用户窗口中新建会话页签。停止时只关闭会话页签，不关闭用户窗口；已有用户页签仍需显式借用。此选项不支持窗口尺寸参数或远程连接。
+
 </details>
 
 在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。

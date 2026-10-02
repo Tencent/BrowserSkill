@@ -135,6 +135,7 @@ where
                     window_id += 1;
                     ResponseBody::Ok(
                         serde_json::to_value(SessionStartResult {
+                            container_mode: None,
                             interaction: None,
                             agent_window_id: Some(id),
                         })
@@ -241,6 +242,7 @@ async fn a_call_in_flight_when_the_extension_disconnects_names_the_disconnect() 
                         id: req.id,
                         body: ResponseBody::Ok(
                             serde_json::to_value(SessionStartResult {
+                                container_mode: None,
                                 interaction: None,
                                 agent_window_id: Some(100),
                             })
