@@ -12,6 +12,7 @@ import type {
   ConsoleParams,
   DownloadParams,
   EmulateParams,
+  CookiesParams,
   EvaluateParams,
   FillParams,
   FocusParams,
@@ -52,6 +53,7 @@ import { handleDebug } from "./debug";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
+import { handleCookies } from "./cookies";
 import { handleEvaluate } from "./evaluate";
 import { handleRequestHelp } from "./human-loop";
 import {
@@ -809,6 +811,19 @@ export class ToolDispatcher {
           req.params as EvaluateParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
+      case "tool.cookies":
+        return handleCookies(
+          this.sessions,
+          req.params as CookiesParams,
+          this.cdp
+            ? {
+                send: (tabId: number, method: string, params?: object) =>
+                  this.cdp!.send(tabId, method, params),
+                tabsApi: chromeTabsApi,
+                signal,
+              }
+            : undefined,
+        );
       case "tool.wait_for_navigation":
         return handleWaitForNavigation(
           this.sessions,
@@ -1023,6 +1038,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.upload":
     case "tool.download":
     case "tool.evaluate":
+    case "tool.cookies":
     case "tool.observe":
     case "tool.screenshot_full_page":
     case "tool.request_help":

@@ -7,6 +7,16 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Added
+
+- CLI/Extension: new `bsk cookies` command (`tool.cookies`) exports the cookies of the
+  site open in the session's Agent Window tab — including `httpOnly` cookies — via CDP
+  `Network.getCookies`. The call reuses the `tool.evaluate` sandbox (`resolveTargetTab`
+  + `enforceAgentWindow`, Agent Window tabs only) and the query is scoped to the tab's
+  own URL, so the export cannot widen into a browser-wide token-exfil window (design §6).
+  Primary use case: hand a logged-in session to a headless test runner (e.g. Playwright
+  `storageState`) for repeatable UI regression on production sites.
+
 ### Fixed
 
 - Extension: input to a background Agent Window tab no longer keeps failing with

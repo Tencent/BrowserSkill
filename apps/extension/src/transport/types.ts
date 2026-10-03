@@ -752,6 +752,29 @@ export interface EvaluateResult {
   dialogs?: JavaScriptDialogInfo[];
 }
 
+export interface CookiesParams {
+  session_id: string;
+  tab_id?: number;
+  timeout_ms?: number;
+}
+
+export interface CookieEntry {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  http_only: boolean;
+  secure: boolean;
+  same_site?: string;
+}
+
+export interface CookiesResult {
+  tab_id: number;
+  url: string;
+  cookies: CookieEntry[];
+}
+
 export interface WaitForNavigationParams {
   session_id: string;
   tab_id?: number;

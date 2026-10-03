@@ -120,6 +120,8 @@ pub enum Method {
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
+    #[serde(rename = "tool.cookies")]
+    ToolCookies,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
     #[serde(rename = "tool.wait_ms")]
@@ -202,6 +204,7 @@ impl Method {
             | Method::ToolUpload
             | Method::ToolDownload
             | Method::ToolEvaluate
+            | Method::ToolCookies
             // May navigate via optional `url` and changes Agent Window
             // chrome; gate behind pending-interrupt like other writes.
             | Method::ToolRecordStart => MethodEffect::BrowserMutation,
