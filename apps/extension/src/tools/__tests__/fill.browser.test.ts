@@ -145,6 +145,62 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser fill of editor para
       });
     });
 
+    describe.each([
+      ["an empty paragraph", '<p id="target"></p>'],
+      ["an empty paragraph holding a break", '<p id="target"><br></p>'],
+      ["an empty span in a paragraph", '<p>a <span id="target"></span> b</p>'],
+    ])("targeting %s", (_name, target) => {
+      it.each([
+        ["replace", true],
+        ["append", false],
+      ])("types into the target, not a sibling (%s)", async (_how, clearBefore) => {
+        await withFillBrowser({ background, markup: editor(target) }, async (h) => {
+          await h.ref("document.querySelector('#target')");
+          expect(await h.fill("hello", clearBefore)).toMatchObject({ value_length: 5 });
+          expect(await h.evaluate("document.querySelector('#target').textContent")).toBe("hello");
+          expect(await h.evaluate("document.querySelector('#before').textContent")).toBe("first");
+          expect(await h.evaluate("document.querySelector('#after').textContent")).toBe("keep");
+          expect(await h.evaluate("document.querySelector('#host').textContent")).not.toContain(
+            "\u200B",
+          );
+        });
+      });
+    });
+
+    it("refills a paragraph it has just cleared", async () => {
+      await withFillBrowser({ background, markup: editor('<p id="target">old</p>') }, async (h) => {
+        await h.ref("document.querySelector('#target')");
+        expect(await h.fill("")).toMatchObject({ value_length: 0 });
+        expect(await h.fill("hello")).toMatchObject({ value_length: 5 });
+        expect(await h.evaluate(paragraphs)).toEqual(["first", "hello", "keep"]);
+        expect(await h.evaluate("document.querySelectorAll('#target').length")).toBe(1);
+      });
+    });
+
+    it.each([
+      ["a multiline replacement", "one\ntwo", true],
+      ["a multiline append", "one\ntwo", false],
+      ["a trailing newline", "hello\n", true],
+      ["a carriage return", "one\r\ntwo", true],
+    ])("rejects %s before changing the editor", async (_name, value, clearBefore) => {
+      await withFillBrowser({ background, markup: editor('<p id="target">old</p>') }, async (h) => {
+        const html = await h.evaluate("document.querySelector('#host').innerHTML");
+        await h.ref("document.querySelector('#target')");
+        expect(await h.fill(value, clearBefore)).toMatchObject({
+          code: "invalid_params",
+          data: { reason: "fill_value_invalid" },
+        });
+        expect(await h.evaluate("document.querySelector('#host').innerHTML")).toBe(html);
+      });
+    });
+
+    it("still fills a multiline value into the whole editing host", async () => {
+      await withFillBrowser({ background, markup: editor('<p id="target">old</p>') }, async (h) => {
+        await h.ref("document.querySelector('#host')");
+        expect(await h.fill("one\ntwo")).toMatchObject({ value_length: 7 });
+      });
+    });
+
     it("still replaces the whole editing host when it is the target", async () => {
       await withFillBrowser({ background, markup: editor('<p id="target">old</p>') }, async (h) => {
         await h.ref("document.querySelector('#host')");

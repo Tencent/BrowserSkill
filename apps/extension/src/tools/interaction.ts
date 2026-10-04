@@ -1006,10 +1006,16 @@ const FILL_EDITING_HOST_FUNCTION = `function() {
   return host;
 }`;
 
+// Typed over in an empty editor element: a zero-width space.
+const FILL_PLACEHOLDER = "\u200B";
+
 // Chrome renders a trailing editable newline with an empty <div><br></div>.
 // innerText includes the padding break; it is not an extra typed character.
+// An editable element holding nothing but one <br> is Chrome's empty line
+// placeholder; its value is empty, not a newline.
 const FILL_VALUE_FUNCTION = `function() {
   if (!this.isContentEditable) return this.value;
+  if (this.textContent === '' && this.childNodes.length === 1 && this.firstChild.nodeName === 'BR') return '';
   const value = this.innerText;
   const tail = this.lastChild;
   const padding = tail && tail.nodeName === 'DIV' && tail.childNodes.length === 1 && tail.firstChild.nodeName === 'BR';
@@ -1085,6 +1091,8 @@ export async function handleFill(
   // takes focus, and the selection is confined to the target, so neither
   // clearing nor typing reaches the rest of the host's content.
   let hostObjectId: string | undefined;
+  // Whether an empty target was given a placeholder character to type over.
+  let placeholderUsed = false;
 
   try {
     if (throwIfAborted(deps.signal)) {
@@ -1112,6 +1120,16 @@ export async function handleFill(
         return fillError(
           "target_not_fillable",
           "fill target is not editable or its input type is unsupported",
+        );
+      }
+      // Typing a line break inside an editing host makes the editor split
+      // the target into new elements (paragraphs, list items), so the text
+      // cannot stay in, or be verified against, this one element. Reject it
+      // before anything is focused or changed.
+      if (/[\r\n]/.test(params.value)) {
+        return fillError(
+          "fill_value_invalid",
+          "a value with line breaks cannot be filled into one element inside an editor; fill the editing host, or each line's element separately",
         );
       }
     }
@@ -1214,7 +1232,10 @@ export async function handleFill(
     // DOM focus works in background tabs. Use document.hasFocus() only to
     // detect deferred focus events, never to reject background input.
     // `confined` also requires the selection to lie inside the target.
-    const checkReady = async (confined = false): Promise<FillReadiness | RpcError> => {
+    const checkReady = async (
+      confined = false,
+      before = preparation.before,
+    ): Promise<FillReadiness | RpcError> => {
       const reply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
         target.tabId,
         "Runtime.callFunctionOn",
@@ -1232,7 +1253,7 @@ export async function handleFill(
             }
             return this.ownerDocument.hasFocus() ? 'ready' : 'background';
           }`,
-          arguments: [{ value: preparation.before }, hostArgument, { value: confined }],
+          arguments: [{ value: before }, hostArgument, { value: confined }],
           returnByValue: true,
         },
       );
@@ -1301,7 +1322,10 @@ export async function handleFill(
     if (hostObjectId && params.value !== "") {
       // Select the target's contents to replace them, or put the caret at
       // their end to append, after any focus handling above has run.
-      const selected = await nodeCdp.send<FillScriptReply<unknown>>(
+      // An empty target gets a placeholder character to type over: Chrome
+      // moves a caret in an empty element out to a neighbouring text node
+      // before inserting, so the text would land in a sibling.
+      const selected = await nodeCdp.send<FillScriptReply<{ placeholder: boolean; value: string }>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
@@ -1310,10 +1334,22 @@ export async function handleFill(
             const root = this.getRootNode();
             const selection = root.getSelection ? root.getSelection() : this.ownerDocument.getSelection();
             const range = this.ownerDocument.createRange();
-            range.selectNodeContents(this);
-            if (!clearBefore) range.collapse(false);
+            let placeholder = false;
+            if (this.textContent === '') {
+              // Chrome's own empty-line <br> is replaced, as typing would.
+              if (this.childNodes.length === 1 && this.firstChild.nodeName === 'BR') this.firstChild.remove();
+              const mark = this.ownerDocument.createTextNode('${FILL_PLACEHOLDER}');
+              this.insertBefore(mark, this.firstChild);
+              range.setStart(mark, 0);
+              range.setEnd(mark, mark.length);
+              placeholder = true;
+            } else {
+              range.selectNodeContents(this);
+              if (!clearBefore) range.collapse(false);
+            }
             selection.removeAllRanges();
             selection.addRange(range);
+            return { placeholder, value: (${FILL_VALUE_FUNCTION}).call(this) };
           }`,
           arguments: [{ value: clearBefore }],
           returnByValue: true,
@@ -1325,7 +1361,13 @@ export async function handleFill(
       if (selected.exceptionDetails) {
         return fillError("fill_failed", "fill selection script failed");
       }
-      ready = await checkReady(true);
+      placeholderUsed = selected.result?.value?.placeholder === true;
+      const placed = selected.result?.value?.value;
+      if (typeof placed !== "string") {
+        return fillError("fill_failed", "fill selection returned an unexpected result");
+      }
+      // The placeholder is part of the target's value until it is typed over.
+      ready = await checkReady(true, placed);
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
@@ -1406,6 +1448,21 @@ export async function handleFill(
   } catch (err) {
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
   } finally {
+    if (placeholderUsed) {
+      // Remove a placeholder left behind when the fill stopped before
+      // typing over it; after a successful fill there is none.
+      await nodeCdp
+        .send(target.tabId, "Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: `function() {
+            for (const child of [...this.childNodes]) {
+              if (child.nodeType === Node.TEXT_NODE && child.data === '${FILL_PLACEHOLDER}') child.remove();
+            }
+          }`,
+          returnByValue: true,
+        })
+        .catch(() => undefined);
+    }
     await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
     if (hostObjectId) {
       await nodeCdp
