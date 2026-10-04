@@ -167,6 +167,18 @@ fn parses_daemon_stop_and_restart() {
 }
 
 #[test]
+fn parses_daemon_autostart_commands() {
+    assert!(matches!(
+        parse(&["bsk", "daemon", "install-autostart"]).command,
+        Command::Daemon(DaemonCmd::InstallAutostart)
+    ));
+    assert!(matches!(
+        parse(&["bsk", "daemon", "uninstall-autostart"]).command,
+        Command::Daemon(DaemonCmd::UninstallAutostart)
+    ));
+}
+
+#[test]
 fn parses_top_level_status_and_doctor() {
     let cli = parse(&["bsk", "status"]);
     assert!(matches!(cli.command, Command::Status));

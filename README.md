@@ -151,6 +151,24 @@ Use `bsk --help` or `bsk <command> --help` for command options. Always stop your
 
 In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.
 
+On Windows, install a per-user logon launcher in the Startup folder with:
+
+```powershell
+bsk daemon install-autostart
+```
+
+The launcher uses `daemon start --foreground`, so it is owned by Explorer and
+survives the short-lived command that installed it. The generated VBScript is
+kept pure ASCII, including when the `bsk.exe` path contains non-ASCII
+characters. Remove it with `bsk daemon uninstall-autostart`; both commands are
+safe to repeat and refuse to overwrite or remove an unrelated file with the
+same name.
+
+The local daemon exits after its idle timeout (10 minutes by default) once no
+browser is connected. An open Edge connection keeps it active; closing the
+browser starts the idle countdown, after which the daemon must be launched
+again (the Startup launcher will run at the next logon).
+
 ## DeepSeek Harness plugin
 
 The [DSH plugin](packages/dsh-plugin-browserskill/README.md) adds native `browser_*` tools, browser task previews, and screenshot results to the DeepSeek Harness Web UI. It uses the same `bsk` CLI and extension and includes its own BrowserSkill skill.
