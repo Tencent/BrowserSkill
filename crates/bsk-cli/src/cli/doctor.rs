@@ -268,7 +268,7 @@ fn auto_update_check(
     if hints.is_empty() {
         CheckResult::ok(name, detail)
     } else {
-        CheckResult::warn(name, detail, hints.join("; "))
+        CheckResult::warn(name, detail, hints.join("\n"))
     }
 }
 
@@ -472,7 +472,7 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             details.extend(conflicts.iter().cloned());
         }
         hints.push(format!(
-            "{id}: keep your instructions with `bsk install-skill --harness {id} --source <existing-skill-directory> --force`, or restore the bundled skill with `bsk install-skill --harness {id} --force` (overwrites existing instructions)"
+            "{id}: keep local changes (recommended): `bsk install-skill --harness {id} --source <existing-skill-directory> --force`\n{id}: discard local changes (overwrites existing instructions): `bsk install-skill --harness {id} --force`"
         ));
     }
     for (harness, message) in &report.errors {
@@ -488,9 +488,9 @@ fn skill_check_from_report(report: &crate::skill_install::sync::SyncReport) -> C
             0,
             "check filesystem access for the failing harness, then re-run `bsk doctor`".into(),
         );
-        CheckResult::fail(name, detail, hints.join("; "))
+        CheckResult::fail(name, detail, hints.join("\n"))
     } else if !report.paused.is_empty() {
-        CheckResult::warn(name, detail, hints.join("; "))
+        CheckResult::warn(name, detail, hints.join("\n"))
     } else if !report.updated.is_empty() || !report.up_to_date.is_empty() {
         CheckResult::ok(name, detail)
     } else if !details.is_empty() {
@@ -1061,7 +1061,12 @@ mod m2_tests {
                     hint.contains("--harness cursor --source <existing-skill-directory> --force")
                 );
                 assert!(hint.contains("--harness cursor --force"));
-                assert!(hint.contains("overwrites existing instructions"));
+                assert!(hint.contains("keep local changes (recommended)"));
+                assert!(hint.contains("discard local changes (overwrites existing instructions)"));
+                let keep = hint.find("keep local changes").expect("keep");
+                let discard = hint.find("discard local changes").expect("discard");
+                assert!(keep < discard, "recommended keep must come before destructive discard");
+                assert!(hint.contains('\n'), "hint options must be on separate lines");
                 // An I/O failure takes precedence without hiding paused installations.
                 report
                     .errors
