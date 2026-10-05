@@ -9,6 +9,11 @@
 #   BSK_VERSION      Pin CLI version (default: latest from version.json)
 #   BSK_INSTALL_DIR  Install directory (default: $HOME/.local/bin)
 #   BSK_BRANCH       Branch for install_sh raw URL metadata only (unused here)
+#   BSK_INSTALL_ALLOW_UNVERIFIED
+#                    Set to 1 to install even when the release's integrity
+#                    cannot be verified (version.json unreachable, no
+#                    checksum published for this platform, or no
+#                    sha256sum/shasum available). Default: refuse.
 
 set -eu
 
@@ -150,16 +155,21 @@ main() {
   archive="bsk-v${version}-${triple}.tar.gz"
   download_url="${GITHUB}/releases/download/${tag}/${archive}"
 
-  # Best-effort checksum: a missing manifest/checksum only skips
-  # verification (does not block the install), but a *mismatch* is fatal.
+  # A missing manifest/checksum/hash-tool used to only skip verification
+  # (never blocked the install); a *mismatch* was always fatal. Now a
+  # missing-verification case is also fatal by default, since it installs
+  # and runs an unverified binary identically to a successful bypass of
+  # the mismatch check. BSK_INSTALL_ALLOW_UNVERIFIED=1 opts back into the
+  # old best-effort behavior for operators who understand the risk.
   expected_sha=""
+  checksum_verified=0
   if [ -n "$manifest_json" ]; then
     expected_sha="$(extract_asset_sha256 "$manifest_json" "$platform_key")"
   else
-    log "warning: could not fetch version.json; skipping checksum verification"
+    log "warning: could not fetch version.json; cannot verify checksum"
   fi
   if [ -z "$expected_sha" ] && [ -n "$manifest_json" ]; then
-    log "warning: no checksum published for ${platform_key}; skipping checksum verification"
+    log "warning: no checksum published for ${platform_key}; cannot verify checksum"
   fi
 
   tmp_dir="$(mktemp -d)"
@@ -174,12 +184,17 @@ main() {
       expected_lower="$(printf '%s' "$expected_sha" | tr 'A-F' 'a-z')"
       if [ "$actual_sha" = "$expected_lower" ]; then
         log "checksum OK"
+        checksum_verified=1
       else
         die "checksum mismatch: expected ${expected_lower}, got ${actual_sha}"
       fi
     else
-      log "warning: no sha256 tool (sha256sum/shasum) found; skipping checksum verification"
+      log "warning: no sha256 tool (sha256sum/shasum) found; cannot verify checksum"
     fi
+  fi
+
+  if [ "$checksum_verified" -ne 1 ] && [ "${BSK_INSTALL_ALLOW_UNVERIFIED:-}" != "1" ]; then
+    die "refusing to install an unverified release (set BSK_INSTALL_ALLOW_UNVERIFIED=1 to override)"
   fi
 
   log "extracting ${archive}"
