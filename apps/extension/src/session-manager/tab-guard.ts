@@ -137,6 +137,11 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
     if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
 
     const target = await resolveUserWindow(manager, windows, recentUserWindows);
+    // A popup reaches onCreated before its navigation-target event, so the wait
+    // above can find nothing in flight and return at once. The claim is then
+    // registered while this lookup is still running. Settle again rather than
+    // treat the first empty read as final.
+    await manager.settlePendingTabClaims(ctx.sessionId);
     // Every await above is a point where the tab may have been claimed, moved
     // by the user, or the session torn down. Re-read both before touching it.
     if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;

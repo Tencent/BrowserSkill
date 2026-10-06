@@ -1,8 +1,12 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
-/** Upper bound on one settle round, so a claim that never settles cannot hold the guard open. */
-const SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS = 2_000;
+/**
+ * Upper bound on one settle call, so a claim that never settles cannot hold the
+ * guard open. The guard settles twice per eviction, before and after the
+ * destination lookup, so the worst case a stuck claim can impose is twice this.
+ */
+const SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS = 1_000;
 
 export interface SessionContext {
   /** Remote connections retain dedicated windows, with explicit page ownership. */

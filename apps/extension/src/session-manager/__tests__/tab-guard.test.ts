@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../manager";
 import { attachAgentWindowTabGuard, chromeTabGuardEvents, type TabGuardEvents } from "../tab-guard";
+import { withTaskPopups } from "../task-popups";
 
 const AGENT_WINDOW = 100;
 const USER_WINDOW = 7;
@@ -188,9 +189,66 @@ describe("agent window tab guard", () => {
     h.manager.trackPendingTabClaim(h.ctx.sessionId, new Promise(() => {}));
 
     h.emitCreated({ id: 42, windowId: AGENT_WINDOW });
+    // Two settles per eviction, so the stuck claim can cost at most two bounds.
     await new Promise((resolve) => setTimeout(resolve, 2_400));
 
     expect(h.tabs.move).toHaveBeenCalledWith(42, { windowId: USER_WINDOW, index: -1 });
+  }, 10_000);
+
+  it("keeps a popup whose claim is registered while the destination is being chosen", async () => {
+    // onCreated reaches the guard before the navigation-target event, so the
+    // first wait finds nothing in flight and returns at once. withTaskPopups
+    // then registers the claim while resolveUserWindow is still running, which
+    // is the window in which the popup used to be evicted.
+    const h = await setup();
+    const POPUP = 77;
+    const SOURCE = HOME_TAB;
+    h.ctx.agentCreatedTabs.add(SOURCE);
+
+    const targetListeners = new Set<
+      (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void
+    >();
+    vi.stubGlobal("chrome", {
+      webNavigation: {
+        onCreatedNavigationTarget: {
+          addListener: (fn: never) => targetListeners.add(fn),
+          removeListener: (fn: never) => targetListeners.delete(fn),
+        },
+      },
+      tabs: {
+        get: async (id: number) => ({ id, windowId: AGENT_WINDOW }),
+        onRemoved: { addListener: () => {}, removeListener: () => {} },
+        onDetached: { addListener: () => {}, removeListener: () => {} },
+      },
+    });
+
+    // Hold the destination lookup open so the claim lands during it.
+    let releaseLookup = () => {};
+    const lookupReached = new Promise<void>((resolve) => {
+      h.windows.listNormalIds.mockImplementationOnce(async () => {
+        resolve();
+        await new Promise<void>((r) => {
+          releaseLookup = r;
+        });
+        return [AGENT_WINDOW, USER_WINDOW];
+      });
+    });
+
+    await withTaskPopups(h.manager, { session_id: h.ctx.sessionId }, async (inputSent) => {
+      inputSent(SOURCE);
+      h.emitCreated({ id: POPUP, windowId: AGENT_WINDOW });
+      await lookupReached;
+      for (const fn of targetListeners) {
+        fn({ sourceTabId: SOURCE, sourceFrameId: 0, tabId: POPUP });
+      }
+      releaseLookup();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(h.ctx.observedTabs?.has(POPUP)).toBe(true);
+    expect(h.tabs.move).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
   }, 10_000);
 
   it("keeps the session home tab and tabs the agent created", async () => {
