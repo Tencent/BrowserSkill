@@ -1364,7 +1364,7 @@ describe("handleFill", () => {
     expect(insert?.params).toEqual({ text: "hello" });
     // Foreground replacement needs no extra caret-positioning round trip.
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(4);
+    expect(callFns).toHaveLength(5);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1468,6 +1468,9 @@ describe("handleFill", () => {
         return {};
       },
       "DOM.focus": () => ({}),
+      "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
+      "Runtime.callFunctionOn": successfulFillScript,
+      "Runtime.releaseObject": () => ({}),
     });
 
     const res = await handleFill(

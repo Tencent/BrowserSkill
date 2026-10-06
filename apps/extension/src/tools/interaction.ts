@@ -900,47 +900,22 @@ interface DescribedNode {
   attributes?: string[];
 }
 
-const NEVER_FILLABLE_TAGS = new Set([
-  "BUTTON",
-  "SELECT",
-  "OPTION",
-  "OPTGROUP",
-  "SCRIPT",
-  "STYLE",
-  "LINK",
-  "META",
-  "IMG",
-  "VIDEO",
-  "AUDIO",
-  "CANVAS",
-  "IFRAME",
-  "OBJECT",
-  "EMBED",
-  "SVG",
-  "BR",
-  "HR",
-]);
-
 /**
- * Decide how a node can receive `tool.fill`. Native `<input>` /
- * `<textarea>` and an element with its own contenteditable attribute
- * are filled as themselves. Any other element may be a descendant of an
- * editing host: `DOM.describeNode` only reports this node's attributes,
- * so a `<p>` inside `[contenteditable]` is not rejected here, and the
- * live `isContentEditable` check decides before anything is focused.
+ * Cheap candidate filter for `tool.fill`. The live preflight also checks
+ * control state and requires a contenteditable target to be an editing host.
  * Exported via `__testing__` for unit coverage.
  */
-function fillTargetKind(node: DescribedNode): "self" | "descendant" | null {
+function isFillable(node: DescribedNode): boolean {
   const tag = (node.nodeName ?? "").toUpperCase();
-  if (tag === "INPUT" || tag === "TEXTAREA") return "self";
+  if (tag === "INPUT" || tag === "TEXTAREA") return true;
   const attrs = node.attributes ?? [];
   for (let i = 0; i + 1 < attrs.length; i += 2) {
     if (attrs[i].toLowerCase() === "contenteditable") {
       const value = attrs[i + 1].toLowerCase();
-      return value === "" || value === "true" || value === "plaintext-only" ? "self" : null;
+      return value === "" || value === "true" || value === "plaintext-only";
     }
   }
-  return NEVER_FILLABLE_TAGS.has(tag) ? null : "descendant";
+  return false;
 }
 
 type SelectMutationResult =
@@ -993,33 +968,68 @@ const FILL_EDITABLE_FUNCTION = `function() {
   const tag = this.tagName.toLowerCase();
   const supported = tag === 'input'
     ? ['text', 'search', 'tel', 'url', 'email', 'password', 'number'].includes(this.type)
-    : tag === 'textarea' || this.isContentEditable;
+    : tag === 'textarea' || (this.isContentEditable && !this.parentElement?.isContentEditable);
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
 
-// The editing host of an editable target: the outermost editable element
-// around it, which takes focus for it. null when the target is not editable.
-const FILL_EDITING_HOST_FUNCTION = `function() {
-  if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return null;
-  let host = this;
-  while (host.parentElement && host.parentElement.isContentEditable) host = host.parentElement;
-  return host;
+// Read plain text without counting Chrome's empty-line <br> as a character.
+// insertText uses direct DIV line wrappers in rich editors and text nodes in
+// plaintext editors. Preserve literal whitespace instead of losing it through
+// innerText's CSS collapsing. Other rich structures retain their rendered text.
+const FILL_VALUE_FUNCTION = `function() {
+  if (this.matches('input,textarea')) return this.value;
+  const rendered = this.innerText;
+  const collapses = ['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace);
+  const children = [...this.childNodes];
+  const lineWrappers = this.children.length > 0 && children.every((child, index) =>
+    (index === 0 && child.nodeType === Node.TEXT_NODE) ||
+    (child.nodeName === 'DIV' && getComputedStyle(child).display === 'block' &&
+      [...child.children].every(el => el.nodeName === 'BR')));
+  let value;
+  if (lineWrappers) {
+    value = children.map(child => child.nodeType === Node.TEXT_NODE ? child.data :
+      child.childNodes.length === 1 && child.firstChild.nodeName === 'BR' ? '' : child.innerText).join('\\n');
+  } else if (this.children.length === 0 && rendered !== '') {
+    value = collapses ? this.textContent.replace(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/g, '') : this.textContent;
+  } else {
+    value = rendered === '\\n' && this.textContent === '' ? '' : rendered;
+  }
+  // Chrome substitutes NBSP at line edges in whitespace-collapsing editors.
+  // Only normalize the read value; never rewrite the user's DOM characters.
+  return collapses ? value.replace(/\\u00a0/g, ' ') : value;
 }`;
 
-// Typed over in an empty editor element: a zero-width space.
-const FILL_PLACEHOLDER = "\u200B";
-
-// Chrome renders a trailing editable newline with an empty <div><br></div>.
-// innerText includes the padding break; it is not an extra typed character.
-// An editable element holding nothing but one <br> is Chrome's empty line
-// placeholder; its value is empty, not a newline.
-const FILL_VALUE_FUNCTION = `function() {
-  if (!this.isContentEditable) return this.value;
-  if (this.textContent === '' && this.childNodes.length === 1 && this.firstChild.nodeName === 'BR') return '';
-  const value = this.innerText;
-  const tail = this.lastChild;
-  const padding = tail && tail.nodeName === 'DIV' && tail.childNodes.length === 1 && tail.firstChild.nodeName === 'BR';
-  return padding && value.endsWith('\\n\\n') ? value.slice(0, -1) : value;
+// Read-only validation shared by preflight and the final check before clearing.
+// Recompute after focus handlers: the target or its constraints may have changed.
+const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
+  const tag = this.tagName.toLowerCase();
+  const native = tag === 'input' || tag === 'textarea';
+  if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill requires an enabled text input, textarea, or contenteditable editing host; target the editor root rather than an internal paragraph or span' };
+  const before = clearBefore ? '' : (${FILL_VALUE_FUNCTION}).call(this);
+  let expected = before + value;
+  if (native) {
+    // Use the browser's own value sanitization (e.g. textarea
+    // line endings) without changing the live control.
+    const normalizer = this.ownerDocument.createElement(tag);
+    if (tag === 'input') {
+      normalizer.type = this.type;
+      normalizer.multiple = this.multiple;
+    }
+    // insertText treats line breaks in a single-line input as spaces.
+    if (tag === 'input') expected = expected.replace(/\\r\\n|\\r|\\n/g, ' ');
+    normalizer.value = expected;
+    if (expected !== '' && normalizer.value === '' && this.type === 'number') {
+      return { reason: 'fill_value_invalid', error: 'fill value is not valid for a number input' };
+    }
+    expected = normalizer.value;
+    if (this.type !== 'number' && this.maxLength >= 0 && expected.length > this.maxLength) {
+      return { reason: 'fill_value_invalid', error: 'fill value exceeds the target maxlength' };
+    }
+  } else {
+    expected = expected.replace(/\\r\\n?/g, '\\n');
+    if (['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)) expected = expected.replace(/\\u00a0/g, ' ');
+  }
+  return { before, expected };
 }`;
 
 export async function handleFill(
@@ -1045,7 +1055,7 @@ export async function handleFill(
   const node = await resolveBackendNode(deps.cdp, ctx, target, params, "fill");
   if (isRpcError(node)) return node;
   const nodeCdp = cdpRunnerForTarget(deps.cdp, node.cdpTarget);
-  let kind: "self" | "descendant" | null = null;
+  let native = false;
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
@@ -1056,24 +1066,13 @@ export async function handleFill(
         backendNodeId: node.backendNodeId,
       },
     );
-    kind = described.node ? fillTargetKind(described.node) : null;
-    if (!kind) {
+    native = ["INPUT", "TEXTAREA"].includes(described.node?.nodeName?.toUpperCase() ?? "");
+    if (!described.node || !isFillable(described.node)) {
       return rpcError(
         "invalid_params",
         "target_not_fillable",
-        `element ${described.node?.nodeName ?? "?"} not fillable (need input/textarea/contenteditable)`,
+        `element ${described.node?.nodeName ?? "?"} not fillable; choose a text input, textarea, or the contenteditable editor root`,
       );
-    }
-    const scrollErr = await scrollElementAndFramesIntoView(
-      deps.cdp,
-      target.tabId,
-      node.cdpTarget,
-      node.backendNodeId,
-      node.frameId,
-    );
-    if (scrollErr) return scrollErr;
-    if (throwIfAborted(deps.signal)) {
-      return { code: "cancelled", message: "fill aborted" };
     }
   } catch (err) {
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
@@ -1087,58 +1086,43 @@ export async function handleFill(
   if (isRpcError(objectIdOrErr)) return objectIdOrErr;
   const objectId = objectIdOrErr;
   const clearBefore = params.clear_before ?? true;
-  // A descendant of an editing host is filled through that host: the host
-  // takes focus, and the selection is confined to the target, so neither
-  // clearing nor typing reaches the rest of the host's content.
-  let hostObjectId: string | undefined;
-  // Whether an empty target was given a placeholder character to type over.
-  let placeholderUsed = false;
 
   try {
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
     }
-    if (kind === "descendant") {
-      // Check the live target before focusing anything, so a target that is
-      // not editable is rejected without blurring the focused element.
-      const host = await nodeCdp.send<{
-        result?: { objectId?: string };
-        exceptionDetails?: unknown;
-      }>(target.tabId, "Runtime.callFunctionOn", {
+    const preflight = await nodeCdp.send<FillScriptReply<FillPreparation>>(
+      target.tabId,
+      "Runtime.callFunctionOn",
+      {
         objectId,
-        functionDeclaration: FILL_EDITING_HOST_FUNCTION,
-        returnByValue: false,
-      });
-      hostObjectId = host.result?.objectId;
-      if (throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "fill aborted" };
-      }
-      if (host.exceptionDetails) {
-        return fillError("fill_failed", "fill editing host script failed");
-      }
-      if (!hostObjectId) {
-        return fillError(
-          "target_not_fillable",
-          "fill target is not editable or its input type is unsupported",
-        );
-      }
-      // Typing a line break inside an editing host makes the editor split
-      // the target into new elements (paragraphs, list items), so the text
-      // cannot stay in, or be verified against, this one element. Reject it
-      // before anything is focused or changed.
-      if (/[\r\n]/.test(params.value)) {
-        return fillError(
-          "fill_value_invalid",
-          "a value with line breaks cannot be filled into one element inside an editor; fill the editing host, or each line's element separately",
-        );
-      }
+        functionDeclaration: FILL_PREPARATION_FUNCTION,
+        arguments: [{ value: params.value }, { value: clearBefore }],
+        returnByValue: true,
+      },
+    );
+    if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+    if (preflight.exceptionDetails || !preflight.result?.value) {
+      return fillError("fill_failed", "fill preflight script failed");
     }
-    const focusTarget = hostObjectId
-      ? { objectId: hostObjectId }
-      : { backendNodeId: node.backendNodeId };
-    const hostArgument = hostObjectId ? { objectId: hostObjectId } : { value: null };
+    const plan = preflight.result.value;
+    if ("error" in plan) return fillError(plan.reason, plan.error);
+    if (typeof plan.before !== "string" || typeof plan.expected !== "string") {
+      return fillError("fill_failed", "fill preflight returned an unexpected result");
+    }
+    const scrollErr = await scrollElementAndFramesIntoView(
+      deps.cdp,
+      target.tabId,
+      node.cdpTarget,
+      node.backendNodeId,
+      node.frameId,
+    );
+    if (scrollErr) return scrollErr;
+    if (throwIfAborted(deps.signal)) {
+      return { code: "cancelled", message: "fill aborted" };
+    }
     try {
-      await nodeCdp.send(target.tabId, "DOM.focus", focusTarget);
+      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
     } catch (error) {
       // Chrome rejects DOM.focus for disabled controls, including inherited
       // fieldset state. Classify the live target before treating this as a
@@ -1169,49 +1153,23 @@ export async function handleFill(
       "Runtime.callFunctionOn",
       {
         objectId,
-        functionDeclaration: `function(value, clearBefore, host) {
+        functionDeclaration: `function(value, clearBefore) {
+          const preparation = (${FILL_PREPARATION_FUNCTION}).call(this, value, clearBefore);
+          if ('error' in preparation) return preparation;
+          if (this.getRootNode().activeElement !== this) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
           const tag = this.tagName.toLowerCase();
-          const native = tag === 'input' || tag === 'textarea';
-          if (!(${FILL_EDITABLE_FUNCTION}).call(this)) return { reason: 'target_not_fillable', error: 'fill target is not editable or its input type is unsupported' };
-          if (this.getRootNode().activeElement !== (host || this)) return { reason: 'fill_focus_lost', error: 'fill target does not have focus' };
-          const current = (${FILL_VALUE_FUNCTION}).call(this);
-          let expected = (clearBefore ? '' : current) + value;
-          if (native) {
-            // Use the browser's own value sanitization (e.g. textarea
-            // line endings) without changing the live control.
-            const normalizer = this.ownerDocument.createElement(tag);
-            if (tag === 'input') {
-              normalizer.type = this.type;
-              normalizer.multiple = this.multiple;
-            }
-            // insertText treats line breaks in a single-line input as spaces.
-            if (tag === 'input') expected = expected.replace(/\\r\\n|\\r|\\n/g, ' ');
-            normalizer.value = expected;
-            if (expected !== '' && normalizer.value === '' && this.type === 'number') {
-              return { reason: 'fill_value_invalid', error: 'fill value is not valid for a number input' };
-            }
-            expected = normalizer.value;
-            if (this.type !== 'number' && this.maxLength >= 0 && expected.length > this.maxLength) {
-              return { reason: 'fill_value_invalid', error: 'fill value exceeds the target maxlength' };
-            }
-          } else {
-            expected = expected.replace(/\\r\\n?/g, '\\n');
-          }
-          // Inside an editing host the typed text replaces the selected
-          // contents of the target instead, unless nothing is typed.
-          if (clearBefore && (!host || value === '')) {
-            if (native) {
+          if (clearBefore) {
+            if (tag === 'input' || tag === 'textarea') {
               const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
               Object.getOwnPropertyDescriptor(proto, 'value').set.call(this, '');
             } else {
               this.textContent = '';
             }
             this.dispatchEvent(new Event('input', { bubbles: true }));
-            return { before: '', expected };
           }
-          return { before: current, expected };
+          return preparation;
         }`,
-        arguments: [{ value: params.value }, { value: clearBefore }, hostArgument],
+        arguments: [{ value: params.value }, { value: clearBefore }],
         returnByValue: true,
       },
     );
@@ -1231,29 +1189,35 @@ export async function handleFill(
     // A separate call runs after the clearing event's microtasks drain.
     // DOM focus works in background tabs. Use document.hasFocus() only to
     // detect deferred focus events, never to reject background input.
-    // `confined` also requires the selection to lie inside the target.
     const checkReady = async (
-      confined = false,
-      before = preparation.before,
+      placeCaret = false,
+      verifyCaret = false,
     ): Promise<FillReadiness | RpcError> => {
       const reply = await nodeCdp.send<FillScriptReply<FillReadiness>>(
         target.tabId,
         "Runtime.callFunctionOn",
         {
           objectId,
-          functionDeclaration: `function(before, host, confined) {
+          functionDeclaration: `function(before, placeCaret, verifyCaret) {
             if (!(${FILL_EDITABLE_FUNCTION}).call(this) ||
                 (${FILL_VALUE_FUNCTION}).call(this) !== before) return 'fill_target_changed';
-            const root = this.getRootNode();
-            if (root.activeElement !== (host || this)) return 'fill_focus_lost';
-            if (confined) {
-              const selection = root.getSelection ? root.getSelection() : this.ownerDocument.getSelection();
-              const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
-              if (!range || !this.contains(range.startContainer) || !this.contains(range.endContainer)) return 'fill_focus_lost';
+            if (this.getRootNode().activeElement !== this) return 'fill_focus_lost';
+            if (verifyCaret) {
+              const selection = this.ownerDocument.getSelection();
+              if (!selection || !selection.isCollapsed || selection.anchorNode !== this ||
+                  selection.anchorOffset !== this.childNodes.length) return 'fill_focus_lost';
+            }
+            if (placeCaret) {
+              const selection = this.ownerDocument.getSelection();
+              const range = this.ownerDocument.createRange();
+              range.selectNodeContents(this);
+              range.collapse(false);
+              selection.removeAllRanges();
+              selection.addRange(range);
             }
             return this.ownerDocument.hasFocus() ? 'ready' : 'background';
           }`,
-          arguments: [{ value: before }, hostArgument, { value: confined }],
+          arguments: [{ value: preparation.before }, { value: placeCaret }, { value: verifyCaret }],
           returnByValue: true,
         },
       );
@@ -1279,7 +1243,7 @@ export async function handleFill(
     // Restore focus once only if clearing left this same target editable
     // and unchanged. Recheck after focus handlers have run.
     if (clearBefore && ready === "fill_focus_lost") {
-      await nodeCdp.send(target.tabId, "DOM.focus", focusTarget);
+      await nodeCdp.send(target.tabId, "DOM.focus", { backendNodeId: node.backendNodeId });
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
@@ -1293,15 +1257,14 @@ export async function handleFill(
       return fillError(ready, "fill target changed or lost focus before typing");
     }
     if (params.value !== "" && (!clearBefore || ready === "background")) {
-      // Native editing commands also support number/email inputs, whose
-      // selection APIs cannot set a caret, and multiline contenteditables.
-      // Also do this for background replacement: CDP input focuses the
-      // renderer, delivering deferred focus events before it inserts text.
-      // Use a command-only event so this does not invoke an End shortcut.
+      // Native commands position number/email carets without selection APIs.
+      // For editors, only flush deferred background focus here: the document
+      // end command can escape a nested editing host. Place its range below.
+      // Neither event carries an End key that could invoke a page shortcut.
       try {
         await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", {
           type: "rawKeyDown",
-          commands: ["moveToEndOfDocument"],
+          commands: native ? ["moveToEndOfDocument"] : [],
         });
       } finally {
         await deps.cdp.send(target.tabId, "Input.dispatchKeyEvent", { type: "keyUp" });
@@ -1309,77 +1272,30 @@ export async function handleFill(
       if (throwIfAborted(deps.signal)) {
         return { code: "cancelled", message: "fill aborted" };
       }
-      // Focus and key handlers can change the target or move focus too.
-      ready = await checkReady();
-      if (throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "fill aborted" };
+    }
+    if (params.value !== "" && (!native || !clearBefore || ready === "background")) {
+      // Recheck after deferred focus handlers, then place the caret only in
+      // this editing host. Empty hosts need no temporary DOM characters.
+      ready = await checkReady(!native);
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
+      if (!native && (ready === "ready" || ready === "background")) {
+        // Selection changes can run page handlers after the placement script.
+        ready = await checkReady(false, true);
       }
+      if (throwIfAborted(deps.signal)) return { code: "cancelled", message: "fill aborted" };
       if (typeof ready !== "string") return ready;
       if (ready !== "ready" && ready !== "background") {
         return fillError(ready, "fill target changed or lost focus while positioning the caret");
       }
     }
-    if (hostObjectId && params.value !== "") {
-      // Select the target's contents to replace them, or put the caret at
-      // their end to append, after any focus handling above has run.
-      // An empty target gets a placeholder character to type over: Chrome
-      // moves a caret in an empty element out to a neighbouring text node
-      // before inserting, so the text would land in a sibling.
-      const selected = await nodeCdp.send<FillScriptReply<{ placeholder: boolean; value: string }>>(
-        target.tabId,
-        "Runtime.callFunctionOn",
-        {
-          objectId,
-          functionDeclaration: `function(clearBefore) {
-            const root = this.getRootNode();
-            const selection = root.getSelection ? root.getSelection() : this.ownerDocument.getSelection();
-            const range = this.ownerDocument.createRange();
-            let placeholder = false;
-            if (this.textContent === '') {
-              // Chrome's own empty-line <br> is replaced, as typing would.
-              if (this.childNodes.length === 1 && this.firstChild.nodeName === 'BR') this.firstChild.remove();
-              const mark = this.ownerDocument.createTextNode('${FILL_PLACEHOLDER}');
-              this.insertBefore(mark, this.firstChild);
-              range.setStart(mark, 0);
-              range.setEnd(mark, mark.length);
-              placeholder = true;
-            } else {
-              range.selectNodeContents(this);
-              if (!clearBefore) range.collapse(false);
-            }
-            selection.removeAllRanges();
-            selection.addRange(range);
-            return { placeholder, value: (${FILL_VALUE_FUNCTION}).call(this) };
-          }`,
-          arguments: [{ value: clearBefore }],
-          returnByValue: true,
-        },
-      );
-      if (throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "fill aborted" };
-      }
-      if (selected.exceptionDetails) {
-        return fillError("fill_failed", "fill selection script failed");
-      }
-      placeholderUsed = selected.result?.value?.placeholder === true;
-      const placed = selected.result?.value?.value;
-      if (typeof placed !== "string") {
-        return fillError("fill_failed", "fill selection returned an unexpected result");
-      }
-      // The placeholder is part of the target's value until it is typed over.
-      ready = await checkReady(true, placed);
-      if (throwIfAborted(deps.signal)) {
-        return { code: "cancelled", message: "fill aborted" };
-      }
-      if (typeof ready !== "string") return ready;
-      if (ready !== "ready" && ready !== "background") {
-        return fillError(ready, "fill target changed or lost focus while selecting its contents");
-      }
-    }
     // CDP `Input.insertText` handles IME / multi-byte input out of the
     // box, much more reliably than per-key `dispatchKeyEvent`.
     if (params.value !== "") {
-      await deps.cdp.send(target.tabId, "Input.insertText", { text: params.value });
+      // Normalize the actual input as well as the expected value: older Chrome
+      // versions retain CR in editors or turn CRLF into two textarea breaks.
+      await deps.cdp.send(target.tabId, "Input.insertText", {
+        text: params.value.replace(/\r\n?/g, "\n"),
+      });
     }
     if (throwIfAborted(deps.signal)) {
       return { code: "cancelled", message: "fill aborted" };
@@ -1448,27 +1364,7 @@ export async function handleFill(
   } catch (err) {
     return fillError("fill_failed", err instanceof Error ? err.message : String(err));
   } finally {
-    if (placeholderUsed) {
-      // Remove a placeholder left behind when the fill stopped before
-      // typing over it; after a successful fill there is none.
-      await nodeCdp
-        .send(target.tabId, "Runtime.callFunctionOn", {
-          objectId,
-          functionDeclaration: `function() {
-            for (const child of [...this.childNodes]) {
-              if (child.nodeType === Node.TEXT_NODE && child.data === '${FILL_PLACEHOLDER}') child.remove();
-            }
-          }`,
-          returnByValue: true,
-        })
-        .catch(() => undefined);
-    }
     await nodeCdp.send(target.tabId, "Runtime.releaseObject", { objectId }).catch(() => undefined);
-    if (hostObjectId) {
-      await nodeCdp
-        .send(target.tabId, "Runtime.releaseObject", { objectId: hostObjectId })
-        .catch(() => undefined);
-    }
   }
 }
 
@@ -1902,5 +1798,5 @@ export async function handleSelect(
 export const __testing__ = {
   DEFAULT_TIMEOUT_MS,
   resolveBackendNode,
-  fillTargetKind,
+  isFillable,
 };

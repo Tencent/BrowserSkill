@@ -197,7 +197,7 @@ pub enum Command {
     /// Remove focus from a snapshot ref or CSS selector.
     Blur(BlurArgs),
 
-    /// Fill an input / textarea / contenteditable.
+    /// Fill a text input, textarea, or contenteditable editor root.
     Fill(FillArgs),
 
     /// Dispatch a keyboard key combo.

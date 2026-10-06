@@ -257,3 +257,14 @@ the case and expected baseline in the same reviewed change.
 The direct smoke lane covers 25 of 28 operations. `tabs.borrow`, `tabs.return`, and
 `assist.request-help` stay manual because they require a real user tab or human interaction and
 would make the default suite destructive or non-deterministic.
+
+### Fill regression workflow options
+
+A `fill` step accepts any string value, including `""` for clearing. Set
+`"noClear": true` to append through `--no-clear`. To check a rejected fill, use
+`"expectError": { "code": "invalid_params", "reason": "target_not_fillable" }`.
+Both fields must match a structured CLI error; timeouts, malformed output, and
+unexpected success fail the workflow. These options are limited to fill steps.
+
+See the [editor-root regression](cases/regression/fill-editor-roots/README.md)
+for the shared fixtures, browser assertions, and CLI smoke command.

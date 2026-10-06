@@ -69,7 +69,24 @@ function validateWorkflowStep(errors, step, path) {
   if (["click", "hover", "fill", "select"].includes(step.action) && !step.selector && !step.ref) {
     errors.push(`${path} requires selector or ref`);
   }
-  if (step.action === "fill") checkString(errors, step.value, `${path}.value`);
+  if (step.action === "fill") {
+    if (typeof step.value !== "string") errors.push(`${path}.value must be a string`);
+    if (step.noClear !== undefined && typeof step.noClear !== "boolean") {
+      errors.push(`${path}.noClear must be a boolean`);
+    }
+  } else if (step.noClear !== undefined || step.expectError !== undefined) {
+    errors.push(`${path}.noClear and expectError are only supported for fill`);
+  }
+  if (step.expectError !== undefined) {
+    if (!isObject(step.expectError)) errors.push(`${path}.expectError must be an object`);
+    else {
+      if (Object.keys(step.expectError).some((key) => !["code", "reason"].includes(key))) {
+        errors.push(`${path}.expectError only supports code and reason`);
+      }
+      checkString(errors, step.expectError.code, `${path}.expectError.code`);
+      checkString(errors, step.expectError.reason, `${path}.expectError.reason`);
+    }
+  }
   if (step.action === "select") {
     if (!Array.isArray(step.values) || step.values.length === 0) {
       errors.push(`${path}.values must be a non-empty array`);

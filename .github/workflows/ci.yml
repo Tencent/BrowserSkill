@@ -245,7 +245,7 @@ jobs:
       - name: Run fill browser regression
         working-directory: apps/extension
         env:
-          BSK_CLICK_CHROME: google-chrome
+          BSK_FILL_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/fill.browser.test.ts
 
   node-scripts:

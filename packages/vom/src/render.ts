@@ -223,7 +223,9 @@ function isFocusable(node: VomNode): boolean {
 
 function isContentEditable(node: VomNode): boolean {
   const contentEditable = node.attrs?.contenteditable?.toLowerCase();
-  return contentEditable === "true" || contentEditable === "plaintext-only";
+  return (
+    contentEditable === "" || contentEditable === "true" || contentEditable === "plaintext-only"
+  );
 }
 
 const ICON_REFERENCE_MARKERS = new Set(["glyph", "icon", "icons", "symbol"]);

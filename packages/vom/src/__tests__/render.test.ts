@@ -30,6 +30,26 @@ function coreRefs(refs: ReturnType<typeof renderVom>["refs"]) {
 
 describe("renderVom single-layer page", () => {
   it.each([
+    "",
+    "true",
+    "plaintext-only",
+  ])("exposes a contenteditable=%s root as a textbox ref", (contenteditable) => {
+    const out = renderVom(
+      scene([
+        node({
+          id: 1,
+          backendNodeId: 42,
+          tag: "div",
+          name: "Message editor",
+          attrs: { contenteditable },
+          rect: { x: 0, y: 0, w: 200, h: 80 },
+        }),
+      ]),
+    );
+    expect(out.text).toContain('@e1 textbox "Message editor"');
+    expect(coreRefs(out.refs)).toEqual([{ ref: "e1", backendNodeId: 42 }]);
+  });
+  it.each([
     { checked: true, marker: " [checked]" },
     { checked: false, marker: " [unchecked]" },
     { checked: "mixed" as const, marker: " [mixed]" },
