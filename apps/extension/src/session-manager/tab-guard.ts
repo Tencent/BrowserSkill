@@ -67,6 +67,22 @@ export const chromeTabGuardWindowsApi: TabGuardWindowsApi = {
 };
 
 /**
+ * The events the guard listens on, beside the tabs and windows adapters above.
+ *
+ * Exported so the production wiring is the thing under test. Built inline at the
+ * call site, a missing listener is invisible: the guard treats every event as
+ * optional and a test fixture supplies its own, so both stay green while the
+ * extension never receives the event.
+ */
+export function chromeTabGuardEvents(): TabGuardEvents {
+  return {
+    onCreated: chrome.tabs.onCreated,
+    onAttached: chrome.tabs.onAttached,
+    onFocusChanged: chrome.windows.onFocusChanged,
+  };
+}
+
+/**
  * Evict tabs that enter an Agent Window without belonging to its session.
  *
  * A tab stays when the session already claims it (`tab_create`, the session
@@ -133,9 +149,10 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
       return;
     }
     if (target === windowId) return;
-    await moveWithRetries(tabs, tabId, target, () =>
+    const outcome = await moveWithRetries(tabs, tabId, target, windowId, () =>
       stillForeign(ctx, tabId, windowId, openerTabId),
     );
+    if (outcome === "cancelled") return;
     await windows.focus(target);
     await tabs.update(tabId, { active: true });
   };
@@ -204,21 +221,31 @@ async function resolveUserWindow(
 
 /**
  * Chrome refuses a move while the user is dragging the tab, which is transient.
- * Retry a bounded number of times, re-checking between attempts so a tab that
- * became ours in the meantime is left alone, and give up rather than loop.
+ * Retry a bounded number of times and give up rather than loop.
+ *
+ * Each backoff is long enough for the tab to stop being ours or to leave the
+ * window we judged it in, so both are re-read before every attempt. The caller
+ * focuses the destination and activates the tab, which it must not do when the
+ * move was abandoned, so the outcome is reported rather than implied.
  */
 async function moveWithRetries(
   tabs: TabGuardTabsApi,
   tabId: number,
   windowId: number,
+  sourceWindowId: number,
   stillForeign: () => boolean,
-): Promise<void> {
+): Promise<"moved" | "cancelled"> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    if (!stillForeign()) return;
+    if (!stillForeign()) return "cancelled";
+    if (attempt > 0) {
+      const current = await tabs.get(tabId);
+      if (!current || current.windowId !== sourceWindowId) return "cancelled";
+      if (!stillForeign()) return "cancelled";
+    }
     try {
       await tabs.move(tabId, { windowId, index: -1 });
-      return;
+      return "moved";
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
