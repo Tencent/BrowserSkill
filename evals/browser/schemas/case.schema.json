@@ -62,7 +62,23 @@
           "items": {
             "type": "object",
             "required": ["action"],
-            "properties": { "action": { "type": "string" } },
+            "properties": {
+              "action": { "type": "string" },
+              "noClear": {
+                "type": "boolean",
+                "description": "Fill only: append instead of replacing."
+              },
+              "expectError": {
+                "type": "object",
+                "description": "Fill only: require this structured CLI error.",
+                "required": ["code", "reason"],
+                "properties": {
+                  "code": { "type": "string", "minLength": 1 },
+                  "reason": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              }
+            },
             "additionalProperties": true
           }
         }

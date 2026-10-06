@@ -692,7 +692,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
     defineTool({
       name: "interact.fill",
       description:
-        "Fill an input / textarea / contenteditable element, clearing it first by default. " +
+        "Fill an editable text input, textarea, or contenteditable editor root, clearing it first by default. Internal paragraphs and spans are not supported. " +
         "Target is a snapshot ref (@e3) or a CSS selector.",
       parameters: {
         target: {

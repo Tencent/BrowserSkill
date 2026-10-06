@@ -12,6 +12,20 @@
   scroll distance. An optional target is scrolled into view first; without one,
   input lands at the viewport centre. Observe to check the page's response.
 
+### Filling text
+
+`fill` supports enabled, editable text inputs, textareas, and contenteditable
+editor roots. Target the whole editing host, not an internal paragraph or span,
+even if that child has `tabindex` or repeats `contenteditable`. Unsupported
+targets are rejected without focusing or changing them; the tool never promotes
+a child target to its parent editor.
+
+By default, fill replaces all text in the target. `--no-clear` appends at its end.
+An empty value clears the target unless `--no-clear` is set. Use the editor root's
+ref from a fresh observation. After a mid-operation failure or cancellation,
+observe before retrying: earlier input events or edits may already have occurred.
+Rich-text framework state and undo behavior require application-specific checks.
+
 ### Large observations
 
 There is no default token cap. With `observe --max-tokens <n>`, follow a returned

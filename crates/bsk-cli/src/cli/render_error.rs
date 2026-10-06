@@ -391,7 +391,7 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         (ErrorCode::InvalidParams, reason::TARGET_NOT_FILLABLE) => RenderInfo {
             summary: "target element is not fillable",
             hint: Some(
-                "observe the page and choose an enabled, editable text input, textarea, or contenteditable; use the appropriate interaction for other control types",
+                "observe the page and choose an enabled, editable text input, textarea, or contenteditable editor root; internal paragraphs and spans are not fill targets",
             ),
             exit_code: base.exit_code,
         },

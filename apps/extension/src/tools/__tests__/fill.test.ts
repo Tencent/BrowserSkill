@@ -321,11 +321,11 @@ describe("fill result verification", () => {
     const result = await h.fill();
     expect(result).toMatchObject({ code: "cdp_failed", data: { reason: "fill_failed" } });
     expect(JSON.stringify(result)).not.toContain("page secret");
-    if (phase <= 3) expect(h.insert).not.toHaveBeenCalled();
+    if (phase <= 4) expect(h.insert).not.toHaveBeenCalled();
     expect(h.release).toHaveBeenCalledOnce();
   });
 
-  it.each([1, 2, 3, 5])("rejects missing results at phase %s", async (phase) => {
+  it.each([1, 2, 3, 4, 6])("rejects missing results at phase %s", async (phase) => {
     const h = await setup();
     vi.spyOn(document, "hasFocus").mockReturnValue(false);
     const run = h.script.getMockImplementation()!;
@@ -334,7 +334,7 @@ describe("fill result verification", () => {
       ++count === phase ? { result: { type: "undefined" } } : run(params),
     );
     expect(await h.fill()).toMatchObject({ code: "cdp_failed" });
-    if (phase <= 3) expect(h.insert).not.toHaveBeenCalled();
+    if (phase <= 4) expect(h.insert).not.toHaveBeenCalled();
   });
 
   it.each(["input", "change"])("checks state after nested microtasks from %s", async (event) => {
@@ -394,6 +394,7 @@ describe("fill result verification", () => {
       h.element.value = normalized;
     });
     expect(await h.fill(requested)).toMatchObject({ value_length: normalized.length });
+    expect(h.insert).toHaveBeenCalledWith(requested.replace(/\r\n?/g, "\n"));
   });
 
   it("does not count an editable padding break as an extra typed character", async () => {
@@ -538,7 +539,7 @@ describe("fill result verification", () => {
     const controller = new AbortController();
     h.insert.mockImplementation(async () => controller.abort());
     expect(await h.fill("hello", true, controller.signal)).toMatchObject({ code: "cancelled" });
-    expect(h.script).toHaveBeenCalledTimes(2);
+    expect(h.script).toHaveBeenCalledTimes(3);
     expect(h.release).toHaveBeenCalledOnce();
   });
 

@@ -195,3 +195,13 @@ failure/error，结束后 `bsk session list --json` 必须为 `[]`。不能为�
 
 直连 smoke 自动覆盖 28 项中的 25 项。`tabs.borrow`、`tabs.return`、`assist.request-help` 需要
 真实用户标签页或真人交互，因此保留在 manual lane，避免默认测试具有破坏性或不确定性。
+
+### Fill 回归用例选项
+
+`fill` 步骤允许空字符串 `""`，用于验证清空；`"noClear": true` 对应
+`--no-clear` 追加。验证拒绝行为时可设置
+`"expectError": { "code": "invalid_params", "reason": "target_not_fillable" }`。
+错误码和原因必须同时匹配；超时、非法输出或意外成功仍然失败。这些选项仅用于 fill。
+
+[编辑器根节点回归](cases/regression/fill-editor-roots/README.md)说明了共享页面、
+真实浏览器断言和 CLI smoke 的运行方式。

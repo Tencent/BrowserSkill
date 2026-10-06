@@ -1436,12 +1436,11 @@ function successfulFillScript(params: unknown) {
   const args = script.arguments ?? [];
   return {
     result: {
-      value:
-        args.length === 2
-          ? { before: "", expected: args[0].value }
-          : script.functionDeclaration.startsWith("function(expected)")
-            ? { connected: true, matches: true, valueLength: String(args[0].value).length }
-            : "ready",
+      value: script.functionDeclaration.startsWith("function(value, clearBefore")
+        ? { before: "", expected: args[0].value }
+        : script.functionDeclaration.startsWith("function(expected)")
+          ? { connected: true, matches: true, valueLength: String(args[0].value).length }
+          : "ready",
     },
   };
 }
@@ -1466,7 +1465,7 @@ describe("handleFill", () => {
     ctx.refStore.set("e1", 100, { tabId: 4 });
     const fake = makeFakeCdp({
       "DOM.describeNode": () => ({
-        node: { backendNodeId: 100, nodeName: "DIV", attributes: [] },
+        node: { backendNodeId: 100, nodeName: "BUTTON", attributes: [] },
       }),
     });
     const res = await handleFill(
@@ -1509,7 +1508,7 @@ describe("handleFill", () => {
     expect(insert?.params).toEqual({ text: "hello" });
     // Foreground replacement needs no extra caret-positioning round trip.
     const callFns = fake.sent.filter((c) => c.method === "Runtime.callFunctionOn");
-    expect(callFns).toHaveLength(4);
+    expect(callFns).toHaveLength(5);
   });
 
   it("passes clear_before=false to preparation and verifies the result", async () => {
@@ -1524,8 +1523,10 @@ describe("handleFill", () => {
       "DOM.focus": () => ({}),
       "DOM.resolveNode": () => ({ object: { objectId: "obj-2" } }),
       "Runtime.callFunctionOn": (p) => {
-        const args = (p as { arguments?: Array<{ value: unknown }> }).arguments ?? [];
-        if (args.length === 2) expect(args[1].value).toBe(false);
+        const script = p as { arguments?: Array<{ value: unknown }>; functionDeclaration: string };
+        if (script.functionDeclaration.startsWith("function(value, clearBefore")) {
+          expect(script.arguments?.[1].value).toBe(false);
+        }
         return successfulFillScript(p);
       },
       "Input.dispatchKeyEvent": () => ({}),
@@ -1611,6 +1612,9 @@ describe("handleFill", () => {
         return {};
       },
       "DOM.focus": () => ({}),
+      "DOM.resolveNode": () => ({ object: { objectId: "fill-target" } }),
+      "Runtime.callFunctionOn": successfulFillScript,
+      "Runtime.releaseObject": () => ({}),
     });
 
     const res = await handleFill(
