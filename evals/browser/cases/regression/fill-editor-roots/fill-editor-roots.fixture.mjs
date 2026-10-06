@@ -26,6 +26,19 @@ export const acceptedTargets = [
     ],
   },
   {
+    name: "trailing line break",
+    markup: '<div id="target" contenteditable="true">hello<br></div>',
+    steps: [
+      ["!", false, "hello!", "hello!"],
+      ["\n", false, "hello!\n"],
+    ],
+  },
+  {
+    name: "formatted line wrappers",
+    markup: '<div id="target" contenteditable="true">\n  <div>a</div>\n  <div>b</div>\n</div>',
+    steps: [["!", false, "a\nb!"]],
+  },
+  {
     name: "append to existing paragraphs",
     markup: '<div id="target" contenteditable="true"><p>first</p><p>second</p></div>',
     steps: [["!", false, "first\n\nsecond!"]],

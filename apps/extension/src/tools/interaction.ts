@@ -972,30 +972,46 @@ const FILL_EDITABLE_FUNCTION = `function() {
   return this.isConnected && supported && !this.readOnly && !this.matches(':disabled');
 }`;
 
-// Read plain text without counting Chrome's empty-line <br> as a character.
-// insertText uses direct DIV line wrappers in rich editors and text nodes in
-// plaintext editors. Preserve literal whitespace instead of losing it through
-// innerText's CSS collapsing. Other rich structures retain their rendered text.
+// In these modes Chrome types NBSP for spaces at line edges, and whitespace at
+// line edges is source formatting rather than text.
+const FILL_COLLAPSES_WHITESPACE = `['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)`;
+
+// Typing produces text nodes, <br>, and direct <div> lines. Read that layout
+// literally: innerText collapses whitespace and counts the <br> that only holds
+// a line open. Other rich structures keep their rendered text. Normalize NBSP
+// only in the read value; never rewrite the user's DOM characters.
 const FILL_VALUE_FUNCTION = `function() {
   if (this.matches('input,textarea')) return this.value;
-  const rendered = this.innerText;
-  const collapses = ['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace);
-  const children = [...this.childNodes];
-  const lineWrappers = this.children.length > 0 && children.every((child, index) =>
-    (index === 0 && child.nodeType === Node.TEXT_NODE) ||
-    (child.nodeName === 'DIV' && getComputedStyle(child).display === 'block' &&
-      [...child.children].every(el => el.nodeName === 'BR')));
+  const collapses = ${FILL_COLLAPSES_WHITESPACE};
+  const isInline = node => node.nodeType === Node.TEXT_NODE || node.nodeName === 'BR';
+  const isLine = node => node.nodeName === 'DIV' && getComputedStyle(node).display === 'block' &&
+    [...node.childNodes].every(isInline);
+  const nodes = [...this.childNodes];
   let value;
-  if (lineWrappers) {
-    value = children.map(child => child.nodeType === Node.TEXT_NODE ? child.data :
-      child.childNodes.length === 1 && child.firstChild.nodeName === 'BR' ? '' : child.innerText).join('\\n');
-  } else if (this.children.length === 0 && rendered !== '') {
-    value = collapses ? this.textContent.replace(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/g, '') : this.textContent;
+  if (nodes.every(node => isInline(node) || isLine(node))) {
+    const lines = [];
+    let open;
+    for (const node of nodes) {
+      if (isLine(node)) {
+        lines.push([...node.childNodes]);
+        open = undefined;
+      } else {
+        if (!open) lines.push(open = []);
+        open.push(node);
+      }
+    }
+    value = lines.flatMap(line => {
+      let text = line.map((node, index) => node.nodeName !== 'BR' ? node.data :
+        index < line.length - 1 ? '\\n' : '').join('');
+      if (collapses) text = text.replace(/^[ \\t\\r\\n]+|[ \\t\\r\\n]+$/g, '');
+      // Without a <br>, an empty line has no height.
+      return text === '' && !line.some(node => node.nodeName === 'BR') ? [] : [text];
+    }).join('\\n');
   } else {
+    // An editor holding only an empty line, such as <p><br></p>, is empty.
+    const rendered = this.innerText;
     value = rendered === '\\n' && this.textContent === '' ? '' : rendered;
   }
-  // Chrome substitutes NBSP at line edges in whitespace-collapsing editors.
-  // Only normalize the read value; never rewrite the user's DOM characters.
   return collapses ? value.replace(/\\u00a0/g, ' ') : value;
 }`;
 
@@ -1027,7 +1043,7 @@ const FILL_PREPARATION_FUNCTION = `function(value, clearBefore) {
     }
   } else {
     expected = expected.replace(/\\r\\n?/g, '\\n');
-    if (['normal', 'nowrap'].includes(getComputedStyle(this).whiteSpace)) expected = expected.replace(/\\u00a0/g, ' ');
+    if (${FILL_COLLAPSES_WHITESPACE}) expected = expected.replace(/\\u00a0/g, ' ');
   }
   return { before, expected };
 }`;
