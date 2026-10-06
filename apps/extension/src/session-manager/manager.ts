@@ -1,6 +1,9 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
+/** Upper bound on one settle round, so a claim that never settles cannot hold the guard open. */
+const SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS = 2_000;
+
 export interface SessionContext {
   /** Remote connections retain dedicated windows, with explicit page ownership. */
   remote?: boolean;
@@ -279,11 +282,31 @@ export class SessionManager {
    * rather than awaiting one round; the bound keeps a misbehaving tool from
    * holding the guard open forever.
    */
-  async settlePendingTabClaims(sessionId: string): Promise<void> {
+  async settlePendingTabClaims(
+    sessionId: string,
+    timeoutMs: number = SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     for (let round = 0; round < 8; round += 1) {
       const inFlight = this.pendingTabClaims.get(sessionId);
       if (!inFlight || inFlight.size === 0) return;
-      await Promise.all([...inFlight]);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      // The round bound alone leaves a claim that never settles holding
+      // Promise.all open, and with it every other tab in this session.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<"expired">((resolve) => {
+        timer = setTimeout(() => resolve("expired"), remaining);
+      });
+      try {
+        const settled = await Promise.race([
+          Promise.all([...inFlight]).then(() => "settled" as const),
+          expired,
+        ]);
+        if (settled === "expired") return;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     }
   }
 
