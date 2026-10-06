@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../manager";
-import { attachAgentWindowTabGuard, type TabGuardEvents } from "../tab-guard";
+import { attachAgentWindowTabGuard, chromeTabGuardEvents, type TabGuardEvents } from "../tab-guard";
 
 const AGENT_WINDOW = 100;
 const USER_WINDOW = 7;
@@ -112,6 +112,25 @@ async function setup(overrides: { userWindows?: number[]; lastFocused?: number |
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+describe("chrome event wiring", () => {
+  const listener = () => ({ addListener: () => {}, removeListener: () => {} });
+
+  it("subscribes to focus as well as creation and attachment", () => {
+    vi.stubGlobal("chrome", {
+      tabs: { onCreated: listener(), onAttached: listener() },
+      windows: { onFocusChanged: listener() },
+    });
+    // The guard treats onFocusChanged as optional and the fixtures below supply
+    // their own, so a call site that omits it keeps every other case green while
+    // the extension never learns which user window was last focused.
+    const events = chromeTabGuardEvents();
+    expect(events.onCreated).toBe(chrome.tabs.onCreated);
+    expect(events.onAttached).toBe(chrome.tabs.onAttached);
+    expect(events.onFocusChanged).toBe(chrome.windows.onFocusChanged);
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("agent window tab guard", () => {
   it("evicts a tab the OS routed into the Agent Window", async () => {
     const h = await setup();
@@ -123,6 +142,56 @@ describe("agent window tab guard", () => {
     expect(h.windows.focus).toHaveBeenCalledWith(USER_WINDOW);
     expect(h.tabs.update).toHaveBeenCalledWith(42, { active: true });
   });
+
+  it("abandons the move when the user pulls the tab out during a retry backoff", async () => {
+    // Each backoff is long enough for the user to drag the tab elsewhere. Moving
+    // it then drags it back from wherever they put it.
+    const h = await setup();
+    h.tabWindows.set(42, AGENT_WINDOW);
+    h.tabs.move.mockImplementationOnce(async () => {
+      // The drag that refused the move is the same drag that lands it elsewhere.
+      h.tabWindows.set(42, 4242);
+      throw new Error("Tabs cannot be edited right now");
+    });
+
+    h.emitCreated({ id: 42, windowId: AGENT_WINDOW });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    expect(h.tabs.move).toHaveBeenCalledTimes(1);
+    expect(h.windows.focus).not.toHaveBeenCalled();
+    expect(h.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it("does not focus or activate a tab whose move was abandoned", async () => {
+    // The tab became the agent's between attempts. Focusing the user window and
+    // activating the tab there is follow-up work for a move that never happened.
+    const h = await setup();
+    h.tabWindows.set(42, AGENT_WINDOW);
+    h.tabs.move.mockRejectedValueOnce(new Error("Tabs cannot be edited right now"));
+    h.tabs.move.mockImplementationOnce(async () => {
+      throw new Error("must not run: the tab is the agent's by now");
+    });
+    setTimeout(() => h.ctx.agentCreatedTabs.add(42), 10);
+
+    h.emitCreated({ id: 42, windowId: AGENT_WINDOW });
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    expect(h.windows.focus).not.toHaveBeenCalled();
+    expect(h.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it("gives up on a claim that never settles instead of blocking the session", async () => {
+    // The round bound caps how many times the guard re-reads, not how long one
+    // Promise.all waits. A claim that never settles would hold every other tab
+    // in the session behind it.
+    const h = await setup();
+    h.manager.trackPendingTabClaim(h.ctx.sessionId, new Promise(() => {}));
+
+    h.emitCreated({ id: 42, windowId: AGENT_WINDOW });
+    await new Promise((resolve) => setTimeout(resolve, 2_400));
+
+    expect(h.tabs.move).toHaveBeenCalledWith(42, { windowId: USER_WINDOW, index: -1 });
+  }, 10_000);
 
   it("keeps the session home tab and tabs the agent created", async () => {
     const h = await setup();

@@ -38,6 +38,7 @@ import { attachSessionEventHandler } from "@/session-manager/event-handler";
 import { isAgentControlledTab, SessionManager } from "@/session-manager/manager";
 import {
   attachAgentWindowTabGuard,
+  chromeTabGuardEvents,
   chromeTabGuardTabsApi,
   chromeTabGuardWindowsApi,
 } from "@/session-manager/tab-guard";
@@ -397,7 +398,7 @@ export default defineBackground(() => {
     manager: sessions,
     tabs: chromeTabGuardTabsApi,
     windows: chromeTabGuardWindowsApi,
-    events: { onCreated: chrome.tabs.onCreated, onAttached: chrome.tabs.onAttached },
+    events: chromeTabGuardEvents(),
   });
 
   // MV3 service worker keepalive + reconnect supervisor (review M4/M5
