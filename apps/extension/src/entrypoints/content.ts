@@ -71,7 +71,6 @@ export default defineContentScript({
   matches: ["<all_urls>"],
   runAt: "document_end",
   allFrames: false,
-  cssInjectionMode: "ui",
 
   async main(ctx) {
     if (window.top !== window) return;
