@@ -84,6 +84,38 @@ describe("registerBskSkill", () => {
     expect(skill.__disposed).toBe(true);
   });
 
+  it("states the untrusted-input rule without the vocabulary guards match on", () => {
+    // A guard that scans tool results blocks the whole body when it matches an
+    // injection rule, so the agent receives one line of guard feedback instead
+    // of the skill and proceeds with no instructions at all. The guidance has
+    // to survive without the phrasing those rules key on (#390).
+    let captured: Record<string, unknown> | undefined;
+    registerBskSkill(
+      fakeCtx({
+        register(skill: Record<string, unknown>) {
+          captured = skill;
+          return () => {};
+        },
+      }),
+    );
+    const content = String(captured?.content).toLowerCase();
+    for (const phrase of [
+      "override instructions",
+      "override your instructions",
+      "disregard earlier instructions",
+      "disregard previous instructions",
+      "ignore previous instructions",
+      "ignore all previous instructions",
+    ]) {
+      expect(content).not.toContain(phrase);
+    }
+    // The rule itself must still be stated, so deleting the paragraph is not a
+    // way to satisfy the assertions above.
+    // Line wrapping can fall between any two words, so match across whitespace.
+    expect(content).toMatch(/untrusted\s+data/);
+    expect(content).toMatch(/not\s+injection/);
+  });
+
   it("keeps one in-memory copy: repeated reads share the same content", () => {
     let captured: Record<string, unknown> | undefined;
     const skills = {
