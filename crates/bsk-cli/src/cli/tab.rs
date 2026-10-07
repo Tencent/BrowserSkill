@@ -1,6 +1,7 @@
 //! `bsk tab …` subcommands. M6.1 landed `list`; M8 adds create / close /
 //! select / borrow / return for Agent Window tab management and the
-//! user-tab borrow ↔ return loop.
+//! user-tab borrow ↔ return loop. `tab group` adds native tab-group
+//! management (`chrome.tabGroups`) scoped to the Agent Window.
 
 use std::path::PathBuf;
 
@@ -8,8 +9,10 @@ use anyhow::Context;
 use bsk_protocol::Method;
 use bsk_protocol::tools::{
     TabBorrowParams, TabBorrowResult, TabCloseParams, TabCloseResult, TabCreateParams,
-    TabCreateResult, TabInfo, TabListParams, TabListResult, TabReturnParams, TabReturnResult,
-    TabScope, TabSelectParams, TabSelectResult,
+    TabCreateResult, TabGroupColor, TabGroupCreateParams, TabGroupCreateResult, TabGroupInfo,
+    TabGroupListParams, TabGroupListResult, TabGroupUngroupParams, TabGroupUngroupResult,
+    TabGroupUpdateParams, TabGroupUpdateResult, TabInfo, TabListParams, TabListResult,
+    TabReturnParams, TabReturnResult, TabScope, TabSelectParams, TabSelectResult,
 };
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -38,6 +41,125 @@ pub enum TabSub {
     Borrow(TabBorrowArgs),
     /// Return a previously borrowed tab to its origin window.
     Return(TabReturnArgs),
+    /// Group, ungroup, list, or restyle tab groups in the Agent Window.
+    Group(TabGroupCmd),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TabGroupCmd {
+    #[command(subcommand)]
+    pub sub: TabGroupSub,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum TabGroupSub {
+    /// Group tabs into a new tab group, or add them to an existing one.
+    Create(TabGroupCreateArgs),
+    /// Rename, recolor, or (un)collapse an existing tab group.
+    Update(TabGroupUpdateArgs),
+    /// List tab groups in the session's Agent Window.
+    List(TabGroupListArgs),
+    /// Remove every tab in a group from that group (tabs stay open).
+    Ungroup(TabGroupUngroupArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum CliTabGroupColor {
+    Grey,
+    Blue,
+    Red,
+    Yellow,
+    Green,
+    Pink,
+    Purple,
+    Cyan,
+    Orange,
+}
+
+impl From<CliTabGroupColor> for TabGroupColor {
+    fn from(value: CliTabGroupColor) -> Self {
+        match value {
+            CliTabGroupColor::Grey => TabGroupColor::Grey,
+            CliTabGroupColor::Blue => TabGroupColor::Blue,
+            CliTabGroupColor::Red => TabGroupColor::Red,
+            CliTabGroupColor::Yellow => TabGroupColor::Yellow,
+            CliTabGroupColor::Green => TabGroupColor::Green,
+            CliTabGroupColor::Pink => TabGroupColor::Pink,
+            CliTabGroupColor::Purple => TabGroupColor::Purple,
+            CliTabGroupColor::Cyan => TabGroupColor::Cyan,
+            CliTabGroupColor::Orange => TabGroupColor::Orange,
+        }
+    }
+}
+
+fn color_label(color: TabGroupColor) -> &'static str {
+    match color {
+        TabGroupColor::Grey => "grey",
+        TabGroupColor::Blue => "blue",
+        TabGroupColor::Red => "red",
+        TabGroupColor::Yellow => "yellow",
+        TabGroupColor::Green => "green",
+        TabGroupColor::Pink => "pink",
+        TabGroupColor::Purple => "purple",
+        TabGroupColor::Cyan => "cyan",
+        TabGroupColor::Orange => "orange",
+    }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TabGroupCreateArgs {
+    /// Session id (must be active).
+    #[arg(long)]
+    pub session: String,
+    /// Tab ids to group (each must already be in the session's Agent
+    /// Window — own tab or borrowed tab). Repeatable or comma-separated.
+    #[arg(long = "tab", required = true, num_args = 1.., value_delimiter = ',')]
+    pub tabs: Vec<i64>,
+    /// Add to this existing group instead of creating a new one.
+    #[arg(long)]
+    pub group_id: Option<i64>,
+    /// Group title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Group color (Chrome picks one automatically when omitted).
+    #[arg(long, value_enum)]
+    pub color: Option<CliTabGroupColor>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TabGroupUpdateArgs {
+    /// Group id to update.
+    pub group_id: i64,
+    #[arg(long)]
+    pub session: String,
+    /// New title.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// New color.
+    #[arg(long, value_enum)]
+    pub color: Option<CliTabGroupColor>,
+    /// Collapse the group in the tab strip.
+    #[arg(long, conflicts_with = "expand")]
+    pub collapsed: bool,
+    /// Expand a previously collapsed group.
+    #[arg(long)]
+    pub expand: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TabGroupListArgs {
+    /// Session id (must be active).
+    #[arg(long)]
+    pub session: String,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct TabGroupUngroupArgs {
+    /// Group id to dissolve.
+    pub group_id: i64,
+    #[arg(long)]
+    pub session: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
@@ -135,6 +257,16 @@ pub fn dispatch(cmd: TabCmd, format: Format) -> Result<(), CliError> {
         TabSub::Select(args) => run_select(info.sock_path, args, format),
         TabSub::Borrow(args) => run_borrow(info.sock_path, args, format),
         TabSub::Return(args) => run_return(info.sock_path, args, format),
+        TabSub::Group(cmd) => dispatch_group(cmd, info.sock_path, format),
+    }
+}
+
+fn dispatch_group(cmd: TabGroupCmd, sock: PathBuf, format: Format) -> Result<(), CliError> {
+    match cmd.sub {
+        TabGroupSub::Create(args) => run_group_create(sock, args, format),
+        TabGroupSub::Update(args) => run_group_update(sock, args, format),
+        TabGroupSub::List(args) => run_group_list(sock, args, format),
+        TabGroupSub::Ungroup(args) => run_group_ungroup(sock, args, format),
     }
 }
 
@@ -367,4 +499,170 @@ fn call(sock: PathBuf, params: TabListParams) -> Result<TabListResult, CliError>
         Some(params),
         TOOL_IPC_TIMEOUT,
     )
+}
+
+// ---------------------------------------------------------------------------
+// tab group
+// ---------------------------------------------------------------------------
+
+fn run_group_create(
+    sock: PathBuf,
+    args: TabGroupCreateArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let params = TabGroupCreateParams {
+        session_id: args.session,
+        tab_ids: args.tabs,
+        group_id: args.group_id,
+        title: args.title,
+        color: args.color.map(Into::into),
+    };
+    let reply: TabGroupCreateResult = ipc_call(
+        "tab-group-create-1",
+        Method::ToolTabGroupCreate,
+        sock,
+        params,
+    )?;
+    print_payload(&reply, format, || {
+        println!(
+            "group_id={} color={} title={} tabs={}",
+            reply.group_id,
+            color_label(reply.color),
+            reply.title.as_deref().unwrap_or("<none>"),
+            format_tab_ids(&reply.tab_ids),
+        );
+    })
+}
+
+fn run_group_update(
+    sock: PathBuf,
+    args: TabGroupUpdateArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let collapsed = if args.collapsed {
+        Some(true)
+    } else if args.expand {
+        Some(false)
+    } else {
+        None
+    };
+    let params = TabGroupUpdateParams {
+        session_id: args.session,
+        group_id: args.group_id,
+        title: args.title,
+        color: args.color.map(Into::into),
+        collapsed,
+    };
+    let reply: TabGroupUpdateResult = ipc_call(
+        "tab-group-update-1",
+        Method::ToolTabGroupUpdate,
+        sock,
+        params,
+    )?;
+    print_payload(&reply, format, || {
+        println!(
+            "group_id={} color={} collapsed={} title={}",
+            reply.group_id,
+            color_label(reply.color),
+            reply.collapsed,
+            reply.title.as_deref().unwrap_or("<none>"),
+        );
+    })
+}
+
+fn run_group_list(sock: PathBuf, args: TabGroupListArgs, format: Format) -> Result<(), CliError> {
+    let params = TabGroupListParams {
+        session_id: args.session,
+    };
+    let reply: TabGroupListResult =
+        ipc_call("tab-group-list-1", Method::ToolTabGroupList, sock, params)?;
+    match format {
+        Format::Json => {
+            let json = serde_json::to_string_pretty(&reply)
+                .map_err(|e| CliError::Local(anyhow::anyhow!(e)))?;
+            println!("{json}");
+        }
+        Format::Human => render_groups_table(&reply.groups),
+    }
+    Ok(())
+}
+
+fn run_group_ungroup(
+    sock: PathBuf,
+    args: TabGroupUngroupArgs,
+    format: Format,
+) -> Result<(), CliError> {
+    let params = TabGroupUngroupParams {
+        session_id: args.session,
+        group_id: args.group_id,
+    };
+    let reply: TabGroupUngroupResult = ipc_call(
+        "tab-group-ungroup-1",
+        Method::ToolTabGroupUngroup,
+        sock,
+        params,
+    )?;
+    print_payload(&reply, format, || {
+        println!("ungrouped tabs={}", format_tab_ids(&reply.tab_ids));
+    })
+}
+
+fn format_tab_ids(ids: &[i64]) -> String {
+    if ids.is_empty() {
+        return "<none>".into();
+    }
+    ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",")
+}
+
+fn render_groups_table(groups: &[TabGroupInfo]) {
+    if groups.is_empty() {
+        println!("(no tab groups)");
+        return;
+    }
+    let rows: Vec<[String; 5]> = groups
+        .iter()
+        .map(|g| {
+            [
+                g.group_id.to_string(),
+                truncate(g.title.as_deref().unwrap_or("-"), 30),
+                color_label(g.color).to_string(),
+                g.collapsed.to_string(),
+                format_tab_ids(&g.tab_ids),
+            ]
+        })
+        .collect();
+    let headers = ["GROUP", "TITLE", "COLOR", "COLLAPSED", "TABS"];
+    let widths: [usize; 5] = std::array::from_fn(|i| {
+        rows.iter()
+            .map(|r| r[i].len())
+            .max()
+            .unwrap_or(0)
+            .max(headers[i].len())
+    });
+    println!(
+        "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}",
+        headers[0],
+        headers[1],
+        headers[2],
+        headers[3],
+        headers[4],
+        w0 = widths[0],
+        w1 = widths[1],
+        w2 = widths[2],
+        w3 = widths[3],
+    );
+    for r in &rows {
+        println!(
+            "{:<w0$}  {:<w1$}  {:<w2$}  {:<w3$}  {}",
+            r[0],
+            r[1],
+            r[2],
+            r[3],
+            r[4],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2],
+            w3 = widths[3],
+        );
+    }
 }
