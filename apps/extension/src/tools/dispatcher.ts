@@ -494,7 +494,9 @@ export class ToolDispatcher {
       case "tool.tab_group_list":
         return handleTabGroupList(this.sessions, req.params as TabGroupListParams, { signal });
       case "tool.tab_group_ungroup":
-        return handleTabGroupUngroup(this.sessions, req.params as TabGroupUngroupParams, { signal });
+        return handleTabGroupUngroup(this.sessions, req.params as TabGroupUngroupParams, {
+          signal,
+        });
       case "tool.tab_borrow": {
         const result = await handleTabBorrow(this.sessions, req.params as TabBorrowParams, {
           signal,

@@ -1509,7 +1509,9 @@ async function authoriseAgentGroupMembers(
       message: err instanceof Error ? err.message : String(err),
     };
   }
-  const memberIds = members.filter((t): t is CreatedChromeTab => typeof t.id === "number").map((t) => t.id);
+  const memberIds = members
+    .filter((t): t is CreatedChromeTab => typeof t.id === "number")
+    .map((t) => t.id);
   return authoriseAgentTabIds(manager, ctx, memberIds, tabsApi, toolName);
 }
 
@@ -1647,6 +1649,9 @@ async function placeNewGroupInAgentWindow(
   // the moves must stop here, after recovering stranded memberships.
   if (aborted(signal, toolName)) return cancelledWithCleanup();
   const landed = await landedTabs(tabIds);
+  // Cancellation check after landedTabs(): if aborted mid-verification,
+  // do NOT recreate the group — clean up stranded tabs and return cancelled.
+  if (aborted(signal, toolName)) return cancelledWithCleanup();
   if (landed.length < tabIds.length) {
     const cleanup = await cleanupStrandedTabs();
     return mismatch(
@@ -1654,7 +1659,9 @@ async function placeNewGroupInAgentWindow(
         `Agent Window ${ctx.agentWindowId} after relocation was attempted ` +
         `(${tabIds.filter((id) => !landed.includes(id)).join(", ")} did not land); ` +
         "the tabs remain open" +
-        (cleanup === "complete" ? ", ungrouped" : `, ungrouping failed (cleanup_state: ${cleanup})`),
+        (cleanup === "complete"
+          ? ", ungrouped"
+          : `, ungrouping failed (cleanup_state: ${cleanup})`),
       cleanup,
     );
   }
@@ -1675,7 +1682,9 @@ async function placeNewGroupInAgentWindow(
     return mismatch(
       "tab_group_create: the browser did not keep the recreated group in the Agent Window " +
         `${ctx.agentWindowId}; the tabs remain open` +
-        (cleanup === "complete" ? ", ungrouped" : `, ungrouping failed (cleanup_state: ${cleanup})`),
+        (cleanup === "complete"
+          ? ", ungrouped"
+          : `, ungrouping failed (cleanup_state: ${cleanup})`),
       cleanup,
     );
   }
@@ -1701,7 +1710,10 @@ function validateTabGroupCreateParams(params: TabGroupCreateParams): RpcError | 
     return { code: "invalid_params", message: "tab_group_create title must be a string" };
   }
   if (params.color !== undefined && !TAB_GROUP_COLORS.has(params.color)) {
-    return { code: "invalid_params", message: "tab_group_create color must be a valid tab group color" };
+    return {
+      code: "invalid_params",
+      message: "tab_group_create color must be a valid tab group color",
+    };
   }
   return null;
 }
@@ -1733,7 +1745,13 @@ export async function handleTabGroupCreate(
   const groupMutation = getTabGroupMutationApi(deps);
 
   // Authorise every tab the request names...
-  const namedErr = await authoriseAgentTabIds(manager, ctx, params.tab_ids, tabsApi, "tab_group_create");
+  const namedErr = await authoriseAgentTabIds(
+    manager,
+    ctx,
+    params.tab_ids,
+    tabsApi,
+    "tab_group_create",
+  );
   if (namedErr) return namedErr;
   // ...and, when adding to an existing group, every tab already in it:
   // they will be renamed/re-grouped alongside, so each needs the same
@@ -1742,7 +1760,12 @@ export async function handleTabGroupCreate(
   // affected through group operations while `tab_select` rejects direct
   // control of the same tab.
   if (params.group_id !== undefined) {
-    const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_create");
+    const groupOrErr = await authoriseAgentGroup(
+      ctx,
+      params.group_id,
+      groupsApi,
+      "tab_group_create",
+    );
     if (isRpcError(groupOrErr)) return groupOrErr;
     const membersErr = await authoriseAgentGroupMembers(
       manager,
@@ -1808,7 +1831,12 @@ export async function handleTabGroupCreate(
     }
   }
 
-  const infoOrErr = await buildGroupInfo(groupsApi, groupMutation.queryTabs, ctx.agentWindowId, groupId);
+  const infoOrErr = await buildGroupInfo(
+    groupsApi,
+    groupMutation.queryTabs,
+    ctx.agentWindowId,
+    groupId,
+  );
   if (isRpcError(infoOrErr)) return infoOrErr;
 
   // Every relocation attempt above ran, but the only signal worth trusting
@@ -1847,7 +1875,10 @@ export async function handleTabGroupUpdate(
     return { code: "invalid_params", message: "tab_group_update title must be a string" };
   }
   if (params.color !== undefined && !TAB_GROUP_COLORS.has(params.color)) {
-    return { code: "invalid_params", message: "tab_group_update color must be a valid tab group color" };
+    return {
+      code: "invalid_params",
+      message: "tab_group_update color must be a valid tab group color",
+    };
   }
   if (params.collapsed !== undefined && typeof params.collapsed !== "boolean") {
     return { code: "invalid_params", message: "tab_group_update collapsed must be a boolean" };
@@ -1921,7 +1952,12 @@ export async function handleTabGroupList(
     if (aborted(deps.signal, "tab_group_list")) {
       return { code: "cancelled", message: "tab_group_list aborted" };
     }
-    const infoOrErr = await buildGroupInfo(groupsApi, groupMutation.queryTabs, ctx.agentWindowId, g.id);
+    const infoOrErr = await buildGroupInfo(
+      groupsApi,
+      groupMutation.queryTabs,
+      ctx.agentWindowId,
+      g.id,
+    );
     // A group that vanished between query() and the follow-up get() is
     // reported as empty rather than failing the whole listing.
     if (isRpcError(infoOrErr)) continue;
@@ -1949,7 +1985,12 @@ export async function handleTabGroupUngroup(
   }
 
   const groupsApi = getTabGroupsApi(deps);
-  const groupOrErr = await authoriseAgentGroup(ctx, params.group_id, groupsApi, "tab_group_ungroup");
+  const groupOrErr = await authoriseAgentGroup(
+    ctx,
+    params.group_id,
+    groupsApi,
+    "tab_group_ungroup",
+  );
   if (isRpcError(groupOrErr)) return groupOrErr;
 
   const groupMutation = getTabGroupMutationApi(deps);
@@ -1959,7 +2000,9 @@ export async function handleTabGroupUngroup(
   } catch (err) {
     return { code: "protocol_error", message: err instanceof Error ? err.message : String(err) };
   }
-  const tabIds = tabs.filter((t): t is CreatedChromeTab => typeof t.id === "number").map((t) => t.id);
+  const tabIds = tabs
+    .filter((t): t is CreatedChromeTab => typeof t.id === "number")
+    .map((t) => t.id);
   // Ungrouping affects every member: authorise them the same way direct
   // control would before touching any of them.
   const membersErr = await authoriseAgentTabIds(

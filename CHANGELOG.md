@@ -7,7 +7,6 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Fixed
 
 - Protocol: preserve explicit `null` results when deserializing `ResponseFrame`,
