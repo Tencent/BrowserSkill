@@ -115,7 +115,21 @@ pub enum Command {
     Status,
 
     /// Run diagnostics + repair hints.
-    Doctor,
+    #[command(arg_required_else_help = false)]
+    Doctor {
+        /// Skip waiting for a browser extension to connect.
+        ///
+        /// By default, `bsk doctor` waits up to 5 seconds for the
+        /// extension to appear so the "extension connected" check can
+        /// report a timely result. Agents that manage the daemon
+        /// externally (e.g. host-managed setups with
+        /// `BSK_AUTO_START=0`) typically run `doctor` before any
+        /// extension is installed, so this wait is a waste. Pass
+        /// `--no-wait` to return immediately once the daemon is
+        /// reachable instead.
+        #[arg(long = "no-wait", default_value_t = false)]
+        no_wait: bool,
+    },
 
     /// Install the browser-skill agent skill into local agent harnesses.
     #[command(name = "install-skill")]
