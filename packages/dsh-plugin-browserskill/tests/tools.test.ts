@@ -240,7 +240,16 @@ const EXPECTED_ACTIONS = {
     "press",
   ],
   browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
-  browser_assist: ["resize", "emulate", "request-help"],
+  browser_assist: [
+    "resize",
+    "emulate",
+    "request-help",
+    "dialog-status",
+    "dialog-accept",
+    "dialog-dismiss",
+    "operation-await",
+    "operation-cancel",
+  ],
 } as const;
 
 describe("tool registration", () => {
@@ -287,6 +296,39 @@ describe("tool registration", () => {
 });
 
 describe("action dispatch", () => {
+  it("lets a model choose prompt text and retrieve the original operation through browser_assist", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "dialog status": { dialogs: [{ id: "dlg", type: "prompt", message: "Name" }] },
+      "dialog accept": { dialog: { handled: "accepted" } },
+      "operation await": { state: "completed", result: { value: "" } },
+    });
+    await startSession(tools);
+    const assist = tools.get("browser_assist")!;
+    expect(await assist.execute({ action: "dialog-status" }, makeExec())).toMatchObject({
+      dialogs: [{ id: "dlg" }],
+    });
+    await assist.execute({ action: "dialog-accept", dialogId: "dlg", text: "" }, makeExec());
+    expect(
+      await assist.execute(
+        { action: "operation-await", operationId: "op-original", waitMs: 500 },
+        makeExec(),
+      ),
+    ).toMatchObject({ state: "completed", result: { value: "" } });
+    expect(calls.slice(1).map(({ args }) => args)).toEqual([
+      ["dialog", "status", "--session", "s1"],
+      ["dialog", "accept", "dlg", "--session", "s1", "--text", ""],
+      ["operation", "await", "op-original", "--session", "s1", "--wait-ms", "500"],
+    ]);
+    await expect(
+      assist.execute({ action: "dialog-dismiss", dialogId: "dlg", text: "ignored" }, makeExec()),
+    ).rejects.toThrow("text is only valid");
+    await expect(assist.execute({ action: "operation-cancel" }, makeExec())).rejects.toThrow(
+      "operationId is required",
+    );
+    expect(calls).toHaveLength(4);
+  });
+
   it("rejects actions outside the public contract", async () => {
     const { tools } = setup({});
     await expect(

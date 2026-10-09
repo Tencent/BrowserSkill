@@ -514,6 +514,10 @@ async fn dispatch_with_sender(
         session_id,
     };
     let lifecycle_cancellable = job.lifecycle_cancel.is_some();
+    let dialog_changes = job
+        .inflight
+        .as_ref()
+        .map(|entry| entry.dialog_pending.subscribe());
     if wait_for_capacity {
         let waited = tokio::time::timeout(
             timeout.saturating_add(Duration::from_secs(1)),
@@ -546,13 +550,17 @@ async fn dispatch_with_sender(
     } else {
         Duration::ZERO
     };
-    let waited = tokio::time::timeout(
+    let deadline = dialog_deadline(
         timeout
             .saturating_add(response_grace)
             .saturating_add(Duration::from_secs(1)),
-        respond_rx,
-    )
-    .await;
+        dialog_changes,
+    );
+    tokio::pin!(deadline);
+    let waited = tokio::select! {
+        value = respond_rx => Ok(value),
+        _ = &mut deadline => Err(()),
+    };
     match waited {
         Ok(Ok(Ok(v))) => Ok(v),
         Ok(Ok(Err(rpc))) => Err(DispatchError::Rpc(rpc)),
@@ -718,13 +726,16 @@ async fn forward_one(
     };
     let deadline_cancel: Option<&(dyn Fn() -> bool + Sync)> =
         waits_for_deadline_cleanup(&job.method).then_some(&send_deadline_cancel);
-    let waited = await_with_optional_cancel(
+    let waited = await_with_dialog_cancel(
         job.timeout,
         job.cancel_cleanup_timeout,
         waiter,
         cancel_token.as_ref(),
         on_abort,
         deadline_cancel,
+        job.inflight
+            .as_ref()
+            .map(|entry| entry.dialog_pending.subscribe()),
     )
     .await;
     // Record what this call implies about the control plane before shaping
@@ -1051,7 +1062,14 @@ fn input_effect_data(response: Option<&ResponseBody>) -> Value {
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
+        Method::ToolScreenshotFullPage
+            | Method::ToolTabBorrow
+            | Method::ToolRequestHelp
+            | Method::ToolEvaluate
+            | Method::ToolNavigate
+            | Method::ToolNavigateBack
+            | Method::ToolNavigateForward
+            | Method::ToolReload
     ) || is_native_input(method)
         || is_effect_aware_transfer(method)
 }
@@ -1131,17 +1149,69 @@ enum WaitOutcome {
     Timeout,
 }
 
+/// A dialog adds one bounded 60s decision budget to the original RPC deadline.
+/// Ordinary requests retain their original timeout; repeated dialogs cannot reset it forever.
+async fn dialog_deadline(
+    timeout: Duration,
+    mut changes: Option<tokio::sync::watch::Receiver<bool>>,
+) {
+    let start = tokio::time::Instant::now();
+    let deadline = tokio::time::sleep_until(start + timeout);
+    tokio::pin!(deadline);
+    let mut extended = false;
+    loop {
+        if !extended && changes.as_ref().is_some_and(|rx| *rx.borrow()) {
+            extended = true;
+            deadline
+                .as_mut()
+                .reset(start + timeout + Duration::from_secs(60));
+        }
+        tokio::select! {
+            _ = &mut deadline => return,
+            _ = async {
+                match changes.as_mut() {
+                    Some(rx) => { if rx.changed().await.is_err() { std::future::pending::<()>().await; } },
+                    None => std::future::pending::<()>().await,
+                }
+            } => {},
+        }
+    }
+}
+
+#[cfg(test)]
 async fn await_with_optional_cancel(
+    timeout: Duration,
+    cleanup_timeout: Duration,
+    waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
+    cancel: Option<&super::abort::AbortToken>,
+    on_abort: Option<&(dyn Fn() + Sync)>,
+    on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+) -> WaitOutcome {
+    await_with_dialog_cancel(
+        timeout,
+        cleanup_timeout,
+        waiter,
+        cancel,
+        on_abort,
+        on_deadline,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn await_with_dialog_cancel(
     timeout: Duration,
     cleanup_timeout: Duration,
     mut waiter: oneshot::Receiver<bsk_protocol::ResponseFrame>,
     cancel: Option<&super::abort::AbortToken>,
     on_abort: Option<&(dyn Fn() + Sync)>,
     on_deadline: Option<&(dyn Fn() -> bool + Sync)>,
+    dialog_changes: Option<tokio::sync::watch::Receiver<bool>>,
 ) -> WaitOutcome {
     match cancel {
         Some(token) => {
-            let deadline = tokio::time::sleep(timeout);
+            let deadline = dialog_deadline(timeout, dialog_changes);
             tokio::pin!(deadline);
             tokio::select! {
                 // Cancel keeps same-tick priority, but it no longer drops the

@@ -320,6 +320,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         state.tool_queues.remove(&session.id);
         state.session_interrupts.drop_session(&session.id);
         state.transfers.release_session(&session.id.0);
+        state.dialog_operations.remove_session(&session.id.0);
         debug!(session = %session.id, "purged stale session before browser reconnect");
     }
     let (tx, mut rx) = mpsc::unbounded_channel::<Frame>();
@@ -457,6 +458,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
             state.tool_queues.remove(&s.id);
             state.session_interrupts.drop_session(&s.id);
             state.transfers.release_session(&s.id.0);
+            state.dialog_operations.remove_session(&s.id.0);
             debug!(session = %s.id, "purged session on browser disconnect");
         }
     } else {
@@ -486,6 +488,24 @@ async fn handle_inbound_text(state: &Arc<DaemonState>, client: &Arc<BrowserClien
         }
         Frame::Event(ev) => match ev.event {
             bsk_protocol::EventKind::AuditContext => state.audit.context(&client.id.0, &ev.payload),
+            bsk_protocol::EventKind::DialogChanged => {
+                if let Some(sid) = ev.payload["session_id"].as_str()
+                    && state
+                        .sessions
+                        .get(&super::sessions::SessionId(sid.into()))
+                        .is_some_and(|s| s.browser_id == client.id)
+                {
+                    state.dialog_operations.dialog_changed(&ev.payload);
+                    if let Some(id) = ev.payload["operation_id"].as_str()
+                        && let Some(operation) = state.dialog_operations.get(sid, id)
+                        && let Some(inflight) = state.tool_inflight.get(&operation.cli_rpc_id)
+                    {
+                        inflight
+                            .dialog_pending
+                            .send_replace(ev.payload["dialog"].is_object());
+                    }
+                }
+            }
             bsk_protocol::EventKind::SystemHeartbeat => {
                 // `touch()` already ran for this frame in the read loop;
                 // additionally opt this browser in to liveness reaping now
@@ -637,6 +657,7 @@ fn handle_session_window_closed(
         &session_id,
     ) {
         state.transfers.release_session(&session_id.0);
+        state.dialog_operations.remove_session(&session_id.0);
         info!(session = %session_id, "session removed: user closed Agent Window");
     } else {
         debug!(session = %session_id, "session.window_closed for unknown session id");

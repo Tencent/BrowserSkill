@@ -87,10 +87,10 @@ export default defineBackground(() => {
   attachAuditBridge(controller, transport);
   const cdp = new ChromiumCdp(undefined, {
     onDocumentChanged: (tabId) => sessions.invalidateTabRefs(tabId),
-    shouldAutoAcceptDialog: async (tabId) => {
+    canControlDialog: async (tabId) => {
       const tab = await chrome.tabs.get(tabId);
       const session = sessions.findByWindowId(tab.windowId);
-      return session !== null && (!session.remote || isAgentControlledTab(session, tabId));
+      return session !== null && isAgentControlledTab(session, tabId);
     },
   });
   const debug = new DebugManager(sessions, cdp, chrome.tabs, Date.now, new LocalDebugArchive());

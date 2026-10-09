@@ -246,6 +246,15 @@ pub fn render_with_extras(
             // whatever the wrapped error renders for transport /
             // setup failures that have no `ErrorCode`.
             let _ = writeln!(out, "error: {summary}");
+            if err.code() == Some(ErrorCode::DialogPending)
+                && let Some(data) = err.data()
+            {
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    serde_json::to_string_pretty(data).unwrap_or_default()
+                );
+            }
             if let Some(extras) = extras
                 && let Err(e) = extras.write_extras(&mut out)
             {

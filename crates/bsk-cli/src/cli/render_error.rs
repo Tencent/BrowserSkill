@@ -17,7 +17,8 @@
 //!   * `2` — protocol or transport error (incl. `cancelled`),
 //!   * `3` — browser / CDP failure,
 //!   * `4` — timeout,
-//!   * `5` — version mismatch.
+//!   * `5` — version mismatch,
+//!   * `6` — pending dialog; decide explicitly, then retrieve the original result.
 //!
 //! Strings are in English: the CLI is consumed by agents and other
 //! automated tooling, so all user-facing copy uses English. Command
@@ -91,6 +92,13 @@ pub struct RenderInfo {
 /// Look up the rendering info for a given error code.
 pub fn info_for(code: ErrorCode) -> RenderInfo {
     match code {
+        ErrorCode::DialogPending => RenderInfo {
+            summary: "operation is waiting for an agent dialog decision",
+            hint: Some(
+                "inspect `bsk dialog status --session <id> --json`; decide with dialog accept/dismiss, then retrieve the ORIGINAL result with `bsk operation await <operation-id> --session <id> --json`. Do not repeat the original action.",
+            ),
+            exit_code: 6,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(

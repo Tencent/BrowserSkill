@@ -145,6 +145,75 @@ export function registerPhaseOneSupportTools(
 ): void {
   const { registry } = deps;
 
+  for (const action of [
+    "dialog-status",
+    "dialog-accept",
+    "dialog-dismiss",
+    "operation-await",
+    "operation-cancel",
+  ] as const) {
+    register(
+      defineTool({
+        name: `assist.${action}`,
+        description:
+          "Decide a native JS modal or retrieve the ORIGINAL suspended operation. Never repeat a dispatched action after dialog_pending.",
+        parameters: {
+          session: SESSION_PARAM,
+          dialogId: {
+            type: "string",
+            description: "Pending dialog id, required for accept/dismiss.",
+          },
+          operationId: {
+            type: "string",
+            description: "Original operation id, required for await/cancel.",
+          },
+          text: {
+            type: "string",
+            description: "Exact prompt input, only for dialog-accept; an empty string is valid.",
+          },
+          waitMs: { type: "integer", description: "operation-await wait, 0..60000 ms." },
+        },
+        output: {
+          schema: { type: "json" },
+          render: (_args, value) => [{ type: "text", text: JSON.stringify(value) }],
+        },
+        async execute(args, exec) {
+          const session = registry.resolve(args.session, `browser_assist(action=${action})`);
+          const [group, verb] = action.split("-");
+          const cmd = [group, verb];
+          if (group === "dialog" && verb !== "status") {
+            if (!args.dialogId)
+              throw new Error("dialogId is required; obtain it from dialog-status");
+            cmd.push(args.dialogId);
+          }
+          if (group === "operation") {
+            if (!args.operationId)
+              throw new Error("operationId is required; use the original dialog_pending receipt");
+            cmd.push(args.operationId);
+          }
+          cmd.push("--session", session);
+          if (args.text !== undefined) {
+            if (action !== "dialog-accept") throw new Error("text is only valid for dialog-accept");
+            cmd.push("--text", args.text);
+          }
+          if (args.waitMs !== undefined) {
+            if (action !== "operation-await" || args.waitMs < 0 || args.waitMs > 60000)
+              throw new Error("waitMs is only valid for operation-await and must be 0..60000");
+            cmd.push("--wait-ms", String(args.waitMs));
+          }
+          return (await runtime.run(
+            exec,
+            cmd,
+            action,
+            session,
+            runnerTimeout(deps, args.waitMs),
+          )) as never;
+        },
+        presentResult: runtime.presentTerminalResult,
+      }),
+    );
+  }
+
   register(
     defineTool({
       name: "assist.request-help",

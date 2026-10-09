@@ -9,6 +9,7 @@ pub mod business_rpc;
 pub mod console;
 pub mod daemon;
 pub mod debug;
+pub mod dialog_control;
 pub mod dialogs;
 pub mod doctor;
 pub mod download;
@@ -107,6 +108,10 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Decide native JavaScript dialogs (alert, confirm, prompt, beforeunload).
+    Dialog(dialog_control::DialogCmd),
+    /// Retrieve or cancel the original operation suspended by a native dialog.
+    Operation(dialog_control::OperationCmd),
     /// Manage the local `bsk` daemon process.
     #[command(subcommand)]
     Daemon(DaemonCmd),

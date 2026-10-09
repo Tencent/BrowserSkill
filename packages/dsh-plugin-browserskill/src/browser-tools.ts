@@ -273,16 +273,31 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
   {
     name: "browser_assist",
     description:
-      "Display and human-assistance operations. Actions: resize, emulate, request-help. resize " +
+      "Display and human-assistance operations. Actions: resize, emulate, request-help, dialog-status, dialog-accept, dialog-dismiss, operation-await, operation-cancel. Native JS dialogs require YOUR decision; use dialogId and optional text, then operation-await with the original operationId. Never repeat its action. resize " +
       "requires width/height; emulate accepts device or width/height/mobile, or off alone; " +
       "request-help requires prompt and can wait for explicit completion criteria.",
     actions: {
       resize: "assist.resize",
       emulate: "assist.emulate",
       "request-help": "assist.request-help",
+      "dialog-status": "assist.dialog-status",
+      "dialog-accept": "assist.dialog-accept",
+      "dialog-dismiss": "assist.dialog-dismiss",
+      "operation-await": "assist.operation-await",
+      "operation-cancel": "assist.operation-cancel",
     },
     parameters: {
       session: SESSION_PARAM,
+      dialogId: { type: "string", description: "Pending native dialog id for accept/dismiss." },
+      operationId: {
+        type: "string",
+        description: "Original suspended operation id for await/cancel.",
+      },
+      text: {
+        type: "string",
+        description: "Exact prompt input for dialog-accept; empty string is valid.",
+      },
+      waitMs: { type: "integer", description: "operation-await wait, 0..60000 ms." },
       tabId: TAB_ID_PARAM,
       width: { type: "integer", description: "Window/viewport width." },
       height: { type: "integer", description: "Window/viewport height." },
