@@ -1,33 +1,39 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WaitForNavigationParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "definitions": {
+    "WaitUntil": {
+      "description": "Page-lifecycle checkpoint a navigation should wait on.\n\nMapping to CDP `Page.lifecycleEvent` names:\n* `Load` → `load`\n* `DomContentLoaded` → `DOMContentLoaded`\n* `NetworkIdle` → `networkIdle`\n* `Commit` → `commit` (earliest event after the navigation actually\n  commits to a new document)",
+      "enum": [
+        "load",
+        "domcontentloaded",
+        "networkidle",
+        "commit"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "session_id": {
       "type": "string"
     },
     "tab_id": {
       "description": "Target tab. Defaults to the Agent Window's currently active tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
       "description": "Hard upper bound on the wait. Defaults to 30s.",
+      "format": "uint32",
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
+      ]
     },
     "wait_until": {
-      "description": "Lifecycle phase to wait on. Defaults to [`WaitUntil::Load`].",
       "anyOf": [
         {
           "$ref": "#/definitions/WaitUntil"
@@ -35,19 +41,13 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Lifecycle phase to wait on. Defaults to [`WaitUntil::Load`]."
     }
   },
-  "definitions": {
-    "WaitUntil": {
-      "description": "Page-lifecycle checkpoint a navigation should wait on.\n\nMapping to CDP `Page.lifecycleEvent` names: * `Load` → `load` * `DomContentLoaded` → `DOMContentLoaded` * `NetworkIdle` → `networkIdle` * `Commit` → `commit` (earliest event after the navigation actually commits to a new document)",
-      "type": "string",
-      "enum": [
-        "load",
-        "domcontentloaded",
-        "networkidle",
-        "commit"
-      ]
-    }
-  }
+  "required": [
+    "session_id"
+  ],
+  "title": "WaitForNavigationParams",
+  "type": "object"
 }

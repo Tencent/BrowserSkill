@@ -78,7 +78,7 @@ pub struct ConsoleEntry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ConsoleResult {
     pub tab_id: i64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub entries: Vec<ConsoleEntry>,
     pub next_since: u64,
     #[serde(default)]

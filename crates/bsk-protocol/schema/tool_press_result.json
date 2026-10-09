@@ -1,56 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "PressResult",
-  "type": "object",
-  "required": [
-    "code",
-    "key",
-    "tab_id"
-  ],
-  "properties": {
-    "code": {
-      "type": "string"
-    },
-    "dialogs": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/JavaScriptDialogInfo"
-      }
-    },
-    "key": {
-      "type": "string"
-    },
-    "modifiers": {
-      "default": [],
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/KeyModifier"
-      }
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    }
-  },
   "definitions": {
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
-      "type": "string",
       "enum": [
         "accepted",
         "dismissed"
-      ]
+      ],
+      "type": "string"
     },
     "JavaScriptDialogInfo": {
       "description": "One observed + handled JavaScript dialog during a tool call.",
-      "type": "object",
-      "required": [
-        "handled",
-        "message",
-        "sequence",
-        "tab_id",
-        "type"
-      ],
       "properties": {
         "default_prompt": {
           "type": [
@@ -72,13 +32,13 @@
         },
         "sequence": {
           "description": "Monotonic per-tab sequence for ordering within a session.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "type": {
           "$ref": "#/definitions/JavaScriptDialogType"
@@ -89,27 +49,67 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
     },
     "JavaScriptDialogType": {
       "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
       "enum": [
         "alert",
         "confirm",
         "prompt",
         "beforeunload"
-      ]
+      ],
+      "type": "string"
     },
     "KeyModifier": {
-      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
-      "type": "string",
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
       "enum": [
         "alt",
         "ctrl",
         "meta",
         "shift"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "code": {
+      "type": "string"
+    },
+    "dialogs": {
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      },
+      "type": "array"
+    },
+    "key": {
+      "type": "string"
+    },
+    "modifiers": {
+      "default": [],
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      },
+      "type": "array"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "tab_id",
+    "key",
+    "code"
+  ],
+  "title": "PressResult",
+  "type": "object"
 }

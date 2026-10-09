@@ -1,22 +1,29 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "HoverParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "modifiers": {
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      },
       "type": [
         "array",
         "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/KeyModifier"
-      }
+      ]
     },
     "ref": {
-      "description": "Optional `@e<N>` ref allocated by the last observation. Mutually exclusive with `selector`.",
+      "description": "Optional `@e<N>` ref allocated by the last observation.\nMutually exclusive with `selector`.",
       "type": [
         "string",
         "null"
@@ -33,40 +40,33 @@
     },
     "settle_ms": {
       "description": "Wait after the mouse move so hover-triggered UI can settle.",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "tab_id": {
       "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint32",
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
-    }
-  },
-  "definitions": {
-    "KeyModifier": {
-      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
-      "type": "string",
-      "enum": [
-        "alt",
-        "ctrl",
-        "meta",
-        "shift"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "HoverParams",
+  "type": "object"
 }

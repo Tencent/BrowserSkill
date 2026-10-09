@@ -1,60 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "FillResult",
-  "type": "object",
-  "required": [
-    "tab_id",
-    "value_length"
-  ],
-  "properties": {
-    "dialogs": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/JavaScriptDialogInfo"
-      }
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "used_ref": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "used_selector": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "value_length": {
-      "description": "UTF-16 code-unit length of the value that was finally typed (matches what `input.value.length` would report in the page).",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0.0
-    }
-  },
   "definitions": {
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
-      "type": "string",
       "enum": [
         "accepted",
         "dismissed"
-      ]
+      ],
+      "type": "string"
     },
     "JavaScriptDialogInfo": {
       "description": "One observed + handled JavaScript dialog during a tool call.",
-      "type": "object",
-      "required": [
-        "handled",
-        "message",
-        "sequence",
-        "tab_id",
-        "type"
-      ],
       "properties": {
         "default_prompt": {
           "type": [
@@ -76,13 +32,13 @@
         },
         "sequence": {
           "description": "Monotonic per-tab sequence for ordering within a session.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "type": {
           "$ref": "#/definitions/JavaScriptDialogType"
@@ -93,17 +49,61 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
     },
     "JavaScriptDialogType": {
       "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
       "enum": [
         "alert",
         "confirm",
         "prompt",
         "beforeunload"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "dialogs": {
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      },
+      "type": "array"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "used_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "used_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "value_length": {
+      "description": "UTF-16 code-unit length of the value that was finally typed\n(matches what `input.value.length` would report in the page).",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "tab_id",
+    "value_length"
+  ],
+  "title": "FillResult",
+  "type": "object"
 }

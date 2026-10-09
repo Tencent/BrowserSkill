@@ -12,7 +12,7 @@ use clap::Args;
 #[derive(Debug, Clone, Args)]
 pub struct DebugArgs {
     /// Capture/inspect evidence, manage request rules, or replay a recorded request.
-    #[arg(value_parser = ["performance", "aggregate", "duplicates", "start", "stop", "status", "requests", "request", "operations", "operation", "console", "pages", "export", "rules", "rule_add", "rule_enable", "rule_disable", "rule_remove", "replay", "capabilities", "activity", "wait", "pin", "unpin"])]
+    #[arg(value_parser = clap::builder::PossibleValuesParser::new(DebugAction::ALL.iter().map(DebugAction::wire_name)))]
     pub action: String,
     /// Request, operation or rule ID returned by an earlier debug action.
     pub id: Option<String>,

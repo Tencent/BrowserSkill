@@ -50,6 +50,7 @@ use super::abort::AbortToken;
 use super::browsers::BrowserRegistry;
 use super::inflight::{PromoteOutcome, ToolInflightEntry};
 use super::sessions::{SessionId, SessionRegistry};
+use super::tool_policy::{Outcome, execution_policy};
 
 /// Bounded queue capacity per session. Picked per design §5 ("tokio
 /// mpsc channel(64)"). A queue overflowing this many in-flight jobs
@@ -1024,10 +1025,7 @@ fn not_dispatched_error(
 }
 
 fn is_native_input(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolClick | Method::ToolPress | Method::ToolWheel
-    )
+    execution_policy(method).outcome == Outcome::NativeInput
 }
 
 // Preserve the extension's knowledge of whether input was sent. A missing
@@ -1049,11 +1047,7 @@ fn input_effect_data(response: Option<&ResponseBody>) -> Value {
 // deadlines cannot account for transit delays. Keep the queue held for cleanup.
 // Human interaction deadlines also dismiss their pending UI before releasing the queue.
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
-    matches!(
-        method,
-        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
-    ) || is_native_input(method)
-        || is_effect_aware_transfer(method)
+    execution_policy(method).cancel_at_deadline
 }
 
 fn unknown_borrow_error(code: ErrorCode) -> RpcError {
@@ -1069,7 +1063,7 @@ fn unknown_borrow_error(code: ErrorCode) -> RpcError {
 }
 
 fn is_effect_aware_transfer(method: &Method) -> bool {
-    matches!(method, Method::ToolUpload | Method::ToolDownload)
+    execution_policy(method).outcome == Outcome::FileTransfer
 }
 
 fn transfer_effect(err: &RpcError) -> Option<&str> {

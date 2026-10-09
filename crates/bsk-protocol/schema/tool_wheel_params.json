@@ -1,34 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WheelParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "delta_x": {
-      "description": "Native CDP wheel input in CSS pixels. Positive X means right. Not measured displacement.",
       "default": 0.0,
-      "type": "number",
-      "format": "double"
+      "description": "Native CDP wheel input in CSS pixels. Positive X means right. Not measured displacement.",
+      "format": "double",
+      "type": "number"
     },
     "delta_y": {
-      "description": "Native CDP wheel input in CSS pixels. Positive Y means down. Defaults to zero.",
       "default": 0.0,
-      "type": "number",
-      "format": "double"
+      "description": "Native CDP wheel input in CSS pixels. Positive Y means down. Defaults to zero.",
+      "format": "double",
+      "type": "number"
     },
     "modifiers": {
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      },
       "type": [
         "array",
         "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/KeyModifier"
-      }
+      ]
     },
     "ref": {
-      "description": "Optional `@e<N>` ref used as the wheel event's hit-test point. Mutually exclusive with `selector`. When neither is supplied, the event is dispatched at the viewport centre.",
+      "description": "Optional `@e<N>` ref used as the wheel event's hit-test point.\nMutually exclusive with `selector`. When neither is supplied,\nthe event is dispatched at the viewport centre.",
       "type": [
         "string",
         "null"
@@ -45,31 +52,24 @@
     },
     "tab_id": {
       "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint32",
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
-    }
-  },
-  "definitions": {
-    "KeyModifier": {
-      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
-      "type": "string",
-      "enum": [
-        "alt",
-        "ctrl",
-        "meta",
-        "shift"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "WheelParams",
+  "type": "object"
 }

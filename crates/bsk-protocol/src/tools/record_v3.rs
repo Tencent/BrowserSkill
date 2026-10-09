@@ -24,13 +24,8 @@ where
     Ok(version)
 }
 
-fn trace_v3_version_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
-    schemars::schema::SchemaObject {
-        instance_type: Some(schemars::schema::InstanceType::Integer.into()),
-        const_value: Some(serde_json::json!(TRACE_VERSION_V3)),
-        ..Default::default()
-    }
-    .into()
+fn trace_v3_version_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "integer", "const": TRACE_VERSION_V3 })
 }
 
 /// Stable semantic handle for an interacted element within a page observation.

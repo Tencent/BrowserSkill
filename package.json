@@ -4,6 +4,7 @@
   "packageManager": "pnpm@10.17.0",
   "scripts": {
     "cli:build": "cargo run -p bsk-protocol --bin dump-schema --locked && pnpm -r build",
+    "protocol:check": "node scripts/protocol.mjs --check",
     "eval:browser": "node evals/browser/cli.mjs",
     "eval:browser:check": "node evals/browser/cli.mjs validate && node --test evals/browser/tests/*.test.mjs",
     "eval:browser:test": "node --test evals/browser/tests/*.test.mjs",
@@ -13,10 +14,14 @@
     "ext:test": "pnpm --filter @browser-skill/extension test",
     "vom:test": "pnpm --filter @browser-skill/vom test",
     "lint": "biome check . && stylelint \"**/*.css\" && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin typecheck && pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin test",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "protocol:generate": "node scripts/protocol.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "ajv": "8.20.0",
+    "esbuild": "0.27.7",
+    "json-schema-to-typescript": "16.0.0",
     "stylelint": "^16.0.0",
     "stylelint-config-standard": "^37.0.0"
   }

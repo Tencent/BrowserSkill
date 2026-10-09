@@ -1,26 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SessionStopResult",
-  "type": "object",
-  "properties": {
-    "return_failures": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/ReturnFailure"
-      }
-    },
-    "returned_tab_ids": {
-      "type": "array",
-      "items": {
-        "type": "integer",
-        "format": "int64"
-      }
-    }
-  },
   "definitions": {
     "ErrorCode": {
       "description": "Stable daemon/extension error codes (§4.5).",
-      "type": "string",
       "enum": [
         "unknown_method",
         "unsupported",
@@ -35,15 +17,10 @@
         "version_too_old",
         "multiple_browsers_online",
         "no_browser_connected"
-      ]
+      ],
+      "type": "string"
     },
     "ReturnFailure": {
-      "type": "object",
-      "required": [
-        "code",
-        "message",
-        "tab_id"
-      ],
       "properties": {
         "code": {
           "$ref": "#/definitions/ErrorCode"
@@ -52,10 +29,40 @@
           "type": "string"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "code",
+        "message"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "Full extension response, including whether a window was left with the user.",
+  "properties": {
+    "return_failures": {
+      "items": {
+        "$ref": "#/definitions/ReturnFailure"
+      },
+      "type": "array"
+    },
+    "returned_tab_ids": {
+      "items": {
+        "format": "int64",
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "window_released": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "title": "SessionStopOutcome",
+  "type": "object"
 }

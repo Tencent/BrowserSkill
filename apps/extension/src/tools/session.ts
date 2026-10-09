@@ -5,12 +5,20 @@ import {
 } from "@/lib/interaction-preferences";
 import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
-import type { InteractionPolicy, RpcError } from "@/transport/types";
+import type {
+  SessionStartParams as ProtocolSessionStartParams,
+  RpcError,
+  SessionStartResult,
+  SessionStopParams,
+  SessionStopResult,
+} from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
 import type { CdpRunner, ChromeTabsApi } from "./shared";
 import { isRpcError } from "./shared";
 import { chromeAgentOverlayResetApi, returnBorrowedTab, type TabManagementDeps } from "./tabs";
+
+export type { SessionStartResult, SessionStopParams, SessionStopResult } from "@/transport/types";
 
 /** Valid range for Agent Window dimensions in CSS pixels. */
 export const WINDOW_SIZE_MIN = 100;
@@ -50,46 +58,14 @@ export function validateWindowSize(
   }
   return { width: width as number, height: height as number };
 }
-
-export interface SessionStartParams {
-  session_id: string;
-  browser_instance_id?: string;
-  /** Optional Agent Window outer width in CSS pixels (100..=7680). */
-  width?: number;
-  /** Optional Agent Window outer height in CSS pixels (100..=7680). */
-  height?: number;
-  /** Defaults to true so existing clients preserve visible Agent Windows. */
-  focused?: boolean;
-  /** Legacy input accepted for compatibility; browser settings always decide. */
+/** Legacy input remains accepted at the handler boundary. */
+export interface SessionStartParams extends ProtocolSessionStartParams {
   unattended?: boolean;
-}
-
-export interface SessionStartResult {
-  interaction?: InteractionPolicy;
-  agent_window_id?: number;
 }
 
 export interface SessionStartDeps {
   preferences?: InteractionPreferenceStore;
   signal?: AbortSignal;
-}
-
-export interface SessionStopParams {
-  session_id: string;
-}
-
-export interface SessionStopResult {
-  /** Tab ids that were returned to their original (or fallback) window. */
-  returned_tab_ids?: number[];
-  /** Tab ids whose return path failed; those entries remain borrowed so
-   *  shutdown can be retried without closing the Agent Window. */
-  return_failures?: Array<{ tab_id: number; code: string; message: string }>;
-  /**
-   * True when the Agent Window was *released* to the user (instead of being
-   * closed) because it still contained user-created tabs after the agent's own
-   * tabs were closed. Single-session scope.
-   */
-  window_released?: boolean;
 }
 
 export interface SessionStopDeps {

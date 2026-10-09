@@ -1,59 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "SnapshotResult",
-  "type": "object",
-  "required": [
-    "ref_count",
-    "tab_id",
-    "text"
-  ],
-  "properties": {
-    "dialogs": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/JavaScriptDialogInfo"
-      }
-    },
-    "ref_count": {
-      "description": "Number of `@e<N>` refs registered for this session by this snapshot. Equivalent to the size of the new ref-store map.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "tab_id": {
-      "description": "Tab the snapshot was actually computed for (after resolving the optional `tab_id` default).",
-      "type": "integer",
-      "format": "int64"
-    },
-    "text": {
-      "description": "Indented aria-snapshot text. Refs are rendered as `@e<N>` so the agent can copy them into subsequent `tool.click` / `tool.fill` selectors.",
-      "type": "string"
-    },
-    "truncated": {
-      "description": "Whether the rendered tree was truncated because of `max_depth` / `max_tokens`. Agents may re-run with looser caps.",
-      "default": false,
-      "type": "boolean"
-    }
-  },
   "definitions": {
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
-      "type": "string",
       "enum": [
         "accepted",
         "dismissed"
-      ]
+      ],
+      "type": "string"
     },
     "JavaScriptDialogInfo": {
       "description": "One observed + handled JavaScript dialog during a tool call.",
-      "type": "object",
-      "required": [
-        "handled",
-        "message",
-        "sequence",
-        "tab_id",
-        "type"
-      ],
       "properties": {
         "default_prompt": {
           "type": [
@@ -75,13 +32,13 @@
         },
         "sequence": {
           "description": "Monotonic per-tab sequence for ordering within a session.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "type": {
           "$ref": "#/definitions/JavaScriptDialogType"
@@ -92,17 +49,60 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
     },
     "JavaScriptDialogType": {
       "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
       "enum": [
         "alert",
         "confirm",
         "prompt",
         "beforeunload"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "dialogs": {
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      },
+      "type": "array"
+    },
+    "ref_count": {
+      "description": "Number of `@e<N>` refs registered for this session by this\nsnapshot. Equivalent to the size of the new ref-store map.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "tab_id": {
+      "description": "Tab the snapshot was actually computed for (after resolving the\noptional `tab_id` default).",
+      "format": "int64",
+      "type": "integer"
+    },
+    "text": {
+      "description": "Indented aria-snapshot text. Refs are rendered as `@e<N>` so the\nagent can copy them into subsequent `tool.click` / `tool.fill`\nselectors.",
+      "type": "string"
+    },
+    "truncated": {
+      "default": false,
+      "description": "Whether the rendered tree was truncated because of `max_depth` /\n`max_tokens`. Agents may re-run with looser caps.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "text",
+    "ref_count",
+    "tab_id"
+  ],
+  "title": "SnapshotResult",
+  "type": "object"
 }

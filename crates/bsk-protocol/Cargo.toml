@@ -22,3 +22,7 @@ thiserror = { workspace = true }
 [[bin]]
 name = "dump-schema"
 path = "src/bin/dump-schema.rs"
+
+[[bin]]
+name = "export-protocol"
+path = "src/bin/export-protocol.rs"

@@ -1,45 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "EmulateParams",
-  "type": "object",
-  "required": [
-    "session_id"
-  ],
-  "properties": {
-    "off": {
-      "description": "Clear every emulation override on the tab and restore its real environment. Mutually exclusive with `overrides`.",
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "overrides": {
-      "description": "Overrides to apply. Required unless `off` is set.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/EmulateOverrides"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "description": "Target tab. Defaults to the Agent Window's active tab.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    }
-  },
   "definitions": {
     "EmulateOverrides": {
-      "description": "Concrete emulation overrides for one tab. Field presence drives the extension: only the overrides whose fields are set are touched, so a call may change just the UA, just the viewport, or any combination.",
-      "type": "object",
+      "description": "Concrete emulation overrides for one tab. Field presence drives the\nextension: only the overrides whose fields are set are touched, so a\ncall may change just the UA, just the viewport, or any combination.",
       "properties": {
         "accept_language": {
           "description": "`Accept-Language` header override. Requires `user_agent`.",
@@ -49,40 +12,40 @@
           ]
         },
         "device_scale_factor": {
-          "description": "Device scale factor (device pixel ratio). Only meaningful with `width`/`height`; the extension maps `None` to CDP's `0` (\"use the display's native factor\").",
+          "description": "Device scale factor (device pixel ratio). Only meaningful with\n`width`/`height`; the extension maps `None` to CDP's `0`\n(\"use the display's native factor\").",
+          "format": "double",
           "type": [
             "number",
             "null"
-          ],
-          "format": "double"
+          ]
         },
         "height": {
           "description": "Viewport height in CSS pixels. Requires `width`.",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         },
         "max_touch_points": {
-          "description": "Touch points reported while touch emulation is on (CDP defaults to 1 when omitted).",
+          "description": "Touch points reported while touch emulation is on (CDP defaults\nto 1 when omitted).",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         },
         "mobile": {
-          "description": "Emulate a mobile viewport (meta-viewport handling, overlay scrollbars). Only meaningful with `width`/`height`.",
+          "description": "Emulate a mobile viewport (meta-viewport handling, overlay\nscrollbars). Only meaningful with `width`/`height`.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "touch": {
-          "description": "Enable/disable touch emulation (`Emulation.setTouchEmulationEnabled`). When omitted while `max_touch_points` is set, touch is enabled.",
+          "description": "Enable/disable touch emulation\n(`Emulation.setTouchEmulationEnabled`). When omitted while\n`max_touch_points` is set, touch is enabled.",
           "type": [
             "boolean",
             "null"
@@ -96,7 +59,6 @@
           ]
         },
         "user_agent_metadata": {
-          "description": "UA client-hints metadata. Requires `user_agent`.",
           "anyOf": [
             {
               "$ref": "#/definitions/UserAgentMetadata"
@@ -104,26 +66,23 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "UA client-hints metadata. Requires `user_agent`."
         },
         "width": {
           "description": "Viewport width in CSS pixels. Requires `height`.",
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         }
-      }
+      },
+      "type": "object"
     },
     "UserAgentBrandVersion": {
       "description": "One entry of CDP `Emulation.UserAgentBrandVersion` (UA client hints).",
-      "type": "object",
-      "required": [
-        "brand",
-        "version"
-      ],
       "properties": {
         "brand": {
           "type": "string"
@@ -131,11 +90,15 @@
         "version": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "brand",
+        "version"
+      ],
+      "type": "object"
     },
     "UserAgentMetadata": {
-      "description": "Mirror of CDP `Emulation.UserAgentMetadata`; every field is optional and only sent when present.",
-      "type": "object",
+      "description": "Mirror of CDP `Emulation.UserAgentMetadata`; every field is optional\nand only sent when present.",
       "properties": {
         "architecture": {
           "type": [
@@ -144,13 +107,13 @@
           ]
         },
         "brands": {
+          "items": {
+            "$ref": "#/definitions/UserAgentBrandVersion"
+          },
           "type": [
             "array",
             "null"
-          ],
-          "items": {
-            "$ref": "#/definitions/UserAgentBrandVersion"
-          }
+          ]
         },
         "full_version": {
           "type": [
@@ -182,7 +145,44 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "off": {
+      "description": "Clear every emulation override on the tab and restore its real\nenvironment. Mutually exclusive with `overrides`.",
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "overrides": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EmulateOverrides"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Overrides to apply. Required unless `off` is set."
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "EmulateParams",
+  "type": "object"
 }

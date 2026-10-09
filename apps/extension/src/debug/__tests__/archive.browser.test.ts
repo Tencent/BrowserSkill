@@ -1,9 +1,9 @@
 // @vitest-environment node
 // Native IndexedDB coverage; uses an isolated Chrome profile, never the user's extension.
 
-import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import ts from "typescript";
+import { fileURLToPath } from "node:url";
+import { buildSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 
 describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", () => {
@@ -20,9 +20,15 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("browser-local debug history", ()
         "json-source",
       ].map((name) => [
         name,
-        ts.transpileModule(readFileSync(new URL(`../${name}.ts`, import.meta.url), "utf8"), {
-          compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
-        }).outputText,
+        buildSync({
+          entryPoints: [fileURLToPath(new URL(`../${name}.ts`, import.meta.url))],
+          bundle: true,
+          write: false,
+          format: "esm",
+          platform: "browser",
+          target: "es2022",
+          alias: { "@": fileURLToPath(new URL("../../", import.meta.url)) },
+        }).outputFiles[0].text,
       ]),
     );
     const server = createServer((request, response) => {

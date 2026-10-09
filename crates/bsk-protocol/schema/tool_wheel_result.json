@@ -1,75 +1,16 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "WheelResult",
-  "type": "object",
-  "required": [
-    "delta_x",
-    "delta_y",
-    "tab_id",
-    "x",
-    "y"
-  ],
-  "properties": {
-    "delta_x": {
-      "description": "Requested deltas, not measured scroll distance or completion.",
-      "type": "number",
-      "format": "double"
-    },
-    "delta_y": {
-      "type": "number",
-      "format": "double"
-    },
-    "dialogs": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/JavaScriptDialogInfo"
-      }
-    },
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "used_ref": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "used_selector": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "x": {
-      "description": "Top-level viewport coordinates where the real wheel event was dispatched.",
-      "type": "number",
-      "format": "double"
-    },
-    "y": {
-      "type": "number",
-      "format": "double"
-    }
-  },
   "definitions": {
     "JavaScriptDialogHandledAction": {
       "description": "How the extension resolved the dialog so CDP could continue.",
-      "type": "string",
       "enum": [
         "accepted",
         "dismissed"
-      ]
+      ],
+      "type": "string"
     },
     "JavaScriptDialogInfo": {
       "description": "One observed + handled JavaScript dialog during a tool call.",
-      "type": "object",
-      "required": [
-        "handled",
-        "message",
-        "sequence",
-        "tab_id",
-        "type"
-      ],
       "properties": {
         "default_prompt": {
           "type": [
@@ -91,13 +32,13 @@
         },
         "sequence": {
           "description": "Monotonic per-tab sequence for ordering within a session.",
-          "type": "integer",
           "format": "uint64",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "tab_id": {
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "type": {
           "$ref": "#/definitions/JavaScriptDialogType"
@@ -108,17 +49,76 @@
             "null"
           ]
         }
-      }
+      },
+      "required": [
+        "tab_id",
+        "type",
+        "message",
+        "handled",
+        "sequence"
+      ],
+      "type": "object"
     },
     "JavaScriptDialogType": {
       "description": "Native JS dialog kind reported by CDP.",
-      "type": "string",
       "enum": [
         "alert",
         "confirm",
         "prompt",
         "beforeunload"
-      ]
+      ],
+      "type": "string"
     }
-  }
+  },
+  "properties": {
+    "delta_x": {
+      "description": "Requested deltas, not measured scroll distance or completion.",
+      "format": "double",
+      "type": "number"
+    },
+    "delta_y": {
+      "format": "double",
+      "type": "number"
+    },
+    "dialogs": {
+      "items": {
+        "$ref": "#/definitions/JavaScriptDialogInfo"
+      },
+      "type": "array"
+    },
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "used_ref": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "used_selector": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "x": {
+      "description": "Top-level viewport coordinates where the real wheel event was dispatched.",
+      "format": "double",
+      "type": "number"
+    },
+    "y": {
+      "format": "double",
+      "type": "number"
+    }
+  },
+  "required": [
+    "tab_id",
+    "x",
+    "y",
+    "delta_x",
+    "delta_y"
+  ],
+  "title": "WheelResult",
+  "type": "object"
 }

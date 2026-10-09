@@ -11,9 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
-use bsk_protocol::system::{
-    HandshakeCompat, HandshakeParams, HandshakeResult, evaluate_handshake_compat,
-};
+use bsk_protocol::system::{HandshakeCompat, HandshakeResult, evaluate_handshake_compat};
 use bsk_protocol::tools::ReturnFailure;
 use bsk_protocol::{Frame, RequestFrame, ResponseBody, ResponseFrame, RpcError};
 use futures_util::{SinkExt, StreamExt};
@@ -243,12 +241,10 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         .params
         .clone()
         .ok_or_else(|| anyhow!("handshake missing params"))?;
-    let audit_enabled = params_raw
-        .get("audit_enabled")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
-    let params: HandshakeParams = serde_json::from_value(params_raw)
-        .map_err(|err| anyhow!("invalid HandshakeParams: {err}"))?;
+    let handshake: bsk_protocol::system::HandshakeRequest = serde_json::from_value(params_raw)
+        .map_err(|err| anyhow!("invalid HandshakeRequest: {err}"))?;
+    let audit_enabled = handshake.audit_enabled.unwrap_or(false);
+    let params = handshake.identity;
 
     // Version compatibility (design §10, M10.4): protocol_version only.
     let our_app_version: Version = env!("CARGO_PKG_VERSION")
@@ -365,9 +361,11 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
         min_compatible_peer: Some(legacy_min_peer),
         min_compatible_protocol: Some(MIN_COMPATIBLE_PROTOCOL.to_string()),
     };
-    let mut result = serde_json::to_value(&result)?;
-    result["audit_version"] = serde_json::json!(1);
-    result["audit_ready"] = serde_json::json!(audit_ready);
+    let result = serde_json::to_value(bsk_protocol::system::HandshakeResponse {
+        identity: result,
+        audit_version: Some(1),
+        audit_ready: Some(audit_ready),
+    })?;
     let resp = ResponseFrame {
         id: request.id.clone(),
         body: ResponseBody::Ok(result),

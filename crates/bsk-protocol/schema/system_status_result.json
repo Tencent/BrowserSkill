@@ -1,91 +1,15 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "StatusResult",
-  "description": "`system.status` reply: daemon meta + connected browsers + live sessions.",
-  "type": "object",
-  "required": [
-    "browsers",
-    "daemon_version",
-    "pid",
-    "protocol_version",
-    "sessions",
-    "sock_path",
-    "uptime_secs",
-    "ws_port"
-  ],
-  "properties": {
-    "browsers": {
-      "description": "Snapshot of connected extension clients.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/BrowserStatusEntry"
-      }
-    },
-    "daemon_version": {
-      "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
-      "type": "string"
-    },
-    "pid": {
-      "description": "Daemon process id.",
-      "type": "integer",
-      "format": "uint32",
-      "minimum": 0.0
-    },
-    "protocol_version": {
-      "description": "Logical protocol revision (e.g. `\"1.0\"`).",
-      "type": "string"
-    },
-    "sessions": {
-      "description": "Snapshot of live sessions.",
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/SessionStatusEntry"
-      }
-    },
-    "sock_path": {
-      "description": "Absolute path of the IPC socket / named pipe handle.",
-      "type": "string"
-    },
-    "uptime_secs": {
-      "description": "Daemon uptime in whole seconds.",
-      "type": "integer",
-      "format": "uint64",
-      "minimum": 0.0
-    },
-    "version_skew_browsers": {
-      "description": "Subset of `browsers` whose `protocol_version` differs from the daemon's (minor drift, same major). Entries mirror `BrowserStatusEntry.version_skew`.",
-      "default": [],
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/VersionSkewEntry"
-      }
-    },
-    "ws_port": {
-      "description": "WS port the daemon listens on for extension clients.",
-      "type": "integer",
-      "format": "uint16",
-      "minimum": 0.0
-    }
-  },
   "definitions": {
     "BorrowConfirmationPolicy": {
-      "type": "string",
       "enum": [
         "always",
         "never"
-      ]
+      ],
+      "type": "string"
     },
     "BrowserStatusEntry": {
       "description": "Snapshot of a single connected extension (extension client view).",
-      "type": "object",
-      "required": [
-        "browser_name",
-        "browser_version",
-        "extension_version",
-        "instance_id",
-        "label",
-        "session_count"
-      ],
       "properties": {
         "browser_name": {
           "type": "string"
@@ -94,14 +18,14 @@
           "type": "string"
         },
         "connected_at_ms": {
-          "description": "Unix epoch milliseconds at which the extension completed the daemon handshake. Stable across reconnects only via the best-effort registry generation; clients should treat this as a rough \"online since\" hint, not a strong identity.",
           "default": 0,
-          "type": "integer",
-          "format": "int64"
+          "description": "Unix epoch milliseconds at which the extension completed the\ndaemon handshake. Stable across reconnects only via the\nbest-effort registry generation; clients should treat this as a\nrough \"online since\" hint, not a strong identity.",
+          "format": "int64",
+          "type": "integer"
         },
         "extension_protocol_version": {
-          "description": "Protocol version the extension advertised at handshake.",
           "default": "",
+          "description": "Protocol version the extension advertised at handshake.",
           "type": "string"
         },
         "extension_version": {
@@ -115,28 +39,32 @@
           "type": "string"
         },
         "session_count": {
-          "type": "integer",
           "format": "uint32",
-          "minimum": 0.0
+          "minimum": 0,
+          "type": "integer"
         },
         "unresponsive": {
-          "description": "The socket is still registered, but a call failed after this heartbeat-capable extension missed two heartbeats. Cleared when any frame arrives.",
           "default": false,
+          "description": "The socket is still registered, but a call failed after this\nheartbeat-capable extension missed two heartbeats. Cleared when any\nframe arrives.",
           "type": "boolean"
         },
         "version_skew": {
-          "description": "`true` when the browser's `protocol_version` differs from the daemon's (same major, minor drift). Connection is still allowed.",
           "default": false,
+          "description": "`true` when the browser's `protocol_version` differs from the\ndaemon's (same major, minor drift). Connection is still allowed.",
           "type": "boolean"
         }
-      }
+      },
+      "required": [
+        "instance_id",
+        "browser_name",
+        "browser_version",
+        "extension_version",
+        "label",
+        "session_count"
+      ],
+      "type": "object"
     },
     "InteractionPolicy": {
-      "type": "object",
-      "required": [
-        "borrow_confirmation",
-        "request_help"
-      ],
       "properties": {
         "borrow_confirmation": {
           "$ref": "#/definitions/BorrowConfirmationPolicy"
@@ -144,38 +72,37 @@
         "request_help": {
           "$ref": "#/definitions/RequestHelpPolicy"
         }
-      }
+      },
+      "required": [
+        "borrow_confirmation",
+        "request_help"
+      ],
+      "type": "object"
     },
     "RequestHelpPolicy": {
-      "type": "string",
       "enum": [
         "enabled",
         "disabled"
-      ]
+      ],
+      "type": "string"
     },
     "SessionStatusEntry": {
       "description": "Snapshot of a single live session.",
-      "type": "object",
-      "required": [
-        "browser_instance_id",
-        "created_at_ms",
-        "session_id"
-      ],
       "properties": {
         "agent_window_id": {
+          "format": "int64",
           "type": [
             "integer",
             "null"
-          ],
-          "format": "int64"
+          ]
         },
         "browser_instance_id": {
           "type": "string"
         },
         "created_at_ms": {
           "description": "Unix epoch milliseconds.",
-          "type": "integer",
-          "format": "int64"
+          "format": "int64",
+          "type": "integer"
         },
         "interaction": {
           "anyOf": [
@@ -190,25 +117,23 @@
         "session_id": {
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "session_id",
+        "browser_instance_id",
+        "created_at_ms"
+      ],
+      "type": "object"
     },
     "VersionSkewEntry": {
-      "description": "One entry per connected browser whose protocol version drifts from the daemon's (same major). Surfaced in `system.status` for `bsk status` / `bsk doctor` / popup \"warn but allow\" UX.",
-      "type": "object",
-      "required": [
-        "browser_name",
-        "client_version",
-        "instance_id",
-        "label",
-        "server_version"
-      ],
+      "description": "One entry per connected browser whose protocol version drifts from\nthe daemon's (same major). Surfaced in `system.status` for\n`bsk status` / `bsk doctor` / popup \"warn but allow\" UX.",
       "properties": {
         "browser_name": {
           "type": "string"
         },
         "client_protocol_version": {
-          "description": "Extension `protocol_version` from handshake.",
           "default": "",
+          "description": "Extension `protocol_version` from handshake.",
           "type": "string"
         },
         "client_version": {
@@ -222,15 +147,91 @@
           "type": "string"
         },
         "server_protocol_version": {
-          "description": "Daemon `protocol_version` at snapshot time.",
           "default": "",
+          "description": "Daemon `protocol_version` at snapshot time.",
           "type": "string"
         },
         "server_version": {
           "description": "Daemon app semver at snapshot time (informational).",
           "type": "string"
         }
-      }
+      },
+      "required": [
+        "instance_id",
+        "browser_name",
+        "label",
+        "server_version",
+        "client_version"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "description": "`system.status` reply: daemon meta + connected browsers + live sessions.",
+  "properties": {
+    "browsers": {
+      "description": "Snapshot of connected extension clients.",
+      "items": {
+        "$ref": "#/definitions/BrowserStatusEntry"
+      },
+      "type": "array"
+    },
+    "daemon_version": {
+      "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
+      "type": "string"
+    },
+    "pid": {
+      "description": "Daemon process id.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "protocol_version": {
+      "description": "Logical protocol revision (e.g. `\"1.0\"`).",
+      "type": "string"
+    },
+    "sessions": {
+      "description": "Snapshot of live sessions.",
+      "items": {
+        "$ref": "#/definitions/SessionStatusEntry"
+      },
+      "type": "array"
+    },
+    "sock_path": {
+      "description": "Absolute path of the IPC socket / named pipe handle.",
+      "type": "string"
+    },
+    "uptime_secs": {
+      "description": "Daemon uptime in whole seconds.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "version_skew_browsers": {
+      "default": [],
+      "description": "Subset of `browsers` whose `protocol_version` differs from the\ndaemon's (minor drift, same major). Entries mirror\n`BrowserStatusEntry.version_skew`.",
+      "items": {
+        "$ref": "#/definitions/VersionSkewEntry"
+      },
+      "type": "array"
+    },
+    "ws_port": {
+      "description": "WS port the daemon listens on for extension clients.",
+      "format": "uint16",
+      "maximum": 65535,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "daemon_version",
+    "protocol_version",
+    "pid",
+    "uptime_secs",
+    "ws_port",
+    "sock_path",
+    "browsers",
+    "sessions"
+  ],
+  "title": "StatusResult",
+  "type": "object"
 }

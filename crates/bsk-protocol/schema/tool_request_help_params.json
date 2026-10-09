@@ -1,68 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "RequestHelpParams",
-  "type": "object",
-  "required": [
-    "prompt",
-    "session_id"
-  ],
-  "properties": {
-    "completion_criteria": {
-      "description": "Optional explicit success detector. Navigation by itself is not a completion signal; these criteria must match before the tool can auto-complete without the user clicking Done.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/HelpCompletionCriteria"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "prompt": {
-      "description": "Message shown to the user explaining what to do.",
-      "type": "string"
-    },
-    "session_id": {
-      "type": "string"
-    },
-    "tab_id": {
-      "description": "Target tab. Defaults to the Agent Window's active tab.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "int64"
-    },
-    "targets": {
-      "description": "Optional components to scroll to + flash-highlight.",
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/HelpTarget"
-      }
-    },
-    "timeout_ms": {
-      "description": "Hard upper bound on the wait. Defaults to 300000 (5 min), enforced daemon-side via the generic tool timeout.",
-      "type": [
-        "integer",
-        "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
-    },
-    "title": {
-      "description": "Optional custom title for the help overlay. Falls back to the extension's default localized title when omitted.",
-      "type": [
-        "string",
-        "null"
-      ]
-    }
-  },
   "definitions": {
     "HelpCompletionCondition": {
-      "type": "object",
       "properties": {
         "selector_exists": {
           "type": [
@@ -96,50 +35,50 @@
         },
         "url_matches": {
           "description": "RE2-compatible URL regex (maximum 128 characters). Backtracking-only syntax is rejected.",
+          "maxLength": 128,
           "type": [
             "string",
             "null"
-          ],
-          "maxLength": 128
+          ]
         }
-      }
+      },
+      "type": "object"
     },
     "HelpCompletionCriteria": {
-      "type": "object",
       "properties": {
         "all": {
-          "type": [
-            "array",
-            "null"
-          ],
           "items": {
             "$ref": "#/definitions/HelpCompletionCondition"
           },
-          "maxItems": 8
+          "maxItems": 8,
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "any": {
-          "type": [
-            "array",
-            "null"
-          ],
           "items": {
             "$ref": "#/definitions/HelpCompletionCondition"
           },
-          "maxItems": 8
+          "maxItems": 8,
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "stable_for_ms": {
+          "format": "uint32",
+          "minimum": 0,
           "type": [
             "integer",
             "null"
-          ],
-          "format": "uint32",
-          "minimum": 0.0
+          ]
         }
-      }
+      },
+      "type": "object"
     },
     "HelpTarget": {
-      "description": "One component the user is asked to look at / interact with. Exactly one of `ref` / `selector` should be supplied (mirrors the click/fill convention). When neither matches a live element the overlay still shows the prompt and reports the miss via [`ResolvedTarget`].",
-      "type": "object",
+      "description": "One component the user is asked to look at / interact with. Exactly\none of `ref` / `selector` should be supplied (mirrors the\nclick/fill convention). When neither matches a live element the\noverlay still shows the prompt and reports the miss via\n[`ResolvedTarget`].",
       "properties": {
         "ref": {
           "type": [
@@ -153,7 +92,68 @@
             "null"
           ]
         }
-      }
+      },
+      "type": "object"
     }
-  }
+  },
+  "properties": {
+    "completion_criteria": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/HelpCompletionCriteria"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Optional explicit success detector. Navigation by itself is not a\ncompletion signal; these criteria must match before the tool can\nauto-complete without the user clicking Done."
+    },
+    "prompt": {
+      "description": "Message shown to the user explaining what to do.",
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "tab_id": {
+      "description": "Target tab. Defaults to the Agent Window's active tab.",
+      "format": "int64",
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "targets": {
+      "description": "Optional components to scroll to + flash-highlight.",
+      "items": {
+        "$ref": "#/definitions/HelpTarget"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "timeout_ms": {
+      "description": "Hard upper bound on the wait. Defaults to 300000 (5 min),\nenforced daemon-side via the generic tool timeout.",
+      "format": "uint32",
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "title": {
+      "description": "Optional custom title for the help overlay. Falls back to the\nextension's default localized title when omitted.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "session_id",
+    "prompt"
+  ],
+  "title": "RequestHelpParams",
+  "type": "object"
 }

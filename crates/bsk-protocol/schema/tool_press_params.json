@@ -1,33 +1,39 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "PressParams",
-  "type": "object",
-  "required": [
-    "key",
-    "session_id"
-  ],
+  "definitions": {
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the\nextension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4,\nshift=8`).",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ],
+      "type": "string"
+    }
+  },
   "properties": {
     "hold_ms": {
-      "description": "Hold the key down for this many milliseconds between `keyDown` and `keyUp`. Useful for testing long-press handlers.",
+      "description": "Hold the key down for this many milliseconds between `keyDown`\nand `keyUp`. Useful for testing long-press handlers.",
+      "format": "uint32",
+      "minimum": 0,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 0.0
+      ]
     },
     "key": {
-      "description": "Logical key name. Accepts CDP `key` strings (`Enter`, `Escape`, `ArrowDown`, single characters like `a`), or a compound expression such as `Ctrl+A` / `Meta+Shift+P`. Modifiers in the compound form combine with anything supplied via `modifiers`.",
+      "description": "Logical key name. Accepts CDP `key` strings (`Enter`, `Escape`,\n`ArrowDown`, single characters like `a`), or a compound\nexpression such as `Ctrl+A` / `Meta+Shift+P`. Modifiers in the\ncompound form combine with anything supplied via `modifiers`.",
       "type": "string"
     },
     "modifiers": {
+      "items": {
+        "$ref": "#/definitions/KeyModifier"
+      },
       "type": [
         "array",
         "null"
-      ],
-      "items": {
-        "$ref": "#/definitions/KeyModifier"
-      }
+      ]
     },
     "ref": {
       "description": "Optional target to focus before dispatching the key.",
@@ -46,31 +52,25 @@
       "type": "string"
     },
     "tab_id": {
+      "format": "int64",
       "type": [
         "integer",
         "null"
-      ],
-      "format": "int64"
+      ]
     },
     "timeout_ms": {
+      "format": "uint32",
+      "minimum": 1,
       "type": [
         "integer",
         "null"
-      ],
-      "format": "uint32",
-      "minimum": 1.0
-    }
-  },
-  "definitions": {
-    "KeyModifier": {
-      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
-      "type": "string",
-      "enum": [
-        "alt",
-        "ctrl",
-        "meta",
-        "shift"
       ]
     }
-  }
+  },
+  "required": [
+    "session_id",
+    "key"
+  ],
+  "title": "PressParams",
+  "type": "object"
 }

@@ -1,19 +1,19 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "TabSelectResult",
-  "type": "object",
+  "properties": {
+    "tab_id": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "window_id": {
+      "format": "int64",
+      "type": "integer"
+    }
+  },
   "required": [
     "tab_id",
     "window_id"
   ],
-  "properties": {
-    "tab_id": {
-      "type": "integer",
-      "format": "int64"
-    },
-    "window_id": {
-      "type": "integer",
-      "format": "int64"
-    }
-  }
+  "title": "TabSelectResult",
+  "type": "object"
 }
