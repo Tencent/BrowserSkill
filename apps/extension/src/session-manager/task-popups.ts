@@ -1,4 +1,4 @@
-import { isAgentControlledTab, type SessionManager } from "./manager";
+import { isAgentControlledTab, type SessionManager, sessionWindowId } from "./manager";
 
 const INPUT_WINDOW_MS = 100;
 const CANDIDATE_BUDGET_MS = 500;
@@ -28,17 +28,22 @@ export async function withTaskPopups<T>(
     active &&
     !signal?.aborted &&
     manager.get(task.sessionId) === task &&
+    !task.stopping &&
     !manager.isWindowCloseExpected(task);
   const validSource = async (id: number) => {
-    if (!live() || invalid.has(id) || (task.remote && !isAgentControlledTab(task, id)))
+    if (
+      !live() ||
+      invalid.has(id) ||
+      ((task.remote || task.container.mode === "in_window") && !isAgentControlledTab(task, id))
+    )
       return false;
     try {
       const tab = await chrome.tabs.get(id);
       return (
         live() &&
         !invalid.has(id) &&
-        tab.windowId === task.agentWindowId &&
-        (!task.remote || isAgentControlledTab(task, id))
+        tab.windowId === sessionWindowId(task) &&
+        (!(task.remote || task.container.mode === "in_window") || isAgentControlledTab(task, id))
       );
     } catch {
       return false;
@@ -62,7 +67,7 @@ export async function withTaskPopups<T>(
         if (
           !(await validSource(sourceTabId)) ||
           invalid.has(tabId) ||
-          tab.windowId !== task.agentWindowId ||
+          tab.windowId !== sessionWindowId(task) ||
           manager.findBorrowingSession(tabId, task.sessionId) ||
           manager.findControllingSession(tabId)
         )

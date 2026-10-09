@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SessionManager } from "@/session-manager/manager";
+import { SessionManager, sessionWindowId } from "@/session-manager/manager";
 import {
   cdpBlockedUrlReason,
   enforceCdpAccessibleTarget,
@@ -117,7 +117,7 @@ describe("CDP target URL guard", () => {
           return [
             {
               id: 7,
-              windowId: ctx.agentWindowId,
+              windowId: sessionWindowId(ctx),
               active: true,
               url: "chrome-extension://other-extension/page.html",
             } as chrome.tabs.Tab,
@@ -126,13 +126,13 @@ describe("CDP target URL guard", () => {
         return [
           {
             id: 7,
-            windowId: ctx.agentWindowId,
+            windowId: sessionWindowId(ctx),
             active: true,
             url: "chrome-extension://other-extension/page.html",
           } as chrome.tabs.Tab,
           {
             id: 8,
-            windowId: ctx.agentWindowId,
+            windowId: sessionWindowId(ctx),
             active: false,
             url: "https://example.test/",
           } as chrome.tabs.Tab,
@@ -156,7 +156,7 @@ describe("CDP target URL guard", () => {
         async () =>
           ({
             id: 7,
-            windowId: ctx.agentWindowId,
+            windowId: sessionWindowId(ctx),
             active: true,
             url: "chrome-extension://other-extension/page.html",
           }) as chrome.tabs.Tab,

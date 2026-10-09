@@ -147,6 +147,8 @@ bsk session stop <id>
 
 Use `bsk --help` or `bsk <command> --help` for command options. Always stop your session when finished, including after a failed task; borrowed tabs are returned to their original window.
 
+For a local session in the last-focused user window, start with `bsk session start --in-window --json`. It creates a session-owned tab; stopping closes that tab, not the user window. Existing user tabs still require an explicit borrow. Window dimensions and remote connections do not support this option.
+
 </details>
 
 In WorkBuddy/CodeBuddy, or hosts that reap command children, the agent should reuse an existing daemon or run `bsk daemon start --foreground` in a managed background task, then verify it from a separate tool call. Follow the [host setup guide](docs/sandboxed-agents.md) for shared `BSK_HOME`, `BSK_AUTO_START=0`, and the independent-terminal fallback when the host cannot keep a task alive.

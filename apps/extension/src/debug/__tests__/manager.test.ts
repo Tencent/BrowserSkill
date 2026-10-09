@@ -88,6 +88,28 @@ afterEach(() => {
 });
 
 describe("task-scoped debug lifecycle", () => {
+  it("keeps a shared task listed when its host tab query fails", async () => {
+    const f = await fixture();
+    const sessions = new SessionManager({
+      sharedWindow: {
+        host: async () => ({ id: 200, type: "normal", incognito: false }) as chrome.windows.Window,
+        create: async () => 8,
+        get: async () => ({ id: 8, windowId: 200 }) as chrome.tabs.Tab,
+        query: async () => [{ id: 8, windowId: 200 }] as chrome.tabs.Tab[],
+        remove: async () => {},
+      },
+    });
+    await sessions.start("shared", { inWindow: true, focused: false });
+    const debug = new DebugManager(sessions, f.cdp, {
+      get: f.tabs.get,
+      query: vi.fn(async () => {
+        throw new Error("host query denied");
+      }),
+    });
+    active.push(debug);
+    await expect(debug.tasks()).resolves.toMatchObject([{ session_id: "shared" }]);
+  });
+
   it("reserves global capacity before concurrent startups yield", async () => {
     const f = await fixture();
     active.push(f.manager);
