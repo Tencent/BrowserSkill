@@ -1,6 +1,13 @@
 import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./agent-window";
 import { RefStore } from "./ref-store";
 
+/**
+ * Upper bound on one settle call, so a claim that never settles cannot hold the
+ * guard open. The guard settles twice per eviction, before and after the
+ * destination lookup, so the worst case a stuck claim can impose is twice this.
+ */
+const SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS = 1_000;
+
 export interface SessionContext {
   /** Remote connections retain dedicated windows, with explicit page ownership. */
   remote?: boolean;
@@ -102,6 +109,11 @@ export class SessionManager {
   private readonly sessions = new Map<string, SessionContext>();
   private readonly windowIndex = new Map<number, string>();
   private readonly borrowReservations = new Map<number, string>();
+  /**
+   * Claims a session is in the middle of making, keyed by session because the
+   * tab id does not exist yet when the claim starts.
+   */
+  private readonly pendingTabClaims = new Map<string, Set<Promise<unknown>>>();
   private readonly expectedWindowClosures = new WeakSet<SessionContext>();
   private readonly agentWindow: AgentWindowApi;
   private readonly now: () => number;
@@ -236,6 +248,70 @@ export class SessionManager {
         release();
       },
     };
+  }
+
+  /**
+   * Register a claim this session is in the middle of making, so the Agent
+   * Window tab guard can wait for it instead of reading ownership once and
+   * treating that as final. `chrome.tabs.onCreated` fires before
+   * `chrome.tabs.create()` resolves, and popup observation finishes later
+   * still, so at the moment the guard first sees such a tab no claim table
+   * holds it yet.
+   *
+   * Mirrors `borrowReservations`: the tool writes, the guard only reads.
+   */
+  trackPendingTabClaim(sessionId: string, work: Promise<unknown>): void {
+    let inFlight = this.pendingTabClaims.get(sessionId);
+    if (!inFlight) {
+      inFlight = new Set();
+      this.pendingTabClaims.set(sessionId, inFlight);
+    }
+    const settled = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    const tracked = inFlight;
+    tracked.add(settled);
+    void settled.then(() => {
+      tracked.delete(settled);
+      if (tracked.size === 0 && this.pendingTabClaims.get(sessionId) === tracked) {
+        this.pendingTabClaims.delete(sessionId);
+      }
+    });
+  }
+
+  /**
+   * Settle every claim this session has in flight, so the caller can re-read
+   * ownership. A claim may register another while we wait, so this drains
+   * rather than awaiting one round; the bound keeps a misbehaving tool from
+   * holding the guard open forever.
+   */
+  async settlePendingTabClaims(
+    sessionId: string,
+    timeoutMs: number = SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (let round = 0; round < 8; round += 1) {
+      const inFlight = this.pendingTabClaims.get(sessionId);
+      if (!inFlight || inFlight.size === 0) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      // The round bound alone leaves a claim that never settles holding
+      // Promise.all open, and with it every other tab in this session.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const expired = new Promise<"expired">((resolve) => {
+        timer = setTimeout(() => resolve("expired"), remaining);
+      });
+      try {
+        const settled = await Promise.race([
+          Promise.all([...inFlight]).then(() => "settled" as const),
+          expired,
+        ]);
+        if (settled === "expired") return;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }
   }
 
   /**

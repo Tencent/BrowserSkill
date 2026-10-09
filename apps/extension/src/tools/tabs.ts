@@ -444,11 +444,16 @@ export async function handleTabCreate(
   // document, not Chrome's restricted New Tab page.
   if (deps.cdp?.acquireBackgroundExecution && params.url === undefined) props.url = "about:blank";
   const prepare = deps.cdp?.acquireBackgroundExecution && !cdpBlockedUrlReason(props.url);
-  const tab = await createTabAndCleanup(
+  // chrome.tabs.onCreated reaches the Agent Window tab guard before this
+  // resolves, so the guard would see the new tab while agentCreatedTabs is
+  // still empty. Register the claim first and it waits for us instead.
+  const creating = createTabAndCleanup(
     ctx,
     deps,
     prepare ? { ...props, url: "about:blank" } : props,
   );
+  manager.trackPendingTabClaim(ctx.sessionId, creating);
+  const tab = await creating;
   if (isRpcError(tab)) return tab;
   if (prepare) {
     try {
