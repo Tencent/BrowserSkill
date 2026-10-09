@@ -28,6 +28,7 @@ export type RpcErrorReason =
   | "ui_deadline"
   | "preview_busy"
   | "agent_window_scope"
+  | "group_window_mismatch"
   | "element_not_visible"
   | "input_not_ready"
   | "input_outcome_unknown"
