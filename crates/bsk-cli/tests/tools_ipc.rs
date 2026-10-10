@@ -499,6 +499,7 @@ async fn snapshot_returns_text_and_ref_count() {
         let _: SnapshotParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(SnapshotResult {
+                observation_id: None,
                 text: "@e1 link \"home\"\n@e2 button \"submit\"\n".into(),
                 ref_count: 2,
                 tab_id: 13,
@@ -539,6 +540,7 @@ async fn observe_returns_semantic_text_and_ref_count() {
         let _: ObserveParams = serde_json::from_value(req.params.clone().unwrap()).unwrap();
         ResponseBody::Ok(
             serde_json::to_value(ObserveResult {
+                observation_id: None,
                 next_cursor: None,
                 text: "@vom 1\n  @e1 button \"Products\" [hover: Shoes]\n".into(),
                 ref_count: 1,

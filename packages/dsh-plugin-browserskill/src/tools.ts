@@ -546,18 +546,20 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               refCount: { type: "integer", required: true },
               truncated: { type: "boolean", required: true },
               nextCursor: { type: "string" },
+              observationId: { type: "string" },
             },
           },
           render: (_args, value) => [
             {
               type: "text",
               text:
-                value.text.length > 0
+                (value.observationId ? `observationId=${value.observationId}\n` : "") +
+                (value.text.length > 0
                   ? value.text +
                     (value.truncated && !value.nextCursor
                       ? "\n(truncated — re-run with looser caps)"
                       : "")
-                  : "(empty observation — page may still be loading)",
+                  : "(empty observation — page may still be loading)"),
             },
           ],
         },
@@ -575,6 +577,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             tab_id: number;
             truncated?: boolean;
             next_cursor?: string;
+            observation_id?: string;
           };
           return {
             session: sessionId,
@@ -583,6 +586,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             refCount: reply.ref_count,
             truncated: reply.truncated ?? false,
             ...(reply.next_cursor ? { nextCursor: reply.next_cursor } : {}),
+            ...(reply.observation_id ? { observationId: reply.observation_id } : {}),
           };
         },
         presentCall: (args) => ({

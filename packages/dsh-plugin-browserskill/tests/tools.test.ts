@@ -229,6 +229,8 @@ const EXPECTED_ACTIONS = {
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
   browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network", "debug"],
   browser_interact: [
+    "batch",
+    "batch-status",
     "click",
     "hover",
     "wheel",

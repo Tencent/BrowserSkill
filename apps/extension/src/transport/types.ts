@@ -403,6 +403,7 @@ export interface SnapshotParams {
 }
 
 export interface SnapshotResult {
+  observation_id?: string;
   text: string;
   ref_count: number;
   tab_id: number;

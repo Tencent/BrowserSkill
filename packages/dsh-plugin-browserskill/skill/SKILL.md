@@ -66,6 +66,8 @@ read [human help and recovery](references/help-and-recovery.md).
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported.
 Do not invent tools or bypass these limits.
 
+For known actions, read [batching](references/batching.md); recover with single actions.
+
 ## Read details only when needed
 
 Resolve references from the skill resource directory provided by the harness, not

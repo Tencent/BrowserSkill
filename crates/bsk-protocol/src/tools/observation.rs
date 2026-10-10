@@ -32,6 +32,9 @@ pub struct SnapshotParams {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SnapshotResult {
+    /// Opaque version of the returned ref mapping; absent on older extensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
     /// Indented aria-snapshot text. Refs are rendered as `@e<N>` so the
     /// agent can copy them into subsequent `tool.click` / `tool.fill`
     /// selectors.
@@ -129,6 +132,9 @@ pub struct HoverProbeReport {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ObserveResult {
+    /// Opaque version of the returned ref mapping; absent on older extensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_id: Option<String>,
     /// Continue omitted content from this same observation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -348,6 +354,7 @@ mod tests {
     #[test]
     fn snapshot_result_round_trips_with_ref_count() {
         let r = SnapshotResult {
+            observation_id: None,
             text: "root\n  @e1 button \"submit\"\n".into(),
             ref_count: 1,
             tab_id: 42,
@@ -406,6 +413,7 @@ mod tests {
     #[test]
     fn observe_result_round_trips_with_ref_count() {
         let r = ObserveResult {
+            observation_id: None,
             next_cursor: None,
             text: "@vom 1\n  @e1 button \"submit\"\n".into(),
             ref_count: 1,
@@ -450,6 +458,7 @@ mod tests {
     #[test]
     fn observe_result_round_trips_with_hover_probe_report() {
         let r = ObserveResult {
+            observation_id: None,
             next_cursor: None,
             text: "@vom 1\n".into(),
             ref_count: 0,

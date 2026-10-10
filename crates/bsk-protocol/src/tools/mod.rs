@@ -1,5 +1,6 @@
 //! Typed params/results for the `tool.*` RPC methods (§7).
 
+pub mod batch;
 pub mod console;
 pub mod debug;
 pub mod dialog;
@@ -22,6 +23,7 @@ pub mod waits;
 pub mod wheel;
 pub mod window;
 
+pub use batch::*;
 pub use console::*;
 pub use debug::*;
 pub use dialog::*;

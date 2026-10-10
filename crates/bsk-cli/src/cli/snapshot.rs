@@ -53,6 +53,9 @@ fn run(sock: PathBuf, args: SnapshotArgs, format: Format) -> Result<(), CliError
             println!("{json}");
         }
         Format::Human => {
+            if let Some(id) = &reply.observation_id {
+                eprintln!("observation_id={id}");
+            }
             if reply.text.is_empty() {
                 println!("(empty snapshot — page may still be loading)");
             } else {

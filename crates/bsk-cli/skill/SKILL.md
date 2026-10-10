@@ -88,7 +88,7 @@ Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
 large DOM changes can stale them too. Re-observe before the next interaction.
 Use refs for iframe/shadow-root targets; CSS selectors search the main document.
 
-Choose the relevant example, using a ref that actually appeared on the page:
+Use refs from the current observation:
 
 | Need | Command |
 | --- | --- |
@@ -103,9 +103,11 @@ Choose the relevant example, using a ref that actually appeared on the page:
 
 - `select` uses the option's value, not its visible label.
 
-Use `snapshot` for static accessibility, `get-html` for exact markup, and screenshots
-for visuals. Prefer `observe` to find ordinary controls. Obtain fresh refs before
-acting on HTML or screenshot findings. Inspect unknown effects before retrying.
+Use `snapshot` for static accessibility, `get-html` for markup, and screenshots for
+visuals. Obtain fresh refs before acting on these findings. Inspect unknown effects
+before retrying.
+
+For known actions, read [batching](references/batching.md); recover with single actions.
 
 ## Read details only when needed
 

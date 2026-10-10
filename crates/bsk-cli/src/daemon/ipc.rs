@@ -289,6 +289,8 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolNavigateBack
                 | Method::ToolNavigateForward
                 | Method::ToolReload
+                | Method::ToolBatch
+                | Method::ToolBatchStatus
                 | Method::ToolClick
                 | Method::ToolHover
                 | Method::ToolWheel
@@ -509,7 +511,8 @@ async fn handle_tool_dispatch(
     let entry = inflight_guard.entry();
     // `record_stop` must reach the extension while `record_await` holds the
     // serial busy lock — finishing the recording unblocks await.
-    let outcome = if method == Method::ToolRecordStop {
+    // Batch receipt reads likewise remain available while the batch runs.
+    let outcome = if matches!(method, Method::ToolRecordStop | Method::ToolBatchStatus) {
         state
             .tool_queues
             .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
@@ -852,7 +855,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
     timeout.map(|timeout| {
         if matches!(
             method,
-            Method::ToolUpload
+            Method::ToolBatch
+                | Method::ToolUpload
                 | Method::ToolDownload
                 | Method::ToolRequestHelp
                 | Method::ToolNavigate

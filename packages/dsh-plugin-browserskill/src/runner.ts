@@ -22,10 +22,17 @@ export class BskError extends Error {
   readonly hint?: string;
   readonly exitCode?: number | null;
   readonly timedOut: boolean;
+  readonly data?: unknown;
 
   constructor(
     message: string,
-    options: { code?: string; hint?: string; exitCode?: number | null; timedOut?: boolean } = {},
+    options: {
+      code?: string;
+      hint?: string;
+      exitCode?: number | null;
+      timedOut?: boolean;
+      data?: unknown;
+    } = {},
   ) {
     super(message);
     this.name = "BskError";
@@ -33,6 +40,7 @@ export class BskError extends Error {
     this.hint = options.hint;
     this.exitCode = options.exitCode;
     this.timedOut = options.timedOut ?? false;
+    this.data = options.data;
   }
 }
 
@@ -398,6 +406,7 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
+      data: parsed?.data,
       hint: parsed?.hint,
       exitCode: result.code,
     });

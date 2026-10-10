@@ -1,0 +1,264 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BatchPlan",
+  "description": "File input for `bsk batch`. Session ownership is supplied separately.",
+  "type": "object",
+  "required": [
+    "observation_id",
+    "steps"
+  ],
+  "properties": {
+    "observation_id": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/BatchStep"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "BatchStep": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target",
+            "value"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "fill"
+              ]
+            },
+            "clear_before": {
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target",
+            "values"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "select"
+              ]
+            },
+            "target": {
+              "type": "string"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "click"
+              ]
+            },
+            "button": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MouseButton"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "click_count": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "modifiers": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/KeyModifier"
+              }
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "key",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "press"
+              ]
+            },
+            "hold_ms": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint32",
+              "minimum": 0.0
+            },
+            "key": {
+              "type": "string"
+            },
+            "modifiers": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "$ref": "#/definitions/KeyModifier"
+              }
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "focus"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "blur"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "hover"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "action",
+            "target"
+          ],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": [
+                "scroll_to"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "KeyModifier": {
+      "description": "Keyboard modifier flags. Multiple flags may be combined; the extension folds them into CDP's bitfield (`alt=1, ctrl=2, meta=4, shift=8`).",
+      "type": "string",
+      "enum": [
+        "alt",
+        "ctrl",
+        "meta",
+        "shift"
+      ]
+    },
+    "MouseButton": {
+      "description": "Mouse button selector for `tool.click`.",
+      "type": "string",
+      "enum": [
+        "left",
+        "middle",
+        "right"
+      ]
+    }
+  }
+}

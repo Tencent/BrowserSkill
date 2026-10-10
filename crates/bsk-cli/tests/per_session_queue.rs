@@ -252,6 +252,166 @@ async fn ipc_session_start(sock: &PathBuf) -> String {
     r.session_id
 }
 
+async fn ipc_tool(
+    sock: PathBuf,
+    method: Method,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, bsk_protocol::RpcError> {
+    bsk::ipc_client::IpcClient::connect(&sock)
+        .await
+        .unwrap()
+        .call("batch-test", method, Some(params), Duration::from_secs(5))
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_status_bypasses_the_busy_gate_and_partial_failure_allows_single_actions() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session = ipc_session_start(&sock).await;
+    let batch = tokio::spawn(ipc_tool(
+        sock.clone(),
+        Method::ToolBatch,
+        json!({
+            "session_id":session, "request_id":"r1", "observation_id":"page-1",
+            "steps":[{"action":"fill","target":"@e1","value":"text"}]
+        }),
+    ));
+    let (batch_rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let busy = ipc_tool(
+        sock.clone(),
+        Method::ToolFill,
+        json!({"session_id":session,"ref":"@e1","value":"text"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(busy.data.unwrap()["reason"], "session_busy");
+    let status = tokio::spawn(ipc_tool(
+        sock.clone(),
+        Method::ToolBatchStatus,
+        json!({"session_id":session,"request_id":"r1"}),
+    ));
+    let (status_rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    reply_tx
+        .send((status_rpc, json!({"status":"running"})))
+        .unwrap();
+    assert_eq!(status.await.unwrap().unwrap()["status"], "running");
+    assert!(!batch.is_finished());
+
+    let receipt = json!({"status":"stopped","request_id":"r1","steps":[{"status":"completed"},{"status":"not_run"}]});
+    reply_tx.send((batch_rpc, receipt.clone())).unwrap();
+    assert_eq!(batch.await.unwrap().unwrap(), receipt);
+    let single = tokio::spawn(ipc_tool(
+        sock.clone(),
+        Method::ToolClick,
+        json!({"session_id":session,"ref":"@e2"}),
+    ));
+    let (single_rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    reply_tx.send((single_rpc, json!({"tab_id":7}))).unwrap();
+    assert_eq!(single.await.unwrap().unwrap()["tab_id"], 7);
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn batch_deadline_and_cancellation_wait_for_cleanup_and_preserve_the_receipt() {
+    for user_cancel in [false, true] {
+        let (handle, sock) = spawn_daemon().await;
+        let mut ws = connect_ext(handle.ws_addr()).await;
+        handshake_as_ext(&mut ws).await;
+        let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+        let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+        tokio::spawn(run_fake_extension(
+            ws,
+            Arc::new(Mutex::new(1)),
+            req_tx,
+            reply_rx,
+        ));
+        let sid = bsk::daemon::sessions::SessionId(ipc_session_start(&sock).await);
+        let state = handle.state();
+        let guard = state
+            .tool_inflight
+            .register("batch".into(), sid.clone())
+            .unwrap();
+        let batch = {
+            let queues = Arc::clone(&state.tool_queues);
+            let sid = sid.clone();
+            let inflight = guard.entry();
+            tokio::spawn(async move {
+                queues
+                    .dispatch(
+                        &sid,
+                        Method::ToolBatch,
+                        json!({"session_id":sid.0}),
+                        Duration::from_millis(if user_cancel { 5000 } else { 20 }),
+                        Some(inflight),
+                    )
+                    .await
+            })
+        };
+        let (rpc, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if user_cancel {
+            state.tool_inflight.cancel_session(&sid);
+        } else {
+            let (_, tag) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(tag, format!("cancel:{rpc}"));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(!batch.is_finished());
+        assert!(matches!(
+            state
+                .tool_queues
+                .dispatch(
+                    &sid,
+                    Method::ToolClick,
+                    json!({"session_id":sid.0}),
+                    Duration::from_secs(1),
+                    None
+                )
+                .await,
+            Err(DispatchError::SessionBusy)
+        ));
+        let receipt = json!({"status":"stopped","request_id":"r1","steps":[{"status":"completed"},{"status":"not_run"}]});
+        reply_tx.send((rpc, receipt.clone())).unwrap();
+        let outcome = batch.await.unwrap();
+        if user_cancel {
+            let Err(DispatchError::Rpc(error)) = outcome else {
+                panic!("expected user cancellation")
+            };
+            assert_eq!(error.code, ErrorCode::UserAborted);
+            assert_eq!(error.data.unwrap()["batch"], receipt);
+        } else {
+            assert_eq!(outcome.unwrap(), receipt);
+        }
+        drop(guard);
+        handle.shutdown().await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_session_dispatches_run_after_previous_completes() {
     let (handle, sock) = spawn_daemon().await;

@@ -1111,7 +1111,12 @@ async function handleVomObservation(
         { cursor, maxTokens: params.max_tokens },
         signal,
       );
-      return isRpcError(page) ? page : attachDialogs(deps.cdp, target.tabId, dialogCursor, page);
+      return isRpcError(page)
+        ? page
+        : attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+            ...page,
+            observation_id: ctx.refStore.observationId,
+          });
     }
     clearObservationContinuation(ctx.refStore);
     const documentRevision = ctx.refStore.documentRevision(target.tabId);
@@ -1143,6 +1148,7 @@ async function handleVomObservation(
       if (isRpcError(page)) return page;
       return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
         ...page,
+        observation_id: ctx.refStore.observationId,
         ...(observation.hoverProbe?.performed
           ? {
               hover_probe: {
@@ -1185,6 +1191,7 @@ async function handleVomObservation(
       }),
     );
     return attachDialogs(deps.cdp, target.tabId, dialogCursor, {
+      observation_id: ctx.refStore.observationId,
       text: observation.text,
       ref_count: observation.refs.length,
       tab_id: target.tabId,

@@ -76,6 +76,10 @@ pub enum Method {
     ToolNavigateForward,
     #[serde(rename = "tool.reload")]
     ToolReload,
+    #[serde(rename = "tool.batch")]
+    ToolBatch,
+    #[serde(rename = "tool.batch_status")]
+    ToolBatchStatus,
     #[serde(rename = "tool.click")]
     ToolClick,
     #[serde(rename = "tool.hover")]
@@ -191,6 +195,7 @@ impl Method {
             | Method::ToolNavigateBack
             | Method::ToolNavigateForward
             | Method::ToolReload
+            | Method::ToolBatch
             | Method::ToolClick
             | Method::ToolWheel
             | Method::ToolScrollTo
@@ -215,6 +220,7 @@ impl Method {
             // without driving new automation gestures, so they stay
             // ungated (teardown after interrupt must still work).
             Method::ToolTabList
+            | Method::ToolBatchStatus
             | Method::ToolSnapshot
             | Method::ToolGetHtml
             | Method::ToolScreenshot

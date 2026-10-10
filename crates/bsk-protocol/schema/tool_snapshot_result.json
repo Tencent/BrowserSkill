@@ -14,6 +14,13 @@
         "$ref": "#/definitions/JavaScriptDialogInfo"
       }
     },
+    "observation_id": {
+      "description": "Opaque version of the returned ref mapping; absent on older extensions.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "ref_count": {
       "description": "Number of `@e<N>` refs registered for this session by this snapshot. Equivalent to the size of the new ref-store map.",
       "type": "integer",

@@ -47,6 +47,7 @@ import type {
 import { isRequestFrame } from "@/transport/types";
 import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
+import { type BatchParams, handleBatch, handleBatchStatus } from "./batch";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
 import { handleDownload } from "./download";
@@ -323,15 +324,7 @@ export class ToolDispatcher {
         /* Evidence must not block the operation. */
       }
       throwIfDispatchAborted(ac.signal);
-      const result = OPENS_TABS.has(req.method)
-        ? await withTaskPopups(
-            this.sessions,
-            (req.params ?? {}) as { session_id?: string; tab_id?: number },
-            (inputSent) => this.invoke(req, ac.signal, inputSent),
-            this.onAgentTabClaimed,
-            ac.signal,
-          )
-        : await this.invoke(req, ac.signal);
+      const result = await this.executeAction(req, ac.signal);
       this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
       debugTicket = undefined;
       if (isRpcError(result)) {
@@ -400,6 +393,38 @@ export class ToolDispatcher {
     }
   }
 
+  /** Shared action boundary: batching must retain popup ownership and hover behavior. */
+  private executeAction(req: RequestFrame, signal: AbortSignal): Promise<unknown> {
+    throwIfDispatchAborted(signal);
+    return OPENS_TABS.has(req.method)
+      ? withTaskPopups(
+          this.sessions,
+          (req.params ?? {}) as { session_id?: string; tab_id?: number },
+          (inputSent) => this.invoke(req, signal, inputSent),
+          this.onAgentTabClaimed,
+          signal,
+        )
+      : this.invoke(req, signal);
+  }
+
+  /** Preserve per-action debugging when a batch enters below the transport boundary. */
+  private async executeBatchStep(req: RequestFrame, signal: AbortSignal): Promise<unknown> {
+    let ticket: DebugTicket | undefined;
+    try {
+      ticket = await this.debug?.before(req, signal);
+    } catch {
+      /* Evidence must not block the operation. */
+    }
+    let failure: string | undefined = "operation failed";
+    try {
+      const result = await this.executeAction(req, signal);
+      failure = isRpcError(result) ? result.message : undefined;
+      return result;
+    } finally {
+      this.debug?.after(ticket, failure);
+    }
+  }
+
   private async invoke(
     req: RequestFrame,
     signal: AbortSignal,
@@ -427,6 +452,24 @@ export class ToolDispatcher {
     );
     if (preparationError) return preparationError;
     switch (req.method) {
+      case "tool.batch":
+        if (!this.cdp)
+          return { code: "unsupported", message: "Batch requires CDP; use single actions" };
+        return handleBatch(
+          this.sessions,
+          req.params as BatchParams,
+          {
+            cdp: this.cdp,
+            tabsApi: chromeTabsApi,
+            invoke: (step, stepSignal) => this.executeBatchStep(step, stepSignal),
+          },
+          signal,
+        );
+      case "tool.batch_status":
+        return handleBatchStatus(
+          this.sessions,
+          req.params as { session_id: string; request_id: string },
+        );
       case "tool.debug":
         if (!this.debug)
           return {
@@ -1011,6 +1054,7 @@ function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
     case "tool.navigate_back":
     case "tool.navigate_forward":
     case "tool.reload":
+    case "tool.batch":
     case "tool.click":
     case "tool.hover":
     case "tool.wheel":

@@ -33,6 +33,13 @@ export type RefInput =
     };
 
 export class RefStore {
+  private readonly identity = crypto.randomUUID();
+
+  /** Identifies a ref mapping, not a frozen page. Existing single actions stay compatible. */
+  get observationId(): string {
+    return `${this.identity}:${this.generation}`;
+  }
+
   private map = new Map<string, RefEntry>();
   private generation = 0;
   private readonly documents = new Map<number, number>();
