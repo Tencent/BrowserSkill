@@ -102,6 +102,12 @@ function safeBasename(filename: string): string {
   return basename && basename !== "." && basename !== ".." ? basename : "download";
 }
 
+function isInBrowserRelativeDir(filename: string, browserRelativeDir: string): boolean {
+  const parent = filename.split(/[\\/]/).slice(0, -1);
+  const expected = browserRelativeDir.split("/");
+  return parent.slice(-expected.length).join("/") === browserRelativeDir;
+}
+
 function sameTarget(source: { tabId?: number; sessionId?: string }, target: CdpTarget): boolean {
   return source.tabId === target.tabId && source.sessionId === target.sessionId;
 }
@@ -171,6 +177,7 @@ export async function captureBrowserDownload(
   let capturedId: number | undefined;
   let settled = false;
   let succeeded = false;
+  let preserveOutsideDownload = false;
   let failureResult: RpcError | undefined;
   let uniquenessTimer: ReturnType<typeof setTimeout> | undefined;
   let operationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -398,6 +405,18 @@ export async function captureBrowserDownload(
     }
     click = triggered;
     const item = await completion;
+    // Another extension can override our suggestion, so validate the completed path.
+    if (!isInBrowserRelativeDir(item.filename, options.browserRelativeDir)) {
+      // The final location may be user-selected, so leave the file in place.
+      preserveOutsideDownload = true;
+      failureResult = transferError(
+        "cdp_failed",
+        "download_path_mismatch",
+        "the browser did not use the requested download directory",
+        { effectState: "committed", phase: "download" },
+      );
+      return failureResult;
+    }
     succeeded = true;
     return { click, item };
   } catch (err) {
@@ -432,7 +451,7 @@ export async function captureBrowserDownload(
     const cleanupDeadline = Date.now() + CLEANUP_TIMEOUT_MS;
     const cleanups: Promise<void>[] = [];
     if (options.cleanupTrigger) cleanups.push(options.cleanupTrigger(cleanupDeadline));
-    if (!succeeded && capturedId !== undefined) {
+    if (!succeeded && !preserveOutsideDownload && capturedId !== undefined) {
       cleanups.push(cleanupClaimedDownload(options.downloads, capturedId));
     }
     try {

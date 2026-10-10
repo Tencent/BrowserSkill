@@ -14,6 +14,7 @@ import {
   type SessionContext,
   type SessionManager,
 } from "@/session-manager/manager";
+import { detectBrowserMeta } from "@/transport/handshake";
 import type { RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { type CdpRunner, cdpBlockedUrlReason, isRpcError, lookupSession } from "./shared";
@@ -285,6 +286,8 @@ export async function handleTabList(
 
 export interface TabManagementDeps {
   tabs?: TabMutationApi;
+  /** Read-only window membership checks before closing a tab. */
+  tabsQuery?: ChromeTabsApi;
   windows?: ChromeWindowsApi;
   /** Abort hook (M10 will wire the full chain). */
   signal?: AbortSignal;
@@ -595,7 +598,21 @@ export async function handleTabClose(
     return { code: "cancelled", message: "tab_close aborted" };
   }
   try {
-    await getTabsApi(deps).remove(params.tab_id);
+    let closeWindow = false;
+    if (detectBrowserMeta().name === "yandex") {
+      const tabs = await (deps.tabsQuery ?? chromeTabsApi).query({ windowId: ctx.agentWindowId });
+      if (aborted(deps.signal, "tab_close")) {
+        return { code: "cancelled", message: "tab_close aborted" };
+      }
+      closeWindow = tabs.length === 1 && tabs[0]?.id === params.tab_id;
+    }
+    if (closeWindow) {
+      // Yandex cancels later debugger attachments if tabs.remove closes a
+      // window's final tab (issue #272). Keep the normal onRemoved lifecycle.
+      await getWindowsApi(deps).remove(ctx.agentWindowId);
+    } else {
+      await getTabsApi(deps).remove(params.tab_id);
+    }
     // Keep the tracking set accurate so session_stop won't try to close a
     // tab that's already gone (design §3.1).
     ctx.agentCreatedTabs.delete(params.tab_id);

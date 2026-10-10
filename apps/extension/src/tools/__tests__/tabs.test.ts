@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CdpDebuggerApi, ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { SessionManager } from "@/session-manager/manager";
 import { handleHover } from "../interaction";
@@ -384,6 +384,130 @@ describe("handleTabClose", () => {
     const { api } = makeTabMutationApi(state);
     const res = await handleTabClose(sm, { session_id: "aa11", tab_id: 7 }, { tabs: api });
     expect(res).toMatchObject({ code: "permission_denied", data: { reason: "borrow_conflict" } });
+  });
+});
+
+describe("handleTabClose browser compatibility (issue #272)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { userAgent: "Chrome/150.0.0.0 YaBrowser/26.8.0.0" });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function setup(tabIds = [5]) {
+    const agentWindow = fakeAgentWindow([100]);
+    agentWindow.ensureActiveTab = vi.fn(async () => 5);
+    const manager = new SessionManager({ agentWindow });
+    const ctx = await manager.start("aa11");
+    const state: FakeTabState = {
+      tabs: new Map(tabIds.map((id) => [id, { id, windowId: 100 } as chrome.tabs.Tab])),
+      nextTabId: 50,
+      windowsClosed: new Set(),
+    };
+    const { api: tabs, spies } = makeTabMutationApi(state);
+    const { api: windows } = makeWindowsApi(state);
+    const tabsQuery = {
+      query: vi.fn(async (_query: chrome.tabs.QueryInfo) => [...state.tabs.values()]),
+    };
+    return { manager, ctx, state, spies, deps: { tabs, tabsQuery, windows } };
+  }
+
+  it("closes the final tab through its window and leaves onRemoved cleanup enabled", async () => {
+    const f = await setup();
+    vi.mocked(f.deps.windows.remove).mockImplementation(async (windowId) => {
+      expect(windowId).toBe(100);
+      expect(f.manager.isWindowCloseExpected(f.ctx)).toBe(false);
+    });
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      tab_id: 5,
+    });
+    expect(f.deps.tabsQuery.query).toHaveBeenCalledExactlyOnceWith({ windowId: 100 });
+    expect(f.deps.windows.remove).toHaveBeenCalledExactlyOnceWith(100);
+    expect(f.spies.remove).not.toHaveBeenCalled();
+    expect(f.ctx.agentCreatedTabs.has(5)).toBe(false);
+  });
+
+  it("removes only the requested tab when another tab remains", async () => {
+    const f = await setup([5, 99]);
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      tab_id: 5,
+    });
+    expect(f.spies.remove).toHaveBeenCalledExactlyOnceWith(5);
+    expect(f.deps.windows.remove).not.toHaveBeenCalled();
+    expect([...f.state.tabs.keys()]).toEqual([99]);
+  });
+
+  it.each([
+    { browser: "Chrome", userAgent: "Chrome/150.0.0.0 Safari/537.36" },
+    { browser: "Edge", userAgent: "Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0" },
+  ])("preserves last-tab removal on $browser", async ({ userAgent }) => {
+    vi.stubGlobal("navigator", { userAgent });
+    const f = await setup();
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      tab_id: 5,
+    });
+    expect(f.spies.remove).toHaveBeenCalledExactlyOnceWith(5);
+    expect(f.deps.tabsQuery.query).not.toHaveBeenCalled();
+    expect(f.deps.windows.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not close anything if querying the window fails", async () => {
+    const f = await setup();
+    f.deps.tabsQuery.query.mockRejectedValueOnce(new Error("query failed"));
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      code: "protocol_error",
+      message: "query failed",
+    });
+    expect(f.spies.remove).not.toHaveBeenCalled();
+    expect(f.deps.windows.remove).not.toHaveBeenCalled();
+    expect(f.ctx.agentCreatedTabs.has(5)).toBe(true);
+  });
+
+  it("keeps a failed window close retryable", async () => {
+    const f = await setup();
+    vi.mocked(f.deps.windows.remove).mockRejectedValueOnce(new Error("close failed"));
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      code: "protocol_error",
+      message: "close failed",
+    });
+    expect(f.ctx.agentCreatedTabs.has(5)).toBe(true);
+    expect(f.manager.has("aa11")).toBe(true);
+    expect(f.spies.remove).not.toHaveBeenCalled();
+    expect(await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps)).toEqual({
+      tab_id: 5,
+    });
+    expect(f.ctx.agentCreatedTabs.has(5)).toBe(false);
+  });
+
+  it("honors cancellation during the last-tab query", async () => {
+    const f = await setup();
+    const controller = new AbortController();
+    f.deps.tabsQuery.query.mockImplementationOnce(async () => {
+      controller.abort();
+      return [...f.state.tabs.values()];
+    });
+    expect(
+      await handleTabClose(
+        f.manager,
+        { session_id: "aa11", tab_id: 5 },
+        { ...f.deps, signal: controller.signal },
+      ),
+    ).toMatchObject({ code: "cancelled" });
+    expect(f.spies.remove).not.toHaveBeenCalled();
+    expect(f.deps.windows.remove).not.toHaveBeenCalled();
+    expect(f.ctx.agentCreatedTabs.has(5)).toBe(true);
+  });
+
+  it("still requires returning a borrowed tab before closing it", async () => {
+    const f = await setup();
+    f.ctx.borrowedTabs.set(5, { tabId: 5, originalWindowId: 200, originalIndex: 0 });
+    expect(
+      await handleTabClose(f.manager, { session_id: "aa11", tab_id: 5 }, f.deps),
+    ).toMatchObject({
+      code: "invalid_params",
+    });
+    expect(f.spies.remove).not.toHaveBeenCalled();
+    expect(f.deps.tabsQuery.query).not.toHaveBeenCalled();
+    expect(f.deps.windows.remove).not.toHaveBeenCalled();
   });
 });
 

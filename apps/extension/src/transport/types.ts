@@ -76,6 +76,7 @@ export type RpcErrorReason =
   | "file_drop_target_unavailable"
   | "file_drop_failed"
   | "download_capture_failed"
+  | "download_path_mismatch"
   | "transfer_outcome_unknown"
   | "transfer_timeout"
   | "cleanup_failed";
@@ -789,6 +790,36 @@ export interface WaitForNavigationResult {
   tab_id: number;
   reached: WaitForNavigationReached;
   error_text?: string;
+  dialogs?: JavaScriptDialogInfo[];
+}
+
+/**
+ * Element states `wait-for-element` can wait on. `visible` / `hidden` ask about
+ * visibility; `attached` / `detached` ask about presence in the DOM.
+ * `hidden` is the opposite of `visible`: absent or attached but not visible.
+ * The `attached` result distinguishes these two observations.
+ */
+export type ElementState = "visible" | "hidden" | "attached" | "detached";
+
+export interface WaitForElementParams {
+  session_id: string;
+  ref?: string;
+  selector?: string;
+  state: ElementState;
+  tab_id?: number;
+  timeout_ms?: number;
+  poll_ms?: number;
+}
+
+export interface WaitForElementResult {
+  tab_id: number;
+  used_ref?: string;
+  used_selector?: string;
+  satisfied: boolean;
+  /** Last completed probe; null if no probe completed before timeout. */
+  attached: boolean | null;
+  visible: boolean | null;
+  elapsed_ms: number;
   dialogs?: JavaScriptDialogInfo[];
 }
 

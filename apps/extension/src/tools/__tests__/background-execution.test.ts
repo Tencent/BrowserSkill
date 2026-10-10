@@ -36,6 +36,7 @@ describe("background execution request boundary", () => {
     "tool.observe",
     "tool.click",
     "tool.wait_for_navigation",
+    "tool.wait_for_element",
   ])("prepares an explicit inactive controlled target before %s", async (method) => {
     const f = await fixture();
     f.ctx.agentCreatedTabs.add(7);

@@ -5,6 +5,7 @@ import {
 } from "@/lib/interaction-preferences";
 import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
+import { detectBrowserMeta } from "@/transport/handshake";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
@@ -188,10 +189,10 @@ export async function handleSessionStart(
  *      cleanly (review parity with M6).
  *   3. Detach CDP sessions the extension still holds for this
  *      session (no-op if M6/M7 didn't attach to any tab).
- *   4. Close the agent-created tabs and the home tab (design §3.2).
- *   5. If any tab remains — those are user-created tabs — release the
- *      window to the user (dropOnly) instead of closing it, so user
- *      tabs survive. Otherwise close the window as before.
+ *   4. Close the agent-created tabs and the home tab (design §3.2),
+ *      retaining the final tab on Yandex for window cleanup.
+ *   5. Release the window to the user (dropOnly) if user-created tabs
+ *      remain. Otherwise close the window and any remaining agent tabs.
  *
  * Failures in step 1 keep the Agent Window open: a failed borrowed tab
  * may still be there, so closing the window would risk losing user
@@ -323,12 +324,25 @@ async function stopSession(
     // closing the window (see Step 5).
     const tabsApi = deps.tabManagement?.tabs;
     const queryApi = deps.tabsQuery;
+    // Yandex 26.8 cancels subsequent debugger attachments when tabs.remove
+    // closes the last tab of a window (issue #272). Closing the window
+    // through windows.remove does not trigger that browser bug. Keep
+    // the last owned tab for Step 5, which still checks for user-created tabs.
+    const closeLastTabWithWindow = detectBrowserMeta().name === "yandex";
+    const deferredAgentTabs = new Set<number>();
 
     if (tabsApi) {
       // Close each agent-created tab that still exists.
       const agentCreatedTabIds = Array.from(ctx.agentCreatedTabs);
       for (const tabId of agentCreatedTabIds) {
         try {
+          if (closeLastTabWithWindow && queryApi) {
+            const liveTabs = await queryApi.query({ windowId: ctx.agentWindowId });
+            if (liveTabs.length === 1 && liveTabs[0]?.id === tabId) {
+              deferredAgentTabs.add(tabId);
+              continue;
+            }
+          }
           await tabsApi.remove(tabId);
           ctx.agentCreatedTabs.delete(tabId);
         } catch (err) {
@@ -352,9 +366,28 @@ async function stopSession(
           if (t.id === undefined) return false;
           return !ctx.agentCreatedTabs.has(t.id);
         });
-        const leakedAgentTabs = liveWindowTabs.filter(
-          (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
+        let leakedAgentTabs = liveWindowTabs.filter(
+          (t): t is chrome.tabs.Tab & { id: number } =>
+            t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (
+          userTabs.length > 0 &&
+          leakedAgentTabs.length > 0 &&
+          tabsApi &&
+          leakedAgentTabs.every((tab) => deferredAgentTabs.has(tab.id))
+        ) {
+          // A user opened a tab after Step 4 deferred the final agent tab.
+          // It is now safe to remove that tab without closing the window.
+          for (const tab of leakedAgentTabs) {
+            try {
+              await tabsApi.remove(tab.id);
+              ctx.agentCreatedTabs.delete(tab.id);
+            } catch (err) {
+              console.warn(`[bsk session_stop] failed to close deferred agent tab ${tab.id}`, err);
+            }
+          }
+          leakedAgentTabs = leakedAgentTabs.filter((tab) => ctx.agentCreatedTabs.has(tab.id));
+        }
         if (leakedAgentTabs.length > 0 && userTabs.length > 0) {
           // Neither releasing ownership nor closing this mixed window is safe.
           // Keep the binding so a later stop can retry only the agent tabs.
@@ -368,10 +401,11 @@ async function stopSession(
             },
           );
         }
-        if (leakedAgentTabs.length > 0) {
+        const failedAgentTabs = leakedAgentTabs.filter((tab) => !deferredAgentTabs.has(tab.id));
+        if (failedAgentTabs.length > 0) {
           console.warn(
-            `[bsk session_stop] ${leakedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
-            leakedAgentTabs.map((t) => t.id),
+            `[bsk session_stop] ${failedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
+            failedAgentTabs.map((t) => t.id),
           );
         }
         shouldRelease = userTabs.length > 0;
@@ -396,7 +430,7 @@ async function stopSession(
       }
       result.window_released = true;
     } else {
-      // Window is empty (or we couldn't verify state) — close it.
+      // Close the window and any remaining agent-owned tabs.
       await manager.stop(params.session_id);
     }
 

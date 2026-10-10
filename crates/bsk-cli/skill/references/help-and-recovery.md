@@ -34,6 +34,12 @@ substring is enough.
 | Timeout or unknown effect | Inspect current state before retrying; the action may already have happened. |
 | `fill_value_mismatch` | Read the field: formatting may still satisfy the request. Correct only a remaining difference; no blind refill or immediate handoff. |
 | Unsupported operation | Use available capabilities; suggest updating only if the missing feature is needed. |
+| `download_path_mismatch` | The browser completed the download outside BrowserSkill's transfer directory, so `bsk download` did not produce `--out`. The browser file is left in place; find it in the Downloads list and decide whether to use or remove it before retrying. A download manager such as Chrono may have overridden the filename suggestion; when one is present, disable or pause its renaming or download takeover. The browser may also have rejected the suggested filename or used a different save location; check both before retrying. Retry only if `--out` is still needed. |
+
+If both extensions suggest a name, updating or reinstalling BrowserSkill after
+the other extension can make BrowserSkill's folder suggestion win. This changes
+which extension wins the conflict; a later update to the other extension may
+reverse it.
 
 Navigation alone (including deprecated help outcome `navigated`) is not completion.
 For other errors, follow the returned hint and inspect the current state.
