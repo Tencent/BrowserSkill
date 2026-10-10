@@ -61,6 +61,9 @@ Prefer refs for frames/shadow roots; selectors search the main document. Use obs
 for ordinary controls, including before acting on HTML or screenshot findings.
 Select options by value, not visible label.
 
+Use `wait-for-element` only for a known pending condition; check `satisfied`.
+Skip waiting when already ready. Prefer an existing ref; see details below.
+
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md).
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported.
@@ -75,6 +78,6 @@ the working directory. Read the matching file before acting; do not preload all 
 | --- | --- |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
+| Element waits, hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |
