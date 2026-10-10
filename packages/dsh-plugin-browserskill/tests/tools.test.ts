@@ -228,7 +228,16 @@ const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chr
 const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait", "dialog"],
-  browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network", "debug"],
+  browser_inspect: [
+    "observe",
+    "snapshot",
+    "html",
+    "screenshot",
+    "console",
+    "network",
+    "debug",
+    "video",
+  ],
   browser_interact: [
     "click",
     "hover",

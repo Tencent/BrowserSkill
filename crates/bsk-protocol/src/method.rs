@@ -21,6 +21,8 @@ pub enum MethodEffect {
 /// Namespaced method string (`system.handshake`, `tool.tab_list`, …).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Method {
+    #[serde(rename = "tool.video")]
+    ToolVideo,
     /// Extension-only local history API; browser identity comes from the peer.
     #[serde(rename = "audit.request")]
     AuditRequest,
@@ -242,9 +244,10 @@ impl Method {
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
-            // System / control. Dialog/debug mutations are gated by params below.
+            // System / control. Dialog/debug/video mutations are gated by params below.
             Method::ToolDialog
             | Method::ToolDebug
+            | Method::ToolVideo
             | Method::AuditRequest
             | Method::SystemHandshake
             | Method::SystemPing
@@ -260,12 +263,15 @@ impl Method {
         }
     }
 
-    /// Dialog/debug reads remain available after interruption. Dialog decisions,
-    /// explicit network interventions and replay are gated like browser writes.
+    /// Dialog/debug/video reads and teardown remain available after
+    /// interruption. Dialog decisions, video start, explicit network
+    /// interventions and replay are gated like browser writes.
     pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
         self.requires_interrupt_gate()
             || (matches!(self, Method::ToolDialog)
                 && params.get("action").and_then(|value| value.as_str()) != Some("status"))
+            || (matches!(self, Method::ToolVideo)
+                && params.get("action").and_then(|value| value.as_str()) == Some("start"))
             || (matches!(self, Method::ToolDebug)
                 && matches!(
                     params.get("action").and_then(|value| value.as_str()),
@@ -303,6 +309,28 @@ mod tests {
             assert!(
                 Method::ToolDialog
                     .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
+    }
+
+    #[test]
+    fn video_start_respects_interrupts_but_teardown_and_artifact_reads_remain_available() {
+        assert!(
+            super::Method::ToolVideo
+                .requires_interrupt_gate_with_params(&serde_json::json!({"action":"start"}))
+        );
+        for action in [
+            "capabilities",
+            "list",
+            "status",
+            "stop",
+            "read",
+            "exported",
+            "discard",
+        ] {
+            assert!(
+                !super::Method::ToolVideo
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action": action}))
             );
         }
     }

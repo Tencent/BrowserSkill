@@ -251,6 +251,39 @@ jobs:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/emulation-lifecycle.browser.test.ts
 
+  browser-video:
+    name: Browser video recording regression
+    # Allows Chrome for Testing's user-namespace sandbox without a custom
+    # AppArmor profile for its temporary installation path.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chrome for Testing
+        run: |
+          video_chrome_download=$(curl --fail --silent --show-error --location https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | jq -er '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url')
+          curl --fail --silent --show-error --location --retry 3 "$video_chrome_download" --output "$RUNNER_TEMP/video-chrome.zip"
+          unzip -q "$RUNNER_TEMP/video-chrome.zip" -d "$RUNNER_TEMP/video-chrome"
+          echo "BSK_VIDEO_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
+      - name: Build CLI, extension and DSH plugin
+        run: |
+          cargo build -p bsk --locked
+          pnpm --filter @browser-skill/extension build
+          pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+      - name: Validate capture, playback, recovery and CLI/DSH export
+        working-directory: apps/extension
+        env:
+          BSK_VIDEO_BSK: ../../target/debug/bsk
+        run: pnpm exec vitest run src/video/*.browser.test.ts
+
   node-scripts:
     name: Node script tests
     runs-on: ubuntu-latest

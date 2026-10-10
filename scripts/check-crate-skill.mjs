@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { validateSkillDirectory } from "../packages/dsh-plugin-browserskill/scripts/validate-skill.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const { files } = validateSkillDirectory(`${root}crates/bsk-cli/skill`, { maxEntryBytes: 7_000 });
+const { files } = validateSkillDirectory(`${root}crates/bsk-cli/skill`, { maxEntryBytes: 7_100 });
 const packaged = new Set(
   execFileSync("cargo", ["package", "--list", "--allow-dirty", "--locked", "-p", "bsk"], {
     cwd: root,

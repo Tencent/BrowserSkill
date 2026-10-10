@@ -60,7 +60,7 @@ the `bsk` CLI and browser extension separately when a release requires it.
 | --- | --- | --- |
 | `browser_session` | `start`, `stop`, `list` | Manage plugin-owned Agent Window sessions. |
 | `browser_page` | `navigate`, `back`, `forward`, `reload`, `wait` | Navigate the active tab and wait for page lifecycle events. |
-| `browser_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network` | Read semantic or diagnostic page state and capture screenshots. |
+| `browser_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video` | Inspect page state, debug websites, and capture screenshots or requested task videos. |
 | `browser_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press` | Interact with controls using fresh refs or selectors. |
 | `browser_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `browser_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
@@ -243,3 +243,16 @@ for documentation-only changes. Published versions cannot be overwritten. See
 ## License
 
 MIT
+
+## Task video recording
+
+Ask the agent to record before it performs the task. It starts an authorized task
+tab, confirms recording is active, performs the task, then stops video before
+ending the session. No manual Start click is required. Preview and Save As are in
+the extension's Features → Video recording → Recent recordings.
+
+`browser_inspect` with `action: "video"` exposes `videoAction` start/status/stop/save/
+list/discard. The default is a silent, fixed-tab MP4 with a 60-second limit (up to
+10 minutes). Export requires an explicit `output` path on the harness host; the
+extension's Save As writes on the browser computer. Partial recordings and limits
+are reported explicitly. See the [video reference](skill/references/video.md).
