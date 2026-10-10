@@ -2,7 +2,7 @@
 // Opt in after cargo build + extension build. All browser, daemon, and output
 // state belongs to temporary directories; no personal browser is contacted.
 import { execFile, spawn } from "node:child_process";
-import { once } from "node:events";
+import { type EventEmitter, once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -40,7 +40,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         );
       });
       pageServer.listen(0, "127.0.0.1");
-      await once(pageServer, "listening");
+      await once(pageServer as unknown as EventEmitter, "listening");
       const address = pageServer.address() as { port: number };
       const cli = async (...args: string[]) => {
         const result = await run(executable, ["--json", ...args], { env, timeout: 45_000 });
@@ -312,7 +312,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         pageServer.closeAllConnections();
         await new Promise<void>((resolve) => pageServer.close(() => resolve()));
         if (daemon.exitCode === null && daemon.signalCode === null) {
-          const exited = once(daemon, "exit");
+          const exited = once(daemon as unknown as EventEmitter, "exit");
           daemon.kill();
           await exited;
         }

@@ -121,6 +121,7 @@ ownership/capabilities, idempotent stops, overlay gating, and screencast sharing
 Existing full-page screenshot lifetime tests cover cancellation and attachment
 replacement. The opt-in browser regressions use temporary Chrome profiles and an
 isolated daemon, with the production extension/encoder and real MP4 decoding:
+use Chrome for Testing to allow loading the isolated unpacked extension.
 
 ```sh
 cargo build -p bsk --locked

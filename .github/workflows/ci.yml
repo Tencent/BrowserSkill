@@ -259,6 +259,12 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install Chrome for Testing
+        run: |
+          video_chrome_download=$(curl --fail --silent --show-error --location https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json | jq -er '.channels.Stable.downloads.chrome[] | select(.platform == "linux64") | .url')
+          curl --fail --silent --show-error --location --retry 3 "$video_chrome_download" --output "$RUNNER_TEMP/video-chrome.zip"
+          unzip -q "$RUNNER_TEMP/video-chrome.zip" -d "$RUNNER_TEMP/video-chrome"
+          echo "BSK_VIDEO_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
       - name: Build CLI and extension
         run: |
           cargo build -p bsk --locked
@@ -266,7 +272,6 @@ jobs:
       - name: Validate capture, playback, recovery and CLI export
         working-directory: apps/extension
         env:
-          BSK_VIDEO_CHROME: google-chrome
           BSK_VIDEO_BSK: ../../target/debug/bsk
         run: pnpm exec vitest run src/video/*.browser.test.ts
 
