@@ -61,8 +61,6 @@ Prefer refs for frames/shadow roots; selectors search the main document. Use obs
 for ordinary controls, including before acting on HTML or screenshot findings.
 Select options by value, not visible label.
 
-Use `wait-for-element` for observed pending updates. Check `satisfied`.
-
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md).
 Arbitrary page-script evaluation and interaction recording are intentionally unsupported.
