@@ -6,11 +6,7 @@
     "nodeVersion": "v26.6.0",
     "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
     "samples": 10,
-    "modes": [
-      "single",
-      "auto",
-      "batch"
-    ],
+    "modes": ["single", "auto", "batch"],
     "hashes": {
       "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
       "candidate": "f1568230603ede013cff029c1bb58e14813f258e6f59b85ca79d36e2e17ad072",
@@ -556,11 +552,7 @@
           "callId": "call_00_E9Amykf1owkryzD076Xr7915",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select"
-          ],
+          "batchSteps": ["fill", "fill", "select"],
           "durationMs": 146.66358400000172,
           "isError": false
         },
@@ -770,12 +762,7 @@
           "callId": "call_00_e9tEIDfV4YkBy1NzwKY30411",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 320.4038330000003,
           "isError": false
         },
@@ -974,11 +961,7 @@
           "callId": "call_00_lfCtCUJjiXJsj6xWy5mu1953",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select"
-          ],
+          "batchSteps": ["fill", "fill", "select"],
           "durationMs": 155.588874999994,
           "isError": false
         },
@@ -1167,12 +1150,7 @@
           "callId": "call_00_hvHdQlhzQy5ZVDpnCKAL1991",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 314.82058299999335,
           "isError": false
         },
@@ -1599,12 +1577,7 @@
           "callId": "call_00_LQI4ypP9Qm3B6jvvoa6h5851",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 306.66570800000045,
           "isError": false
         },
@@ -2029,12 +2002,7 @@
           "callId": "call_00_lDjlPGpdnqWQL6aUYIQt0159",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 300.961249999993,
           "isError": false
         },
@@ -2458,12 +2426,7 @@
           "callId": "call_00_vLBAx4ibqRtFTKQGOYoO2169",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 316.12208299999475,
           "isError": false
         },
@@ -2660,12 +2623,7 @@
           "callId": "call_00_o2eAsZPqi12FTI0628rn1696",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 300.37354099999357,
           "isError": false
         },
@@ -2862,12 +2820,7 @@
           "callId": "call_00_48J9WyApWuSNs4y3xCgO6326",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 301.41454099997645,
           "isError": false
         },
@@ -3063,12 +3016,7 @@
           "callId": "call_00_D47xNoXVFGk9gQcXMAqL9134",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 295.12620899998,
           "isError": false
         },
@@ -3492,12 +3440,7 @@
           "callId": "call_00_zV2CtbqFUY3wMhAymSVM4227",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 295.8009580000071,
           "isError": false
         },
@@ -3943,11 +3886,7 @@
           "callId": "call_00_VLMUoVxDvwBaFWgd0DBk8931",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select"
-          ],
+          "batchSteps": ["fill", "fill", "select"],
           "durationMs": 139.13195899999118,
           "isError": false
         },
@@ -4384,12 +4323,7 @@
           "callId": "call_00_xKmHIyIMgzK1JQyneNEG9803",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 305.83479100000113,
           "isError": false
         },
@@ -4586,12 +4520,7 @@
           "callId": "call_00_rYRfa9ZhBv12oEILYrZo2291",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 295.3059169999906,
           "isError": false
         },
@@ -4788,12 +4717,7 @@
           "callId": "call_00_KIBTba9JD0JjlV4ZTDYc3213",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 321.8766659999965,
           "isError": false
         },
@@ -4989,12 +4913,7 @@
           "callId": "call_00_qO5YgGvu4iucgZXIKf8l0838",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 318.3285420000029,
           "isError": false
         },
@@ -5399,12 +5318,7 @@
           "callId": "call_00_IJMduyfowNEgpVxYtxL66421",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 306.2276660000207,
           "isError": false
         },
@@ -5880,11 +5794,7 @@
           "callId": "call_00_QKbGSpQkOY6db0C547QC8275",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select"
-          ],
+          "batchSteps": ["fill", "fill", "select"],
           "durationMs": 151.38683400000446,
           "isError": false
         },
@@ -6324,11 +6234,7 @@
           "callId": "call_00_NQQAHoI8xCAJ5FVinRWU6922",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select"
-          ],
+          "batchSteps": ["fill", "fill", "select"],
           "durationMs": 163.3631249999744,
           "isError": false
         },
@@ -6518,12 +6424,7 @@
           "callId": "call_00_v5iV2xicYktzxRd4hm0Y3011",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 289.75908300001174,
           "isError": false
         },

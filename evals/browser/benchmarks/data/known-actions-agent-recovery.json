@@ -6,9 +6,7 @@
     "nodeVersion": "v26.6.0",
     "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
     "samples": 3,
-    "modes": [
-      "batch"
-    ],
+    "modes": ["batch"],
     "recovery": true,
     "hashes": {
       "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
@@ -229,12 +227,7 @@
           "callId": "call_00_hG7k3PENFjWRNARIP6mt2553",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 131.60675000000083,
           "isError": false
         },
@@ -530,12 +523,7 @@
           "callId": "call_00_T06ML3PTXfGuUKvXb85M8430",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 125.37233399999968,
           "isError": false
         },
@@ -841,12 +829,7 @@
           "callId": "call_00_5uZuXTEkMom2t0RZkppU8929",
           "tool": "browser_interact",
           "action": "batch",
-          "batchSteps": [
-            "fill",
-            "fill",
-            "select",
-            "click"
-          ],
+          "batchSteps": ["fill", "fill", "select", "click"],
           "durationMs": 105.33508299999812,
           "isError": false
         },
