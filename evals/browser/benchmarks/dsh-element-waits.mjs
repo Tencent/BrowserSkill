@@ -243,23 +243,24 @@ try {
     async () => {
       await until(async () => (await bsk(["browsers"])).length);
       if (values.smoke) {
-        const smoke = checked(
-          await runProcess(
-            process.execPath,
-            [
-              join(root, "evals/browser/cli.mjs"),
-              "smoke",
-              "--suite",
-              "core",
-              "--bsk",
-              bskPath,
-              "--out",
-              join(out, "smoke"),
-            ],
-            { cwd: root, env },
-          ),
-        );
-        await writeFile(join(out, "smoke.log"), smoke.stdout);
+        for (const suite of ["all", "matrix"]) {
+          const smoke = checked(
+            await runProcess(
+              process.execPath,
+              [
+                join(root, "evals/browser/cli.mjs"),
+                "smoke",
+                ...(suite === "all" ? ["--case", "all"] : ["--suite", suite, "--seed", "4,7,14"]),
+                "--bsk",
+                bskPath,
+                "--out",
+                join(out, `smoke-${suite}`),
+              ],
+              { cwd: root, env },
+            ),
+          );
+          await writeFile(join(out, `smoke-${suite}.log`), smoke.stdout);
+        }
       }
       trials: for (const scenario of cases) {
         for (let round = 0; round < samples; round++) {
