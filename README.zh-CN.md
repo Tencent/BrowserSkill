@@ -151,6 +151,16 @@ bsk session stop <id>
 
 在 WorkBuddy/CodeBuddy 或会回收命令子进程的宿主中，Agent 应先复用已有 daemon；需要启动时，在宿主管理的后台任务中运行 `bsk daemon start --foreground`，并在另一条工具调用中验证连接。[宿主配置指南](docs/sandboxed-agents.md)说明了如何共用 `BSK_HOME`、设置 `BSK_AUTO_START=0`，以及宿主无法维持任务时的独立终端兜底方式。
 
+在 Windows 上，可以把 daemon 安装为当前用户登录时启动的任务：
+
+```powershell
+bsk daemon install-autostart
+```
+
+生成的启动文件使用 `daemon start --foreground`，由 Explorer 启动，因此不会随着执行安装命令的短命进程结束。生成的 VBScript 始终是纯 ASCII；即使 `bsk.exe` 路径包含非 ASCII 字符也能正常工作。使用 `bsk daemon uninstall-autostart` 删除；两个命令都支持重复执行，并且不会覆盖或删除同名的非 BrowserSkill 文件。
+
+本地 daemon 在没有浏览器连接后开始计算空闲时间，默认约 10 分钟后退出。Edge 保持连接时 daemon 应持续运行；关闭浏览器后才会开始倒计时，退出后需要再次启动 daemon（启动文件会在下一次登录时运行）。
+
 ## DeepSeek Harness 插件
 
 [DSH 插件](packages/dsh-plugin-browserskill/README.md) 在 DeepSeek Harness Web UI 中提供原生 `browser_*` 工具、浏览器任务预览和截图结果。它使用同一套 `bsk` CLI 与扩展，并自带 BrowserSkill skill。
