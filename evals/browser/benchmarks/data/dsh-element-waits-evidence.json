@@ -114,6 +114,29 @@
         "reasoningEffort": "high"
       },
       "completed": 9
+    },
+    "packaged-smoke": {
+      "startedAt": "2026-10-10T14:38:39.291Z",
+      "sourceRevision": "98f1b991cc47dcda291efd7d275b8e7e9abfc379",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 1,
+      "modes": ["candidate"],
+      "cases": ["static", "results", "enabled", "timeout", "unsupported", "stale"],
+      "hashes": {
+        "baseline": "cfe179e31fbbec7529f4e033018ba045197a13bb9af5d2d7163844b503d1afb7",
+        "candidate": "06e9d71c505ac0f9b2bb5fa9b0e3de3ad91902d8ee69fe04ea9d4de643ebe802",
+        "cli": "abb36bf5f3dbfb6fe83f1bdfd1f2ba8c7558c76d4e4bb591193c64d9da41bd17"
+      },
+      "baselineRevision": "63c16570ae4d6be54df386098ed14119cc3115b8",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 6
     }
   },
   "recovery": {

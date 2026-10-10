@@ -1,0 +1,7 @@
+scenario,round,mode,delayMs,success,measurementValid,taskMs,processMs,modelMs,toolMs,modelCalls,toolCalls,waitCalls,waitTimeouts,waitErrors,toolErrors,htmlCalls,starts,confirmations,observed,stopped,allHttp200
+static,0,candidate,0,true,true,10266.227250000002,10718.5845,8640.887166,1407.6336649999976,9,10,0,0,0,0,0,0,0,true,true,true
+results,0,candidate,6000,true,true,17045.087541999997,17486.89975,11972.996001000001,4786.663503,12,12,1,0,0,0,0,1,1,true,true,true
+enabled,0,candidate,6000,true,true,16821.058999999997,17259.588333,11972.159832,4563.382124000014,12,11,0,0,0,0,0,1,1,true,true,true
+timeout,0,candidate,16000,true,true,27032.00854200001,27475.791541000006,13890.503749,12819.465168000032,14,14,2,1,0,0,0,1,1,true,true,true
+unsupported,0,candidate,6000,true,true,21743.890958999997,22179.754709,15369.152751,6073.051332999996,14,14,1,0,1,1,0,1,1,true,true,true
+stale,0,candidate,6000,true,true,17532.616666,17976.334999999992,11690.160999000002,5576.1936660000065,12,12,1,0,1,1,0,1,1,true,true,true

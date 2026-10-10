@@ -115,7 +115,8 @@ Main advanced to `63c16570ae4d6be54df386098ed14119cc3115b8` during the experimen
 adding video support and changing the DSH tool/skill entry. After merging it,
 candidate `32cd37f4e5bb659c7885663bd538ef8a47a2cfc4` was rebuilt and compared
 against that main revision, using the same newly rebuilt CLI/extension in both arms.
-The entry guidance was shortened to retain the existing 4500-byte budget.
+The entry guidance was shortened for the LF byte budget; the subsequent
+Windows CRLF packaging correction is described below.
 
 This independent follow-up has three trials per arm/workload and uses the same
 method and delay sequence. It is a compatibility check, not a replacement for the
@@ -142,6 +143,24 @@ timeout trial; all unsupported/stale trials surfaced their intended errors.
 
 Data: [18 current-main trials](data/dsh-element-waits-latest.csv),
 [9 current-main recovery trials](data/dsh-element-waits-latest-recovery.csv).
+
+## Final packaged-plugin smoke check
+
+CI also validates CRLF checkouts and caught that the merged entry exceeded its
+4500-byte budget on Windows. Revision `98f1b991cc47dcda291efd7d275b8e7e9abfc379`
+removed the duplicated one-sentence wait hint from the entry; the action schema
+and detailed reference retain the guidance. No size limit was relaxed. The entry
+now uses 4419 bytes with LF and 4500 with CRLF. All 13 Node script tests, including
+both line-ending variants, and all 494 DSH tests passed after the correction.
+
+The final packaged plugin then ran one additional real-model task for each of
+static, results, enabled, timeout, unsupported and stale: 6/6 passed, with 73
+verified HTTP requests. All three fault cases exercised their intended timeout
+or error and recovered. The ready enabled-page task completed without a wait.
+This smoke check verifies the final instruction change; it does not replace or
+revise either earlier timing comparison.
+
+Data: [six packaged-plugin tasks](data/dsh-element-waits-packaged-smoke.csv).
 
 ## Build and regression checks
 
