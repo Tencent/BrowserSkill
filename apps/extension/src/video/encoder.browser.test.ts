@@ -6,12 +6,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-
-type Send = <T = Record<string, unknown>>(
-  method: string,
-  params?: object,
-  sessionId?: string,
-) => Promise<T>;
+import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
 
 const entry = `
 import { BrowserVideoHost } from '@/video/host';
@@ -55,6 +50,7 @@ globalThis.inspectVideo=async(id)=>{
 
 describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression", () => {
   it("encodes offscreen, preserves static time and produces a seekable MP4", async () => {
+    const extensionName = "Video encoding regression";
     const directory = await mkdtemp(path.join(tmpdir(), "bsk-video-extension-"));
     try {
       await cp(path.resolve("dist/chrome-mv3"), directory, { recursive: true });
@@ -92,7 +88,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
         path.join(directory, "manifest.json"),
         JSON.stringify({
           manifest_version: 3,
-          name: "Video encoding regression",
+          name: extensionName,
           version: "1.0",
           background: { service_worker: "background.js" },
           permissions: ["offscreen", "storage"],
@@ -112,27 +108,8 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME)("video encoder browser regression
           zoom: 1,
         },
         async (send: Send) => {
-          let target: { targetId: string; url: string } | undefined;
-          await expect
-            .poll(
-              async () => {
-                const result = await send<{
-                  targetInfos: { targetId: string; url: string; type: string }[];
-                }>("Target.getTargets");
-                target = result.targetInfos.find(
-                  (value) =>
-                    value.type === "service_worker" && value.url.endsWith("/background.js"),
-                );
-                return !!target;
-              },
-              { timeout: 15_000 },
-            )
-            .toBe(true);
-          const origin = target!.url.slice(0, -"/background.js".length);
-          const background = await send<{ sessionId: string }>("Target.attachToTarget", {
-            targetId: target!.targetId,
-            flatten: true,
-          });
+          const background = await attachVideoBackground(send, extensionName);
+          const origin = background.origin;
           const evaluate = async <T>(session: string, expression: string) => {
             const result = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
               "Runtime.evaluate",

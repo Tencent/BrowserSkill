@@ -9,12 +9,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
+import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
 
-type Send = <T = Record<string, unknown>>(
-  method: string,
-  params?: object,
-  sessionId?: string,
-) => Promise<T>;
 const run = promisify(execFile);
 
 describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
@@ -65,6 +61,10 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           .toBeGreaterThan(0);
         const extension = path.join(directory, "extension");
         await cp(path.resolve("dist/chrome-mv3"), extension, { recursive: true });
+        const manifestPath = path.join(extension, "manifest.json");
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+        manifest.name = "BrowserSkill video integration";
+        await writeFile(manifestPath, JSON.stringify(manifest));
         const backgroundPath = path.join(extension, "background.js");
         const background = await readFile(backgroundPath, "utf8");
         expect(background).toContain("ws://127.0.0.1:52800");
@@ -97,17 +97,8 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             expect(started.recording.state).toBe("recording");
             await new Promise((resolve) => setTimeout(resolve, 1100));
             await cli("navigate", "--session", session, `http://127.0.0.1:${address.port}/blue`);
-            const targets = await send<{
-              targetInfos: { type: string; url: string; targetId: string }[];
-            }>("Target.getTargets");
-            const worker = targets.targetInfos.find(
-              (target) => target.type === "service_worker" && target.url.endsWith("/background.js"),
-            )!;
-            const origin = worker.url.slice(0, -"/background.js".length);
-            const workerSession = await send<{ sessionId: string }>("Target.attachToTarget", {
-              targetId: worker.targetId,
-              flatten: true,
-            });
+            const workerSession = await attachVideoBackground(send, manifest.name);
+            const origin = workerSession.origin;
             const evaluate = async <T>(sessionId: string, expression: string): Promise<T> => {
               const result = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
                 "Runtime.evaluate",
@@ -117,10 +108,16 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
               return result.result.value;
             };
-            await evaluate(
-              workerSession.sessionId,
-              `chrome.tabs.sendMessage(${started.recording.tab_id},{type:'bsk-help-request',requestId:'video-help-test',prompt:'Confirm this step',selectors:[],timeoutMs:10000})`,
-            );
+            await expect
+              .poll(
+                () =>
+                  evaluate(
+                    workerSession.sessionId,
+                    `chrome.tabs.sendMessage(${started.recording.tab_id},{type:'bsk-help-request',requestId:'video-help-test',prompt:'Confirm this step',selectors:[],timeoutMs:10000}).then(()=>true,()=>false)`,
+                  ),
+                { timeout: 10_000 },
+              )
+              .toBe(true);
             await new Promise((resolve) => setTimeout(resolve, 1200));
             await evaluate(
               workerSession.sessionId,
