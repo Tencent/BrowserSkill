@@ -31,13 +31,14 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
    browser_inspect({ action: "observe", session: "<id>" })
    ```
 
-2. For an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first. Replace example IDs/refs with actual
-   results. Pass `session` when more than one exists; never use foreign IDs.
+2. For an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first. Use real IDs/refs, not
+   examples. Pass `session` when more than one exists; never use foreign IDs.
 3. Observe after page changes; check ambiguous results once. Stop when success is
    visible. Stop requested video first, then on success or failure call
-   `browser_session({ action: "stop", session: "<id>" })` unless keeping the session
-   open is part of the user's request. Stopping returns borrowed tabs, leaving them
-   open in the user's window.
+   `browser_session({ action: "stop", session: "<id>" })` unless the user wants it
+   kept open. Stopping returns borrowed tabs, leaving them open in the user's window.
+
+Confirm/prompt dialogs need `browser_page(action=dialog)`; alert/beforeunload auto-accept.
 
 ## Read and interact
 
@@ -56,7 +57,7 @@ To fill an observed field `@e3`:
 browser_interact({ action: "fill", session: "<id>", target: "@e3", value: "text" })
 ```
 
-Refs invalidate after navigation; large DOM changes may stale them too. Observe again.
+Refs invalidate after navigation or large DOM changes; observe again.
 Prefer refs for frames/shadow roots; selectors search the main document. Use observe
 for ordinary controls, including before acting on HTML or screenshot findings.
 Select options by value, not visible label.
@@ -68,14 +69,14 @@ Do not invent tools or bypass these limits.
 
 ## Read details only when needed
 
-Resolve references from the skill resource directory provided by the harness, not
-the working directory. Read the matching file before acting; do not preload all files.
+Resolve references from the harness's skill resource directory, not the working
+directory. Read only matching files before acting.
 
 | When | Read |
 | --- | --- |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
+| Dialogs, hover, scroll, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

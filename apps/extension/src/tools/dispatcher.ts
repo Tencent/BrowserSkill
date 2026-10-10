@@ -10,6 +10,7 @@ import type {
   BlurParams,
   ClickParams,
   ConsoleParams,
+  DialogParams,
   DownloadParams,
   EmulateParams,
   EvaluateParams,
@@ -53,6 +54,7 @@ import { auditContext } from "./audit-context";
 import { prepareBackgroundExecution } from "./background-execution";
 import { handleConsole } from "./console";
 import { handleDebug } from "./debug";
+import { handleDialog, pendingDialogError } from "./dialogs";
 import { handleDownload } from "./download";
 import { type EmulateCdpRunner, handleEmulate } from "./emulate";
 import { classifyCdpError } from "./errors";
@@ -118,6 +120,22 @@ import { handleUpload } from "./upload";
 import { handleWaitForElement, handleWaitForNavigation } from "./waits";
 import { handleWheel } from "./wheel";
 import { handleWindowResize, type WindowResizeParams } from "./window";
+
+// These tools can inspect cached state or release ownership without running page JS.
+const DIALOG_INDEPENDENT_METHODS = new Set([
+  "tool.dialog",
+  "tool.session_start",
+  "tool.session_stop",
+  "tool.tab_list",
+  "tool.tab_create",
+  "tool.tab_select",
+  "tool.tab_return",
+  "tool.tab_close",
+  "tool.request_help",
+  "tool.record_stop",
+  "tool.screenshot_read",
+  "tool.screenshot_release",
+]);
 
 type DispatcherCdpRunner = CdpRunner &
   NetworkCdpRunner &
@@ -311,11 +329,41 @@ export class ToolDispatcher {
     let body: ResponseFrame;
     let startedSession: string | null = null;
     let debugTicket: DebugTicket | undefined;
+    const checksDialogs = this.cdp?.pendingDialog && !DIALOG_INDEPENDENT_METHODS.has(req.method);
+    const dialogWarning = () =>
+      this.cdp && checksDialogs
+        ? pendingDialogError(
+            this.sessions,
+            (req.params ?? {}) as { session_id?: string; tab_id?: number },
+            this.cdp,
+            chromeTabsApi,
+          )
+        : Promise.resolve(null);
+    let interruptedByDialog: RpcError | null = null;
+    const dialogSubscription = checksDialogs
+      ? this.cdp?.onPendingDialog?.((tabId) => {
+          void dialogWarning()
+            .then((warning) => {
+              if (
+                this.inflightAbortControllers.get(req.id) !== ac ||
+                warning?.data?.reason !== "dialog_pending"
+              )
+                return;
+              const dialog = warning.data.dialog as { tab_id?: number } | undefined;
+              if (dialog?.tab_id !== tabId) return;
+              interruptedByDialog = warning;
+              // Also release lifecycle/event waits that have no CDP command in flight.
+              ac.abort();
+            })
+            .catch(() => {});
+        })
+      : undefined;
     try {
       if (startsSession && this.idleOperationInProgress) {
         throw new Error("Browser settings are updating; retry session start.");
       }
-      const sessionId = sessionIdForBrowserControlMethod(req);
+      const blocked = checksDialogs ? await dialogWarning() : null;
+      const sessionId = blocked ? null : sessionIdForBrowserControlMethod(req);
       if (sessionId) this.onBrowserControlResumed?.(sessionId);
       // Best-effort context must never prevent the requested operation.
       try {
@@ -325,20 +373,34 @@ export class ToolDispatcher {
         /* The daemon still has the original operation metadata. */
       }
       try {
-        debugTicket = await this.debug?.before(req, ac.signal);
+        if (!blocked) debugTicket = await this.debug?.before(req, ac.signal);
       } catch {
         /* Evidence must not block the operation. */
       }
       throwIfDispatchAborted(ac.signal);
-      const result = OPENS_TABS.has(req.method)
-        ? await withTaskPopups(
-            this.sessions,
-            (req.params ?? {}) as { session_id?: string; tab_id?: number },
-            (inputSent) => this.invoke(req, ac.signal, inputSent),
-            this.onAgentTabClaimed,
-            ac.signal,
-          )
-        : await this.invoke(req, ac.signal);
+      let result =
+        blocked ??
+        (OPENS_TABS.has(req.method)
+          ? await withTaskPopups(
+              this.sessions,
+              (req.params ?? {}) as { session_id?: string; tab_id?: number },
+              (inputSent) => this.invoke(req, ac.signal, inputSent),
+              this.onAgentTabClaimed,
+              ac.signal,
+            )
+          : await this.invoke(req, ac.signal));
+      const pending =
+        blocked ?? (checksDialogs ? await dialogWarning() : null) ?? interruptedByDialog;
+      if (pending)
+        result = {
+          ...pending,
+          data: {
+            ...pending.data,
+            ...(isRpcError(result) ? result.data : undefined),
+            reason: pending.data?.reason,
+            dialog: pending.data?.dialog,
+          },
+        };
       this.debug?.after(debugTicket, isRpcError(result) ? result.message : undefined);
       debugTicket = undefined;
       if (isRpcError(result)) {
@@ -364,7 +426,10 @@ export class ToolDispatcher {
           },
         };
       }
+      const pending = (checksDialogs ? await dialogWarning() : null) ?? interruptedByDialog;
+      if (pending) body = { id: req.id, error: pending };
     } finally {
+      dialogSubscription?.dispose();
       if (startsSession) this.pendingSessionStarts -= 1;
       this.debug?.after(debugTicket, "operation failed");
       this.inflightAbortControllers.delete(req.id);
@@ -412,6 +477,12 @@ export class ToolDispatcher {
     signal: AbortSignal,
     onInputSent?: (tabId: number) => void,
   ): Promise<unknown | RpcError> {
+    // Dialog control must not perform renderer reads or focus preparation:
+    // those operations can themselves be blocked by the modal it will close.
+    if (req.method === "tool.dialog")
+      return this.cdp
+        ? handleDialog(this.sessions, req.params as DialogParams, this.cdp, chromeTabsApi, signal)
+        : { code: "unsupported", message: "JavaScript dialog control is unavailable" };
     const sessionId = (req.params as { session_id?: string } | undefined)?.session_id;
     // Also enforce this for gateways backed by a local-mode daemon, where the
     // standalone server's early IPC rejection does not apply.
@@ -1031,6 +1102,10 @@ function recordingRuntimeUnavailable(): RpcError {
 }
 
 function sessionIdForBrowserControlMethod(req: RequestFrame): string | null {
+  if (req.method === "tool.dialog") {
+    const params = req.params as DialogParams | undefined;
+    return params && params.action !== "status" ? params.session_id : null;
+  }
   if (req.method === "tool.debug") {
     const params = req.params as DebugParams | undefined;
     return params && ["rule_add", "rule_enable", "replay"].includes(params.action)

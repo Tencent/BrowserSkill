@@ -2,6 +2,7 @@ import { AGENT_WINDOW_HOME, type AgentWindowApi, chromeAgentWindowApi } from "./
 import { RefStore } from "./ref-store";
 
 export interface SessionContext {
+  noAutoDialog?: boolean;
   /** Remote connections retain dedicated windows, with explicit page ownership. */
   remote?: boolean;
   sessionId: string;
@@ -47,6 +48,7 @@ export interface SessionManagerOptions {
 
 /** Options for starting a session's Agent Window. */
 export interface SessionStartOptions {
+  noAutoDialog?: boolean;
   /** Optional Agent Window outer size in CSS pixels. */
   size?: { width: number; height: number };
   /** Defaults to true so existing clients keep visible Agent Windows. */
@@ -268,6 +270,7 @@ export class SessionManager {
       throwIfSessionStartAborted(opts.signal);
 
       const ctx: SessionContext = {
+        noAutoDialog: opts.noAutoDialog,
         ...(this.remote() ? { remote: true } : {}),
         sessionId,
         agentWindowId: windowId,

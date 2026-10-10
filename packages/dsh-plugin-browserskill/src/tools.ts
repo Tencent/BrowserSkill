@@ -192,6 +192,11 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           type: "integer",
           description: "Agent Window outer height in CSS pixels (100..=7680). Requires width.",
         },
+        noAutoDialog: {
+          type: "boolean",
+          description:
+            "Leave alert/beforeunload pending too; confirm/prompt always require a decision.",
+        },
         noFocus: {
           type: "boolean",
           description: "Open the Agent Window in the background without stealing focus.",
@@ -241,6 +246,7 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
           startArgs.push("--width", String(args.width), "--height", String(args.height));
         }
         if (args.noFocus === true) startArgs.push("--no-focus");
+        if (args.noAutoDialog === true) startArgs.push("--no-auto-dialog");
         if (args.browser !== undefined) startArgs.push("--browser", args.browser);
         let reply: { session_id: string; browser_instance_id: string };
         try {

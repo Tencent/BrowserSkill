@@ -301,6 +301,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolSelect
                 | Method::ToolUpload
                 | Method::ToolDownload
+                | Method::ToolDialog
                 | Method::ToolEvaluate
                 | Method::ToolWaitForNavigation
                 | Method::ToolWaitForElement
@@ -577,9 +578,9 @@ async fn handle_tool_dispatch(
         object.insert("_audit_id".into(), audit_id);
     }
     let entry = inflight_guard.entry();
-    // `record_stop` must reach the extension while `record_await` holds the
-    // serial busy lock — finishing the recording unblocks await.
-    let outcome = if method == Method::ToolRecordStop {
+    // Dialog decisions and recording stop must reach the extension even while
+    // the operation they unblock holds the ordinary session busy lock.
+    let outcome = if matches!(method, Method::ToolRecordStop | Method::ToolDialog) {
         state
             .tool_queues
             .dispatch_unlocked(&session_id, method.clone(), params, timeout, Some(entry))
@@ -947,6 +948,8 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CliSessionStartParams {
     #[serde(default)]
+    pub no_auto_dialog: Option<bool>,
+    #[serde(default)]
     pub browser_instance_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
@@ -1068,6 +1071,7 @@ pub(super) async fn handle_session_start(
             width: None,
             height: None,
             focused: None,
+            no_auto_dialog: None,
         }
     } else {
         serde_json::from_value(params).map_err(|err| RpcError {
@@ -1097,6 +1101,7 @@ pub(super) async fn handle_session_start(
         AgentWindowOptions {
             size: window_size,
             focused: params.focused,
+            no_auto_dialog: params.no_auto_dialog,
         },
         state.config.extension_connect_wait,
         DEFAULT_RPC_TIMEOUT,

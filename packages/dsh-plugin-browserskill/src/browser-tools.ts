@@ -134,6 +134,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       width: { type: "integer", description: "Agent Window width; start requires height too." },
       height: { type: "integer", description: "Agent Window height; start requires width too." },
       noFocus: { type: "boolean", description: "Start the Agent Window in the background." },
+      noAutoDialog: {
+        type: "boolean",
+        description: "Also leave alert/beforeunload pending for an explicit decision.",
+      },
       browser: BROWSER_PARAM,
       device: { type: "string", enum: DEVICE_PRESETS, description: "Device preset for start." },
     },
@@ -142,7 +146,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_page",
     description:
       "Navigate and wait on the active Agent Window tab. Actions: navigate, back, forward, reload, " +
-      "wait. navigate requires url; reload optionally accepts hard; navigation actions accept " +
+      "wait, dialog. dialog requires dialogAction (status/accept/dismiss), with optional prompt text and dialogId. navigate requires url; reload optionally accepts hard; navigation actions accept " +
       "waitUntil/timeoutMs. Observe again after a meaningful page change before reusing refs.",
     actions: {
       navigate: "page.navigate",
@@ -150,9 +154,17 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       forward: "page.forward",
       reload: "page.reload",
       wait: "page.wait",
+      dialog: "page.dialog",
     },
     parameters: {
       session: SESSION_PARAM,
+      dialogAction: {
+        type: "string",
+        enum: ["status", "accept", "dismiss"],
+        description: "Operation for action=dialog.",
+      },
+      text: { type: "string", description: "Prompt text for dialog accept, including empty text." },
+      dialogId: { type: "string", description: "Expected pending dialog ID." },
       tabId: TAB_ID_PARAM,
       url: { type: "string", description: "Destination URL; required for navigate." },
       waitUntil: WAIT_UNTIL_PARAM,

@@ -1731,3 +1731,60 @@ it("passes dispatcher cancellation to popup tracking before the tool settles", a
     vi.unstubAllGlobals();
   }
 });
+
+it("returns the pending dialog and releases a navigation event wait", async () => {
+  const tab = { id: 7, windowId: 100, active: true, url: "https://example.test" };
+  vi.stubGlobal("chrome", { tabs: { get: async () => tab, query: async () => [tab] } });
+  const { transport, sent, deliver } = fakeTransport();
+  const sessions = new SessionManager({
+    agentWindow: {
+      create: async () => ({ windowId: 100, initialTabIds: [7] }),
+      remove: async () => {},
+      ensureActiveTab: async () => 7,
+    },
+  });
+  await sessions.start("test");
+  let pending: import("@/transport/types").PendingJavaScriptDialog | null = null;
+  let notify: ((tabId: number) => void) | undefined;
+  const listeners = new Set<unknown>();
+  const cdp = {
+    send: vi.fn(async (_tab, method) =>
+      method === "Page.getFrameTree"
+        ? { frameTree: { frame: { id: "root" } } }
+        : method === "Runtime.evaluate"
+          ? { result: { value: "loading" } }
+          : {},
+    ),
+    pendingDialog: () => pending,
+    onPendingDialog: (listener: (tabId: number) => void) => {
+      notify = listener;
+      return {
+        dispose: () => {
+          notify = undefined;
+        },
+      };
+    },
+    onEvent: (listener: unknown) => {
+      listeners.add(listener);
+      return { dispose: () => listeners.delete(listener) };
+    },
+    detachSession: async () => {},
+  } as unknown as TestDispatcherCdp;
+  const dispatcher = new ToolDispatcher({ transport, sessions, cdp });
+  try {
+    dispatcher.start();
+    deliver(makeRequest("tool.wait_for_navigation", { session_id: "test", timeout_ms: 30_000 }));
+    await vi.waitFor(() => expect(listeners.size).toBeGreaterThan(0));
+    pending = { id: "d1", tab_id: 7, type: "confirm", message: "Decide", sequence: 1 };
+    notify!(7);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      error: { data: { reason: "dialog_pending", dialog: { id: "d1" } } },
+    });
+    expect(listeners.size).toBe(0);
+    expect(dispatcher.inflightAbortControllers.size).toBe(0);
+  } finally {
+    dispatcher.stop();
+    vi.unstubAllGlobals();
+  }
+});

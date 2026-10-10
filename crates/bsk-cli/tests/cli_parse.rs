@@ -15,6 +15,74 @@ fn parse(args: &[&str]) -> Cli {
 }
 
 #[test]
+fn parses_dialog_decisions_and_preserves_empty_prompt_text() {
+    use bsk_protocol::tools::DialogAction;
+    for (args, text) in [
+        (vec!["bsk", "dialog", "accept", "--session", "s1"], None),
+        (
+            vec!["bsk", "dialog", "accept", "", "--session", "s1"],
+            Some(""),
+        ),
+        (
+            vec![
+                "bsk",
+                "dialog",
+                "accept",
+                "--text=--literal",
+                "--session",
+                "s1",
+            ],
+            Some("--literal"),
+        ),
+    ] {
+        let Command::Dialog(cmd) = parse(&args).command else {
+            panic!("expected dialog");
+        };
+        let params = cmd.params();
+        assert_eq!(params.action, DialogAction::Accept);
+        assert_eq!(params.prompt_text.as_deref(), text);
+    }
+    let Command::Dialog(cmd) = parse(&[
+        "bsk",
+        "dialog",
+        "dismiss",
+        "--session",
+        "s1",
+        "--tab-id",
+        "7",
+        "--dialog-id",
+        "d1",
+    ])
+    .command
+    else {
+        panic!("expected dialog");
+    };
+    let params = cmd.params();
+    assert_eq!(params.action, DialogAction::Dismiss);
+    assert_eq!(params.tab_id, Some(7));
+    assert_eq!(params.dialog_id.as_deref(), Some("d1"));
+    assert!(
+        Cli::try_parse_from([
+            "bsk",
+            "dialog",
+            "accept",
+            "one",
+            "--text=two",
+            "--session",
+            "s1"
+        ])
+        .is_err()
+    );
+    let Command::Session(SessionCmd {
+        sub: SessionSub::Start(args),
+    }) = parse(&["bsk", "session", "start", "--no-auto-dialog"]).command
+    else {
+        panic!("expected start");
+    };
+    assert!(args.no_auto_dialog);
+}
+
+#[test]
 fn parses_unattended_session_without_changing_normal_defaults() {
     for unattended in [false, true] {
         let mut argv = vec!["bsk", "session", "start"];

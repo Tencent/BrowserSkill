@@ -28,6 +28,8 @@ macro_rules! dump {
 }
 
 fn main() {
+    dump!(DialogParams, "tool_dialog_params");
+    dump!(DialogResult, "tool_dialog_result");
     dump!(VideoParams, "tool_video_params");
     dump!(VideoRecording, "video_recording");
     dump!(VideoGrant, "video_grant");

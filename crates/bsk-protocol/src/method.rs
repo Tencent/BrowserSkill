@@ -122,6 +122,8 @@ pub enum Method {
     ToolNetwork,
     #[serde(rename = "tool.evaluate")]
     ToolEvaluate,
+    #[serde(rename = "tool.dialog")]
+    ToolDialog,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
     #[serde(rename = "tool.wait_for_element")]
@@ -242,8 +244,9 @@ impl Method {
             | Method::ToolSessionStart
             | Method::ToolSessionStop => MethodEffect::ControlPlane,
 
-            // System / control — not gated.
-            Method::ToolDebug
+            // System / control. Dialog/debug/video mutations are gated by params below.
+            Method::ToolDialog
+            | Method::ToolDebug
             | Method::ToolVideo
             | Method::AuditRequest
             | Method::SystemHandshake
@@ -260,10 +263,13 @@ impl Method {
         }
     }
 
-    /// Debug reads/teardown remain available after interruption, while explicit
-    /// network interventions and replay are gated like other browser writes.
+    /// Dialog/debug/video reads and teardown remain available after
+    /// interruption. Dialog decisions, video start, explicit network
+    /// interventions and replay are gated like browser writes.
     pub fn requires_interrupt_gate_with_params(&self, params: &serde_json::Value) -> bool {
         self.requires_interrupt_gate()
+            || (matches!(self, Method::ToolDialog)
+                && params.get("action").and_then(|value| value.as_str()) != Some("status"))
             || (matches!(self, Method::ToolVideo)
                 && params.get("action").and_then(|value| value.as_str()) == Some("start"))
             || (matches!(self, Method::ToolDebug)
@@ -292,6 +298,20 @@ mod tests {
     use super::*;
     use crate::{CancelParams, CancelResult};
     use serde_json::json;
+
+    #[test]
+    fn dialog_decisions_respect_user_interrupts_but_status_does_not() {
+        assert!(
+            !Method::ToolDialog
+                .requires_interrupt_gate_with_params(&serde_json::json!({"action":"status"}))
+        );
+        for action in ["accept", "dismiss"] {
+            assert!(
+                Method::ToolDialog
+                    .requires_interrupt_gate_with_params(&serde_json::json!({"action":action}))
+            );
+        }
+    }
 
     #[test]
     fn video_start_respects_interrupts_but_teardown_and_artifact_reads_remain_available() {
