@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import * as recording from "../record";
 import { handleSessionStop } from "../session";
@@ -29,7 +29,7 @@ function fakeAgentWindow(ids: number[]) {
     if (id === undefined) throw new Error("ran out of fake ids");
     return { windowId: id, initialTabIds: [] };
   });
-  const remove = vi.fn(async () => {});
+  const remove = vi.fn(async (_windowId: number) => {});
   const ensureActiveTab = vi.fn(async () => 0);
   return { create, remove, ensureActiveTab };
 }
@@ -396,6 +396,135 @@ describe("handleSessionStop with auto-return", () => {
     if (timing === "before teardown" || timing === "before its turn in the return loop") {
       expect(tabs.move).not.toHaveBeenCalledWith(closedTabId, expect.anything());
     }
+  });
+});
+
+describe("handleSessionStop browser compatibility (issue #272)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { userAgent: "Chrome/150.0.0.0 YaBrowser/26.8.0.0" });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  async function setup(tabIds: number[], userTabIds: number[] = []) {
+    const aw = fakeAgentWindow([100]);
+    aw.ensureActiveTab = vi.fn(async () => tabIds[0]);
+    const manager = new SessionManager({ agentWindow: aw });
+    const ctx = await manager.start("aa11");
+    for (const id of tabIds) ctx.agentCreatedTabs.add(id);
+    const state: FakeState = {
+      tabs: new Map(
+        [...tabIds, ...userTabIds].map((id) => [id, { id, windowId: 100 } as chrome.tabs.Tab]),
+      ),
+      windowsClosed: new Set(),
+      moves: [],
+    };
+    aw.remove.mockImplementation(async (windowId) => {
+      state.windowsClosed.add(windowId);
+      for (const [id, tab] of state.tabs) {
+        if (tab.windowId === windowId) state.tabs.delete(id);
+      }
+    });
+    const { tabs, windows } = makeApis(state);
+    const query = makeQuery(state);
+    const deps = {
+      tabManagement: {
+        tabs,
+        windows,
+        agentOverlayReset: { resetAgentOverlays: vi.fn(async () => {}) },
+      },
+      tabsQuery: query,
+    };
+    return { aw, manager, ctx, state, tabs, query, deps };
+  }
+
+  it.each([
+    { tabIds: [10] },
+    { tabIds: [10, 11, 12] },
+  ])("closes the final owned tab through its window ($tabIds)", async ({ tabIds }) => {
+    const f = await setup(tabIds);
+    const result = await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps);
+    expect(result).toEqual({});
+    expect(vi.mocked(f.tabs.remove).mock.calls.map(([id]) => id)).toEqual(tabIds.slice(0, -1));
+    expect(f.aw.remove).toHaveBeenCalledWith(100);
+    expect(f.state.tabs.size).toBe(0);
+    expect(f.manager.has("aa11")).toBe(false);
+  });
+
+  it.each([
+    { browser: "Chrome", userAgent: "Chrome/150.0.0.0 Safari/537.36" },
+    { browser: "Edge", userAgent: "Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0" },
+  ])("preserves the existing tab cleanup on $browser", async ({ userAgent }) => {
+    vi.stubGlobal("navigator", { userAgent });
+    const f = await setup([10, 11]);
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({});
+    expect(vi.mocked(f.tabs.remove).mock.calls.map(([id]) => id)).toEqual([10, 11]);
+    expect(f.query.query).toHaveBeenCalledTimes(1);
+    expect(f.aw.remove).toHaveBeenCalledWith(100);
+    expect(f.state.tabs.size).toBe(0);
+    expect(f.manager.has("aa11")).toBe(false);
+  });
+
+  it("removes only agent tabs when a user tab remains", async () => {
+    const f = await setup([10, 11], [99]);
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({
+      window_released: true,
+    });
+    expect(vi.mocked(f.tabs.remove).mock.calls.map(([id]) => id)).toEqual([10, 11]);
+    expect([...f.state.tabs.keys()]).toEqual([99]);
+    expect(f.aw.remove).not.toHaveBeenCalled();
+  });
+
+  it("preserves a user tab opened after the final agent tab was deferred and allows retry", async () => {
+    const f = await setup([10]);
+    const query = f.query.query;
+    let calls = 0;
+    f.query.query = vi.fn(async (params) => {
+      if (++calls === 2) f.state.tabs.set(99, { id: 99, windowId: 100 } as chrome.tabs.Tab);
+      return query(params);
+    });
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toMatchObject({
+      code: "protocol_error",
+    });
+    expect(f.aw.remove).not.toHaveBeenCalled();
+    expect(f.tabs.remove).not.toHaveBeenCalled();
+    expect(f.manager.has("aa11")).toBe(true);
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({
+      window_released: true,
+    });
+    expect([...f.state.tabs.keys()]).toEqual([99]);
+    expect(f.aw.remove).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed window close retryable", async () => {
+    const f = await setup([10]);
+    f.aw.remove.mockRejectedValueOnce(new Error("window close failed"));
+    await expect(handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).rejects.toThrow(
+      "window close failed",
+    );
+    expect(f.manager.has("aa11")).toBe(true);
+    expect(f.ctx.agentCreatedTabs.has(10)).toBe(true);
+    expect(f.tabs.remove).not.toHaveBeenCalled();
+    await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps);
+    expect(f.state.tabs.size).toBe(0);
+    expect(f.manager.has("aa11")).toBe(false);
+  });
+
+  it("preserves a mixed window when the last-tab query fails and allows retry", async () => {
+    const f = await setup([10], [99]);
+    vi.mocked(f.query.query).mockRejectedValueOnce(new Error("query failed"));
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toMatchObject({
+      code: "protocol_error",
+    });
+    expect(f.tabs.remove).not.toHaveBeenCalled();
+    expect(f.aw.remove).not.toHaveBeenCalled();
+    expect([...f.state.tabs.keys()]).toEqual([10, 99]);
+    expect(f.manager.has("aa11")).toBe(true);
+    expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({
+      window_released: true,
+    });
+    expect([...f.state.tabs.keys()]).toEqual([99]);
+    expect(f.aw.remove).not.toHaveBeenCalled();
+    expect(f.manager.has("aa11")).toBe(false);
   });
 });
 

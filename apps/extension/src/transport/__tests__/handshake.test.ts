@@ -225,6 +225,11 @@ describe("performHandshake", () => {
 });
 
 describe("detectBrowserMeta", () => {
+  it("identifies Yandex before its compatibility Chrome token", () => {
+    expect(
+      detectBrowserMeta("Mozilla/5.0 Chrome/150.0.0.0 YaBrowser/26.8.0.0 Safari/537.36"),
+    ).toEqual({ name: "yandex", version: "26.8.0.0" });
+  });
   it("recognises Chrome", () => {
     const meta = detectBrowserMeta(
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.86 Safari/537.36",
