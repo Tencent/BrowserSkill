@@ -45,7 +45,8 @@ export const ELEMENT_WAIT_PARAMS = {
   target: {
     type: "string",
     description:
-      "wait-for-element: fresh snapshot ref or a known, scoped main-document CSS selector.",
+      "wait-for-element: fresh @eN ref or an observed main-document CSS selector. " +
+      "CSS only: no text=, XPath, or Playwright locators.",
   },
   state: {
     type: "string",

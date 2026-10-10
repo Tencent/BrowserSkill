@@ -13,6 +13,7 @@ not fetch HTML just to replace a usable ref with a selector. A known
 CSS selector can find a node that will appear or be replaced; it checks only the
 first match in the main document, so scope it to the intended component. Do not
 invent selectors: inspect bounded HTML if the current observation lacks one.
+Only CSS selectors are supported, not `text=...`, XPath, or Playwright locators.
 
 States are `visible` (default), `hidden` (absent or not visible), `attached`, and
 `detached` (absent). Visibility does not guarantee enabled state or actionability.

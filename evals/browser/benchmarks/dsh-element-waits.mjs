@@ -71,6 +71,14 @@ const server = createEvalServer({
 });
 let daemon;
 const rows = [];
+let stopRequested = false;
+let stopDsh = () => {};
+const stop = () => {
+  stopRequested = true;
+  stopDsh();
+};
+process.on("SIGINT", stop);
+process.on("SIGTERM", stop);
 function checked(result) {
   assert.equal(result.exitCode, 0, result.stderr || result.stdout);
   return result;
@@ -153,14 +161,17 @@ async function runDsh(args, options) {
     stderr += chunk;
   });
   let killTimer;
-  const timer = setTimeout(() => {
+  stopDsh = () => {
     child.kill("SIGTERM");
+    clearTimeout(killTimer);
     killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
-  }, 90_000);
+  };
+  const timer = setTimeout(stopDsh, 90_000);
   try {
     const [exitCode] = await once(child, "close");
     return { stdout, stderr, exitCode, events };
   } finally {
+    stopDsh = () => {};
     clearTimeout(timer);
     clearTimeout(killTimer);
   }
@@ -250,9 +261,10 @@ try {
         );
         await writeFile(join(out, "smoke.log"), smoke.stdout);
       }
-      for (const scenario of cases) {
+      trials: for (const scenario of cases) {
         for (let round = 0; round < samples; round++) {
           for (let slot = 0; slot < modes.length; slot++) {
+            if (stopRequested) break trials;
             const mode = modes[(round + slot) % modes.length];
             const runId = `${scenario}-${round}-${mode}`;
             const fixtureId = randomUUID();
@@ -498,4 +510,7 @@ child.on("exit", (code) => process.exit(code ?? 1));
     clearTimeout(timeout);
   }
   await rm(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  process.off("SIGINT", stop);
+  process.off("SIGTERM", stop);
+  if (stopRequested) process.exitCode = 130;
 }

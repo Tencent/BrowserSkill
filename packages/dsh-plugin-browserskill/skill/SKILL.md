@@ -61,8 +61,8 @@ Prefer refs for frames/shadow roots; selectors search the main document. Use obs
 for ordinary controls, including before acting on HTML or screenshot findings.
 Select options by value, not visible label.
 
-Use `wait-for-element` only for a known pending condition; check `satisfied`.
-Skip waiting when already ready. Prefer an existing ref; see details below.
+Observe after the triggering action. Use `wait-for-element` only for a known pending
+condition, then check `satisfied`. Skip waits when already ready.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md).

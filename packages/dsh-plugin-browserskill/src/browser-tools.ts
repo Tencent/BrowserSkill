@@ -135,7 +135,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       "Navigate and wait on the active Agent Window tab. Actions: navigate, back, forward, reload, " +
       "wait, wait-for-element. navigate requires url; reload optionally accepts hard; navigation " +
       "actions and wait accept waitUntil/timeoutMs. wait-for-element requires target; use it for " +
-      "a known pending condition after an action, with state/pollMs and timeoutMs (default 10000, " +
+      "a known pending condition after observing the post-action page, with state/pollMs and timeoutMs (default 10000, " +
       "max 300000). Check satisfied: false means timeout, not success. Prefer element conditions " +
       "for dynamic content; skip waiting when already ready. networkidle does not prove application readiness. Observe again " +
       "after a meaningful page change before reusing refs.",
