@@ -63,6 +63,7 @@ fn dispatch(cli: Cli, format: Format) -> Result<(), CliError> {
                 Ok(())
             }
         }
+        Command::Diagnostics(cmd) => cli::diagnostics::dispatch(cmd, cli.flags.json),
         Command::InstallSkill(args) => {
             let output = if cli.flags.json {
                 Output::Json
