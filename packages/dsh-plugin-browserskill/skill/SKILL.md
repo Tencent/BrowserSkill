@@ -21,9 +21,9 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 ## Mandatory workflow
 
 1. Define success. Start a session and retain `sessionId`. Include the verified `browser`
-   when a profile is required. For debugging, read the reference below and start
-   capture before navigation/reproduction. Leave capture off for ordinary browsing.
-   Otherwise, for a new page:
+   when a profile is required. For debugging or requested video, read the matching
+   reference below and start capture before navigation. Leave capture off otherwise.
+   For a new page:
 
    ```text
    browser_session({ action: "start" })
@@ -33,8 +33,8 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 
 2. For an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first. Replace example IDs/refs with actual
    results. Pass `session` when more than one exists; never use foreign IDs.
-3. Observe after page changes; check ambiguous results once. Stop acting when success
-   is visible. On success or failure, call
+3. Observe after page changes; check ambiguous results once. Stop when success is
+   visible. Stop requested video first, then on success or failure call
    `browser_session({ action: "stop", session: "<id>" })` unless keeping the session
    open is part of the user's request. Stopping returns borrowed tabs, leaving them
    open in the user's window.
@@ -68,8 +68,8 @@ Do not invent tools or bypass these limits.
 
 ## Read details only when needed
 
-Resolve references from the skill resource directory provided by the harness, not
-the working directory. Read the matching file before acting; do not preload all files.
+Resolve references from the harness-provided skill directory. Read only the matching
+file before acting.
 
 | When | Read |
 | --- | --- |

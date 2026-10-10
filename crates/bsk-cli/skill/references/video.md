@@ -1,7 +1,11 @@
 # Video recording
 
 Use video only when the user requests visual recording or reproduction evidence.
-It records one authorized task tab as MP4/H.264, without audio. It is separate
+Create a session (without an initial navigation) or borrow the requested tab,
+then start recording before navigating or performing the task. Wait for
+`recording.state=recording`; report a failed start before proceeding without video.
+The user does not need to click Start in the extension. It records one authorized
+task tab as MP4/H.264, without audio. It is separate
 from `bsk record`, which records semantic actions. Do not run both in one session.
 
 ```sh
@@ -20,15 +24,18 @@ recording. Default limit: 60 seconds; accepted range: 1 second to 10 minutes.
 `standard`: up to 1280 pixels / 15 fps; `clear`: up to 1920 pixels / 30 fps.
 One video can record per browser. Start fails explicitly if H.264 is unavailable.
 
-Confirm the user's desired destination before exporting unless they already
-specified it. There is no implicit output path. `stop --out <path>` combines stop
+Keep the stopped result for preview under Features → Video recording → Recent
+recordings. Starting and retaining a recording do not require choosing a path.
+Confirm the user's destination before exporting unless they already specified it.
+There is no implicit output path. `stop --out <path>` combines stop
 and save; `--overwrite` is required to replace an existing file. The CLI writes
 on its own computer, which may differ from the browser's computer. The extension
 preview's Save As writes on the browser's computer.
 
 Stop the video before stopping the task when a complete result is required.
 Stopping video leaves the task active. Duration and size caps stop automatically;
-subsequent `stop` calls are safe. Status and stop remain available while a page
+subsequent `stop` calls are safe. A capped video may omit later task operations;
+report that limit rather than claiming to have recorded the entire task. Status and stop remain available while a page
 action is waiting. A stopped artifact does not require its original task to exist.
 
 Task teardown, closing the captured tab, disconnects and capture failures preserve

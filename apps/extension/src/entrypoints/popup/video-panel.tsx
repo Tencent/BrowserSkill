@@ -1,6 +1,6 @@
 import { useTranslation } from "@browser-skill/i18n/react";
 import { Button, Input, Label } from "@browser-skill/ui";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { openVideo, useVideos, videoTime } from "@/video/client";
 import type { VideoQuality } from "@/video/types";
 
@@ -11,7 +11,8 @@ export function VideoPanel() {
   const [tab, setTab] = useState("");
   const [duration, setDuration] = useState(60);
   const [quality, setQuality] = useState<VideoQuality>("standard");
-  const [copied, setCopied] = useState(false);
+  const [feedback, setFeedback] = useState<"copied" | "failed" | null>(null);
+  const copyAttempt = useRef(0);
   const task =
     tasks.find((value) => value.session_id === session) ??
     (tasks.length === 1 ? tasks[0] : undefined);
@@ -24,7 +25,25 @@ export function VideoPanel() {
   const elapsed = active?.started_at
     ? Math.min(active.max_duration_ms, Date.now() - active.started_at)
     : 0;
-  const valid = task && target && Number.isInteger(duration) && duration >= 1 && duration <= 600;
+  const validSettings = Number.isInteger(duration) && duration >= 1 && duration <= 600;
+  const valid = task && target && validSettings;
+  const prompt = t("video.prompt", { duration, quality });
+  useEffect(() => {
+    setFeedback(null);
+    return () => {
+      copyAttempt.current += 1;
+    };
+  }, [prompt]);
+  const copyPrompt = async () => {
+    const attempt = ++copyAttempt.current;
+    setFeedback(null);
+    try {
+      await navigator.clipboard.writeText(prompt);
+      if (attempt === copyAttempt.current) setFeedback("copied");
+    } catch {
+      if (attempt === copyAttempt.current) setFeedback("failed");
+    }
+  };
   const selectClass = "w-full rounded-md border bg-background p-2 text-xs";
 
   return (
@@ -64,42 +83,7 @@ export function VideoPanel() {
         </div>
       ) : (
         <>
-          {!tasks.length && <p className="rounded-lg border p-3 text-xs">{t("video.noTask")}</p>}
-          <div className="space-y-1">
-            <Label htmlFor="video-task">{t("video.task")}</Label>
-            <select
-              id="video-task"
-              className={selectClass}
-              value={task?.session_id ?? ""}
-              onChange={(event) => {
-                setSession(event.target.value);
-                setTab("");
-              }}
-            >
-              <option value="">{t("video.chooseTask")}</option>
-              {tasks.map((value) => (
-                <option key={value.session_id} value={value.session_id}>
-                  {value.session_id}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-1">
-            <Label htmlFor="video-tab">{t("video.tab")}</Label>
-            <select
-              id="video-tab"
-              className={selectClass}
-              value={target?.id ?? ""}
-              onChange={(event) => setTab(event.target.value)}
-            >
-              <option value="">{t("video.chooseTab")}</option>
-              {task?.tabs.map((value) => (
-                <option key={value.id} value={value.id}>
-                  {value.title || value.url || value.id}
-                </option>
-              ))}
-            </select>
-          </div>
+          <p className="text-sm">{t("video.agentHint")}</p>
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
               <Label htmlFor="video-duration">{t("video.duration")}</Label>
@@ -125,39 +109,77 @@ export function VideoPanel() {
               </select>
             </div>
           </div>
-          <Button
-            className="w-full"
-            disabled={!valid || busy}
-            onClick={() =>
-              void run("start", {
-                options: {
-                  session_id: task!.session_id,
-                  tab_id: target!.id,
-                  max_duration_ms: duration * 1000,
-                  quality,
-                  request_id: crypto.randomUUID(),
-                },
-              })
-            }
-          >
-            {t("video.start")}
+          <Button className="w-full" disabled={!validSettings} onClick={() => void copyPrompt()}>
+            <span aria-live="polite">
+              {t(feedback === "copied" ? "video.copied" : "video.copyPrompt")}
+            </span>
           </Button>
-          <Button
-            variant="outline"
-            className="w-full"
-            disabled={!valid || busy}
-            onClick={() => {
-              void navigator.clipboard
-                .writeText(
-                  t("video.prompt", {
-                    command: `bsk video start --session ${task!.session_id} --tab-id ${target!.id} --duration ${duration}s --quality ${quality}`,
-                  }),
-                )
-                .then(() => setCopied(true));
-            }}
-          >
-            {t(copied ? "video.copied" : "video.copyPrompt")}
-          </Button>
+          {feedback === "failed" && (
+            <p role="alert" className="text-xs text-destructive">
+              {t("video.copyFailed")}
+            </p>
+          )}
+          <details className="rounded-lg border p-3">
+            <summary className="cursor-pointer text-sm font-medium">{t("video.manual")}</summary>
+            <div className="mt-3 space-y-3">
+              {!tasks.length && (
+                <p className="rounded-lg border p-3 text-xs">{t("video.noTask")}</p>
+              )}
+              <div className="space-y-1">
+                <Label htmlFor="video-task">{t("video.task")}</Label>
+                <select
+                  id="video-task"
+                  className={selectClass}
+                  value={task?.session_id ?? ""}
+                  onChange={(event) => {
+                    setSession(event.target.value);
+                    setTab("");
+                  }}
+                >
+                  <option value="">{t("video.chooseTask")}</option>
+                  {tasks.map((value) => (
+                    <option key={value.session_id} value={value.session_id}>
+                      {value.session_id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <Label htmlFor="video-tab">{t("video.tab")}</Label>
+                <select
+                  id="video-tab"
+                  className={selectClass}
+                  value={target?.id ?? ""}
+                  onChange={(event) => setTab(event.target.value)}
+                >
+                  <option value="">{t("video.chooseTab")}</option>
+                  {task?.tabs.map((value) => (
+                    <option key={value.id} value={value.id}>
+                      {value.title || value.url || value.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                variant="outline"
+                className="w-full"
+                disabled={!valid || busy}
+                onClick={() =>
+                  void run("start", {
+                    options: {
+                      session_id: task!.session_id,
+                      tab_id: target!.id,
+                      max_duration_ms: duration * 1000,
+                      quality,
+                      request_id: crypto.randomUUID(),
+                    },
+                  })
+                }
+              >
+                {t("video.start")}
+              </Button>
+            </div>
+          </details>
         </>
       )}
       <Button variant="ghost" className="w-full" onClick={() => void openVideo()}>

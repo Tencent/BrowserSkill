@@ -1,21 +1,66 @@
 # Video recording
 
-The browser extension's Features → Video recording page can record an authorized
-task tab as a silent MP4. The user selects the task and fixed tab, starts capture,
-then previews and saves the video in the extension. Closing the popup does not
-stop capture. Stopping video does not stop the task.
+When the user asks to record a task, control recording yourself through
+`browser_inspect` with `action: "video"`. The user does not need to race to the
+extension's Start button. Record only when requested. Video is separate from
+semantic interaction recording, which remains unsupported by these tools.
 
-This plugin does not expose a video action in its injected tool schemas yet.
-Do not invent a video tool or start another process to bypass that boundary.
-When video is requested in this harness, explain the extension workflow and let
-the user control the recording while the authorized browser task continues.
+1. Start a session without an initial URL. For an existing page, borrow its tab
+   first using the normal authorization flow. Retain the session and tab IDs.
+2. Start recording and wait for `recording.state: "recording"` before navigating
+   or performing task operations. A start error must be reported before proceeding
+   without video; never imply that capture is active after an error.
+3. Execute the task on that fixed tab. Navigation/reload remain recorded; switching
+   tabs does not move capture. Start is nonblocking after the first encoded frame.
+4. Stop recording before stopping the session, on success or failure. Inspect
+   `state`, `completeness`, `stop_reason` and `error`, then report the result.
 
-The recorded tab stays fixed across navigation and tab switching. The default
-limit is 60 seconds, with a 10-minute maximum; audio is omitted. Recordings remain
-in the browser for 24 hours, including after task teardown. Interruptions may
-produce partial videos. The preview distinguishes partial results and files
-waiting to be saved. Save As writes to the browser's computer, including when
-the harness runs remotely. A crash may lose the last incomplete fragment.
+```text
+browser_session({ action: "start" })
+browser_inspect({ action: "video", videoAction: "start", session: "<sessionId>", durationMs: 60000, quality: "standard" })
+// Retain recording.recording_id. Navigate and perform the task only after start succeeds.
+browser_inspect({ action: "video", videoAction: "status", recordingId: "<recording_id>" })
+browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
+browser_session({ action: "stop", session: "<sessionId>" })
+```
 
-Before ending a task whose complete video is still wanted, let the user stop
-recording in the extension; otherwise task teardown produces a partial result.
+The result is a silent H.264 MP4. Default limit: 60 seconds; range: 1 second to
+10 minutes. `standard` targets 1280 pixels / 15 fps; `clear` targets 1920 / 30 fps.
+Choose a limit appropriate to the requested task. A duration/size limit stops the
+video, not the task: do not call a capped video a recording of the entire task.
+One video can record per browser. A start error includes a stable `requestId` for
+retrying the same session/options if the reply was lost. A recovered recording
+that has already stopped is not an active recording; inspect it before continuing.
+
+## Preview and explicit export
+
+Tell the user to open Features → Video recording → Recent recordings in the
+extension to preview, seek, and Save MP4 as. Stopping video leaves the task running;
+closing the popup does not stop recording. No save-location question is needed to
+start recording or keep its result for preview.
+
+Export through the tool only when the user specifies a destination; ask if needed:
+
+```text
+browser_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
+```
+
+Tool export writes on the harness host, which may be remote. The extension's Save
+As writes on the browser computer. Replacing an existing file requires explicit
+permission and `overwrite: true`. A partial stop/save is a tool error containing
+the recording metadata and any saved path. Use status to inspect it; a file's
+existence does not make the recording complete. Unsupported capture/encoding fails
+explicitly; do not silently switch to another browser or recording method.
+
+Status, stop and list remain available during navigation or human help. After
+session teardown, use the recording ID to inspect or save the preserved video:
+artifact access is independent of the live task. `videoAction: "list"` lists only
+recordings started by this plugin instance; optional `session` filters that list.
+`videoAction: "discard"` with `recordingId` deletes a stopped browser copy only when
+requested. Never delete unsaved evidence merely to start another capture.
+
+Browser copies last 24 hours, including after task teardown. Closing the tab,
+disconnects or ending the session before stopping video may preserve a partial
+result; a crash may lose the last incomplete fragment. After a plugin reload, or
+for recordings started manually, use the extension library to preview and save.
+Interactive confirmation/help UI is replaced by a neutral waiting screen in video.

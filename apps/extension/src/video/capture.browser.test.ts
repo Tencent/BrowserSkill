@@ -10,11 +10,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { attachVideoBackground, type BrowserSend as Send } from "./browser-fixture";
+import { createDshVideoFixture } from "./dsh-fixture";
 
 const run = promisify(execFile);
 
 describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
-  "video CLI/browser integration",
+  "video CLI/DSH browser integration",
   () => {
     it("records a fixed tab through navigation, exports after task teardown and previews a seekable MP4", async () => {
       const directory = await mkdtemp(path.join(tmpdir(), "bsk-video-flow-"));
@@ -303,6 +304,89 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               ),
             ).rejects.toMatchObject({ code: 1 });
             expect((await stat(partialPath)).size).toBe(partialStatus.recording.byte_size);
+
+            // The packaged DSH tool surface records before the first task
+            // navigation and exports after its owned session is gone.
+            const dsh = await createDshVideoFixture(executable, env, path.join(directory, "dsh"));
+            try {
+              const task = await dsh.call<{ sessionId: string }>("browser_session", {
+                action: "start",
+              });
+              const started = await dsh.call<{
+                recording: { recording_id: string; state: string };
+              }>("browser_inspect", {
+                action: "video",
+                videoAction: "start",
+                session: task.sessionId,
+                durationMs: 30000,
+              });
+              expect(started.recording.state).toBe("recording");
+              const recordingId = started.recording.recording_id;
+              await dsh.call("browser_page", {
+                action: "navigate",
+                session: task.sessionId,
+                url: `http://127.0.0.1:${address.port}/red`,
+              });
+              await new Promise((resolve) => setTimeout(resolve, 1200));
+              const finished = await dsh.call<{
+                recording: { state: string; completeness: string; byte_size: number };
+              }>("browser_inspect", { action: "video", videoAction: "stop", recordingId });
+              expect(finished.recording.state).toBe("ready");
+              expect(finished.recording.completeness).toBe("complete");
+              await dsh.call("browser_session", { action: "stop", session: task.sessionId });
+              const output = path.join(directory, "dsh.mp4");
+              await dsh.call("browser_inspect", {
+                action: "video",
+                videoAction: "save",
+                recordingId,
+                output,
+              });
+              expect((await stat(output)).size).toBe(finished.recording.byte_size);
+              await expect(
+                dsh.call("browser_inspect", {
+                  action: "video",
+                  videoAction: "save",
+                  recordingId,
+                  output,
+                }),
+              ).rejects.toThrow(/Output exists/);
+              const list = await dsh.call<{ recordings: { recording_id: string }[] }>(
+                "browser_inspect",
+                { action: "video", videoAction: "list" },
+              );
+              expect(list.recordings.map((value) => value.recording_id)).toEqual([recordingId]);
+              await send(
+                "Page.navigate",
+                { url: `${origin}/video.html?id=${recordingId}` },
+                preview.sessionId,
+              );
+              await send("Page.bringToFront", {}, preview.sessionId);
+              await expect
+                .poll(
+                  () =>
+                    evaluate(
+                      preview.sessionId,
+                      `({search:location.search,loaded:document.querySelector('video')?.readyState>=1,error:document.querySelector('[role=alert]')?.textContent??'',video:!!document.querySelector('video'),body:document.body.innerText.slice(0,400)})`,
+                    ),
+                  { timeout: 10000 },
+                )
+                .toMatchObject({
+                  search: `?id=${recordingId}`,
+                  loaded: true,
+                  error: "",
+                  video: true,
+                });
+              // The preview intentionally preloads only metadata. Seek to
+              // request and verify a decoded frame from the completed task.
+              const pixel = await evaluate<number[]>(
+                preview.sessionId,
+                `(async()=>{const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;v.currentTime=v.duration-.2;await new Promise(r=>v.onseeked=r);const ctx=c.getContext('2d');ctx.drawImage(v,0,0);return Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data)})()`,
+              );
+              expect(pixel[0]).toBeGreaterThan(240);
+              expect(pixel[1]).toBeLessThan(15);
+            } finally {
+              await dsh.dispose();
+            }
           },
         );
       } finally {

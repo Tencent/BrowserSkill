@@ -616,7 +616,7 @@
     "backgroundHint": "You can close this popup. Stopping the video keeps the task running.",
     "stop": "Stop recording",
     "interrupt": "Stop task actions",
-    "noTask": "Start a browser task first, then choose an authorized tab here.",
+    "noTask": "Manual recording needs a running task and an authorized tab. You can copy the agent prompt above before starting a task.",
     "task": "Task",
     "tab": "Fixed tab",
     "chooseTask": "Choose a task",
@@ -628,7 +628,7 @@
     "start": "Start recording",
     "copyPrompt": "Copy agent prompt",
     "copied": "Copied",
-    "prompt": "Record this task tab using {{command}}. Continue the task after recording starts, then stop the recording. Ask me where to save the MP4 before exporting it with bsk video save --out. Do not change the recorded tab.",
+    "prompt": "Please record the browser task I request as a silent MP4, with a {{duration}}-second limit and {{quality}} quality. Use the video controls provided by your browser tools or CLI. Create or reuse this task’s authorized tab, start recording and confirm it is active before navigation or task operations. If recording fails, tell me before proceeding without video. Keep the recorded tab fixed. Stop recording before ending the task, and tell me whether the video is complete or limited/interrupted. Keep it for preview and Save As in the extension’s Features → Video recording. Export only to a destination I specify; ask where if needed.",
     "recent": "Recent recordings ({{count}})",
     "partial": "Partial recording — preserved video is available",
     "saved": "Saved",
@@ -660,6 +660,9 @@
       "encoding_failed": "Video encoding was interrupted",
       "storage_failed": "Browser storage could not continue",
       "browser_restarted": "Recovered after the browser or extension restarted"
-    }
+    },
+    "agentHint": "Tell your agent to record before starting the task. It will start and stop recording for you; preview and save the result here.",
+    "manual": "Record a running task manually",
+    "copyFailed": "Could not copy the prompt. Please try again."
   }
 }

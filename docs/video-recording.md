@@ -6,18 +6,27 @@ following task tab switches is deliberately deferred.
 
 ## User flow
 
-Open the extension's Features → Video recording. Choose a running task and one
-of its authorized tabs (a sole choice is selected automatically), set a duration
-and quality, and start. The extension badge shows REC. Closing the popup is safe.
-The recording panel shows elapsed/remaining time, Stop recording, and Stop task
-actions. Stopping a video leaves its task running.
+The primary entry is a request to the agent: “Perform this task and record the
+process; let me preview the video afterwards.” The agent creates a session or
+borrows the authorized tab, starts recording and waits for its first encoded
+frame **before** navigation/task operations. It stops recording before ending the
+session, then reports the result. A failed start is reported before continuing
+without video. Recording is opt-in; choosing a save location does not block start.
+
+Both CLI and DSH agents can manage this sequence. The extension's Features → Video
+recording offers a harness-neutral prompt even with no running task. Its duration
+and quality settings are included in the copied instructions. Manual recording is
+in a secondary section: choose a running task and an authorized tab (a sole choice
+is selected automatically), then start. The extension badge shows REC. Closing the
+popup is safe. While active, the panel prioritizes elapsed/remaining time, Stop
+recording, and Stop task actions. Stopping a video leaves its task running.
 
 The recent recordings page offers native video playback, seeking, Save MP4 as,
 and deletion. “Recording complete · waiting to save” remains until Chrome reports
 a successful download. Canceled or failed downloads do not count as saved.
 Partial recordings remain clearly labeled with their interruption reason.
 
-The popup can copy an agent prompt. The CLI equivalent is:
+The CLI controls are:
 
 ```sh
 bsk video start --session <task> --tab-id <tab> --duration 60s --quality standard
@@ -128,11 +137,27 @@ use Chrome for Testing to allow loading the isolated unpacked extension.
 ```sh
 cargo build -p bsk --locked
 pnpm --filter @browser-skill/extension build
+pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
 cd apps/extension
 BSK_VIDEO_CHROME=/path/to/chrome BSK_VIDEO_BSK=../../target/debug/bsk \
   pnpm exec vitest run src/video/*.browser.test.ts
 ```
 
 The extension's minimum Chrome version remains 125. Codec support is validated at
-runtime. The injected DSH tool set is unchanged; its skill describes the extension
-workflow without inventing unsupported video tools.
+runtime. DSH uses `browser_inspect(action=video)` with `videoAction` set to start, status,
+stop, save, list, or discard. Its six public tool schemas are retained. Start
+follows the session queue; artifact operations bypass that queue so status/stop
+remain available during human help. A plugin-local allowlist of returned recording
+IDs outlives session teardown; retry keys are scoped to the plugin and session
+lifetime. A shared CLI cache or an arbitrary ID does not grant
+access to other tasks' videos. List is filtered to these IDs. Plugin reloads clear
+this allowlist; the extension library remains available for recovery. CLI partial
+stop/save errors retain their recording metadata and saved path in the tool error.
+
+```text
+browser_inspect({ action: "video", videoAction: "start", session: "<task>", durationMs: 60000 })
+// Execute task operations after state=recording.
+browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
+// End the task. Preview and Save As remain available in the extension.
+browser_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
+```

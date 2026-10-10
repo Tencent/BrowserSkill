@@ -267,11 +267,12 @@ jobs:
           curl --fail --silent --show-error --location --retry 3 "$video_chrome_download" --output "$RUNNER_TEMP/video-chrome.zip"
           unzip -q "$RUNNER_TEMP/video-chrome.zip" -d "$RUNNER_TEMP/video-chrome"
           echo "BSK_VIDEO_CHROME=$RUNNER_TEMP/video-chrome/chrome-linux64/chrome" >> "$GITHUB_ENV"
-      - name: Build CLI and extension
+      - name: Build CLI, extension and DSH plugin
         run: |
           cargo build -p bsk --locked
           pnpm --filter @browser-skill/extension build
-      - name: Validate capture, playback, recovery and CLI export
+          pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+      - name: Validate capture, playback, recovery and CLI/DSH export
         working-directory: apps/extension
         env:
           BSK_VIDEO_BSK: ../../target/debug/bsk
