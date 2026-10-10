@@ -522,6 +522,69 @@ describe("parseBskJson", () => {
     expect(() => parseBskJson(result, "fill")).toThrow(hint);
   });
 
+  it("lists the connected browsers a selector miss carries in data", () => {
+    const body = JSON.stringify({
+      code: "not_found",
+      message: "requested browser is not connected",
+      hint: "run bsk browsers",
+      data: {
+        browsers: [
+          {
+            instance_id: "alpha",
+            browser_name: "chrome",
+            browser_version: "131",
+            label: "Personal",
+            session_count: 0,
+          },
+          {
+            instance_id: "beta",
+            browser_name: "edge",
+            browser_version: "130",
+            label: "",
+            session_count: 1,
+          },
+        ],
+      },
+    });
+    let message = "";
+    try {
+      parseBskJson({ ...base, code: 3, stdout: body }, "session start");
+      expect.unreachable();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('alpha (chrome 131, label "Personal", 0 sessions)');
+    expect(message).toContain("beta (edge 130, 1 session)");
+    // summary -> candidates -> hint, the order the CLI's own output uses
+    expect(message.indexOf("not connected")).toBeLessThan(message.indexOf("connected browsers:"));
+    expect(message.indexOf("connected browsers:")).toBeLessThan(message.indexOf("hint:"));
+    // one line: the action card keeps only the first
+    expect(message.split("\n")).toHaveLength(1);
+  });
+
+  it("renders no candidate list for an empty browsers array", () => {
+    const body = JSON.stringify({
+      code: "not_found",
+      message: "requested browser is not connected",
+      data: { browsers: [] },
+    });
+    expect(() => parseBskJson({ ...base, code: 3, stdout: body }, "session start")).toThrow(
+      "bsk session start failed: requested browser is not connected",
+    );
+  });
+
+  it("leaves data that is not a candidate list out of the message", () => {
+    const body = JSON.stringify({
+      code: "cdp_failed",
+      message: "fill could not verify the expected value",
+      data: { reason: "fill_value_mismatch" },
+      hint: "observe the field",
+    });
+    expect(() => parseBskJson({ ...base, code: 3, stdout: body }, "fill")).toThrow(
+      "bsk fill failed: fill could not verify the expected value (hint: observe the field)",
+    );
+  });
+
   it("reports killed-by-interrupt children (null exit code) as interrupted", () => {
     expect(() => parseBskJson({ ...base, code: null }, "navigate")).toThrow(/interrupted/);
   });
