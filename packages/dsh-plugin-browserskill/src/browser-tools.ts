@@ -16,6 +16,16 @@ import {
   WAIT_UNTIL_PARAM,
 } from "./tool-params";
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
+import { VIDEO_PARAMETERS } from "./video-tool";
+
+// Exclude the shared path before combining action-specific schemas.
+const { output: debugOutput, ...debugParameters } = DEBUG_PARAMETERS;
+const { output: videoOutput, ...videoParameters } = VIDEO_PARAMETERS;
+const INSPECT_OUTPUT = {
+  type: debugOutput.type satisfies typeof videoOutput.type,
+  description:
+    "Debug export: new local JSON path. Video save: explicit MP4 destination chosen by the user; omit to preview and Save As in the extension. Video replacement requires overwrite=true.",
+} as const;
 
 const DEVICE_PRESETS = [
   "iphone-14",
@@ -154,7 +164,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_inspect",
     description:
       "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
-      "screenshot, console, network. Prefer observe, then snapshot, then bounded html; use screenshot " +
+      "screenshot, console, network, video. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
       "debug with debugAction starts/stops capture, reads/exports evidence, or explicitly controls network traffic. " +
       "rule_add/rule_enable can block, modify or mock live requests; replay sends a new request and may change server data. Start capture before visiting the page.",
@@ -166,11 +176,14 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       console: "inspect.console",
       network: "inspect.network",
       debug: "inspect.debug",
+      video: "inspect.video",
     },
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
-      ...DEBUG_PARAMETERS,
+      ...debugParameters,
+      ...videoParameters,
+      output: INSPECT_OUTPUT,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
       cursor: {

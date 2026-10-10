@@ -18,6 +18,7 @@ import { SettingInfo } from "./setting-info";
 import { Switch } from "./switch";
 import { type PopupStatusState, useConnectionState } from "./use-connection-state";
 import { useControlHintsHidden } from "./use-control-hints-hidden";
+import { VideoPanel } from "./video-panel";
 
 const STATE_LABEL_KEYS = {
   disconnected: "popup.stateLabel.disconnected",
@@ -115,17 +116,19 @@ export function App() {
   };
 
   const headerTitle =
-    view === "features"
-      ? t("popup.launcher.title")
-      : view === "debug"
-        ? t("debug.title")
-        : view === "record"
-          ? t("popup.record.sectionTitle")
-          : view === "long-screenshot"
-            ? t("longScreenshot.title")
-            : view === "audit"
-              ? t("audit.title")
-              : t("popup.brandName");
+    view === "video"
+      ? t("video.title")
+      : view === "features"
+        ? t("popup.launcher.title")
+        : view === "debug"
+          ? t("debug.title")
+          : view === "record"
+            ? t("popup.record.sectionTitle")
+            : view === "long-screenshot"
+              ? t("longScreenshot.title")
+              : view === "audit"
+                ? t("audit.title")
+                : t("popup.brandName");
 
   return (
     <main
@@ -180,6 +183,8 @@ export function App() {
           </Button>
         )}
       </header>
+
+      {view === "video" && <VideoPanel />}
 
       {view === "main" && (
         <>

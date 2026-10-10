@@ -15,6 +15,7 @@ export async function withChrome(
     softwareRendering = false,
     startupTimeout = 15_000,
     onEvent,
+    extraArgs = [],
   },
   run,
 ) {
@@ -50,6 +51,7 @@ export async function withChrome(
         "--window-size=1600,1200",
         `--force-device-scale-factor=${deviceScale}`,
         `--user-data-dir=${profile}`,
+        ...extraArgs,
         "about:blank",
       ],
       { stdio: ["ignore", "ignore", "pipe"] },

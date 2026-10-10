@@ -267,6 +267,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 Method::TransferFinish => handle_transfer_finish(&state, params),
                 Method::TransferRead => handle_transfer_read(&state, params),
                 Method::TransferRelease => handle_transfer_release(&state, params),
+                Method::ToolVideo => handle_video(&state, rpc_id, params).await,
                 Method::ToolTabList
                 | Method::ToolTabCreate
                 | Method::ToolTabClose
@@ -323,6 +324,74 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
             body
         })
     })
+}
+
+/// Stored videos remain addressable after session teardown. Only start takes
+/// the session queue; status, stop and artifact transfer cannot wait behind a
+/// long page action. The extension validates connection ownership + capability.
+async fn handle_video(state: &Arc<DaemonState>, rpc_id: RpcId, params: Value) -> ResponseBody {
+    use super::browsers::SendError;
+    if let Err(error) = serde_json::from_value::<bsk_protocol::tools::VideoParams>(params.clone()) {
+        return ResponseBody::Err(invalid_params(error.to_string()));
+    }
+    let browser = if let Some(session_id) = params.get("session_id").and_then(Value::as_str) {
+        let Some(session) = state.sessions.get(&SessionId(session_id.into())) else {
+            return ResponseBody::Err(invalid_params("Video task session is no longer active"));
+        };
+        state.browsers.get(&session.browser_id)
+    } else {
+        match state
+            .browsers
+            .select(params.get("browser").and_then(Value::as_str))
+        {
+            Ok(browser) => Some(browser),
+            Err(error) => {
+                return ResponseBody::Err(invalid_params(format!(
+                    "Select a connected browser with --browser: {error:?}"
+                )));
+            }
+        }
+    };
+    let Some(browser) = browser else {
+        return ResponseBody::Err(invalid_params(
+            "Recording browser is disconnected; reconnect it to retrieve the video",
+        ));
+    };
+    let mut result = if params.get("action").and_then(Value::as_str) == Some("start") {
+        handle_tool_dispatch(state, rpc_id, Method::ToolVideo, params).await
+    } else {
+        let id = format!("video-{}", uuid::Uuid::new_v4().simple());
+        let receiver = match browser.dispatch(bsk_protocol::RequestFrame {
+            id: id.clone(),
+            method: Method::ToolVideo,
+            params: Some(params),
+        }) {
+            Ok(receiver) => receiver,
+            Err(SendError::Terminated(error)) => return ResponseBody::Err(error),
+            Err(SendError::SinkClosed) => {
+                return ResponseBody::Err(invalid_params("Recording browser disconnected"));
+            }
+        };
+        let reply = tokio::time::timeout(Duration::from_secs(32), receiver).await;
+        browser
+            .pending
+            .lock()
+            .expect("browser pending poisoned")
+            .cancel(&id);
+        match reply {
+            Ok(Ok(frame)) => frame.body,
+            Ok(Err(_)) => ResponseBody::Err(invalid_params("Recording browser disconnected")),
+            Err(_) => ResponseBody::Err(RpcError {
+                code: ErrorCode::Timeout,
+                message: "Video service timed out; use video list/status before retrying".into(),
+                data: None,
+            }),
+        }
+    };
+    if let ResponseBody::Ok(value) = &mut result {
+        value["browser"] = Value::String(browser.id.0.clone());
+    }
+    result
 }
 
 /// IPC entry point for `tool.*` RPCs (M6+). Looks up the per-session
