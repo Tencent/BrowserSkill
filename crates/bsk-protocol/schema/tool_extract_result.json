@@ -1,0 +1,327 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ExtractResult",
+  "type": "object",
+  "required": [
+    "columns",
+    "coverage",
+    "kind",
+    "row_sources",
+    "rows",
+    "schema_version",
+    "source",
+    "spans",
+    "tab_id",
+    "warnings"
+  ],
+  "properties": {
+    "columns": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExtractColumn"
+      }
+    },
+    "coverage": {
+      "$ref": "#/definitions/ExtractCoverage"
+    },
+    "kind": {
+      "$ref": "#/definitions/ExtractAction"
+    },
+    "row_sources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExtractRowSource"
+      }
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "schema_version": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "source": {
+      "$ref": "#/definitions/ExtractSource"
+    },
+    "spans": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ExtractSpan"
+      }
+    },
+    "tab_id": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "targets": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/ExtractTarget"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "definitions": {
+    "ExtractAction": {
+      "type": "string",
+      "enum": [
+        "discover",
+        "table",
+        "list"
+      ]
+    },
+    "ExtractColumn": {
+      "type": "object",
+      "required": [
+        "header_path",
+        "key",
+        "name",
+        "name_source"
+      ],
+      "properties": {
+        "header_path": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "key": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "name_source": {
+          "$ref": "#/definitions/ExtractNameSource"
+        }
+      }
+    },
+    "ExtractCompleteness": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "incomplete"
+      ]
+    },
+    "ExtractCoverage": {
+      "type": "object",
+      "required": [
+        "dataset_complete",
+        "rows_returned",
+        "scope",
+        "truncated"
+      ],
+      "properties": {
+        "dataset_complete": {
+          "$ref": "#/definitions/ExtractCompleteness"
+        },
+        "declared_columns": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "declared_rows": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "rows_returned": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scope": {
+          "$ref": "#/definitions/ExtractScope"
+        },
+        "stop_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ExtractNameSource": {
+      "type": "string",
+      "enum": [
+        "header",
+        "generated",
+        "field"
+      ]
+    },
+    "ExtractRowKind": {
+      "type": "string",
+      "enum": [
+        "data",
+        "footer"
+      ]
+    },
+    "ExtractRowSource": {
+      "type": "object",
+      "required": [
+        "locator",
+        "row",
+        "row_kind",
+        "source_row"
+      ],
+      "properties": {
+        "locator": {
+          "type": "string"
+        },
+        "row": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "row_kind": {
+          "$ref": "#/definitions/ExtractRowKind"
+        },
+        "source_row": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ExtractScope": {
+      "type": "string",
+      "enum": [
+        "loaded_dom"
+      ]
+    },
+    "ExtractSource": {
+      "type": "object",
+      "required": [
+        "captured_at",
+        "frame_id",
+        "frame_url",
+        "page_url",
+        "title"
+      ],
+      "properties": {
+        "captured_at": {
+          "type": "string"
+        },
+        "frame_id": {
+          "type": "string"
+        },
+        "frame_url": {
+          "type": "string"
+        },
+        "page_url": {
+          "type": "string"
+        },
+        "selector": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      }
+    },
+    "ExtractSpan": {
+      "type": "object",
+      "required": [
+        "column",
+        "column_span",
+        "row",
+        "row_span"
+      ],
+      "properties": {
+        "column": {
+          "type": "string"
+        },
+        "column_span": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "row": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "row_span": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ExtractTarget": {
+      "type": "object",
+      "required": [
+        "columns",
+        "frame_id",
+        "frame_url",
+        "kind",
+        "name",
+        "target_id"
+      ],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "frame_id": {
+          "type": "string"
+        },
+        "frame_url": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/definitions/ExtractTargetKind"
+        },
+        "name": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        }
+      }
+    },
+    "ExtractTargetKind": {
+      "type": "string",
+      "enum": [
+        "table",
+        "list"
+      ]
+    }
+  }
+}

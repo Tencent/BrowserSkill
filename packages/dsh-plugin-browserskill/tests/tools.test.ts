@@ -124,6 +124,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.console": ["browser_inspect", "console"],
   "inspect.network": ["browser_inspect", "network"],
   "inspect.debug": ["browser_inspect", "debug"],
+  "inspect.extract": ["browser_inspect", "extract"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
   "interact.wheel": ["browser_interact", "wheel"],
@@ -227,7 +228,16 @@ const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chr
 const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
   browser_page: ["navigate", "back", "forward", "reload", "wait"],
-  browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network", "debug"],
+  browser_inspect: [
+    "observe",
+    "snapshot",
+    "html",
+    "screenshot",
+    "console",
+    "network",
+    "debug",
+    "extract",
+  ],
   browser_interact: [
     "click",
     "hover",
@@ -1675,6 +1685,100 @@ it("forwards screenshot-bound Canvas coordinates to click", async () => {
     "shift",
     "e1",
   ]);
+});
+
+describe("structured extraction", () => {
+  it("routes field selectors and literal data without shell interpolation", async () => {
+    const answer = {
+      schema_version: 1,
+      rows: [{ title: "结果" }],
+      coverage: { scope: "loaded_dom" },
+    };
+    const { tools, calls } = setup({ "session start": START_REPLY("s1"), "extract list": answer });
+    await startSession(tools);
+    const fields = JSON.stringify({
+      fields: [{ key: "title", selector: '[data-value="$(literal)"]', read: "text" }],
+    });
+    const result = await tools.get("browser_inspect")!.execute(
+      {
+        action: "extract",
+        extractKind: "list",
+        selector: "#results",
+        itemSelector: ".result",
+        extractFields: fields,
+        maxRows: 20,
+        maxBytes: 2048,
+        tabId: 7,
+      },
+      makeExec(),
+    );
+    expect(result).toEqual(answer);
+    expect(calls.at(-1)?.args).toEqual([
+      "extract",
+      "list",
+      "--session",
+      "s1",
+      "--tab-id",
+      "7",
+      "--selector",
+      "#results",
+      "--item-selector",
+      ".result",
+      "--fields-json",
+      fields,
+      "--max-rows",
+      "20",
+      "--max-bytes",
+      "2048",
+    ]);
+  });
+  it("routes discovered targets and CSV receipts through the existing tool", async () => {
+    const receipt = { path: "/tmp/results.csv", metadata_path: "/tmp/results.csv.meta.json" };
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "extract table": receipt,
+    });
+    await startSession(tools);
+    expect(
+      await tools.get("browser_inspect")!.execute(
+        {
+          action: "extract",
+          extractKind: "table",
+          extractTarget: "xt_fixture",
+          extractFormat: "csv",
+          extractOutput: "/tmp/results.csv",
+          csvSafe: true,
+        },
+        makeExec(),
+      ),
+    ).toEqual(receipt);
+    expect(calls.at(-1)?.args).toEqual([
+      "extract",
+      "table",
+      "--session",
+      "s1",
+      "--target",
+      "xt_fixture",
+      "--format",
+      "csv",
+      "--out",
+      "/tmp/results.csv",
+      "--csv-safe",
+    ]);
+  });
+  it.each([
+    { selector: "#table", extractTarget: "xt_fixture" },
+    { extractFormat: "csv" },
+    { extractFields: '{"fields":"wrong"}' },
+  ])("rejects invalid extraction options before invoking CLI: %j", async (args) => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const count = calls.length;
+    await expect(
+      tools.get("browser_inspect")!.execute({ action: "extract", ...args }, makeExec()),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(count);
+  });
 });
 
 describe("website debug", () => {

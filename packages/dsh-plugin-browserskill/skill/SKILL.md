@@ -73,6 +73,7 @@ the working directory. Read the matching file before acting; do not preload all 
 
 | When | Read |
 | --- | --- |
+| Table/list JSON/CSV export | [Extract](references/extraction.md) |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |

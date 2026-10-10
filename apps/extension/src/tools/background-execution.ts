@@ -1,5 +1,6 @@
 import { isAgentControlledTab, type SessionManager } from "@/session-manager/manager";
 import type { RequestFrame, RpcError } from "@/transport/types";
+import { extractTargetTab } from "./extract";
 import {
   type CdpRunner,
   type ChromeTabsApi,
@@ -14,6 +15,7 @@ const reads = new Set([
   "tool.observe",
   "tool.screenshot",
   "tool.get_html",
+  "tool.extract",
   "tool.evaluate",
   "tool.console",
   "tool.network",
@@ -51,13 +53,22 @@ export async function prepareBackgroundExecution(
   signal: AbortSignal,
 ): Promise<RpcError | undefined> {
   if (!cdp?.acquireBackgroundExecution || !pageTools.has(request.method)) return;
-  const params = request.params as { session_id?: string; tab_id?: number } | undefined;
+  const params = request.params as
+    | { session_id?: string; tab_id?: number; target_id?: string }
+    | undefined;
   if (!params?.session_id) return;
   const ctx = manager.get(params.session_id);
   if (!ctx) return;
+  const extractionHandle =
+    request.method === "tool.extract" && typeof params.target_id === "string";
+  const tabId =
+    params.tab_id ?? (extractionHandle ? extractTargetTab(ctx, params.target_id!) : undefined);
+  // Let the extraction handler report an expired/foreign handle, without first
+  // preparing an unrelated default tab.
+  if (extractionHandle && tabId === undefined) return;
   const target = await (reads.has(request.method)
-    ? resolveCdpAccessibleTargetTab(manager, ctx, params.tab_id, tabs, request.method)
-    : resolveTargetTab(manager, ctx, params.tab_id, tabs));
+    ? resolveCdpAccessibleTargetTab(manager, ctx, tabId, tabs, request.method)
+    : resolveTargetTab(manager, ctx, tabId, tabs));
   if (isRpcError(target)) return target;
   request.params = { ...params, tab_id: target.tabId };
   // Navigation owns preparation: an inaccessible source document must still
