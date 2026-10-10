@@ -10,17 +10,7 @@ fn main() -> ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(err) => {
-            // Parsing can fail before clap reaches --json. Only standalone
-            // flags before `--` select the error format; values stay literal.
-            let json = args
-                .iter()
-                .skip(1)
-                .take_while(|arg| *arg != "--")
-                .any(|arg| arg == "--json");
-            let format = if json { Format::Json } else { Format::Human };
-            return render_parse_error(err, format);
-        }
+        Err(err) => return render_parse_error(err, &args),
     };
 
     // The daemon installs its own subscriber (with the rolling file

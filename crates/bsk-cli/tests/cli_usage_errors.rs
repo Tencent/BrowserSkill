@@ -1,8 +1,19 @@
 //! Process-level coverage of argument errors, output streams, and exit codes.
 
+use std::path::Path;
 use std::process::{Command, Output};
 
 use serde_json::Value;
+
+/// clap names the binary after argv[0]: `bsk.exe` on Windows.
+fn usage(rest: &str) -> String {
+    let bin = Path::new(env!("CARGO_BIN_EXE_bsk"))
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    format!("Usage: {bin} {rest}")
+}
 
 fn bsk(args: &[&str]) -> Output {
     let home = tempfile::tempdir().unwrap();
@@ -107,7 +118,7 @@ fn json_message_is_the_clap_summary_and_details_keep_the_full_text() {
         missing["data"]["details"]
             .as_str()
             .unwrap()
-            .contains("Usage: bsk click --session <SESSION>")
+            .contains(&usage("click --session <SESSION>"))
     );
 
     let invalid = json_usage_error(&bsk(&[
@@ -141,7 +152,7 @@ fn json_message_is_the_clap_summary_and_details_keep_the_full_text() {
         bare_group["data"]["details"]
             .as_str()
             .unwrap()
-            .contains("Usage: bsk tab")
+            .contains(&usage("tab"))
     );
 }
 
@@ -196,15 +207,12 @@ fn human_usage_errors_keep_stderr_and_replace_the_misleading_suggestion() {
     for (args, usage) in [
         (
             vec!["--session", "s1", "click"],
-            "Usage: bsk [OPTIONS] <COMMAND>",
+            usage("[OPTIONS] <COMMAND>"),
         ),
-        (
-            vec!["--tab-id", "7", "click"],
-            "Usage: bsk [OPTIONS] <COMMAND>",
-        ),
+        (vec!["--tab-id", "7", "click"], usage("[OPTIONS] <COMMAND>")),
         (
             vec!["tab", "--session", "s1", "list"],
-            "Usage: bsk tab [OPTIONS] <COMMAND>",
+            usage("tab [OPTIONS] <COMMAND>"),
         ),
     ] {
         let output = bsk(&args);
@@ -214,7 +222,7 @@ fn human_usage_errors_keep_stderr_and_replace_the_misleading_suggestion() {
         assert!(stderr.contains("unexpected argument"), "{stderr}");
         assert!(stderr.contains("tip: --session and --tab-id"), "{stderr}");
         assert!(stderr.contains("bsk click --session"), "{stderr}");
-        assert!(stderr.contains(usage), "{stderr}");
+        assert!(stderr.contains(&usage), "{stderr}");
         // clap's did-you-mean pointed `--session` at `--version` (#387).
         assert!(!stderr.contains("--version"), "{stderr}");
     }

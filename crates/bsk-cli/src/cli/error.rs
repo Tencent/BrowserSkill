@@ -9,7 +9,9 @@
 //! Exit codes are documented in [`super::render_error`] and
 //! design §3.1.
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Error;
@@ -114,15 +116,24 @@ const MISPLACED_COMMAND_OPTION_HINT: &str = "--session and --tab-id are command-
      options; place them after a subcommand that supports them, e.g. `bsk click --session <id> \
      --tab-id <tab> --selector '#submit'`; run `bsk <cmd> --help` for supported options";
 
-/// Render clap failures using the CLI's error contract, while preserving
-/// successful help/version output and the existing usage-error exit code.
-pub fn render_parse_error(err: clap::Error, format: Format) -> ExitCode {
+/// Render clap failures for `args` (the full argv clap parsed) using the
+/// CLI's error contract, while preserving successful help/version output
+/// and the existing usage-error exit code.
+pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
     if !err.use_stderr() {
         let _ = err.print();
         return ExitCode::SUCCESS;
     }
 
-    let (err, hint) = match misplaced_command_option_error(&err) {
+    // Parsing can fail before clap reaches --json. Only standalone flags
+    // before `--` select the error format; values stay literal.
+    let json = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json");
+    let format = if json { Format::Json } else { Format::Human };
+    let (err, hint) = match misplaced_command_option_error(&err, args) {
         Some(rebuilt) => (rebuilt, Some(MISPLACED_COMMAND_OPTION_HINT)),
         None => (err, None),
     };
@@ -152,7 +163,7 @@ pub fn render_parse_error(err: clap::Error, format: Format) -> ExitCode {
 /// clap's own did-you-mean can point `--session` at `--version` and print
 /// `Usage: bsk --version <COMMAND>`. Rebuild the error so its tip and usage
 /// describe where the option actually belongs.
-fn misplaced_command_option_error(err: &clap::Error) -> Option<clap::Error> {
+fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Option<clap::Error> {
     let arg = match (err.kind(), err.get(ContextKind::InvalidArg)) {
         (ErrorKind::UnknownArgument, Some(ContextValue::String(arg)))
             if matches!(arg.as_str(), "--session" | "--tab-id") =>
@@ -162,6 +173,14 @@ fn misplaced_command_option_error(err: &clap::Error) -> Option<clap::Error> {
         _ => return None,
     };
     let mut cmd = super::Cli::command();
+    // Like clap, name the binary after argv[0], e.g. `bsk.exe` on Windows.
+    if let Some(name) = args
+        .first()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(|name| name.to_str())
+    {
+        cmd = cmd.bin_name(name);
+    }
     // The usage clap printed names the suggested argument when it found one;
     // otherwise it is the usage of the command being parsed, e.g. `bsk tab`.
     let usage = match (
