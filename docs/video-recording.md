@@ -78,6 +78,8 @@ stop a replacement attachment or another consumer. Capture retains only an
 in-flight frame and the newest pending frame. Canvas dimensions stay fixed and
 resizes are letterboxed. A monotonic timeline preserves elapsed static time and
 caps the final duration without compressing periods with dropped frames.
+Capture reads have a 10-second deadline. Stopping during startup cancels the wait
+for a stalled renderer; a late screenshot cannot open an encoder after cleanup.
 
 Video's idempotent overlay lease is separate from short screenshot suppression.
 Content checks the lease before mounting. Interactive confirmation/help overlays

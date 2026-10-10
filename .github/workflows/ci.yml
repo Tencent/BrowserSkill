@@ -247,7 +247,9 @@ jobs:
 
   browser-video:
     name: Browser video recording regression
-    runs-on: ubuntu-latest
+    # Allows Chrome for Testing's user-namespace sandbox without a custom
+    # AppArmor profile for its temporary installation path.
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v6

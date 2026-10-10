@@ -268,10 +268,32 @@ describe("video lifetime and access", () => {
     await store.put({ ...value, state: "ready", stop_reason: "duration_limit" });
     await video.finished(value.recording_id);
     release();
-    await expect(starting).rejects.toThrow("stopped during capture startup");
+    await expect(starting).rejects.toThrow(/cancelled|stopped during capture startup/);
     expect(video.isRecording()).toBe(false);
     expect(
       cdp.send.mock.calls.filter(([, method]) => method === "Page.stopScreencast"),
     ).toHaveLength(1);
+  });
+
+  it("can stop a task while its first screenshot is not responding", async () => {
+    const { start, cdp, video, request } = await setup();
+    let entered!: () => void;
+    const capturing = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    cdp.send.mockImplementation(async (_tab, method) => {
+      if (method === "Page.captureScreenshot") {
+        entered();
+        return new Promise<never>(() => {});
+      }
+      return {} as never;
+    });
+    const starting = start();
+    const cancelled = expect(starting).rejects.toThrow("cancelled");
+    await capturing;
+    await video.stopSession("task");
+    await cancelled;
+    expect(video.isRecording()).toBe(false);
+    expect(request.mock.calls.some(([command]) => command.action === "start")).toBe(false);
   });
 });

@@ -14,6 +14,7 @@ import {
   lookupSession,
   resolveTargetTab,
 } from "@/tools/shared";
+import { captureReply } from "./capture-deadline";
 import type { VideoHost } from "./host-protocol";
 import { VideoArtifactStore } from "./store";
 import { FrameClock } from "./timeline";
@@ -47,6 +48,7 @@ interface ActiveVideo {
   clock: FrameClock;
   origin: number;
   cleanAfter?: number;
+  capture: AbortController;
 }
 
 export interface VideoManagerDeps {
@@ -229,6 +231,7 @@ export class VideoManager {
         pumping: false,
         clock: new FrameClock(),
         origin: performance.now(),
+        capture: new AbortController(),
       };
       this.active = active;
       active.starting = this.begin(active, signal);
@@ -240,9 +243,12 @@ export class VideoManager {
     }
   }
 
-  private async begin(active: ActiveVideo, signal?: AbortSignal): Promise<VideoGrant> {
+  private async begin(active: ActiveVideo, callerSignal?: AbortSignal): Promise<VideoGrant> {
     const { cdp, host } = this.deps;
     const { tab_id: tab, session_id: session } = active.value;
+    const signal = callerSignal
+      ? AbortSignal.any([callerSignal, active.capture.signal])
+      : active.capture.signal;
     const check = () => {
       if (
         signal?.aborted ||
@@ -257,17 +263,21 @@ export class VideoManager {
     try {
       await this.store.put(active.value);
       check();
-      const overlay = await this.deps.overlay(tab, active.value.recording_id);
+      const overlay = await captureReply(this.deps.overlay(tab, active.value.recording_id), signal);
       if (overlay.interactive)
         throw new Error("Finish the current browser confirmation before starting a video");
       check();
-      await cdp.send(tab, "Page.enable");
+      await captureReply(cdp.send(tab, "Page.enable"), signal);
       cdp.trackSessionTab?.(session, tab);
-      await cdp.acquireBackgroundExecution?.(session, tab);
-      const first = await cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
-        format: "jpeg",
-        quality: 80,
-      });
+      if (cdp.acquireBackgroundExecution)
+        await captureReply(cdp.acquireBackgroundExecution(session, tab), signal);
+      const first = await captureReply(
+        cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
+          format: "jpeg",
+          quality: 80,
+        }),
+        signal,
+      );
       check();
       active.value = await host.request<StoredVideo>({
         action: "start",
@@ -357,6 +367,7 @@ export class VideoManager {
     const active = this.active;
     if (!active || active.value.recording_id !== id) return this.get(id);
     active.stopReason ??= reason;
+    active.capture.abort(new Error("Video capture cancelled"));
     active.pending = undefined;
     active.stopping ??= (async () => {
       await active.starting?.catch(() => {});
@@ -405,6 +416,7 @@ export class VideoManager {
   }
 
   private async cleanup(active: ActiveVideo): Promise<void> {
+    active.capture.abort(new Error("Video capture cancelled"));
     active.suspended = true;
     active.pending = undefined;
     await active.lease?.release().catch(() => {});
@@ -430,6 +442,7 @@ export class VideoManager {
       // racing startup cancels it; acknowledge only after startup compensation
       // removes the overlay lease and closes the encoder.
       active.stopReason ??= "capture_failed";
+      active.capture.abort(new Error("Video capture cancelled"));
       await active.starting?.catch(() => {});
       return null;
     }
@@ -443,10 +456,13 @@ export class VideoManager {
       if (!waiting && epoch === active.epoch) {
         // A fresh screenshot replaces any buffered screencast frame from before
         // the overlay was removed. Content confirms two clean animation frames.
-        const first = await this.deps.cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
-          format: "jpeg",
-          quality: 80,
-        });
+        const first = await captureReply(
+          this.deps.cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
+            format: "jpeg",
+            quality: 80,
+          }),
+          active.capture.signal,
+        );
         if (epoch === active.epoch) {
           await this.deps.host.request({
             action: "frame",
