@@ -6,6 +6,7 @@ import { OVERLAY_AGENT_STATE, type OverlayAgentStateMessage } from "@/lib/overla
 import { attachSessionsLiveFlag } from "@/lib/sessions-live-flag";
 import { isAgentControlledTab } from "@/session-manager/manager";
 import { ToolDispatcher } from "@/tools/dispatcher";
+import { VideoManager } from "@/video/manager";
 
 vi.hoisted(() => {
   Object.assign(globalThis, { defineBackground: (main: unknown) => main });
@@ -17,6 +18,9 @@ vi.mock("@/browser-driver/chromium-cdp");
 vi.mock("@/debug/archive");
 vi.mock("@/debug/bridge");
 vi.mock("@/debug/manager");
+vi.mock("@/video/manager");
+vi.mock("@/video/bridge");
+vi.mock("@/video/host");
 vi.mock("@/lib/audit");
 vi.mock("@/lib/audit-bridge");
 vi.mock("@/lib/connection-controller");
@@ -76,6 +80,7 @@ async function fixture() {
       onRemoved: event(),
     },
     debugger: { onDetach: event() },
+    webNavigation: { onBeforeNavigate: event(), onCompleted: event() },
     runtime: { onMessage: event(), onConnect: event() },
     notifications: { onClicked: event(), onButtonClicked: event() },
   });
@@ -85,6 +90,7 @@ async function fixture() {
     syncFromManager: vi.fn(async () => {}),
   });
   vi.mocked(ChromiumCdp.prototype.releaseSessionTab).mockResolvedValue();
+  vi.mocked(VideoManager.prototype.stopTab).mockResolvedValue();
   (background as unknown as () => void)();
   const deps = vi.mocked(ToolDispatcher).mock.calls.at(-1)![0];
   const task = await deps.sessions.start("one");

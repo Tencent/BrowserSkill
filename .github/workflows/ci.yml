@@ -245,6 +245,31 @@ jobs:
           BSK_CLICK_CHROME: google-chrome
         run: pnpm exec vitest run src/tools/__tests__/emulation-lifecycle.browser.test.ts
 
+  browser-video:
+    name: Browser video recording regression
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build CLI and extension
+        run: |
+          cargo build -p bsk --locked
+          pnpm --filter @browser-skill/extension build
+      - name: Validate capture, playback, recovery and CLI export
+        working-directory: apps/extension
+        env:
+          BSK_VIDEO_CHROME: google-chrome
+          BSK_VIDEO_BSK: ../../target/debug/bsk
+        run: pnpm exec vitest run src/video/*.browser.test.ts
+
   node-scripts:
     name: Node script tests
     runs-on: ubuntu-latest

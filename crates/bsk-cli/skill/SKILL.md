@@ -109,9 +109,8 @@ acting on HTML or screenshot findings. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
-Resolve these paths from this skill's directory, not the working directory.
-Read the matching reference before the operation; do not load every file at startup.
-A task may need more than one reference as it progresses.
+Resolve paths from this skill's directory, not the working directory.
+Read matching references before each operation; do not preload every file.
 
 | When | Read |
 | --- | --- |
@@ -120,5 +119,6 @@ A task may need more than one reference as it progresses.
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
 | Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
+| Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |

@@ -253,6 +253,95 @@ async fn ipc_session_start(sock: &PathBuf) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn video_stop_bypasses_a_busy_task_and_remains_available_after_teardown() {
+    let (handle, sock) = spawn_daemon().await;
+    let mut ws = connect_ext(handle.ws_addr()).await;
+    handshake_as_ext(&mut ws).await;
+    let (req_tx, mut req_rx) = mpsc::unbounded_channel();
+    let (reply_tx, reply_rx) = mpsc::unbounded_channel();
+    tokio::spawn(run_fake_extension(
+        ws,
+        Arc::new(Mutex::new(1)),
+        req_tx,
+        reply_rx,
+    ));
+    let session_id = ipc_session_start(&sock).await;
+    let state = handle.state();
+    let sid = bsk::daemon::sessions::SessionId(session_id.clone());
+    let browser_id = state.sessions.get(&sid).unwrap().browser_id.0;
+    let mut busy = Some({
+        let queues = Arc::clone(&state.tool_queues);
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            queues
+                .dispatch(
+                    &sid,
+                    Method::ToolSnapshot,
+                    json!({"session_id": sid.0, "tag": "busy"}),
+                    Duration::from_secs(5),
+                    None,
+                )
+                .await
+        })
+    });
+    let (busy_id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    for action in ["stop", "status"] {
+        let video = {
+            let sock = sock.clone();
+            let browser = browser_id.clone();
+            tokio::spawn(async move {
+                let mut ipc = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+                ipc.call::<_, serde_json::Value>(
+                    "video-control",
+                    Method::ToolVideo,
+                    Some(json!({
+                        "action": action,
+                        "browser": browser,
+                        "recording_id": "vid_0123456789abcdef0123456789abcdef",
+                        "capability": "private-grant"
+                    })),
+                    Duration::from_secs(3),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+            })
+        };
+        let (id, _) = tokio::time::timeout(Duration::from_secs(2), req_rx.recv())
+            .await
+            .expect("video control was blocked by the task queue")
+            .unwrap();
+        reply_tx
+            .send((id, json!({"recording": {"state": "ready"}})))
+            .unwrap();
+        assert_eq!(video.await.unwrap()["browser"], browser_id);
+        if action == "stop" {
+            assert!(
+                !busy.as_ref().unwrap().is_finished(),
+                "video stop must not wait for the active tool"
+            );
+            reply_tx.send((busy_id.clone(), json!({}))).unwrap();
+            assert!(busy.take().unwrap().await.unwrap().is_ok());
+            let mut ipc = bsk::ipc_client::IpcClient::connect(&sock).await.unwrap();
+            ipc.call::<_, serde_json::Value>(
+                "stop-task",
+                Method::SessionStop,
+                Some(json!({"session_id": session_id})),
+                Duration::from_secs(3),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(state.sessions.get(&sid).is_none());
+        }
+    }
+    handle.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn same_session_dispatches_run_after_previous_completes() {
     let (handle, sock) = spawn_daemon().await;
     let mut ws = connect_ext(handle.ws_addr()).await;

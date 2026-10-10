@@ -64,6 +64,7 @@ import type {
   BorrowRequestMessage,
   BorrowResponseMessage,
 } from "@/tools/borrow-confirmation";
+import { VIDEO_OVERLAY, VideoOverlayGate, type VideoOverlayMessage } from "@/video/overlay";
 
 // Run at document_end so the overlay does not block first paint. Only attach
 // in the top-level frame so iframes do not double-render overlays.
@@ -84,6 +85,17 @@ export default defineContentScript({
     const overlayVersions = new OverlayVersionGate();
     let hostLossReported = false;
     let remountInProgress = false;
+    const videoOverlay = new VideoOverlayGate(
+      async (action) => {
+        const response = await chrome.runtime.sendMessage({ type: VIDEO_OVERLAY, action });
+        if (!response || response.error)
+          throw new Error(response?.error ?? "Video overlay unavailable");
+        return response;
+      },
+      () => renderAll(),
+      () => waitForRenderedOverlayUpdate(),
+    );
+    await videoOverlay.initialize().catch(() => {});
 
     // Load the user's control-hints preference up front so an already-active
     // Agent session does not flash the overlay before the stored value lands.
@@ -174,13 +186,14 @@ export default defineContentScript({
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      const controlOverlayVisible = shouldShowAgentControlOverlay(overlayState);
+      const controlOverlayVisible = !videoOverlay.id && shouldShowAgentControlOverlay(overlayState);
       // Leaving control (including help/record UI) must not retain click leases.
       if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
         overlayState.borrowRequests.length > 0 ||
         overlayState.activeHelp !== null ||
         overlayState.activeRecord !== null;
+      const showInteractive = videoOverlay.canRenderInteractive(interactiveOverlayVisible);
       setOverlayHostHiddenFromAccessibility(!interactiveOverlayVisible);
       setOverlaySurfaceState(
         controlOverlayVisible,
@@ -197,10 +210,14 @@ export default defineContentScript({
               React.Fragment,
               null,
               React.createElement(BorrowConfirmationOverlay, {
-                requests: overlayState.borrowRequests,
+                requests: showInteractive ? overlayState.borrowRequests : [],
               }),
-              React.createElement(HelpRequestOverlay, { request: overlayState.activeHelp }),
-              React.createElement(RecordOverlay, { request: overlayState.activeRecord }),
+              React.createElement(HelpRequestOverlay, {
+                request: showInteractive ? overlayState.activeHelp : null,
+              }),
+              React.createElement(RecordOverlay, {
+                request: showInteractive ? overlayState.activeRecord : null,
+              }),
               React.createElement(ControlOverlay, {
                 visible: controlOverlayVisible,
                 interrupting: overlayState.interrupting,
@@ -218,8 +235,18 @@ export default defineContentScript({
     }
 
     async function waitForRenderedOverlayUpdate(): Promise<void> {
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
-      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+      // Background tabs may not receive animation frames. Rendering has already
+      // committed synchronously; the fallback also bounds shutdown/navigation.
+      const frame = () =>
+        new Promise<void>((resolve) => {
+          const timer = window.setTimeout(resolve, 500);
+          window.requestAnimationFrame(() => {
+            window.clearTimeout(timer);
+            resolve();
+          });
+        });
+      await frame();
+      await frame();
     }
 
     function clearCurrentAgentSession(): void {
@@ -288,6 +315,18 @@ export default defineContentScript({
         response: BorrowResponseMessage | HelpAckMessage | CaptureSuppressAck | InputPassthroughAck,
       ) => void,
     ) => {
+      if ((message as { type?: string }).type === VIDEO_OVERLAY) {
+        void videoOverlay.set((message as unknown as VideoOverlayMessage).recording_id).then(() => {
+          const state = overlays.snapshot();
+          (sendResponse as (value: unknown) => void)({
+            interactive:
+              state.borrowRequests.length > 0 ||
+              state.activeHelp !== null ||
+              state.activeRecord !== null,
+          });
+        });
+        return true;
+      }
       if (isCaptureSuppressMessage(message)) {
         return captureSuppress.handleMessage(message, sendResponse);
       }
@@ -495,7 +534,16 @@ export default defineContentScript({
     }
 
     const onPageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) void requestOverlayState();
+      if (event.persisted) {
+        void videoOverlay
+          .initialize()
+          .then(() => {
+            renderAll();
+            return videoOverlay.clean();
+          })
+          .catch(() => {});
+        void requestOverlayState();
+      }
     };
 
     // Live-apply popup toggles of the control-hints preference.
@@ -513,6 +561,7 @@ export default defineContentScript({
 
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
+    void videoOverlay.clean().catch(() => {});
     void requestOverlayState();
 
     window.addEventListener("pageshow", onPageShow);
