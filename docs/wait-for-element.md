@@ -32,6 +32,10 @@ return `not_found` with `data.reason: "ref_not_found"`, including for `hidden` a
 disconnects, invalid selectors and other inspection failures remain errors; they
 do not prove absence.
 
+If a selector's node id expires during lookup, the next poll queries the selector
+again. A replacement may already match; a failed lookup does not replace the last
+completed observation or by itself satisfy the wait.
+
 A full-document navigation invalidates the tab's refs, even if the wait already
 probed the old node successfully. Use `wait-for-navigation` for page lifecycle
 readiness and then `observe` for refs in the new document, instead of waiting for

@@ -235,8 +235,8 @@ async function beforeDeadline<T>(
   }
 }
 
-/** Only CDP's explicit missing-node response proves removal. Chrome's
- * debugger API may encode the protocol error as a JSON string. */
+/** Recognize only CDP's explicit missing-node errors. A stale selector lookup
+ * must still be retried. Chrome's debugger API may encode the error as JSON. */
 function isMissingNode(error: unknown): boolean {
   let message = error instanceof Error ? error.message : String(error);
   try {
@@ -245,7 +245,9 @@ function isMissingNode(error: unknown): boolean {
   } catch {
     // Plain debugger error message.
   }
-  return message === "No node with given id found";
+  return (
+    message === "No node with given id found" || message === "Could not find node with given id"
+  );
 }
 
 /** Does an observation of `(attached, visible)` satisfy `state`? */
@@ -379,9 +381,11 @@ export async function handleWaitForElement(
         deps.signal,
       );
       if (isRpcError(next)) return next;
-      probe = next;
-      if (satisfiesState(params.state, next.attached, next.visible)) {
-        return finish(true);
+      if (next) {
+        probe = next;
+        if (satisfiesState(params.state, next.attached, next.visible)) {
+          return finish(true);
+        }
       }
       const remaining = deadline - performance.now();
       if (remaining <= 0) return finish(false);
@@ -406,9 +410,10 @@ export async function handleWaitForElement(
  * is re-queried on every probe (that is how "wait until it appears"
  * works) and a ref keeps the same staleness rules as every other tool.
  *
- * An unmatched selector is reported as a state, not an error — it is precisely
- * what `detached` and the not-yet-`attached` case look like. Every other
- * failure propagates: folding a real CDP fault into `attached: false`
+ * An unmatched selector is reported as a state. A missing frontend node id
+ * during lookup returns null so the next poll re-queries the selector without
+ * replacing the last completed observation. Other failures propagate:
+ * folding a real CDP fault into `attached: false`
  * would let a broken probe masquerade as "the element really is gone",
  * and the caller uses exactly this distinction to decide whether the
  * case fails or is retried.
@@ -420,15 +425,16 @@ async function probeState(
   params: WaitForElementParams,
   objectGroup: string,
   objectTargets: Map<string, CdpTarget>,
-): Promise<Probe | RpcError> {
+): Promise<Probe | RpcError | null> {
   const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element");
   if (isRpcError(node)) {
-    if (
-      (node.code === "not_found" && node.data?.reason === "selector_not_found") ||
-      (node.code === "cdp_failed" && isMissingNode(node.message))
-    ) {
+    if (node.code === "not_found" && node.data?.reason === "selector_not_found") {
       return { attached: false, visible: false };
     }
+    // A selector's frontend node id can expire between querySelector and
+    // describeNode. Re-query on the next poll: a replacement may already match,
+    // so this failed lookup is not an observation of absence.
+    if (params.selector && node.code === "cdp_failed" && isMissingNode(node.message)) return null;
     return node;
   }
 

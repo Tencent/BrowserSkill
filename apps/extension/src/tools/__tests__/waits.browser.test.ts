@@ -71,7 +71,10 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
                 { session_id: ctx.sessionId, selector, state, timeout_ms },
                 deps,
               );
-              expect(result).not.toHaveProperty("code");
+              expect(
+                result,
+                `${state} ${selector} (background=${background}): ${JSON.stringify(result)}`,
+              ).not.toHaveProperty("code");
               return result as WaitForElementResult;
             };
             expect(await wait("#absent", "detached")).toMatchObject({
@@ -136,6 +139,32 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
               attached: false,
               visible: false,
             });
+
+            // Force the querySelector → describeNode removal race, rather than
+            // relying on a page timer to fall between these two CDP calls.
+            await evaluate(
+              `document.body.insertAdjacentHTML('beforeend', '<div id="race-mask">Loading</div>')`,
+            );
+            const removalCdp: CdpRunner = {
+              async send<T>(tabId: number, method: string, params?: object): Promise<T> {
+                if (method === "DOM.describeNode") {
+                  await evaluate(`document.querySelector('#race-mask')?.remove()`);
+                }
+                return cdp.send<T>(tabId, method, params);
+              },
+            };
+            expect(
+              await handleWaitForElement(
+                manager,
+                {
+                  session_id: ctx.sessionId,
+                  selector: "#race-mask",
+                  state: "hidden",
+                  timeout_ms: 3000,
+                },
+                { ...deps, cdp: removalCdp },
+              ),
+            ).toMatchObject({ satisfied: true, attached: false, visible: false });
 
             // Visibility alone does not promise that an element is enabled or unoccluded.
             await evaluate(

@@ -727,24 +727,101 @@ describe("wait-for-element regression coverage", () => {
     expect(dispatched).not.toHaveBeenCalled();
   });
 
-  it("handles removal between selector lookup and describeNode", async () => {
+  it.each([
+    "No node with given id found",
+    "Could not find node with given id",
+    JSON.stringify({ code: -32000, message: "No node with given id found" }),
+    JSON.stringify({ code: -32000, message: "Could not find node with given id" }),
+  ])("re-queries a selector after removal during lookup: %s", async (message) => {
     const manager = await sessionWithRef();
+    let queries = 0;
     const fake = makeFakeCdp({
       handlers: {
         "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
-        "DOM.querySelector": () => ({ nodeId: 2 }),
+        "DOM.querySelector": () => ({ nodeId: ++queries === 1 ? 2 : 0 }),
         "DOM.describeNode": () => {
-          throw new Error("No node with given id found");
+          throw new Error(message);
         },
       },
     });
-    expect(
-      await handleWaitForElement(
-        manager,
-        { session_id: "aa11", selector: "#mask", state: "detached" },
-        fake,
-      ),
-    ).toMatchObject({ satisfied: true, attached: false, used_selector: "#mask" });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state: "hidden", timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: true,
+      attached: false,
+      visible: false,
+      used_selector: "#mask",
+    });
+    expect(queries).toBe(2);
+  });
+
+  it.each([
+    "hidden",
+    "detached",
+  ] as const)("does not satisfy %s when a visible replacement matches the selector", async (state) => {
+    const manager = await sessionWithRef();
+    let described = 0;
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: true }),
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: 2 }),
+        "DOM.describeNode": () => {
+          if (++described === 1) throw new Error("Could not find node with given id");
+          return { node: { backendNodeId: 556 } };
+        },
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state, timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: true,
+      visible: true,
+      elapsed_ms: 100,
+    });
+  });
+
+  it.each([
+    false,
+    true,
+  ])("bounds repeated stale lookups and preserves evidence (initial probe=%s)", async (initialProbe) => {
+    const manager = await sessionWithRef();
+    let described = 0;
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: true }),
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: 2 }),
+        "DOM.describeNode": () => {
+          if (++described === 1 && initialProbe) return { node: { backendNodeId: 555 } };
+          throw new Error("Could not find node with given id");
+        },
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#mask", state: "hidden", timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: initialProbe ? true : null,
+      visible: initialProbe ? true : null,
+      elapsed_ms: 100,
+    });
+    expect(fake.sent.filter((c) => c.method === "Runtime.callFunctionOn")).toHaveLength(
+      initialProbe ? 1 : 0,
+    );
   });
 
   it("preserves an invalid selector as a CDP error", async () => {
