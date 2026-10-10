@@ -1,21 +1,25 @@
 use std::process::ExitCode;
 
-use clap::{Parser, error::ErrorKind};
+use clap::Parser;
 
-use bsk::cli::error::{CliError, Format, render};
+use bsk::cli::error::{CliError, Format, render, render_parse_error};
 use bsk::cli::status::Output;
 use bsk::{Cli, Command, cli};
 
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let args: Vec<_> = std::env::args_os().collect();
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
         Err(err) => {
-            let exit = match err.kind() {
-                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
-                _ => 1,
-            };
-            let _ = err.print();
-            return ExitCode::from(exit);
+            // Parsing can fail before clap reaches --json. Only standalone
+            // flags before `--` select the error format; values stay literal.
+            let json = args
+                .iter()
+                .skip(1)
+                .take_while(|arg| *arg != "--")
+                .any(|arg| arg == "--json");
+            let format = if json { Format::Json } else { Format::Human };
+            return render_parse_error(err, format);
         }
     };
 
