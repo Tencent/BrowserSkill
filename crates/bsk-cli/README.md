@@ -40,3 +40,12 @@ restart an existing daemon with `bsk daemon restart`. It does not automate Chrom
 internal pages, the Web Store, nested scrolling panels or virtualized lists. It follows
 the page's document scroll; endlessly growing pages can reach the chosen timeout.
 See [long screenshot behavior and implementation](../../docs/long-screenshot.md).
+
+## Element waits
+
+Use `bsk wait-for-element <selector-or-ref> --state visible|hidden|attached|detached
+--session <id> --json` after a triggering action. `hidden` requires an attached
+node; `detached` includes initial absence. `visible` does not imply enabled,
+unobstructed or application-ready. Timeout returns `satisfied: false` with exit
+code 0: inspect the JSON result before continuing, then `observe` for fresh refs.
+See [the complete wait/check/observe example](../../docs/wait-for-element.md).

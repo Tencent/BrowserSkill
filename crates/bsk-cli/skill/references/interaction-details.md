@@ -12,6 +12,38 @@
   scroll distance. An optional target is scrolled into view first; without one,
   input lands at the viewport centre. Observe to check the page's response.
 
+## Element waits
+
+`wait-for-element` polls one selector/ref inside the extension. `hidden` means
+attached but not visible; `detached` includes an element absent from the start.
+`visible` does not imply enabled, unobstructed or application-ready. Choose an
+actual post-action readiness signal; an absent mask may not have appeared yet.
+Unknown/cross-tab refs and CDP failures remain errors, not evidence of detachment.
+
+Timeout returns `satisfied: false`, still with CLI exit code 0. Never rely on `&&`
+alone. `attached`/`visible` reflect the last completed probe, or `null` when there
+was no completed probe. Waiting does not create fresh refs.
+
+In an existing session, after observing and identifying the trigger and readiness
+selector, this Bash example triggers, waits, checks the result, then observes:
+
+```bash
+# Replace the session and selectors with values from the task's page.
+session=abcd
+bsk click '#run-search' --session "$session" || exit 1
+result=$(bsk wait-for-element '#search-results' --state visible \
+  --timeout 20s --session "$session" --json) || exit 1
+if ! jq -e '.satisfied == true' <<<"$result" >/dev/null; then
+  printf 'Results not ready: %s\n' "$result" >&2
+  exit 1
+fi
+bsk observe --session "$session"
+```
+
+Use `--state detached` for an already present loading mask that will be removed,
+or `--state hidden` if it stays in the DOM. Observe after success before using
+new refs. End the session on success and error as required by the task workflow.
+
 ### Large observations
 
 There is no default token cap. With `observe --max-tokens <n>`, follow a returned
