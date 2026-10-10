@@ -135,7 +135,7 @@ impl ElementState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForElementParams {
     pub session_id: String,
-    /// Optional `@e<N>` ref allocated by the last `tool.snapshot`.
+    /// Optional `@e<N>` ref from the latest snapshot or observe.
     /// Mutually exclusive with `selector`.
     #[serde(
         rename = "ref",
@@ -151,32 +151,21 @@ pub struct WaitForElementParams {
     /// Target tab. Defaults to the Agent Window's active tab.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<i64>,
-    /// Hard upper bound on the wait. Defaults to 10s.
+    /// Element inspection budget, including probes. Defaults to 10s (1..=300000ms).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 1, max = 300000))]
     pub timeout_ms: Option<u32>,
-    /// Delay between two state probes. Defaults to 100ms; the extension
-    /// clamps it into `[16, 2000]` so a caller cannot turn the wait into
-    /// a busy loop against the renderer.
+    /// Polling interval, shortened near the deadline to allow a final probe.
+    /// Defaults to 100ms; values outside 16..=2000ms are rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
+    #[schemars(range(min = 16, max = 2000))]
     pub poll_ms: Option<u32>,
 }
 
-/// Outcome of a `wait_for_element`.
-///
-/// `satisfied` is the answer and `attached` / `visible` are the
-/// evidence: a timeout is **not** an RPC error, because "no, not within
-/// 10s — and here is what it looked like when I stopped looking" is a
-/// complete answer to the question that was asked. This mirrors
-/// `wait_for_navigation`'s `reached: "timeout"`.
-///
-/// The two booleans are reported separately rather than as one
-/// `observed` enum because presence and visibility are orthogonal, and
-/// **the reason for a timeout is the whole point of the report**:
-/// `attached: true, visible: false` says "it is there but hidden",
-/// `attached: false` says "it never appeared". A single enum cannot
-/// express both without losing one of them.
+/// Outcome of a `wait_for_element`. A timeout returns `satisfied: false` and
+/// CLI exit code 0; callers must inspect the result before continuing.
+/// `attached` / `visible` describe the last probe completed before the deadline,
+/// not a new observation at return time. Both are null if no probe completed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WaitForElementResult {
     pub tab_id: i64,
@@ -186,13 +175,11 @@ pub struct WaitForElementResult {
     pub used_selector: Option<String>,
     /// Whether the requested state was reached before the deadline.
     pub satisfied: bool,
-    /// Whether the target was still mounted in the DOM when the wait
-    /// returned.
-    pub attached: bool,
-    /// Whether the target was visible when the wait returned. Always
-    /// `false` when `attached` is `false`.
-    pub visible: bool,
-    /// Wall-clock time spent waiting, including the final probe.
+    /// DOM attachment at the last completed probe; null if unobserved.
+    pub attached: Option<bool>,
+    /// Visibility at the last completed probe; false if detached, null if unobserved.
+    pub visible: Option<bool>,
+    /// Monotonic elapsed time spent inspecting and waiting, including probes.
     pub elapsed_ms: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dialogs: Vec<JavaScriptDialogInfo>,
@@ -326,8 +313,8 @@ mod tests {
             used_ref: None,
             used_selector: Some(".el-loading-mask".into()),
             satisfied: false,
-            attached: true,
-            visible: false,
+            attached: Some(true),
+            visible: Some(false),
             elapsed_ms: 10_004,
             dialogs: vec![],
         };
@@ -338,6 +325,20 @@ mod tests {
         assert_eq!(v["elapsed_ms"], 10_004);
         let round: WaitForElementResult = serde_json::from_value(v).unwrap();
         assert_eq!(round, r);
+    }
+
+    #[test]
+    fn wait_for_element_timeout_without_observation_is_unknown() {
+        let result: WaitForElementResult = serde_json::from_value(json!({
+            "tab_id": 4, "satisfied": false, "attached": null,
+            "visible": null, "elapsed_ms": 100
+        }))
+        .unwrap();
+        assert_eq!(result.attached, None);
+        assert_eq!(result.visible, None);
+        let value = serde_json::to_value(result).unwrap();
+        assert!(value["attached"].is_null());
+        assert!(value["visible"].is_null());
     }
 
     #[test]

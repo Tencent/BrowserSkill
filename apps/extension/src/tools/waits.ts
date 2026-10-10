@@ -32,13 +32,14 @@
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
 import type { SessionContext, SessionManager } from "@/session-manager/manager";
+import { normaliseRef } from "@/session-manager/ref-store";
 import type {
+  ElementState,
   RpcError,
-  WaitForNavigationParams,
-  WaitForNavigationResult,
   WaitForElementParams,
   WaitForElementResult,
-  ElementState,
+  WaitForNavigationParams,
+  WaitForNavigationResult,
   WaitUntil,
 } from "@/transport/types";
 import { attachDialogs, markDialogCursor } from "./dialogs";
@@ -202,26 +203,59 @@ const STATE_PROBE = `function() {
 interface Probe {
   attached: boolean;
   visible: boolean;
-  usedRef?: string;
-  usedSelector?: string;
 }
 
-/**
- * `used_ref` on the wire is bare (`e1`); the CLI's `format_used_target`
- * adds the `@`. Echoing the caller's `@e1` verbatim would render as `@@e1`.
- */
-function normaliseRef(ref: string | undefined): string | undefined {
-  const trimmed = ref?.trim();
-  if (!trimmed) return undefined;
-  return trimmed.replace(/^@+/, "");
+class ElementWaitTimeout extends Error {}
+
+function checkBudget(deadline: number, signal?: AbortSignal): void {
+  abortError(signal);
+  if (performance.now() >= deadline) throw new ElementWaitTimeout();
+}
+
+/** Chrome cannot cancel an already dispatched read. Stop awaiting it, and
+ * check the same budget at every subsequent dispatch so late replies cannot
+ * continue the probe. The post-await check also covers a delayed timer callback. */
+async function beforeDeadline<T>(
+  run: () => Promise<T>,
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  checkBudget(deadline, signal);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    const interrupted = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new ElementWaitTimeout()), deadline - performance.now());
+      onAbort = () => reject(new DOMException("wait-for-element aborted", "AbortError"));
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+    const result = await Promise.race([run(), interrupted]);
+    checkBudget(deadline, signal);
+    return result;
+  } catch (error) {
+    checkBudget(deadline, signal);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Only CDP's explicit missing-node response proves removal. Chrome's
+ * debugger API may encode the protocol error as a JSON string. */
+function isMissingNode(error: unknown): boolean {
+  let message = error instanceof Error ? error.message : String(error);
+  try {
+    const parsed = JSON.parse(message);
+    if (typeof parsed?.message === "string") message = parsed.message;
+  } catch {
+    // Plain debugger error message.
+  }
+  return message === "No node with given id found";
 }
 
 /** Does an observation of `(attached, visible)` satisfy `state`? */
-export function satisfiesState(
-  state: ElementState,
-  attached: boolean,
-  visible: boolean,
-): boolean {
+export function satisfiesState(state: ElementState, attached: boolean, visible: boolean): boolean {
   switch (state) {
     case "visible":
       return visible;
@@ -289,7 +323,7 @@ export async function handleWaitForElement(
       message: `wait-for-element: poll_ms must be an integer in ${MIN_POLL_MS}..${MAX_POLL_MS}`,
     };
   }
-  abortError(deps.signal);
+  if (deps.signal?.aborted) return { code: "cancelled", message: "wait-for-element aborted" };
 
   const target = await resolveTargetTab(manager, ctx, params.tab_id, deps.tabsApi);
   if (isRpcError(target)) return target;
@@ -297,54 +331,77 @@ export async function handleWaitForElement(
   if (denied) return denied;
   const dialogCursor = markDialogCursor(deps.cdp, target.tabId);
 
-  const started = Date.now();
+  const started = performance.now();
   const deadline = started + timeoutMs;
   // One object group for the whole wait, released in `finally`: probes
   // allocate a node handle each time, and a 10s wait at 100ms is ~100 of
   // them (same pattern as `wheel.ts`).
   const objectGroup = `bsk-wait-for-element-${crypto.randomUUID()}`;
   const objectTargets = new Map<string, CdpTarget>();
+  let finished = false;
+  const release = (objectTarget: CdpTarget) => {
+    // Cleanup must not extend the wait's deadline or delay cancellation.
+    void sendToCdpTarget(deps.cdp, objectTarget, "Runtime.releaseObjectGroup", {
+      objectGroup,
+    }).catch(() => {});
+  };
+  const send = async <T>(cdpTarget: CdpTarget, method: string, args?: object): Promise<T> => {
+    checkBudget(deadline, deps.signal);
+    try {
+      return await (deps.cdp.sendGuarded
+        ? deps.cdp.sendGuarded<T>(cdpTarget, method, args, {
+            signal: deps.signal,
+            onDispatch: () => checkBudget(deadline, deps.signal),
+          })
+        : sendToCdpTarget<T>(deps.cdp, cdpTarget, method, args));
+    } finally {
+      // A resolveNode reply may allocate a handle after timeout/cancellation.
+      if (finished && method === "DOM.resolveNode") release(cdpTarget);
+    }
+  };
+  const probeCdp: CdpRunner = {
+    send: (tabId, method, args) => send({ tabId }, method, args),
+    sendToTarget: send,
+  };
+  let probe: Probe | undefined;
 
-  const finish = (probe: Probe, satisfied: boolean) =>
+  const finish = (satisfied: boolean) =>
     attachDialogs(deps.cdp, target.tabId, dialogCursor, {
       tab_id: target.tabId,
-      ...(probe.usedRef ? { used_ref: probe.usedRef } : {}),
-      ...(probe.usedSelector ? { used_selector: probe.usedSelector } : {}),
+      ...(params.ref ? { used_ref: normaliseRef(params.ref) } : {}),
+      ...(params.selector ? { used_selector: params.selector } : {}),
       satisfied,
-      attached: probe.attached,
-      visible: probe.visible,
-      elapsed_ms: Date.now() - started,
+      attached: probe?.attached ?? null,
+      visible: probe?.visible ?? null,
+      elapsed_ms: Math.round(performance.now() - started),
     });
 
   try {
     deps.cdp.trackSessionTab?.(ctx.sessionId, target.tabId);
-    let probe: Probe = { attached: false, visible: false };
     for (;;) {
-      abortError(deps.signal);
-      // Probe before checking the deadline: when the wait times out, the
-      // evidence we report has to describe the moment we stopped looking,
-      // not the moment before it.
-      const next = await probeState(deps.cdp, ctx, target, params, objectGroup, objectTargets);
+      const next = await beforeDeadline(
+        () => probeState(probeCdp, ctx, target, params, objectGroup, objectTargets),
+        deadline,
+        deps.signal,
+      );
       if (isRpcError(next)) return next;
       probe = next;
       if (satisfiesState(params.state, next.attached, next.visible)) {
-        return finish(probe, true);
+        return finish(true);
       }
-      const remaining = deadline - Date.now();
-      if (remaining <= 0) break;
-      await sleep(Math.min(pollMs, remaining), deps.signal);
-      if (Date.now() >= deadline) break;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return finish(false);
+      // Shorten the final intervals to leave time for another bounded probe,
+      // even when poll_ms >= timeout_ms. Keep a 16ms floor to avoid a busy loop.
+      await sleep(Math.min(pollMs, Math.max(MIN_POLL_MS, remaining / 2), remaining), deps.signal);
     }
-    return finish(probe, false);
   } catch (error) {
     if (deps.signal?.aborted) return { code: "cancelled", message: "wait-for-element aborted" };
+    if (error instanceof ElementWaitTimeout) return finish(false);
     return cdpError(error);
   } finally {
-    for (const objectTarget of objectTargets.values()) {
-      await sendToCdpTarget(deps.cdp, objectTarget, "Runtime.releaseObjectGroup", {
-        objectGroup,
-      }).catch(() => {});
-    }
+    finished = true;
+    for (const objectTarget of objectTargets.values()) release(objectTarget);
   }
 }
 
@@ -355,7 +412,7 @@ export async function handleWaitForElement(
  * is re-queried on every probe (that is how "wait until it appears"
  * works) and a ref keeps the same staleness rules as every other tool.
  *
- * "Not found" is reported as a state, not an error — it is precisely
+ * An unmatched selector is reported as a state, not an error — it is precisely
  * what `detached` and the not-yet-`attached` case look like. Every other
  * failure propagates: folding a real CDP fault into `attached: false`
  * would let a broken probe masquerade as "the element really is gone",
@@ -372,22 +429,17 @@ async function probeState(
 ): Promise<Probe | RpcError> {
   const node = await resolveBackendNode(cdp, ctx, target, params, "wait-for-element");
   if (isRpcError(node)) {
-    if (node.code === "not_found") {
-      // The target is not there (yet, or any more). Echoing which target
-      // was asked about matters most on this path: a timeout report has to
-      // name what was being waited for, or the CLI renders `target=?`.
-      const ref = normaliseRef(params.ref);
-      return {
-        attached: false,
-        visible: false,
-        ...(ref ? { usedRef: ref } : {}),
-        ...(params.selector ? { usedSelector: params.selector } : {}),
-      };
+    if (
+      (node.code === "not_found" && node.data?.reason === "selector_not_found") ||
+      (node.code === "cdp_failed" && isMissingNode(node.message))
+    ) {
+      return { attached: false, visible: false };
     }
     return node;
   }
 
   let objectId: string | undefined;
+  objectTargets.set(cdpTargetKey(node.cdpTarget), node.cdpTarget);
   try {
     const resolved = await sendToCdpTarget<{ object?: { objectId?: string } }>(
       cdp,
@@ -396,14 +448,14 @@ async function probeState(
       { backendNodeId: node.backendNodeId, objectGroup },
     );
     objectId = resolved.object?.objectId;
-  } catch {
+  } catch (error) {
     // The node left the document between the lookup and the handle
     // request. That is the `detached` transition itself — the one case
     // where a failing CDP call is an observation rather than a fault.
+    if (!isMissingNode(error)) throw error;
     return { attached: false, visible: false };
   }
-  if (!objectId) return { attached: false, visible: false };
-  objectTargets.set(cdpTargetKey(node.cdpTarget), node.cdpTarget);
+  if (!objectId) return { code: "cdp_failed", message: "DOM.resolveNode returned no objectId" };
 
   const reply = await sendToCdpTarget<{
     result?: { value?: { attached?: boolean; visible?: boolean } };
@@ -414,7 +466,13 @@ async function probeState(
     returnByValue: true,
   });
   const value = reply.result?.value;
-  if (!value || typeof value.attached !== "boolean") {
+  if (
+    reply.exceptionDetails ||
+    !value ||
+    typeof value.attached !== "boolean" ||
+    typeof value.visible !== "boolean" ||
+    (!value.attached && value.visible)
+  ) {
     // No usable shape: report a fault instead of inventing a state.
     return {
       code: "cdp_failed",
@@ -424,8 +482,6 @@ async function probeState(
   return {
     attached: value.attached,
     visible: value.visible === true,
-    ...(node.usedRef ? { usedRef: node.usedRef } : {}),
-    ...(node.usedSelector ? { usedSelector: node.usedSelector } : {}),
   };
 }
 

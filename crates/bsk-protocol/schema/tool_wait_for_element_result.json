@@ -1,19 +1,20 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "WaitForElementResult",
-  "description": "Outcome of a `wait_for_element`.\n\n`satisfied` is the answer and `attached` / `visible` are the evidence: a timeout is **not** an RPC error, because \"no, not within 10s — and here is what it looked like when I stopped looking\" is a complete answer to the question that was asked. This mirrors `wait_for_navigation`'s `reached: \"timeout\"`.\n\nThe two booleans are reported separately rather than as one `observed` enum because presence and visibility are orthogonal, and **the reason for a timeout is the whole point of the report**: `attached: true, visible: false` says \"it is there but hidden\", `attached: false` says \"it never appeared\". A single enum cannot express both without losing one of them.",
+  "description": "Outcome of a `wait_for_element`. A timeout returns `satisfied: false` and CLI exit code 0; callers must inspect the result before continuing. `attached` / `visible` describe the last probe completed before the deadline, not a new observation at return time. Both are null if no probe completed.",
   "type": "object",
   "required": [
-    "attached",
     "elapsed_ms",
     "satisfied",
-    "tab_id",
-    "visible"
+    "tab_id"
   ],
   "properties": {
     "attached": {
-      "description": "Whether the target was still mounted in the DOM when the wait returned.",
-      "type": "boolean"
+      "description": "DOM attachment at the last completed probe; null if unobserved.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     },
     "dialogs": {
       "type": "array",
@@ -22,7 +23,7 @@
       }
     },
     "elapsed_ms": {
-      "description": "Wall-clock time spent waiting, including the final probe.",
+      "description": "Monotonic elapsed time spent inspecting and waiting, including probes.",
       "type": "integer",
       "format": "uint64",
       "minimum": 0.0
@@ -48,8 +49,11 @@
       ]
     },
     "visible": {
-      "description": "Whether the target was visible when the wait returned. Always `false` when `attached` is `false`.",
-      "type": "boolean"
+      "description": "Visibility at the last completed probe; false if detached, null if unobserved.",
+      "type": [
+        "boolean",
+        "null"
+      ]
     }
   },
   "definitions": {

@@ -791,8 +791,9 @@ export interface WaitForElementResult {
   used_ref?: string;
   used_selector?: string;
   satisfied: boolean;
-  attached: boolean;
-  visible: boolean;
+  /** Last completed probe; null if no probe completed before timeout. */
+  attached: boolean | null;
+  visible: boolean | null;
   elapsed_ms: number;
   dialogs?: JavaScriptDialogInfo[];
 }

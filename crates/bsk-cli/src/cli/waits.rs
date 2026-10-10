@@ -145,7 +145,7 @@ impl From<CliElementState> for ElementState {
 
 #[derive(Debug, Clone, Args)]
 pub struct WaitForElementArgs {
-    /// Snapshot ref (`@e3`, `e3`) or CSS selector.
+    /// Snapshot/observe ref (`@e3`, `e3`) or CSS selector.
     #[arg(value_name = "TARGET")]
     pub target: Option<String>,
 
@@ -161,11 +161,11 @@ pub struct WaitForElementArgs {
     #[arg(long, value_enum, default_value_t = CliElementState::Visible)]
     pub state: CliElementState,
 
-    /// Hard timeout (default 10s). Accepts `30s`, `1m`, `1500ms`.
+    /// Inspection budget (default 10s, max 5m). Timeout returns satisfied=false, exit 0.
     #[arg(long, default_value = "10s", value_parser = parse_timeout_ms)]
     pub timeout: u32,
 
-    /// Delay between two state probes (default 100ms).
+    /// Poll interval (16..=2000ms, default 100ms); shortened near the deadline.
     #[arg(long = "poll-ms", default_value = "100")]
     pub poll_ms: u32,
 
@@ -181,9 +181,14 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
     let (ref_, selector) = split_target(args.target, args.ref_, args.selector)?;
     // Validate here so a bad flag fails locally instead of spending a daemon
     // round trip; the extension applies the same bounds.
-    if args.poll_ms == 0 {
+    if !(16..=2_000).contains(&args.poll_ms) {
         return Err(CliError::Local(anyhow::anyhow!(
-            "--poll-ms must be at least 1"
+            "--poll-ms must be in 16..=2000"
+        )));
+    }
+    if !(1..=300_000).contains(&args.timeout) {
+        return Err(CliError::Local(anyhow::anyhow!(
+            "--timeout must be in 1ms..=5m"
         )));
     }
     let state: ElementState = args.state.into();
@@ -218,8 +223,8 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
                 reply.tab_id,
                 state.as_str(),
                 reply.satisfied,
-                reply.attached,
-                reply.visible,
+                format_observed(reply.attached),
+                format_observed(reply.visible),
                 reply.elapsed_ms
             );
             if !reply.satisfied {
@@ -227,14 +232,22 @@ pub fn dispatch_wait_for_element(args: WaitForElementArgs, format: Format) -> Re
                     "warning: {target} did not become {} within {}ms (attached={}, visible={})",
                     state.as_str(),
                     args.timeout,
-                    reply.attached,
-                    reply.visible
+                    format_observed(reply.attached),
+                    format_observed(reply.visible)
                 );
             }
             print_dialog_summaries(&reply.dialogs);
         }
     }
     Ok(())
+}
+
+fn format_observed(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
 }
 
 fn format_used_target(used_ref: Option<&str>, used_selector: Option<&str>) -> String {
@@ -460,5 +473,33 @@ mod tests {
                 "{argv:?} should have failed locally"
             );
         }
+    }
+    #[test]
+    fn dispatch_rejects_out_of_range_element_wait_budgets_locally() {
+        for (flag, value) in [
+            ("--poll-ms", "15"),
+            ("--poll-ms", "2001"),
+            ("--timeout", "301s"),
+        ] {
+            let cli = crate::cli::Cli::try_parse_from([
+                "bsk",
+                "wait-for-element",
+                "#target",
+                "--session",
+                "s1",
+                flag,
+                value,
+            ])
+            .unwrap();
+            let crate::cli::Command::WaitForElement(args) = cli.command else {
+                panic!("expected element wait");
+            };
+            assert!(matches!(
+                dispatch_wait_for_element(args, Format::Json),
+                Err(CliError::Local(_))
+            ));
+        }
+        assert_eq!(format_observed(None), "unknown");
+        assert_eq!(format_observed(Some(false)), "false");
     }
 }

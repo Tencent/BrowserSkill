@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import { handleWaitForElement, handleWaitForNavigation, satisfiesState } from "../waits";
@@ -369,5 +369,360 @@ describe("handleWaitForElement outcomes", () => {
       { cdp: fake.cdp, tabsApi: fake.tabsApi },
     );
     expect(fake.sent.some((c) => c.method === "Runtime.releaseObjectGroup")).toBe(true);
+  });
+});
+
+describe("wait-for-element regression coverage", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const params = { session_id: "aa11", ref: "@e1", state: "detached" as const, timeout_ms: 100 };
+
+  it.each([
+    { ref: "@e999" },
+    { ref: "@e1", tab_id: 7 },
+  ])("preserves ref_not_found for %j", async (target) => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp();
+    expect(await handleWaitForElement(manager, { ...params, ...target }, fake)).toMatchObject({
+      code: "not_found",
+      data: { reason: "ref_not_found" },
+    });
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  it.each([
+    "Debugger is not attached to the tab with id: 4.",
+    "Session with given id not found.",
+    "Cannot access a chrome-extension:// URL of different extension",
+    "Cannot find context with specified id",
+  ])("propagates resolveNode failure: %s", async (message) => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.resolveNode": () => {
+          throw new Error(message);
+        },
+      },
+    });
+    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({
+      code: "cdp_failed",
+      message,
+    });
+  });
+
+  it.each([
+    "No node with given id found",
+    JSON.stringify({ code: -32000, message: "No node with given id found" }),
+  ])("accepts confirmed removal and retains the target: %s", async (message) => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.resolveNode": () => {
+          throw new Error(message);
+        },
+      },
+    });
+    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({
+      satisfied: true,
+      attached: false,
+      visible: false,
+      used_ref: "e1",
+    });
+  });
+
+  it("recognizes an existing ref's node becoming disconnected", async () => {
+    const manager = await sessionWithRef();
+    const state = { attached: true, visible: true };
+    const fake = makeFakeCdp({ handlers: probeHandlers(state) });
+    setTimeout(() => {
+      state.attached = false;
+      state.visible = false;
+    }, 50);
+    const pending = handleWaitForElement(manager, { ...params, poll_ms: 100 }, fake);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: true,
+      attached: false,
+      visible: false,
+      used_ref: "e1",
+    });
+  });
+
+  it.each([
+    { method: "DOM.resolveNode", reply: {} },
+    { method: "Runtime.callFunctionOn", reply: { result: { value: { attached: true } } } },
+    {
+      method: "Runtime.callFunctionOn",
+      reply: { result: { value: { attached: false, visible: true } } },
+    },
+    { method: "Runtime.callFunctionOn", reply: { exceptionDetails: { text: "probe threw" } } },
+  ])("rejects malformed replies from $method", async ({ method, reply }) => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: { ...probeHandlers({ attached: false, visible: false }), [method]: () => reply },
+    });
+    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({ code: "cdp_failed" });
+  });
+
+  it("reserves a probe when timeout and poll are both 100ms", async () => {
+    const manager = await sessionWithRef();
+    const state = { attached: true, visible: false };
+    const fake = makeFakeCdp({ handlers: probeHandlers(state) });
+    setTimeout(() => {
+      state.visible = true;
+    }, 50);
+    const pending = handleWaitForElement(
+      manager,
+      { ...params, state: "visible", poll_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ satisfied: true, visible: true, elapsed_ms: 50 });
+  });
+
+  it.each([
+    "DOM.getDocument",
+    "DOM.querySelector",
+    "DOM.describeNode",
+    "DOM.resolveNode",
+    "Runtime.callFunctionOn",
+  ])("bounds a slow %s and never continues a retired probe", async (method) => {
+    const manager = await sessionWithRef();
+    const handlers = {
+      ...probeHandlers({ attached: true, visible: true }),
+      "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+      "DOM.querySelector": () => ({ nodeId: 2 }),
+      "DOM.describeNode": () => ({ node: { backendNodeId: 555 } }),
+      "Runtime.releaseObjectGroup": () => ({}),
+    };
+    const reply = handlers[method as keyof typeof handlers]();
+    const fake = makeFakeCdp({
+      handlers: {
+        ...handlers,
+        [method]: () => new Promise((resolve) => setTimeout(() => resolve(reply), 500)),
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { session_id: "aa11", selector: "#result", state: "visible", timeout_ms: 100 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: null,
+      visible: null,
+      elapsed_ms: 100,
+      used_selector: "#result",
+    });
+    const reads = () => fake.sent.filter((c) => c.method !== "Runtime.releaseObjectGroup");
+    const count = reads().length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(reads()).toHaveLength(count);
+    if (method === "DOM.resolveNode") {
+      expect(fake.sent.filter((c) => c.method === "Runtime.releaseObjectGroup")).toHaveLength(2);
+    }
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains the last completed observation when a later probe overruns", async () => {
+    const manager = await sessionWithRef();
+    let probes = 0;
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: false }),
+        "Runtime.callFunctionOn": () =>
+          ++probes === 1
+            ? { result: { value: { attached: true, visible: false } } }
+            : new Promise((resolve) =>
+                setTimeout(
+                  () => resolve({ result: { value: { attached: true, visible: true } } }),
+                  500,
+                ),
+              ),
+      },
+    });
+    const pending = handleWaitForElement(
+      manager,
+      { ...params, state: "visible", poll_ms: 16 },
+      fake,
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      satisfied: false,
+      attached: true,
+      visible: false,
+      elapsed_ms: 100,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(probes).toBe(2);
+  });
+
+  it("rejects a late success even when the deadline timer has not run", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: true }),
+        "Runtime.callFunctionOn": () => {
+          vi.advanceTimersByTime(500);
+          return { result: { value: { attached: true, visible: true } } };
+        },
+      },
+    });
+    expect(
+      await handleWaitForElement(manager, { ...params, state: "visible" }, fake),
+    ).toMatchObject({
+      satisfied: false,
+      attached: null,
+      visible: null,
+      elapsed_ms: 500,
+    });
+  });
+
+  it.each([
+    "before",
+    "sleep",
+    "DOM.resolveNode",
+    "Runtime.callFunctionOn",
+  ])("cancels during %s", async (phase) => {
+    const manager = await sessionWithRef();
+    const abort = new AbortController();
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: false }),
+        ...(phase.startsWith("DOM.") || phase.startsWith("Runtime.")
+          ? {
+              [phase]: () =>
+                new Promise((resolve) =>
+                  setTimeout(() => resolve({ object: { objectId: "late" } }), 500),
+                ),
+            }
+          : {}),
+      },
+    });
+    if (phase === "before") abort.abort();
+    const pending = handleWaitForElement(
+      manager,
+      { ...params, state: "visible" },
+      { ...fake, signal: abort.signal },
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    abort.abort();
+    expect(await pending).toMatchObject({ code: "cancelled" });
+    const count = fake.sent.filter((c) => c.method !== "Runtime.releaseObjectGroup").length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(fake.sent.filter((c) => c.method !== "Runtime.releaseObjectGroup")).toHaveLength(count);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not wait for object-group cleanup", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        ...probeHandlers({ attached: true, visible: true }),
+        "Runtime.releaseObjectGroup": () => new Promise(() => {}),
+      },
+    });
+    expect(
+      await handleWaitForElement(manager, { ...params, state: "visible" }, fake),
+    ).toMatchObject({ satisfied: true });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("releases frame-local handles in their own CDP session", async () => {
+    const manager = await sessionWithRef();
+    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    const fake = makeFakeCdp();
+    const sendToTarget = vi.fn(async (_target, method) =>
+      method === "DOM.resolveNode"
+        ? { object: { objectId: "frame-object" } }
+        : method === "Runtime.callFunctionOn"
+          ? { result: { value: { attached: false, visible: false } } }
+          : {},
+    );
+    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({ satisfied: true });
+    expect(sendToTarget).toHaveBeenLastCalledWith(
+      { tabId: 4, sessionId: "child-frame" },
+      "Runtime.releaseObjectGroup",
+      { objectGroup: expect.any(String) },
+    );
+    expect(fake.sent).toHaveLength(0);
+  });
+  it("does not dispatch a read queued during attachment past the deadline", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp();
+    const dispatched = vi.fn();
+    fake.cdp.sendGuarded = async (_target, _method, _params, guard) => {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      guard.onDispatch?.();
+      dispatched();
+      return {} as never;
+    };
+    const pending = handleWaitForElement(manager, params, fake);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ satisfied: false, attached: null });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(dispatched).not.toHaveBeenCalled();
+  });
+
+  it("handles removal between selector lookup and describeNode", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => ({ nodeId: 2 }),
+        "DOM.describeNode": () => {
+          throw new Error("No node with given id found");
+        },
+      },
+    });
+    expect(
+      await handleWaitForElement(
+        manager,
+        { session_id: "aa11", selector: "#mask", state: "detached" },
+        fake,
+      ),
+    ).toMatchObject({ satisfied: true, attached: false, used_selector: "#mask" });
+  });
+
+  it("preserves an invalid selector as a CDP error", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.getDocument": () => ({ root: { nodeId: 1 } }),
+        "DOM.querySelector": () => {
+          throw new Error("DOM Error while querying");
+        },
+      },
+    });
+    expect(
+      await handleWaitForElement(
+        manager,
+        { session_id: "aa11", selector: "[", state: "detached" },
+        fake,
+      ),
+    ).toMatchObject({ code: "cdp_failed" });
+  });
+  it("ignores a late failure when the deadline callback is delayed", async () => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({
+      handlers: {
+        "DOM.resolveNode": () => {
+          vi.spyOn(performance, "now").mockReturnValue(500);
+          throw new Error("Debugger connection lost");
+        },
+      },
+    });
+    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({
+      satisfied: false,
+      attached: null,
+      visible: null,
+      elapsed_ms: 500,
+    });
   });
 });

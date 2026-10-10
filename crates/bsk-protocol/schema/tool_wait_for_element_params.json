@@ -8,16 +8,17 @@
   ],
   "properties": {
     "poll_ms": {
-      "description": "Delay between two state probes. Defaults to 100ms; the extension clamps it into `[16, 2000]` so a caller cannot turn the wait into a busy loop against the renderer.",
+      "description": "Polling interval, shortened near the deadline to allow a final probe. Defaults to 100ms; values outside 16..=2000ms are rejected.",
       "type": [
         "integer",
         "null"
       ],
       "format": "uint32",
-      "minimum": 1.0
+      "maximum": 2000.0,
+      "minimum": 16.0
     },
     "ref": {
-      "description": "Optional `@e<N>` ref allocated by the last `tool.snapshot`. Mutually exclusive with `selector`.",
+      "description": "Optional `@e<N>` ref from the latest snapshot or observe. Mutually exclusive with `selector`.",
       "type": [
         "string",
         "null"
@@ -49,12 +50,13 @@
       "format": "int64"
     },
     "timeout_ms": {
-      "description": "Hard upper bound on the wait. Defaults to 10s.",
+      "description": "Element inspection budget, including probes. Defaults to 10s (1..=300000ms).",
       "type": [
         "integer",
         "null"
       ],
       "format": "uint32",
+      "maximum": 300000.0,
       "minimum": 1.0
     }
   },
