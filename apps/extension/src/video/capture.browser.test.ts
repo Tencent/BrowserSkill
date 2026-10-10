@@ -139,12 +139,17 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           `(() => {
           const start = () => { ${content}\n };
           const route=location.pathname;
-          if (!['/late-overlay','/query-retry','/query-recover','/prerendered'].includes(route)) { start(); return; }
+          const discoveryFixture=['/late-overlay','/query-retry','/query-recover','/prerendered'].includes(route);
           document.documentElement.dataset.videoPrerendered=String(document.prerendering);
           let attempts=0;
           const send = chrome.runtime.sendMessage.bind(chrome.runtime);
           chrome.runtime.sendMessage = (...args) => {
-            if (args[0]?.type !== 'bsk/video-overlay' || args[0]?.action !== 'query') return send(...args);
+            if (args[0]?.type !== 'bsk/video-overlay') return send(...args);
+            if (args[0]?.action === 'clean') return send(...args).then(result => {
+              document.documentElement.dataset.videoClean=result?.recording_id??'';
+              return result;
+            });
+            if (args[0]?.action !== 'query' || !discoveryFixture) return send(...args);
             document.documentElement.dataset.videoQueryAttempts=String(++attempts);
             const failures=route==='/query-recover'?3:route==='/prerendered'?0:1;
             if(attempts<=failures)return Promise.reject(new Error('Transient video discovery failure'));
@@ -729,7 +734,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 action: "start",
               });
               const started = await dsh.call<{
-                recording: { recording_id: string; state: string };
+                recording: { recording_id: string; state: string; tab_id: number };
               }>("browser_inspect", {
                 action: "video",
                 videoAction: "start",
@@ -743,6 +748,19 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 session: task.sessionId,
                 url: `http://127.0.0.1:${address.port}/red`,
               });
+              // Background-tab paint fallbacks can outlast a fixed delay.
+              // Wait for capture to acknowledge the new document's clean frame
+              // before collecting its final stable footage and stopping.
+              await expect
+                .poll(
+                  () =>
+                    pageScript(
+                      started.recording.tab_id,
+                      "return document.documentElement.dataset.videoClean;",
+                    ),
+                  { timeout: 10_000 },
+                )
+                .toBe(recordingId);
               await new Promise((resolve) => setTimeout(resolve, 1200));
               const finished = await dsh.call<{
                 recording: { state: string; completeness: string; byte_size: number };
