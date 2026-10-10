@@ -12,7 +12,13 @@ semantic interaction recording, which remains unsupported by these tools.
    without video; never imply that capture is active after an error.
 3. Execute the task on that fixed tab. Navigation/reload remain recorded; switching
    tabs does not move capture. Start is nonblocking after the first encoded frame.
-4. Stop recording before stopping the session, on success or failure. Inspect
+4. Before stopping, wait for navigation to settle and the expected final page
+   state (such as its result element), then observe to confirm the outcome. An
+   action returning does not guarantee that asynchronous page updates have finished.
+   Stopping during unresolved navigation produces a partial result even if the
+   task action succeeded. If the page fails to settle, stop and report incomplete
+   capture rather than waiting indefinitely.
+5. Stop recording before stopping the session, on success or failure. Inspect
    `state`, `completeness`, `stop_reason` and `error`, then report the result.
 
 ```text
@@ -20,6 +26,7 @@ browser_session({ action: "start" })
 browser_inspect({ action: "video", videoAction: "start", session: "<sessionId>", durationMs: 60000, quality: "standard" })
 // Retain recording.recording_id. Navigate and perform the task only after start succeeds.
 browser_inspect({ action: "video", videoAction: "status", recordingId: "<recording_id>" })
+// Wait for navigation and the expected final page state before stopping.
 browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording_id>" })
 browser_session({ action: "stop", session: "<sessionId>" })
 ```
@@ -61,6 +68,9 @@ requested. Never delete unsaved evidence merely to start another capture.
 
 Browser copies last 24 hours, including after task teardown. Closing the tab,
 disconnects or ending the session before stopping video may preserve a partial
-result; a crash may lose the last incomplete fragment. After a plugin reload, or
-for recordings started manually, use the extension library to preview and save.
+result. Network error pages or PDF viewers may also end as partial if clean
+capture cannot resume. Unresolved navigation has a 60-second fallback; the selected
+duration limit can stop it sooner. A crash may lose the last incomplete fragment.
+After a plugin reload, or for recordings started manually, use the extension
+library to preview and save.
 Interactive confirmation/help UI is replaced by a neutral waiting screen in video.

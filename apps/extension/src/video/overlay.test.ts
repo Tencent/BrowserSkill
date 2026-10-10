@@ -1,6 +1,47 @@
 import { expect, it, vi } from "vitest";
 import { VideoOverlayGate } from "./overlay";
 
+it("hides controls and interactive overlays until recording state is known", async () => {
+  let resolve!: (value: { recording_id: string | null }) => void;
+  const gate = new VideoOverlayGate(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+    vi.fn(),
+    async () => {},
+  );
+  expect(gate.canRenderControl()).toBe(false);
+  expect(gate.canRenderInteractive(true)).toBe(false);
+  const initializing = gate.initialize();
+  expect(gate.canRenderControl()).toBe(false);
+  resolve({ recording_id: null });
+  await initializing;
+  expect(gate.canRenderControl()).toBe(true);
+  expect(gate.canRenderInteractive(true)).toBe(true);
+  // A restored page must also hide stale controls until the new query returns.
+  const restoring = gate.initialize();
+  expect(gate.canRenderControl()).toBe(false);
+  resolve({ recording_id: "video" });
+  await restoring;
+  expect(gate.canRenderControl()).toBe(false);
+});
+
+it("keeps overlays hidden after failed discovery and accepts a later background handshake", async () => {
+  const gate = new VideoOverlayGate(
+    async () => {
+      throw new Error("Background unavailable");
+    },
+    vi.fn(),
+    async () => {},
+  );
+  await expect(gate.initialize()).rejects.toThrow("Background unavailable");
+  expect(gate.canRenderControl()).toBe(false);
+  expect(gate.canRenderInteractive(true)).toBe(false);
+  await gate.set(null);
+  expect(gate.canRenderControl()).toBe(true);
+});
+
 it("waits for background suspension before rendering help, then confirms a clean paint", async () => {
   let acknowledge!: () => void;
   const pending = new Promise<void>((resolve) => {
@@ -63,4 +104,5 @@ it("ignores a stale initialization query after a newer recording handshake", asy
   resolve({ recording_id: null });
   await initializing;
   expect(gate.id).toBe("new-recording");
+  expect(gate.canRenderControl()).toBe(false);
 });

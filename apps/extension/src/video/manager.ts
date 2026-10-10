@@ -35,7 +35,9 @@ import {
   validateVideoStart,
 } from "./types";
 
-export const VIDEO_NAVIGATION_TIMEOUT_MS = 15_000;
+// Allow slow pages to settle without spending an entire long recording on a
+// frozen frame. The selected recording deadline can still end the wait sooner.
+export const VIDEO_NAVIGATION_TIMEOUT_MS = 60_000;
 
 interface ActiveVideo {
   value: StoredVideo;

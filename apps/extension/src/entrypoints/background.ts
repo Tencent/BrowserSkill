@@ -108,10 +108,15 @@ export default defineBackground(() => {
     owner: () => requestedConnection?.key ?? "unavailable",
     overlay: async (tabId, recordingId) => {
       try {
-        return await chrome.tabs.sendMessage(
-          tabId,
-          { type: VIDEO_OVERLAY, recording_id: recordingId },
-          { frameId: 0 },
+        // Another content script can receive messages before the overlay script
+        // mounts, resolving undefined instead of reporting a missing receiver.
+        // The overlay stays hidden until its own video handshake completes.
+        return (
+          (await chrome.tabs.sendMessage(
+            tabId,
+            { type: VIDEO_OVERLAY, recording_id: recordingId },
+            { frameId: 0 },
+          )) ?? {}
         );
       } catch (error) {
         // Error pages, downloads and PDF viewers may have no content script.

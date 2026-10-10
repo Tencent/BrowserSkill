@@ -78,7 +78,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
 
         response.setHeader("Content-Type", "text/html");
         response.end(
-          `<!doctype html><title>Video regression</title><style>html,body{margin:0;background:${request.url === "/blue" ? "#0000ff" : "#ff0000"};height:100%;}</style>${request.url === "/blue" ? "<script>setTimeout(()=>{document.body.style.background='#00ff00'},800)</script>" : ""}`,
+          `<!doctype html><title>Video regression</title><style>html,body{margin:0;background:${["/blue", "/late-overlay"].includes(request.url ?? "") ? "#0000ff" : "#ff0000"};height:100%;}</style>${request.url === "/blue" ? "<script>setTimeout(()=>{document.body.style.background='#00ff00'},800)</script>" : ""}`,
         );
       });
       pageServer.listen(0, "127.0.0.1");
@@ -122,6 +122,28 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         await writeFile(
           backgroundPath,
           background.replaceAll("ws://127.0.0.1:52800", `ws://127.0.0.1:${port}`),
+        );
+        // Only the fixture delays production content startup. onCompleted can
+        // resume capture before its listener exists, and the video query arrives
+        // after the ordinary overlay state. No production test hook is needed.
+        const contentPath = path.join(extension, "content-scripts/content.js");
+        const content = await readFile(contentPath, "utf8");
+        await writeFile(
+          contentPath,
+          `(() => {
+          const start = () => { ${content}\n };
+          if (location.pathname !== '/late-overlay') { start(); return; }
+          const send = chrome.runtime.sendMessage.bind(chrome.runtime);
+          chrome.runtime.sendMessage = (...args) => {
+            if (args[0]?.type !== 'bsk/video-overlay' || args[0]?.action !== 'query') return send(...args);
+            document.documentElement.dataset.videoQuery = 'pending';
+            return new Promise(resolve => setTimeout(resolve, 1500)).then(() => send(...args)).then(result => {
+              document.documentElement.dataset.videoQuery = 'ready';
+              return result;
+            });
+          };
+          setTimeout(start, 800);
+        })();`,
         );
         const { withChrome } = await import(
           new URL(
@@ -360,7 +382,16 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               behavior: "allow",
               downloadPath: path.join(directory, "downloads"),
             });
-            for (const route of ["blue", "empty", "download", "cancel", "error", "pdf", "hang"]) {
+            for (const route of [
+              "blue",
+              "late-overlay",
+              "empty",
+              "download",
+              "cancel",
+              "error",
+              "pdf",
+              "hang",
+            ]) {
               const task = await cli("session", "start");
               await cli(
                 "navigate",
@@ -391,6 +422,21 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 );
               }
               await new Promise((resolve) => setTimeout(resolve, route === "hang" ? 2000 : 1500));
+              if (route === "late-overlay") {
+                await expect
+                  .poll(
+                    async () => {
+                      const response = await evaluate<{ result: { value: string } }>(
+                        workerSession.sessionId,
+                        `chrome.debugger.sendCommand({tabId:${recording.tab_id}},'Runtime.evaluate',{expression:"document.documentElement.dataset.videoQuery",returnByValue:true})`,
+                      );
+                      return response.result.value;
+                    },
+                    { timeout: 10_000 },
+                  )
+                  .toBe("ready");
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+              }
               if (["empty", "download", "cancel", "error"].includes(route)) {
                 // The original document remains; changing it proves capture resumed.
                 await evaluate(
@@ -405,7 +451,10 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 "--recording",
                 recording.recording_id,
               ).catch((error) => {
-                if (!["pdf", "error", "hang"].includes(route)) throw error;
+                if (!["pdf", "error", "hang"].includes(route)) {
+                  error.message += `\nRoute: ${route}`;
+                  throw error;
+                }
                 return JSON.parse(error.stdout);
               });
               const result = stopped.recording;
@@ -453,6 +502,33 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 if (["empty", "download", "cancel", "error"].includes(route))
                   expect(pixels.at(-1)![2], route).toBeGreaterThan(240);
                 if (route === "blue") expect(pixels.at(-1)![1], route).toBeGreaterThan(240);
+                if (route === "late-overlay") {
+                  expect(pixels.at(-1)![2], route).toBeGreaterThan(240);
+                  // Sample faster than the 15 fps capture rate, including the
+                  // initial frames. Uniform page colors make any control pill
+                  // or orange breathing border visible as a pixel deviation.
+                  const deviation = await evaluate<number>(
+                    preview.sessionId,
+                    `(async()=>{
+                    const v=document.querySelector('video'),c=document.createElement('canvas');
+                    c.width=160;c.height=Math.round(160*v.videoHeight/v.videoWidth);
+                    const ctx=c.getContext('2d');let deviation=0;
+                    for(let time=.01;time<v.duration-.01;time+=1/30){
+                      v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0,c.width,c.height);
+                      const data=ctx.getImageData(0,0,c.width,c.height).data;
+                      const center=4*(Math.floor(c.height/2)*c.width+Math.floor(c.width/2));
+                      for(let y=2;y<c.height-2;y++)for(let x=2;x<c.width-2;x++){
+                        const border=x<4||x>=c.width-4||y<4||y>=c.height-4;
+                        const pill=y>c.height*.75&&x>c.width*.25&&x<c.width*.75;
+                        if(!border&&!pill)continue;
+                        for(let channel=0;channel<3;channel++)deviation=Math.max(deviation,Math.abs(data[4*(y*c.width+x)+channel]-data[center+channel]));
+                      }
+                    }
+                    return deviation;
+                  })()`,
+                  );
+                  expect(deviation, "control overlay pixels in the recording").toBeLessThan(20);
+                }
                 if (route === "pdf") {
                   // If Chrome permits PDF capture, require the fixture's blue page,
                   // not merely a complete status with an unchanged/neutral frame.

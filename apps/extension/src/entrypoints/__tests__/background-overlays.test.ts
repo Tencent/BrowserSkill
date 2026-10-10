@@ -67,12 +67,16 @@ function event<T extends unknown[] = []>() {
 async function fixture() {
   const overlay = new OverlayController();
   const onDetached = event<[number]>();
-  const sendMessage = vi.fn(async (_tabId: number, message: OverlayAgentStateMessage) => {
-    overlay.applyAgentControlMode(message.sessionId, message.mode);
-  });
+  const sendMessage = vi.fn(
+    async (_tabId: number, message: OverlayAgentStateMessage): Promise<unknown> => {
+      overlay.applyAgentControlMode(message.sessionId, message.mode);
+      return undefined;
+    },
+  );
   vi.stubGlobal("chrome", {
     tabs: {
       sendMessage,
+      get: vi.fn(async () => ({ url: "https://example.test" })),
       onDetached,
       onActivated: event(),
       onUpdated: event(),
@@ -138,4 +142,15 @@ it("does not reset tabs without an observed claim", async () => {
   expect(f.sendMessage).not.toHaveBeenCalled();
   expect(f.deps.cdp?.releaseSessionTab).not.toHaveBeenCalled();
   expect(isAgentControlledTab(f.task, 10)).toBe(true);
+});
+
+it("accepts an absent video listener but preserves real overlay replies and errors", async () => {
+  const f = await fixture();
+  const video = vi.mocked(VideoManager).mock.calls.at(-1)![0];
+  for (const reply of [undefined, null, { interactive: true }]) {
+    f.sendMessage.mockResolvedValueOnce(reply);
+    await expect(video.overlay(10, "video")).resolves.toEqual(reply ?? {});
+  }
+  f.sendMessage.mockRejectedValueOnce(new Error("Overlay paint failed"));
+  await expect(video.overlay(10, "video")).rejects.toThrow("Overlay paint failed");
 });

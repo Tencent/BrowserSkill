@@ -12,6 +12,7 @@ from `bsk record`, which records semantic actions. Do not run both in one sessio
 bsk video start --session <session_id> --tab-id <tab_id> --duration 60s --quality standard --json
 # Continue the task; start returns after the first encoded frame.
 bsk video status --recording <recording_id> --json
+# Wait for navigation and the expected final page state before stopping.
 bsk video stop --recording <recording_id> --json
 bsk video save --recording <recording_id> --out <explicit-path.mp4> --json
 ```
@@ -32,6 +33,12 @@ and save; `--overwrite` is required to replace an existing file. The CLI writes
 on its own computer, which may differ from the browser's computer. The extension
 preview's Save As writes on the browser's computer.
 
+Before stopping, wait for navigation to settle and the expected final page state
+to appear (for example, its result element), then observe to confirm the outcome.
+An action returning does not necessarily mean an asynchronously updating page is
+ready. Stopping during unresolved navigation preserves a partial result even if
+the task action succeeded. Do not wait indefinitely: if the page fails to settle,
+stop and report the incomplete capture.
 Stop the video before stopping the task when a complete result is required.
 Stopping video leaves the task active. Duration and size caps stop automatically;
 subsequent `stop` calls are safe. A capped video may omit later task operations;
@@ -39,8 +46,11 @@ report that limit rather than claiming to have recorded the entire task. Status 
 action is waiting. A stopped artifact does not require its original task to exist.
 
 Task teardown, closing the captured tab, disconnects and capture failures preserve
-a playable partial result when possible. Always inspect `state`, `completeness`,
-`stop_reason` and `error`. A saved partial video is still partial: stop/save prints
+a playable partial result when possible. Network error pages or PDF viewers may
+also end as partial if clean capture cannot resume. Unresolved navigation has a
+60-second fallback; the recording's selected duration limit can stop it sooner.
+Always inspect `state`, `completeness`, `stop_reason` and `error`.
+A saved partial video is still partial: stop/save prints
 the result and exits with status 1. Do not claim success merely because a file exists.
 
 ```sh

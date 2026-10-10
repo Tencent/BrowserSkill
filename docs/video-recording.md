@@ -9,9 +9,12 @@ following task tab switches is deliberately deferred.
 The primary entry is a request to the agent: “Perform this task and record the
 process; let me preview the video afterwards.” The agent creates a session or
 borrows the authorized tab, starts recording and waits for its first encoded
-frame **before** navigation/task operations. It stops recording before ending the
-session, then reports the result. A failed start is reported before continuing
-without video. Recording is opt-in; choosing a save location does not block start.
+frame **before** navigation/task operations. After the final operation, it waits
+for navigation and the expected page result to settle, confirms that result, then
+stops recording before ending the session. Stopping while navigation is unresolved
+produces partial video even when the task action has succeeded. A failed start is
+reported before continuing without video. Recording is opt-in; choosing a save
+location does not block start.
 
 Both CLI and DSH agents can manage this sequence. The extension's Features → Video
 recording offers a harness-neutral prompt even with no running task. Its duration
@@ -93,17 +96,22 @@ for a stalled renderer; a late screenshot cannot open an encoder after cleanup.
 
 Video's idempotent overlay lease is separate from short screenshot suppression.
 Content initializes the lease asynchronously after mounting and registering its
-listeners, so ordinary page setup does not wait for a video request. The start
-handshake hides controls before the first screenshot. Interactive confirmation/help
-overlays wait until frame intake closes and the worker switches to a localized
-user-confirmation slate. Clean
-rendering is acknowledged before capture resumes; stale document messages and
+listeners, so ordinary page setup does not wait for a video request. Until that
+state is known, control and interactive overlays stay hidden. This also covers a
+navigation completing before the new document's message listener is registered.
+The start handshake hides controls before the first screenshot. Interactive
+confirmation/help overlays wait until frame intake closes and the worker switches
+to a localized user-confirmation slate. Clean rendering is acknowledged before
+capture resumes; stale document messages and
 pre-resume frames are rejected. Navigation holds the last clean frame without a
 slate. Both completed and failed navigation events recheck the current overlay and
 restore capture, including error pages, downloads, HTTP 204 and canceled requests.
-PDF viewers that deny capture end with a partial artifact. A 15-second fallback
-ends unresolved navigation as partial; stopping or reaching the duration cap before
-a clean frame returns also cannot mark it complete. Popup task interruption remains accessible.
+Network error pages and PDF viewers may end with a partial artifact if capture
+cannot resume. The navigation fallback allows 60 seconds for slow pages to settle,
+then stops as partial. This bounds time spent recording a frozen frame without
+prematurely ending slower page loads. The chosen duration limit still applies
+during the wait. Stopping or reaching that limit before a clean
+frame returns also cannot mark it complete. Popup task interruption remains accessible.
 
 ## Storage, access and failure handling
 
@@ -140,7 +148,9 @@ replace an existing destination or expose a partially written final file.
 ## Validation
 
 Unit coverage includes timeline bounds, fragment salvage, bounded frame intake,
-ownership/capabilities, idempotent stops, overlay gating, and screencast sharing.
+ownership/capabilities, idempotent stops, overlay gating, slow-navigation recovery,
+and screencast sharing. A browser regression delays both content startup and video
+state discovery, then checks decoded pixels in the control pill and border regions.
 Existing full-page screenshot lifetime tests cover cancellation and attachment
 replacement. The opt-in browser regressions use temporary Chrome profiles and an
 isolated daemon, with the production extension/encoder and real MP4 decoding:

@@ -266,6 +266,21 @@ describe("video lifetime and access", () => {
     expect(video.isRecording()).toBe(false);
   });
 
+  it("allows slow navigation to recover after 15 seconds and cancels its fallback", async () => {
+    vi.useFakeTimers();
+    const { video, start, frame, request } = await setup();
+    const grant = await start();
+    await video.navigationStarted(7);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(video.isRecording()).toBe(true);
+    frame("still-loading");
+    expect(request.mock.calls.some(([command]) => command.action === "frame")).toBe(false);
+    await video.navigationSettled(7);
+    await vi.advanceTimersByTimeAsync(VIDEO_NAVIGATION_TIMEOUT_MS);
+    expect(video.isRecording()).toBe(true);
+    expect((await video.stop(grant.recording.recording_id)).completeness).toBe("complete");
+  });
+
   it("marks a duration reply partial when it races the navigation message", async () => {
     const { video, start, store } = await setup();
     const grant = await start();

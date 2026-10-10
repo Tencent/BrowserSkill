@@ -8,6 +8,7 @@ export interface VideoOverlayMessage {
 
 export class VideoOverlayGate {
   id: string | null = null;
+  private known = false;
   private interactive = false;
   private allowed = false;
   private generation = 0;
@@ -22,13 +23,18 @@ export class VideoOverlayGate {
   ) {}
 
   async initialize(): Promise<void> {
-    const generation = this.generation;
+    const generation = ++this.generation;
+    // A new or restored document must not assume that capture is inactive.
+    // Navigation may resume capture before this script registers its listener.
+    this.known = false;
+    this.render();
     const response = await this.send("query");
     if (generation === this.generation) await this.set(response.recording_id);
   }
 
   async set(id: string | null): Promise<void> {
     this.id = id;
+    this.known = true;
     this.allowed = false;
     this.pending = false;
     this.generation++;
@@ -36,7 +42,12 @@ export class VideoOverlayGate {
     await this.painted();
   }
 
+  canRenderControl(): boolean {
+    return this.known && this.id === null;
+  }
+
   canRenderInteractive(visible: boolean): boolean {
+    if (!this.known) return false;
     if (!this.id) return true;
     if (visible !== this.interactive || (visible && !this.allowed && !this.pending)) {
       this.interactive = visible;

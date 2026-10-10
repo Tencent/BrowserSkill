@@ -185,7 +185,8 @@ export default defineContentScript({
 
     function renderReactOverlays(): void {
       const overlayState = overlays.snapshot();
-      const controlOverlayVisible = !videoOverlay.id && shouldShowAgentControlOverlay(overlayState);
+      const controlOverlayVisible =
+        videoOverlay.canRenderControl() && shouldShowAgentControlOverlay(overlayState);
       // Leaving control (including help/record UI) must not retain click leases.
       if (!controlOverlayVisible) inputPassthrough.reset();
       const interactiveOverlayVisible =
