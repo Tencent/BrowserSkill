@@ -122,6 +122,8 @@ pub enum Method {
     ToolEvaluate,
     #[serde(rename = "tool.wait_for_navigation")]
     ToolWaitForNavigation,
+    #[serde(rename = "tool.wait_for_element")]
+    ToolWaitForElement,
     #[serde(rename = "tool.wait_ms")]
     ToolWaitMs,
     #[serde(rename = "tool.request_help")]
@@ -222,6 +224,7 @@ impl Method {
             | Method::ToolConsole
             | Method::ToolNetwork
             | Method::ToolWaitForNavigation
+            | Method::ToolWaitForElement
             | Method::ToolWaitMs
             | Method::ToolRequestHelp
             | Method::ToolRecordStop
@@ -370,6 +373,7 @@ mod tests {
         assert!(!Method::ToolConsole.is_mutating());
         assert!(!Method::ToolNetwork.is_mutating());
         assert!(!Method::ToolWaitForNavigation.is_mutating());
+        assert!(!Method::ToolWaitForElement.is_mutating());
         assert!(!Method::ToolWaitMs.is_mutating());
     }
 
