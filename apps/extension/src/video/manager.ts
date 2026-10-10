@@ -1,3 +1,4 @@
+import { i18n } from "@browser-skill/i18n";
 import {
   type ScreencastFrame,
   type ScreencastLease,
@@ -15,7 +16,8 @@ import {
   resolveTargetTab,
 } from "@/tools/shared";
 import { captureReply } from "./capture-deadline";
-import type { VideoHost } from "./host-protocol";
+import { VideoError } from "./errors";
+import type { VideoHost, VideoSuspension } from "./host-protocol";
 import { VideoArtifactStore } from "./store";
 import { FrameClock } from "./timeline";
 import {
@@ -33,6 +35,8 @@ import {
   validateVideoStart,
 } from "./types";
 
+export const VIDEO_NAVIGATION_TIMEOUT_MS = 15_000;
+
 interface ActiveVideo {
   value: StoredVideo;
   lease?: ScreencastLease;
@@ -42,6 +46,11 @@ interface ActiveVideo {
   stopReason?: VideoStopReason;
   suspended: boolean;
   documentId?: string;
+  navigation?: {
+    previousDocument?: string;
+    startedAt: number;
+    timer: ReturnType<typeof setTimeout>;
+  };
   epoch: number;
   pending?: ScreencastFrame;
   pumping: boolean;
@@ -160,13 +169,16 @@ export class VideoManager {
       value.expires_at <= Date.now() ||
       (auth && (value.owner !== auth.owner || value.capability !== auth.capability))
     )
-      throw new Error("Recording unavailable or access denied");
+      throw new VideoError({
+        code: "permission_denied",
+        message: "Recording unavailable or access denied",
+      });
     return this.progress(value);
   }
 
   async start(options: VideoStartOptions, signal?: AbortSignal): Promise<VideoGrant> {
     const invalid = validateVideoStart(options);
-    if (invalid) throw new Error(invalid);
+    if (invalid) throw new VideoError({ code: "invalid_params", message: invalid });
     const owner = this.deps.owner();
     await this.ready;
     const existing = (await this.store.list()).find(
@@ -181,26 +193,35 @@ export class VideoManager {
       return { recording: publicVideo(existing), capability: existing.capability };
     }
     if (this.starting || this.active)
-      throw new Error("A video is already recording or being finalized");
+      throw new VideoError({
+        code: "invalid_params",
+        message: "A video is already recording or being finalized",
+      });
     this.starting = true;
     this.startingSession = options.session_id;
     try {
       const context = lookupSession(this.deps.sessions, options, "video");
-      if (isRpcError(context)) throw new Error(context.message);
+      if (isRpcError(context)) throw new VideoError(context);
       if (this.actionStarts.has(context.sessionId) || hasActiveRecording(context.sessionId))
-        throw new Error("Stop action recording before starting a video");
+        throw new VideoError({
+          code: "invalid_params",
+          message: "Stop action recording before starting a video",
+        });
       const target = await resolveTargetTab(
         this.deps.sessions,
         context,
         options.tab_id,
         this.deps.tabs,
       );
-      if (isRpcError(target)) throw new Error(target.message);
+      if (isRpcError(target)) throw new VideoError(target);
       const denied =
         enforceAgentWindow(context, target, "video") ?? enforceCdpAccessibleTarget(target, "video");
-      if (denied) throw new Error(denied.message);
+      if (denied) throw new VideoError(denied);
       if (!isAgentControlledTab(context, target.tabId))
-        throw new Error("Video requires a task-created or borrowed tab");
+        throw new VideoError({
+          code: "permission_denied",
+          message: "Video requires a task-created or borrowed tab",
+        });
       await this.store.reserve();
       const tab = await this.deps.tabs.get(target.tabId);
       const value: StoredVideo = {
@@ -258,7 +279,7 @@ export class VideoManager {
         !this.deps.sessions.has(session) ||
         this.deps.owner() !== active.value.owner
       )
-        throw new Error("Video start cancelled");
+        throw new VideoError({ code: "cancelled", message: "Video start cancelled" });
     };
     try {
       await this.store.put(active.value);
@@ -366,17 +387,21 @@ export class VideoManager {
   async stop(id: string, reason: VideoStopReason = "user_stopped"): Promise<StoredVideo> {
     const active = this.active;
     if (!active || active.value.recording_id !== id) return this.get(id);
-    active.stopReason ??= reason;
-    active.capture.abort(new Error("Video capture cancelled"));
+    active.stopReason ??=
+      active.navigation && ["user_stopped", "duration_limit", "size_limit"].includes(reason)
+        ? "capture_failed"
+        : reason;
+    active.capture.abort(new VideoError({ code: "cancelled", message: "Video capture cancelled" }));
     active.pending = undefined;
     active.stopping ??= (async () => {
       await active.starting?.catch(() => {});
       try {
-        return await this.deps.host.request<StoredVideo>({
+        const result = await this.deps.host.request<StoredVideo>({
           action: "stop",
           recording_id: id,
           reason: active.stopReason!,
         });
+        return await this.preserveNavigationFailure(active, result);
       } finally {
         await this.release(active);
       }
@@ -406,8 +431,31 @@ export class VideoManager {
 
   async finished(id: string): Promise<void> {
     const active = this.active;
-    if (active?.value.recording_id === id) await this.release(active);
+    if (active?.value.recording_id === id) {
+      try {
+        const result = await this.store.get(id);
+        if (result) await this.preserveNavigationFailure(active, result);
+      } finally {
+        await this.release(active);
+      }
+    }
     this.deps.changed?.();
+  }
+
+  private async preserveNavigationFailure(
+    active: ActiveVideo,
+    value: StoredVideo,
+  ): Promise<StoredVideo> {
+    // The worker's duration timer can win the race against delivery of a
+    // navigation message. Apply the capture owner's state to that final reply too.
+    if (!active.navigation || value.completeness !== "complete") return value;
+    const partial: StoredVideo = {
+      ...value,
+      completeness: "partial",
+      stop_reason: "capture_failed",
+    };
+    await this.store.put(partial);
+    return partial;
   }
 
   private release(active: ActiveVideo): Promise<void> {
@@ -416,7 +464,8 @@ export class VideoManager {
   }
 
   private async cleanup(active: ActiveVideo): Promise<void> {
-    active.capture.abort(new Error("Video capture cancelled"));
+    clearTimeout(active.navigation?.timer);
+    active.capture.abort(new VideoError({ code: "cancelled", message: "Video capture cancelled" }));
     active.suspended = true;
     active.pending = undefined;
     await active.lease?.release().catch(() => {});
@@ -427,59 +476,127 @@ export class VideoManager {
     await this.deps.host.closeWhenIdle().catch(() => {});
   }
 
+  async queryOverlay(tab: number, documentId?: string): Promise<string | null> {
+    const active = this.active;
+    // Initial content-script discovery may overlap start's own paint handshake.
+    // It is not a navigation; onBeforeNavigate separately cancels a racing start.
+    if (active?.value.tab_id === tab && active.value.state === "starting") {
+      active.documentId = documentId;
+      return active.value.recording_id;
+    }
+    return this.suspend(tab, "navigation", documentId);
+  }
+
+  /** Navigation keeps the last clean canvas instead of painting a user-help slate. */
+  async navigationStarted(tab: number, startedAt = Date.now()): Promise<void> {
+    const active = this.active;
+    if (!active || active.value.tab_id !== tab || active.stopReason) return;
+    this.markNavigation(active, startedAt);
+    await this.suspend(tab, "navigation");
+  }
+
+  private markNavigation(active: ActiveVideo, startedAt: number): void {
+    clearTimeout(active.navigation?.timer);
+    active.navigation = {
+      previousDocument: active.documentId,
+      startedAt,
+      timer: setTimeout(() => {
+        void this.stop(active.value.recording_id, "capture_failed").catch(() => {});
+      }, VIDEO_NAVIGATION_TIMEOUT_MS),
+    };
+  }
+
+  /** Completed/error events also cover documents without content scripts and
+   * navigations (204, downloads, cancelled requests) which leave the old page. */
+  async navigationSettled(tab: number, settledAt = Date.now()): Promise<void> {
+    const active = this.active;
+    if (
+      !active?.navigation ||
+      active.value.tab_id !== tab ||
+      active.stopReason ||
+      settledAt < active.navigation.startedAt
+    )
+      return;
+    const epoch = active.epoch;
+    try {
+      const overlay = await captureReply(
+        this.deps.overlay(tab, active.value.recording_id),
+        active.capture.signal,
+      );
+      if (this.active !== active || epoch !== active.epoch || active.stopReason) return;
+      await this.suspend(tab, overlay.interactive ? "interactive" : "clean");
+    } catch {
+      if (this.active === active && epoch === active.epoch)
+        await this.stop(active.value.recording_id, "capture_failed");
+    }
+  }
+
   /** Block intake synchronously before an overlay can paint or navigation commits. */
-  async suspend(tab: number, waiting: boolean, documentId?: string): Promise<string | null> {
+  async suspend(tab: number, mode: VideoSuspension, documentId?: string): Promise<string | null> {
     const active = this.active;
     if (!active || active.value.tab_id !== tab || active.stopReason) return null;
-    if (documentId && !waiting && active.documentId && active.documentId !== documentId)
+    if (
+      documentId &&
+      mode === "clean" &&
+      ((active.documentId && active.documentId !== documentId) ||
+        active.navigation?.previousDocument === documentId)
+    )
       return null;
+    if (mode === "navigation" && !active.navigation) this.markNavigation(active, Date.now());
     if (documentId) active.documentId = documentId;
     const epoch = ++active.epoch;
     active.suspended = true;
     active.pending = undefined;
     if (active.value.state === "starting") {
-      // The first screenshot must also be clean. A confirmation or navigation
-      // racing startup cancels it; acknowledge only after startup compensation
-      // removes the overlay lease and closes the encoder.
+      if (mode === "clean") return active.value.recording_id;
       active.stopReason ??= "capture_failed";
-      active.capture.abort(new Error("Video capture cancelled"));
+      active.capture.abort(
+        new VideoError({ code: "cancelled", message: "Video capture cancelled" }),
+      );
       await active.starting?.catch(() => {});
       return null;
     }
-    if (active.value.state === "recording") {
-      await this.deps.host.request({
-        action: "suspend",
-        recording_id: active.value.recording_id,
-        waiting,
-        label: "Waiting for user",
-      });
-      if (!waiting && epoch === active.epoch) {
-        // A fresh screenshot replaces any buffered screencast frame from before
-        // the overlay was removed. Content confirms two clean animation frames.
-        const first = await captureReply(
-          this.deps.cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
-            format: "jpeg",
-            quality: 80,
-          }),
-          active.capture.signal,
-        );
-        if (epoch === active.epoch) {
+    try {
+      if (active.value.state === "recording") {
+        // Do not clear the worker's navigation guard until a clean frame exists.
+        const first =
+          mode === "clean"
+            ? await captureReply(
+                this.deps.cdp.send<{ data: string }>(tab, "Page.captureScreenshot", {
+                  format: "jpeg",
+                  quality: 80,
+                }),
+                active.capture.signal,
+              )
+            : undefined;
+        if (epoch !== active.epoch || active.stopReason) return null;
+        await this.deps.host.request({
+          action: "suspend",
+          recording_id: active.value.recording_id,
+          mode,
+          label: mode === "interactive" ? i18n.t("extension:video.waitingForUser") : "",
+        });
+        if (first && epoch === active.epoch && !active.stopReason) {
           await this.deps.host.request({
             action: "frame",
             recording_id: active.value.recording_id,
             image: first.data,
             elapsed_ms: active.clock.elapsed(undefined, performance.now() - active.origin),
           });
+          if (epoch !== active.epoch || active.stopReason) return null;
           active.cleanAfter = Date.now() / 1000;
           active.suspended = false;
         }
+        if (mode !== "navigation" && epoch === active.epoch) {
+          clearTimeout(active.navigation?.timer);
+          active.navigation = undefined;
+        }
       }
+      return active.value.recording_id;
+    } catch (error) {
+      if (epoch === active.epoch) await this.stop(active.value.recording_id, "capture_failed");
+      throw error;
     }
-    return active.value.recording_id;
-  }
-
-  overlayId(tab: number): string | null {
-    return this.active?.value.tab_id === tab ? this.active.value.recording_id : null;
   }
 
   async discard(id: string): Promise<void> {
@@ -521,11 +638,12 @@ export class VideoManager {
       await this.exported(value.recording_id);
       return { exported: true };
     }
-    if (params.action !== "read") throw new Error("Unsupported video action");
+    if (params.action !== "read")
+      throw new VideoError({ code: "invalid_params", message: "Unsupported video action" });
     if (value.state !== "ready") throw new Error("Video is not ready to save");
     const offset = params.offset ?? 0;
     if (!Number.isSafeInteger(offset) || offset < 0 || offset > value.byte_size)
-      throw new Error("Invalid video offset");
+      throw new VideoError({ code: "invalid_params", message: "Invalid video offset" });
     const file = await this.store.file(value.recording_id);
     if (file.size !== value.byte_size) throw new Error("Video artifact size changed");
     const bytes = new Uint8Array(

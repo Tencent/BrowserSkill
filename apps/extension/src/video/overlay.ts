@@ -22,7 +22,9 @@ export class VideoOverlayGate {
   ) {}
 
   async initialize(): Promise<void> {
-    this.id = (await this.send("query")).recording_id;
+    const generation = this.generation;
+    const response = await this.send("query");
+    if (generation === this.generation) await this.set(response.recording_id);
   }
 
   async set(id: string | null): Promise<void> {

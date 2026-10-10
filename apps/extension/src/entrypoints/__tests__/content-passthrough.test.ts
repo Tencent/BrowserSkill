@@ -32,12 +32,13 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function fixture() {
+async function fixture(pendingVideoQuery = false) {
   vi.useFakeTimers();
   let receive: (message: unknown, sender: object, ack: () => void) => void;
   vi.stubGlobal("chrome", {
     runtime: {
-      sendMessage: vi.fn(async () => {
+      sendMessage: vi.fn(async (message) => {
+        if (pendingVideoQuery && message.type === "bsk/video-overlay") return new Promise(() => {});
         throw new Error("Background unavailable");
       }),
       onMessage: {
@@ -98,6 +99,13 @@ async function fixture() {
   state();
   return { send, version, state, reset, begin, active, blocking, remount: () => mount() };
 }
+
+it("mounts and registers ordinary overlay controls without waiting for video discovery", async () => {
+  const f = await fixture(true);
+  expect(f.blocking()).toBe(true);
+  f.begin();
+  expect(f.active()).toBe(true);
+}, 1000);
 
 it.each([
   "paused",

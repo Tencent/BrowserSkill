@@ -114,10 +114,15 @@ export default defineBackground(() => {
           { frameId: 0 },
         );
       } catch (error) {
-        // about:blank has no extension overlay. Ordinary pages must confirm
-        // suppression before any pixels enter the recording.
+        // Error pages, downloads and PDF viewers may have no content script.
+        // A receiving script must confirm a clean paint; absent scripts have no overlay.
         const tab = await chrome.tabs.get(tabId);
-        if (!recordingId || tab.url === "about:blank") return {};
+        if (
+          !recordingId ||
+          tab.url === "about:blank" ||
+          (error instanceof Error && error.message.includes("Receiving end does not exist"))
+        )
+          return {};
         throw error;
       }
     },
@@ -131,11 +136,15 @@ export default defineBackground(() => {
     if (details.frameId !== 0) return;
     if (cdpBlockedUrlReason(details.url))
       void video.stopTab(details.tabId, "capture_failed").catch(() => {});
-    else void video.suspend(details.tabId, true).catch(() => {});
+    else void video.navigationStarted(details.tabId, details.timeStamp).catch(() => {});
   });
   chrome.webNavigation.onCompleted.addListener((details) => {
-    if (details.frameId === 0 && details.url === "about:blank")
-      void video.suspend(details.tabId, false).catch(() => {});
+    if (details.frameId === 0)
+      void video.navigationSettled(details.tabId, details.timeStamp).catch(() => {});
+  });
+  chrome.webNavigation.onErrorOccurred.addListener((details) => {
+    if (details.frameId === 0)
+      void video.navigationSettled(details.tabId, details.timeStamp).catch(() => {});
   });
   chrome.debugger.onDetach.addListener((source) => {
     if (source.tabId !== undefined) debug.stopTab(source.tabId, "debugger_detached");

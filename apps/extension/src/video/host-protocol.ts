@@ -1,9 +1,12 @@
+import type { RpcError } from "@/transport/types";
 import type { StoredVideo, VideoStopReason } from "./types";
+
+export type VideoSuspension = "navigation" | "interactive" | "clean";
 
 export type VideoHostCommand =
   | { action: "start"; recording: StoredVideo; image: string }
   | { action: "frame"; recording_id: string; image: string; elapsed_ms: number }
-  | { action: "suspend"; recording_id: string; waiting: boolean; label: string }
+  | { action: "suspend"; recording_id: string; mode: VideoSuspension; label: string }
   | { action: "stop"; recording_id: string; reason: VideoStopReason }
   | { action: "recover"; recording_id: string; reason?: VideoStopReason }
   | { action: "download_url"; recording_id: string }
@@ -13,7 +16,7 @@ export type VideoHostCommand =
 export interface VideoHostReply {
   id: string;
   result?: unknown;
-  error?: string;
+  error?: RpcError;
 }
 
 export interface VideoHost {

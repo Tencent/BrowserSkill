@@ -159,6 +159,48 @@ fn cache_path(id: &str) -> anyhow::Result<PathBuf> {
     Ok(crate::daemon::paths::ensure_bsk_home()?.join(format!("video-{id}.json")))
 }
 
+/// Remove only recognized, expired grants; unrelated, malformed and symlinked
+/// files in the shared application directory do not belong to this cleanup.
+fn prune_cached_grants(directory: &Path, now_ms: u64) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("video-"))
+            .and_then(|name| name.strip_suffix(".json"))
+            .filter(|id| valid_id(id))
+        else {
+            continue;
+        };
+        let Some(cached) = std::fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<CachedGrant>(&bytes).ok())
+        else {
+            continue;
+        };
+        if cached.grant.recording.recording_id == id && cached.grant.recording.expires_at <= now_ms
+        {
+            match std::fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn remember(value: &CachedGrant) -> anyhow::Result<()> {
     let path = cache_path(&value.grant.recording.recording_id)?;
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
@@ -192,7 +234,9 @@ fn resolve(sock: &Path, selector: Selector) -> Result<CachedGrant, CliError> {
             if cached.grant.recording.recording_id != *id {
                 return Err(anyhow!("Video cache identity mismatch").into());
             }
-            return Ok(cached);
+            if cached.grant.recording.expires_at > now_ms() {
+                return Ok(cached);
+            }
         }
     }
     let list = listing(sock, selector.browser)?;
@@ -220,6 +264,7 @@ fn resolve(sock: &Path, selector: Selector) -> Result<CachedGrant, CliError> {
 }
 
 pub fn dispatch(cmd: VideoCmd, format: Format) -> Result<(), CliError> {
+    prune_cached_grants(&crate::daemon::paths::ensure_bsk_home()?, now_ms())?;
     let sock = super::ensure_daemon::ensure_daemon()?.sock_path;
     match cmd.command {
         VideoCommand::Start(args) => {
@@ -463,6 +508,46 @@ fn validate_chunk(
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn prunes_only_recognized_expired_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = |letter: char, expires_at: u64| {
+            let id = format!("vid_{}", letter.to_string().repeat(32));
+            let value = json!({
+                "browser": "test", "capability": "private", "recording": {
+                    "recording_id": id, "session_id": "test", "tab_id": 1, "title": "test",
+                    "state": "ready", "quality": "standard", "created_at": 1,
+                    "expires_at": expires_at, "max_duration_ms": 1000, "duration_ms": 1000,
+                    "byte_size": 10, "width": 100, "height": 100, "frames": 1,
+                    "dropped_frames": 0, "exported": false
+                }
+            });
+            let path = dir.path().join(format!("video-{id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            path
+        };
+        let expired = cache('a', 99);
+        let boundary = cache('b', 100);
+        let live = cache('c', 101);
+        let malformed = dir
+            .path()
+            .join(format!("video-vid_{}.json", "d".repeat(32)));
+        std::fs::write(&malformed, b"broken").unwrap();
+        let unrelated = dir.path().join("daemon.json");
+        std::fs::copy(&expired, &unrelated).unwrap();
+        let mismatched = dir
+            .path()
+            .join(format!("video-vid_{}.json", "e".repeat(32)));
+        std::fs::copy(&expired, &mismatched).unwrap();
+        prune_cached_grants(dir.path(), 100).unwrap();
+        assert!(!expired.exists());
+        assert!(!boundary.exists());
+        for path in [live, malformed, unrelated, mismatched] {
+            assert!(path.exists());
+        }
+        prune_cached_grants(dir.path(), 100).unwrap();
+    }
 
     #[test]
     fn accepts_the_issue_duration_flag_and_requires_an_explicit_save_path() {

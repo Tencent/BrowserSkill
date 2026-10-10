@@ -95,7 +95,6 @@ export default defineContentScript({
       () => renderAll(),
       () => waitForRenderedOverlayUpdate(),
     );
-    await videoOverlay.initialize().catch(() => {});
 
     // Load the user's control-hints preference up front so an already-active
     // Agent session does not flash the overlay before the stored value lands.
@@ -561,7 +560,11 @@ export default defineContentScript({
 
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
-    void videoOverlay.clean().catch(() => {});
+    // Start the handshake after mounting/listening; it never delays page setup.
+    void videoOverlay
+      .initialize()
+      .then(() => videoOverlay.clean())
+      .catch(() => {});
     void requestOverlayState();
 
     window.addEventListener("pageshow", onPageShow);

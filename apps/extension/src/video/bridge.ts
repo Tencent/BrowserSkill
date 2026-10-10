@@ -40,15 +40,14 @@ export function attachVideoBridge(
         if (sender.documentId && current?.documentId !== sender.documentId)
           throw new Error("Video overlay document changed");
         if (message.action === "query") {
-          await video.suspend(tab, true, sender.documentId);
-          return { recording_id: video.overlayId(tab) };
+          return { recording_id: await video.queryOverlay(tab, sender.documentId) };
         }
         if (!["interactive", "clean"].includes(message.action))
           throw new Error("Invalid overlay action");
         return {
           recording_id: await video.suspend(
             tab,
-            message.action === "interactive",
+            message.action === "interactive" ? "interactive" : "clean",
             sender.documentId,
           ),
         };

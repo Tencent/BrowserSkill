@@ -14,6 +14,7 @@ it("waits for background suspension before rendering help, then confirms a clean
   const painted = vi.fn(async () => {});
   const gate = new VideoOverlayGate(send, render, painted);
   await gate.initialize();
+  render.mockClear();
   expect(gate.canRenderInteractive(true)).toBe(false);
   expect(gate.canRenderInteractive(true)).toBe(false);
   expect(send.mock.calls.filter(([action]) => action === "interactive")).toHaveLength(1);
@@ -44,4 +45,22 @@ it("ignores old acknowledgements after an overlay or recording is removed", asyn
   expect(render).not.toHaveBeenCalled();
   expect(gate.id).toBeNull();
   expect(gate.canRenderInteractive(true)).toBe(true);
+});
+
+it("ignores a stale initialization query after a newer recording handshake", async () => {
+  let resolve!: (value: { recording_id: string | null }) => void;
+  const gate = new VideoOverlayGate(
+    () =>
+      new Promise((r) => {
+        resolve = r;
+      }),
+    vi.fn(),
+    async () => {},
+  );
+  const initializing = gate.initialize();
+  expect(gate.id).toBeNull();
+  await gate.set("new-recording");
+  resolve({ recording_id: null });
+  await initializing;
+  expect(gate.id).toBe("new-recording");
 });

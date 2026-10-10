@@ -241,6 +241,33 @@ describe("ToolDispatcher", () => {
     expect(sent[0]).toEqual({ id: "r-1", result: {} });
   });
 
+  it.each([
+    "not_found",
+    "permission_denied",
+    "timeout",
+    "unsupported",
+    "cdp_failed",
+  ] as const)("preserves video %s errors and their diagnostic data", async (code) => {
+    const { transport, sent, deliver } = fakeTransport();
+    const error = { code, message: "original failure", data: { phase: "video" } };
+    const video = {
+      rpc: vi.fn(async () => {
+        throw error;
+      }),
+    } as unknown as NonNullable<ConstructorParameters<typeof ToolDispatcher>[0]["video"]>;
+    const dispatcher = new ToolDispatcher({ transport, sessions: new SessionManager(), video });
+    dispatcher.start();
+    try {
+      deliver(
+        makeRequest("tool.video", { action: "status", recording_id: "video", capability: "test" }),
+      );
+      await vi.waitFor(() => expect(sent).toHaveLength(1));
+      expect(sent[0]).toEqual({ id: "r-1", error });
+    } finally {
+      dispatcher.stop();
+    }
+  });
+
   it("still cleans up a task when video finalization fails", async () => {
     const { transport, sent, deliver } = fakeTransport();
     const sessions = new SessionManager({

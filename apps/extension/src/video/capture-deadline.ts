@@ -1,3 +1,5 @@
+import { VideoError } from "./errors";
+
 /** Chrome cannot cancel an already dispatched screenshot. Stop waiting for it
  * on cancellation/deadline and ignore its late result before opening an encoder. */
 export async function captureReply<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -9,7 +11,13 @@ export async function captureReply<T>(promise: Promise<T>, signal: AbortSignal):
       new Promise<never>((_, reject) => {
         abort = () => reject(signal.reason ?? new Error("Video capture cancelled"));
         timer = setTimeout(
-          () => reject(new Error("Video capture did not respond within 10s")),
+          () =>
+            reject(
+              new VideoError({
+                code: "timeout",
+                message: "Video capture did not respond within 10s",
+              }),
+            ),
           10_000,
         );
         signal.addEventListener("abort", abort, { once: true });

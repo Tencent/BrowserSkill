@@ -71,7 +71,8 @@ flowchart LR
 
 `VideoManager` owns target authorization, one-browser concurrency, lifecycle,
 overlay coordination and connection ownership. The offscreen host manages one
-worker independently of popup lifetime. The worker owns the encoder and OPFS
+worker independently of popup lifetime. A long-lived runtime Port carries control
+requests and frames; document discovery runs only when connecting, not per frame. The worker owns the encoder and OPFS
 files. Mediabunny muxes and remuxes packets; there is no runtime ffmpeg dependency
 and no second encode when producing the final seekable MP4.
 
@@ -91,15 +92,24 @@ Capture reads have a 10-second deadline. Stopping during startup cancels the wai
 for a stalled renderer; a late screenshot cannot open an encoder after cleanup.
 
 Video's idempotent overlay lease is separate from short screenshot suppression.
-Content checks the lease before mounting. Interactive confirmation/help overlays
-wait until frame intake closes and the worker switches to a neutral slate. Clean
+Content initializes the lease asynchronously after mounting and registering its
+listeners, so ordinary page setup does not wait for a video request. The start
+handshake hides controls before the first screenshot. Interactive confirmation/help
+overlays wait until frame intake closes and the worker switches to a localized
+user-confirmation slate. Clean
 rendering is acknowledged before capture resumes; stale document messages and
-pre-resume frames are rejected. Popup task interruption remains accessible.
+pre-resume frames are rejected. Navigation holds the last clean frame without a
+slate. Both completed and failed navigation events recheck the current overlay and
+restore capture, including error pages, downloads, HTTP 204 and canceled requests.
+PDF viewers that deny capture end with a partial artifact. A 15-second fallback
+ends unresolved navigation as partial; stopping or reaching the duration cap before
+a clean frame returns also cannot mark it complete. Popup task interruption remains accessible.
 
 ## Storage, access and failure handling
 
 Fragments are flushed during recording. Normal stop remuxes complete packets into
-a seekable MP4 without reencoding. Recovery discards incomplete tail boxes and
+a seekable MP4 without reencoding. The final copy flushes once before committing
+metadata; the durable fragment journal remains until that commit succeeds. Recovery discards incomplete tail boxes and
 uses complete fragments. An interrupted final fragment can be lost; this is
 reported as a partial recording, never as a complete result. No complete fragment
 means failed with an actionable error. Worker failure resets the encoder worker
@@ -116,7 +126,9 @@ owner and a random capability. Only extension-owned popup/preview pages can use
 the local UI bridge. Content messages are restricted to the sender's current
 top-level document. Public metadata strips capabilities. The CLI stores private
 grants in the existing per-user application directory, and the browser catalog
-remains authoritative after reconnects.
+remains authoritative after reconnects. Video commands remove expired CLI grant
+files using their recorded expiration time; unrelated files are left intact.
+Protocol error codes and diagnostic data survive validation, capture and worker IPC.
 
 `tool.video` exposes a versioned capability probe. Start uses the existing task
 queue and user-interrupt gate; artifact/status/stop operations route directly to
@@ -161,3 +173,37 @@ browser_inspect({ action: "video", videoAction: "stop", recordingId: "<recording
 // End the task. Preview and Save As remain available in the extension.
 browser_inspect({ action: "video", videoAction: "save", recordingId: "<recording_id>", output: "<explicit-path.mp4>" })
 ```
+
+
+## Capacity benchmark
+
+The manual benchmark uses the production WebCodecs/OPFS pipeline in an isolated
+Chrome worker. `BSK_VIDEO_STRESS=size` feeds high-entropy 1920×1080 images at the
+clear preset until the size cap. `BSK_VIDEO_STRESS=duration` runs a moving pattern
+for the full ten-minute limit. Each run also remuxes 18,000 real AVC keyframes
+with valid filler NALs into a near-256 MiB, ten-minute MP4, stressing both the
+maximum packet table and file size without waiting for another recording.
+The benchmark asserts finalization stays below the offscreen worker's 29-second
+watchdog. It measures encoder flush, journal finalization and remux for real
+capture, and remux separately for the capacity fixture.
+
+```sh
+cd apps/extension
+BSK_VIDEO_CHROME=/path/to/chrome BSK_VIDEO_STRESS=size \
+  BSK_VIDEO_BENCHMARK_OUT=/tmp/video-capacity.json \
+  pnpm exec vitest run src/video/stress.browser.test.ts
+# Repeat with BSK_VIDEO_STRESS=duration for the full ten-minute capture.
+```
+
+On macOS arm64 / Chrome for Testing 149.0.7827.55:
+
+| Workload | Finalization |
+| --- | --- |
+| Full 600-second clear capture, 1920×1080, 136,474,558 bytes | 388 ms |
+| High-entropy clear capture reaching the size cap, up to 267,628,206 bytes | 177–261 ms |
+| 18,000 frames / 600 seconds, 266,956,902-byte capacity fixture | 409–492 ms |
+
+The capacity fixture also decodes and seeks to 599.9 seconds in Chrome's native
+video element. Bitrate is an encoder target, so high-entropy input reached the
+byte cap before the duration limit. These are local measurements, not a timing
+guarantee for slower disks or other operating systems.

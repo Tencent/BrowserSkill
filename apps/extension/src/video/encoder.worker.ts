@@ -1,4 +1,5 @@
 import { finishVideo, VideoEncoderPipeline } from "./encoder";
+import { videoError } from "./errors";
 import type { VideoHostCommand } from "./host-protocol";
 import { VideoArtifactStore } from "./store";
 import { completeStop, type StoredVideo, type VideoStopReason } from "./types";
@@ -76,7 +77,7 @@ async function execute(command: VideoHostCommand): Promise<unknown> {
   }
   if (command.action === "stop") return active.pipeline.stop(command.reason);
   if (command.action === "frame") return active.pipeline.frame(command.image, command.elapsed_ms);
-  return active.pipeline.suspend(command.waiting, command.label);
+  return active.pipeline.suspend(command.mode, command.label);
 }
 
 self.addEventListener(
@@ -85,8 +86,7 @@ self.addEventListener(
     const { id, command } = event.data;
     void execute(command).then(
       (result) => self.postMessage({ id, result }),
-      (error: unknown) =>
-        self.postMessage({ id, error: error instanceof Error ? error.message : String(error) }),
+      (error: unknown) => self.postMessage({ id, error: videoError(error) }),
     );
   },
 );

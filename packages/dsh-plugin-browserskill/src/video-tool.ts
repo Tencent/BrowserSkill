@@ -33,7 +33,7 @@ export const VIDEO_PARAMETERS = {
   output: {
     type: "string",
     description:
-      "Debug export or video save: explicit file path on the host computer. Video requires the user's chosen destination; omit to keep the video for preview and Save As in the extension.",
+      "Video save: explicit MP4 file path on the host computer. Video requires the user's chosen destination; omit to keep the video for preview and Save As in the extension.",
   },
   overwrite: {
     type: "boolean",

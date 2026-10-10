@@ -632,6 +632,7 @@
     "recent": "最近录制（{{count}}）",
     "partial": "录制中断 · 已保留可播放的部分视频",
     "saved": "已保存",
+    "waitingForUser": "等待用户完成确认",
     "unsaved": "录制完成，待保存",
     "retention": "录制文件在当前浏览器保留 24 小时，请及时保存重要视频。",
     "library": "最近录制",

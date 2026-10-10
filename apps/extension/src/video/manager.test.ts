@@ -1,8 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@/session-manager/manager";
 import type { CdpRunner } from "@/tools/shared";
 import type { VideoHost, VideoHostCommand } from "./host-protocol";
-import { VideoManager } from "./manager";
+import { VIDEO_NAVIGATION_TIMEOUT_MS, VideoManager } from "./manager";
 import { VideoArtifactStore } from "./store";
 import { completeStop, type StoredVideo } from "./types";
 
@@ -113,6 +113,7 @@ async function setup() {
 }
 
 describe("video lifetime and access", () => {
+  afterEach(() => vi.useRealTimers());
   it("reserves against action recording during asynchronous startup", async () => {
     const { video, start } = await setup();
     const release = video.reserveActionRecording("task")!;
@@ -168,13 +169,13 @@ describe("video lifetime and access", () => {
   it("closes frame intake before acknowledging interactive overlays", async () => {
     const { video, start, request, frame } = await setup();
     const grant = await start();
-    const paused = video.suspend(7, true, "document");
+    const paused = video.suspend(7, "interactive", "document");
     frame("must-not-enter-encoder", Date.now() / 1000);
     await paused;
     expect(request.mock.calls.some(([command]) => command.action === "frame")).toBe(false);
-    await video.suspend(7, false, "old-document");
+    await video.suspend(7, "clean", "old-document");
     expect(request.mock.calls.some(([command]) => command.action === "frame")).toBe(false);
-    await video.suspend(7, false, "document");
+    await video.suspend(7, "clean", "document");
     frame("stale-overlay-frame", 0);
     expect(request.mock.calls.filter(([command]) => command.action === "frame")).toHaveLength(1);
     await video.stop(grant.recording.recording_id);
@@ -196,7 +197,7 @@ describe("video lifetime and access", () => {
       expect(request.mock.calls.some(([command]) => command.action === "start")).toBe(true),
     );
     let acknowledged = false;
-    const showing = video.suspend(7, true, "document").then(() => {
+    const showing = video.suspend(7, "interactive", "document").then(() => {
       acknowledged = true;
     });
     await Promise.resolve();
@@ -229,6 +230,111 @@ describe("video lifetime and access", () => {
       request.mock.calls.filter(([command]) => command.action === "frame").at(-1)?.[0],
     ).toMatchObject({ image: "99" });
     await video.stop(grant.recording.recording_id);
+  });
+
+  it("holds the clean frame during navigation and recovers without a content script", async () => {
+    const { video, start, request, frame, overlay } = await setup();
+    const grant = await start();
+    await video.navigationStarted(7);
+    frame("during-navigation");
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({
+      action: "suspend",
+      mode: "navigation",
+      label: "",
+    });
+    expect(request.mock.calls.some(([command]) => command.action === "frame")).toBe(false);
+    await video.navigationSettled(7);
+    expect(overlay).toHaveBeenLastCalledWith(7, grant.recording.recording_id);
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({ action: "frame", image: "image" });
+    expect((await video.stop(grant.recording.recording_id)).completeness).toBe("complete");
+  });
+
+  it("cannot mark an unresolved navigation complete on manual stop or timeout", async () => {
+    vi.useFakeTimers();
+    const { video, start } = await setup();
+    const first = await start();
+    await video.navigationStarted(7);
+    expect((await video.stop(first.recording.recording_id)).stop_reason).toBe("capture_failed");
+    const next = await video.start({ session_id: "task", request_id: "next-request" });
+    await video.navigationStarted(7);
+    await vi.advanceTimersByTimeAsync(VIDEO_NAVIGATION_TIMEOUT_MS);
+    expect(await video.get(next.recording.recording_id)).toMatchObject({
+      state: "ready",
+      completeness: "partial",
+      stop_reason: "capture_failed",
+    });
+    expect(video.isRecording()).toBe(false);
+  });
+
+  it("marks a duration reply partial when it races the navigation message", async () => {
+    const { video, start, store } = await setup();
+    const grant = await start();
+    await video.navigationStarted(7);
+    const value = (await store.get(grant.recording.recording_id))!;
+    await store.put({
+      ...value,
+      state: "ready",
+      stop_reason: "duration_limit",
+      completeness: "complete",
+    });
+    await video.finished(grant.recording.recording_id);
+    expect(await video.get(grant.recording.recording_id)).toMatchObject({
+      completeness: "partial",
+      stop_reason: "capture_failed",
+    });
+  });
+
+  it("rejects late navigation recovery and old document acknowledgements", async () => {
+    const { video, start, request, overlay } = await setup();
+    const grant = await start();
+    await video.suspend(7, "clean", "old-document");
+    await video.navigationStarted(7, 100);
+    await video.suspend(7, "clean", "old-document");
+    let resolve!: (value: object) => void;
+    overlay.mockImplementationOnce(
+      () =>
+        new Promise((r) => {
+          resolve = r;
+        }),
+    );
+    const recovering = video.navigationSettled(7, 101);
+    await video.navigationStarted(7, 200);
+    const count = request.mock.calls.length;
+    resolve({});
+    await recovering;
+    await video.navigationSettled(7, 199);
+    expect(request.mock.calls).toHaveLength(count);
+    await video.suspend(7, "navigation", "new-document");
+    await video.suspend(7, "clean", "new-document");
+    expect((await video.stop(grant.recording.recording_id)).completeness).toBe("complete");
+  });
+
+  it("keeps confirmation pixels out of cancelled-navigation recovery", async () => {
+    const { video, start, request, overlay } = await setup();
+    const grant = await start();
+    await video.navigationStarted(7);
+    overlay.mockResolvedValueOnce({ interactive: true });
+    await video.navigationSettled(7);
+    expect(request.mock.calls.at(-1)?.[0]).toMatchObject({
+      action: "suspend",
+      mode: "interactive",
+    });
+    expect(request.mock.calls.some(([command]) => command.action === "frame")).toBe(false);
+    await video.suspend(7, "clean");
+    expect((await video.stop(grant.recording.recording_id)).completeness).toBe("complete");
+  });
+
+  it("preserves session, authorization and parameter error codes", async () => {
+    const { video } = await setup();
+    await expect(
+      video.start({ session_id: "missing", request_id: "test-request" }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(video.start({ session_id: "task", request_id: "bad" })).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+    await expect(
+      video.get("missing", { owner: "local", capability: "missing" }),
+    ).rejects.toMatchObject({ code: "permission_denied" });
   });
 
   it("cleans up suppression and leaves actionable metadata after startup failure", async () => {

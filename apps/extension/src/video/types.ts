@@ -5,7 +5,7 @@ export const VIDEO_BUDGET_BYTES = 1024 * 1024 * 1024;
 export const VIDEO_RETENTION_MS = 24 * 60 * 60_000;
 export const VIDEO_MAX_DURATION_MS = 10 * 60_000;
 export const VIDEO_MESSAGE = "bsk/video";
-export const VIDEO_HOST_MESSAGE = "bsk/video-host";
+export const VIDEO_HOST_PORT = "bsk/video-host";
 export const VIDEO_HOST_EVENT = "bsk/video-host-event";
 
 export const VIDEO_PRESETS = {

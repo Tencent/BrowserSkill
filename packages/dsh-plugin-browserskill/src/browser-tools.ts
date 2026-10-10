@@ -18,6 +18,15 @@ import {
 import { createBrowserOperationDefinitions, type ToolDeps } from "./tools";
 import { VIDEO_PARAMETERS } from "./video-tool";
 
+// Exclude the shared path before combining action-specific schemas.
+const { output: debugOutput, ...debugParameters } = DEBUG_PARAMETERS;
+const { output: videoOutput, ...videoParameters } = VIDEO_PARAMETERS;
+const INSPECT_OUTPUT = {
+  type: debugOutput.type satisfies typeof videoOutput.type,
+  description:
+    "Debug export: new local JSON path. Video save: explicit MP4 destination chosen by the user; omit to preview and Save As in the extension. Video replacement requires overwrite=true.",
+} as const;
+
 const DEVICE_PRESETS = [
   "iphone-14",
   "iphone-14-pro-max",
@@ -172,8 +181,9 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     parameters: {
       session: SESSION_PARAM,
       tabId: TAB_ID_PARAM,
-      ...DEBUG_PARAMETERS,
-      ...VIDEO_PARAMETERS,
+      ...debugParameters,
+      ...videoParameters,
+      output: INSPECT_OUTPUT,
       maxDepth: { type: "integer", description: "Tree depth cap for observe/snapshot." },
       maxTokens: { type: "integer", description: "Token cap for observe/snapshot." },
       cursor: {

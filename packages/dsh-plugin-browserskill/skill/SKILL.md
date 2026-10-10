@@ -68,8 +68,8 @@ Do not invent tools or bypass these limits.
 
 ## Read details only when needed
 
-Resolve references from the harness-provided skill directory. Read only the matching
-file before acting.
+Resolve references from the skill resource directory provided by the harness, not
+the working directory. Read the matching file before acting; do not preload all files.
 
 | When | Read |
 | --- | --- |

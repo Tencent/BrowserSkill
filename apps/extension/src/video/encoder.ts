@@ -10,6 +10,8 @@ import {
   StreamTarget,
   type StreamTargetChunk,
 } from "mediabunny";
+import { VideoError } from "./errors";
+import type { VideoSuspension } from "./host-protocol";
 import { VideoArtifactStore, videoDirectory } from "./store";
 import { VideoTimeline, videoDimensions } from "./timeline";
 import {
@@ -35,14 +37,14 @@ async function syncFile(handle: FileSystemFileHandle): Promise<SyncFile> {
   return file;
 }
 
-function fileTarget(file: SyncFile, limit: number) {
+function fileTarget(file: SyncFile, limit: number, durable = true) {
   return new StreamTarget(
     new WritableStream<StreamTargetChunk>({
       write({ data, position }) {
         if (position + data.byteLength > limit) throw new Error("video_size_limit");
         if (file.write(data, { at: position }) !== data.byteLength)
           throw new Error("Video storage returned an incomplete write");
-        file.flush();
+        if (durable) file.flush();
       },
     }),
     { chunked: false },
@@ -101,7 +103,8 @@ export async function finishVideo(recording: StoredVideo): Promise<StoredVideo> 
       throw new Error("The recording has no playable H.264 track");
     destination = await syncFile(await directory.getFileHandle("video.mp4", { create: true }));
     const output = new Output({
-      target: fileTarget(destination, VIDEO_MAX_BYTES),
+      // The durable journal remains until this file and its metadata are committed.
+      target: fileTarget(destination, VIDEO_MAX_BYTES, false),
       format: new Mp4OutputFormat({ fastStart: "reserve" }),
     });
     const source = new EncodedVideoPacketSource("avc");
@@ -168,6 +171,8 @@ export class VideoEncoderPipeline {
   private origin = 0;
   private failure?: Error;
   private waiting = false;
+  private navigationPending = false;
+  private suspensionVersion = 0;
   private started = false;
   private heartbeatPending = false;
 
@@ -187,7 +192,10 @@ export class VideoEncoderPipeline {
     const size = videoDimensions(bitmap.width, bitmap.height, preset.maxDimension);
     try {
       if (typeof VideoEncoder === "undefined")
-        throw new Error("This browser does not support video encoding");
+        throw new VideoError({
+          code: "unsupported",
+          message: "This browser does not support video encoding",
+        });
       // Baseline AVC, level 4.2, AVCC packets for an MP4 container. Test the exact
       // dimensions rather than treating API presence as codec availability.
       const config: VideoEncoderConfig = {
@@ -200,7 +208,10 @@ export class VideoEncoderPipeline {
       };
       const support = await VideoEncoder.isConfigSupported(config);
       if (!support.supported)
-        throw new Error("This browser cannot encode H.264 at the requested quality");
+        throw new VideoError({
+          code: "unsupported",
+          message: "This browser cannot encode H.264 at the requested quality",
+        });
       this.canvas = new OffscreenCanvas(size.width, size.height);
       const context = this.canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("The browser could not prepare the video canvas");
@@ -277,12 +288,14 @@ export class VideoEncoderPipeline {
   }
 
   frame(image: string, elapsedMs: number): Promise<void> {
+    const version = this.suspensionVersion;
     return this.enqueue(async () => {
       if (this.waiting) return;
       const bitmap = await decodeImage(image);
       try {
         this.encode(Math.min(elapsedMs, performance.now() - this.origin));
         this.draw(bitmap);
+        if (version === this.suspensionVersion) this.navigationPending = false;
         await this.writes;
       } finally {
         bitmap.close();
@@ -290,11 +303,14 @@ export class VideoEncoderPipeline {
     });
   }
 
-  suspend(waiting: boolean, label: string): Promise<void> {
+  suspend(mode: VideoSuspension, label: string): Promise<void> {
+    this.suspensionVersion++;
+    // A navigation remains incomplete until its first clean frame is installed.
+    if (mode !== "clean") this.navigationPending = mode === "navigation";
     return this.enqueue(async () => {
       this.encode(performance.now() - this.origin);
-      this.waiting = waiting;
-      if (waiting) {
+      this.waiting = mode !== "clean";
+      if (mode === "interactive") {
         this.context.fillStyle = "#202124";
         this.context.fillRect(0, 0, this.canvas.width, this.canvas.height);
         this.context.fillStyle = "#fff";
@@ -353,6 +369,7 @@ export class VideoEncoderPipeline {
   }
 
   private async finalize(reason: VideoStopReason): Promise<StoredVideo> {
+    if (this.navigationPending && completeStop(reason)) reason = "capture_failed";
     clearInterval(this.timer);
     clearTimeout(this.deadline);
     this.recording = { ...this.recording, state: "finalizing", stop_reason: reason };

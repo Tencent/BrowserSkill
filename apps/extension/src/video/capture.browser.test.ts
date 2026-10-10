@@ -14,6 +14,28 @@ import { createDshVideoFixture } from "./dsh-fixture";
 
 const run = promisify(execFile);
 
+function bluePdf(): Buffer {
+  let pdf = "%PDF-1.4\n";
+  const offsets = [0];
+  const drawing = "0 0 1 rg 0 0 600 800 re f\n";
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R >>",
+    `<< /Length ${drawing.length} >>\nstream\n${drawing}endstream`,
+  ];
+  for (const [index, object] of objects.entries()) {
+    offsets.push(Buffer.byteLength(pdf));
+    pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  }
+  const xref = Buffer.byteLength(pdf);
+  pdf += `xref\n0 5\n0000000000 65535 f \n${offsets
+    .slice(1)
+    .map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`)
+    .join("")}trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
+  return Buffer.from(pdf);
+}
+
 describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
   "video CLI/DSH browser integration",
   () => {
@@ -31,6 +53,29 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         stdio: "ignore",
       });
       const pageServer = createServer((request, response) => {
+        if (request.url === "/error") {
+          request.socket.destroy();
+          return;
+        }
+        if (request.url === "/cancel" || request.url === "/hang") return;
+        if (request.url === "/empty") {
+          response.writeHead(204).end();
+          return;
+        }
+        if (request.url === "/download") {
+          response
+            .writeHead(200, {
+              "Content-Type": "application/octet-stream",
+              "Content-Disposition": 'attachment; filename="video-test.txt"',
+            })
+            .end("test download");
+          return;
+        }
+        if (request.url === "/pdf") {
+          response.writeHead(200, { "Content-Type": "application/pdf" }).end(bluePdf());
+          return;
+        }
+
         response.setHeader("Content-Type", "text/html");
         response.end(
           `<!doctype html><title>Video regression</title><style>html,body{margin:0;background:${request.url === "/blue" ? "#0000ff" : "#ff0000"};height:100%;}</style>${request.url === "/blue" ? "<script>setTimeout(()=>{document.body.style.background='#00ff00'},800)</script>" : ""}`,
@@ -40,7 +85,12 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
       await once(pageServer as unknown as EventEmitter, "listening");
       const address = pageServer.address() as { port: number };
       const cli = async (...args: string[]) => {
-        const result = await run(executable, ["--json", ...args], { env, timeout: 45_000 });
+        const result = await run(executable, ["--json", ...args], { env, timeout: 45_000 }).catch(
+          (error) => {
+            error.message += `\n${error.stdout}\n${error.stderr}`;
+            throw error;
+          },
+        );
         return JSON.parse(result.stdout);
       };
       try {
@@ -305,6 +355,113 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             ).rejects.toMatchObject({ code: 1 });
             expect((await stat(partialPath)).size).toBe(partialStatus.recording.byte_size);
 
+            // Real top-level outcomes without a new content-script handshake.
+            await send("Browser.setDownloadBehavior", {
+              behavior: "allow",
+              downloadPath: path.join(directory, "downloads"),
+            });
+            for (const route of ["blue", "empty", "download", "cancel", "error", "pdf", "hang"]) {
+              const task = await cli("session", "start");
+              await cli(
+                "navigate",
+                "--session",
+                task.session_id,
+                `http://127.0.0.1:${address.port}/red`,
+              );
+              const recording = (
+                await cli(
+                  "video",
+                  "start",
+                  "--session",
+                  task.session_id,
+                  "--duration",
+                  route === "hang" ? "1500ms" : "15s",
+                )
+              ).recording;
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              await evaluate(
+                workerSession.sessionId,
+                `chrome.tabs.update(${recording.tab_id},{url:'http://127.0.0.1:${address.port}/${route}'})`,
+              );
+              if (route === "cancel") {
+                await new Promise((resolve) => setTimeout(resolve, 200));
+                await evaluate(
+                  workerSession.sessionId,
+                  `chrome.debugger.sendCommand({tabId:${recording.tab_id}},'Page.stopLoading')`,
+                );
+              }
+              await new Promise((resolve) => setTimeout(resolve, route === "hang" ? 2000 : 1500));
+              if (["empty", "download", "cancel", "error"].includes(route)) {
+                // The original document remains; changing it proves capture resumed.
+                await evaluate(
+                  workerSession.sessionId,
+                  `chrome.debugger.sendCommand({tabId:${recording.tab_id}},'Runtime.evaluate',{expression:"document.body.style.background='#0000ff'"})`,
+                );
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+              }
+              const stopped = await cli(
+                "video",
+                "stop",
+                "--recording",
+                recording.recording_id,
+              ).catch((error) => {
+                if (!["pdf", "error", "hang"].includes(route)) throw error;
+                return JSON.parse(error.stdout);
+              });
+              const result = stopped.recording;
+              expect(result, route).toBeDefined();
+              if (route === "hang" || result.completeness === "partial") {
+                expect(["pdf", "error", "hang"], route).toContain(route);
+                expect(result.completeness, route).toBe("partial");
+                expect(
+                  route === "pdf" ? ["capture_failed", "debugger_detached"] : ["capture_failed"],
+                  route,
+                ).toContain(result.stop_reason);
+              } else {
+                expect(result, route).toMatchObject({ state: "ready", completeness: "complete" });
+                await send(
+                  "Page.navigate",
+                  { url: `${origin}/video.html?id=${recording.recording_id}` },
+                  preview.sessionId,
+                );
+                await send("Page.bringToFront", {}, preview.sessionId);
+                await expect
+                  .poll(
+                    () =>
+                      evaluate(preview.sessionId, "document.querySelector('video')?.readyState>=1"),
+                    { timeout: 10000 },
+                  )
+                  .toBe(true);
+                const pixels = await evaluate<number[][]>(
+                  preview.sessionId,
+                  `(async()=>{
+                  const v=document.querySelector('video'),c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+                  const ctx=c.getContext('2d'),pixels=[];
+                  for(let time=.1;time<v.duration-.1;time+=.1){v.currentTime=time;await new Promise(r=>v.onseeked=r);ctx.drawImage(v,0,0);pixels.push(Array.from(ctx.getImageData(c.width/2,c.height/2,1,1).data));}
+                  return pixels;
+                })()`,
+                );
+                // Navigation must never paint the neutral user-confirmation slate.
+                if (!["error", "pdf"].includes(route))
+                  expect(
+                    pixels.some(
+                      ([r, g, b]) =>
+                        Math.abs(r - 32) < 4 && Math.abs(g - 33) < 4 && Math.abs(b - 36) < 4,
+                    ),
+                    route,
+                  ).toBe(false);
+                if (["empty", "download", "cancel", "error"].includes(route))
+                  expect(pixels.at(-1)![2], route).toBeGreaterThan(240);
+                if (route === "blue") expect(pixels.at(-1)![1], route).toBeGreaterThan(240);
+              }
+              if (route === "hang")
+                await evaluate(
+                  workerSession.sessionId,
+                  `chrome.debugger.sendCommand({tabId:${recording.tab_id}},'Page.stopLoading')`,
+                ).catch(() => {});
+              await cli("session", "stop", task.session_id);
+            }
+
             // The packaged DSH tool surface records before the first task
             // navigation and exports after its owned session is gone.
             const dsh = await createDshVideoFixture(executable, env, path.join(directory, "dsh"));
@@ -399,6 +556,6 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
         }
         await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
-    }, 120_000);
+    }, 180_000);
   },
 );

@@ -45,6 +45,7 @@ import type {
   WheelParams,
 } from "@/transport/types";
 import { isRequestFrame } from "@/transport/types";
+import { videoError } from "@/video/errors";
 import type { VideoManager } from "@/video/manager";
 import type { VideoParams } from "@/video/types";
 import { auditContext } from "./audit-context";
@@ -441,10 +442,7 @@ export class ToolDispatcher {
         try {
           return await this.video.rpc(req.params as VideoParams, signal);
         } catch (error) {
-          return {
-            code: signal?.aborted ? "cancelled" : "invalid_params",
-            message: error instanceof Error ? error.message : String(error),
-          };
+          return videoError(error, signal?.aborted ? "cancelled" : "cdp_failed");
         }
       case "tool.debug":
         if (!this.debug)

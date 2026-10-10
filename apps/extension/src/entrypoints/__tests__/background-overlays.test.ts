@@ -80,7 +80,7 @@ async function fixture() {
       onRemoved: event(),
     },
     debugger: { onDetach: event() },
-    webNavigation: { onBeforeNavigate: event(), onCompleted: event() },
+    webNavigation: { onBeforeNavigate: event(), onCompleted: event(), onErrorOccurred: event() },
     runtime: { onMessage: event(), onConnect: event() },
     notifications: { onClicked: event(), onButtonClicked: event() },
   });

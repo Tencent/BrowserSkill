@@ -632,6 +632,7 @@
     "recent": "Recent recordings ({{count}})",
     "partial": "Partial recording — preserved video is available",
     "saved": "Saved",
+    "waitingForUser": "Waiting for user confirmation",
     "unsaved": "Recording complete · waiting to save",
     "retention": "Recordings stay in this browser for 24 hours. Save important videos before they expire.",
     "library": "Recent recordings",
