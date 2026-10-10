@@ -1,0 +1,6578 @@
+{
+  "metadata": {
+    "startedAt": "2026-10-10T12:53:43.699Z",
+    "sourceRevision": "e68ffeeca7e89f7136685f4b78370ef3c3999e7e",
+    "dshVersion": "0.2.0-rc.2",
+    "nodeVersion": "v26.6.0",
+    "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+    "samples": 10,
+    "modes": [
+      "single",
+      "auto",
+      "batch"
+    ],
+    "hashes": {
+      "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
+      "candidate": "f1568230603ede013cff029c1bb58e14813f258e6f59b85ca79d36e2e17ad072",
+      "cli": "5c2d6325e62dcea0de282c505bfd49752c5835078d4e3e450b43aca84a6117b7"
+    },
+    "baselineSourceRevision": "5590e48cd6442a74aeb19d4e8658d5502dfa55b0",
+    "evidence": "All 30 scheduled trials. Action-phase timings derived from durable DSH tool-result timestamps; model timings from passive HTTP diagnostics."
+  },
+  "summary": [
+    {
+      "mode": "single",
+      "n": 10,
+      "turnMs": {
+        "median": 10925.500270999997,
+        "min": 8984.358707999985,
+        "max": 11441.454499999993,
+        "p95": 11441.454499999993
+      },
+      "totalMs": {
+        "median": 11406.130999999994,
+        "min": 9432.838583000004,
+        "max": 11898.726083000016,
+        "p95": 11898.726083000016
+      },
+      "modelMs": {
+        "median": 8666.0360015,
+        "min": 6932.0397490000005,
+        "max": 9296.900043000003,
+        "p95": 9296.900043000003
+      },
+      "toolMs": {
+        "median": 1876.7925634999992,
+        "min": 1388.6312510000134,
+        "max": 2353.045958999988,
+        "p95": 2353.045958999988
+      },
+      "modelCalls": {
+        "median": 9,
+        "min": 8,
+        "max": 11,
+        "p95": 11
+      },
+      "toolCalls": {
+        "median": 10,
+        "min": 9,
+        "max": 11,
+        "p95": 11
+      },
+      "actionPhaseMs": 3432.5,
+      "actionPhaseRequests": 3,
+      "fullBatches": 0,
+      "batchedRuns": 0,
+      "outputTokens": 932.5,
+      "totalInputTokens": 99741
+    },
+    {
+      "mode": "auto",
+      "n": 10,
+      "turnMs": {
+        "median": 9761.84550000001,
+        "min": 8158.381500000018,
+        "max": 11571.661791999999,
+        "p95": 11571.661791999999
+      },
+      "totalMs": {
+        "median": 10213.705749999996,
+        "min": 8641.605666999996,
+        "max": 12041.53816700005,
+        "p95": 12041.53816700005
+      },
+      "modelMs": {
+        "median": 7517.0146239999995,
+        "min": 6136.754750000002,
+        "max": 9452.357917000001,
+        "p95": 9452.357917000001
+      },
+      "toolMs": {
+        "median": 1859.7955815000023,
+        "min": 1375.0753750000076,
+        "max": 2416.5394569999917,
+        "p95": 2416.5394569999917
+      },
+      "modelCalls": {
+        "median": 7.5,
+        "min": 7,
+        "max": 9,
+        "p95": 9
+      },
+      "toolCalls": {
+        "median": 6.5,
+        "min": 6,
+        "max": 8,
+        "p95": 8
+      },
+      "actionPhaseMs": 2639.5,
+      "actionPhaseRequests": 2,
+      "fullBatches": 5,
+      "batchedRuns": 10,
+      "outputTokens": 818,
+      "totalInputTokens": 84071.5
+    },
+    {
+      "mode": "batch",
+      "n": 10,
+      "turnMs": {
+        "median": 8967.73285450001,
+        "min": 8114.186999999991,
+        "max": 38500.154415999976,
+        "p95": 38500.154415999976
+      },
+      "totalMs": {
+        "median": 9428.208166,
+        "min": 8580.224457999997,
+        "max": 39046.84854200002,
+        "p95": 39046.84854200002
+      },
+      "modelMs": {
+        "median": 7031.565290999999,
+        "min": 5903.824208,
+        "max": 8080.268833999999,
+        "p95": 8080.268833999999
+      },
+      "toolMs": {
+        "median": 1864.5703535000066,
+        "min": 1338.5917060000356,
+        "max": 30694.604124999983,
+        "p95": 30694.604124999983
+      },
+      "modelCalls": {
+        "median": 7,
+        "min": 6,
+        "max": 7,
+        "p95": 7
+      },
+      "toolCalls": {
+        "median": 6,
+        "min": 5,
+        "max": 6,
+        "p95": 6
+      },
+      "actionPhaseMs": 1811,
+      "actionPhaseRequests": 1,
+      "fullBatches": 10,
+      "batchedRuns": 10,
+      "outputTokens": 792,
+      "totalInputTokens": 77409
+    }
+  ],
+  "rows": [
+    {
+      "round": 0,
+      "mode": "single",
+      "totalMs": 10587.702667,
+      "turnMs": 10122.947375,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12186,
+        "outputTokens": 1115,
+        "cacheReadTokens": 87680,
+        "cacheWriteTokens": 0,
+        "totalTokens": 100981
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 474.096458,
+          "time": 1791636826997,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1285.449,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1804.648375,
+          "time": 1791636828328,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 825.7271670000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3389.415792,
+          "time": 1791636829913,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 634.0362500000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4714.193,
+          "time": 1791636831237,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 635.3004579999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5425.4335,
+          "time": 1791636831949,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1396.3302919999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6969.143167,
+          "time": 1791636833492,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 572.8971659999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7736.686625,
+          "time": 1791636834260,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 658.8092919999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8463.544625,
+          "time": 1791636834987,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 856.5562499999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9413.125333,
+          "time": 1791636835936,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1110.09425,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1782.0330410000001,
+          "callId": "call_00_ET_MNTAiyxUEGXFqk364VZb5852",
+          "tool": "skill",
+          "durationMs": 18.16162499999973,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2650.2489579999997,
+          "callId": "call_00_sagVChMguqfiqG7fMNec8818",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 741.1148330000005,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4042.2847909999996,
+          "callId": "call_00_TxCENIKj4zI51BpdlTCT3876",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 673.6441249999993,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5367.873791,
+          "callId": "call_00_ET_wVIaE7fnGLEoblfieN7i8317",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 56.52508400000079,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6840.496041,
+          "callId": "call_00_xICjwjhGVKFqn2e4w2ts8914",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 49.138999999999214,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6889.837165999999,
+          "callId": "call_01_ZfRHSCTfyMGMkEYcuOe53227",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 39.678375000001324,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6929.850416000001,
+          "callId": "call_02_8ff71aaFPFMVbOtkj1RC5114",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 40.41883399999824,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7560.645875,
+          "callId": "call_00_aF7DITD3SJIq0Z0E3PFa7751",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 178.01266600000054,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8413.379041,
+          "callId": "call_00_ET_Nu0wwF5MxeKRknmnQsn08088",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 50.48716699999932,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9338.371875,
+          "callId": "call_00_mEPUT55VlrGTAJrgE26r5071",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 77.55220799999915,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 7975.200124999999,
+      "toolMs": 1924.7339169999982,
+      "actionPhase": {
+        "durationMs": 3039,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 0,
+      "mode": "auto",
+      "totalMs": 9087.719416,
+      "turnMs": 8647.828625,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12678,
+        "outputTokens": 851,
+        "cacheReadTokens": 90112,
+        "cacheWriteTokens": 0,
+        "totalTokens": 103641
+      },
+      "modelSteps": 9,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 438.998333,
+          "time": 1791636837565,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 815.303042,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1305.857458,
+          "time": 1791636838432,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 709.10475,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2782.137833,
+          "time": 1791636839908,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 603.4611250000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3545.518417,
+          "time": 1791636840671,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 617.2416249999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4222.08375,
+          "time": 1791636841348,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1104.2979999999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5490.733333,
+          "time": 1791636842616,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 640.1796249999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6316.513,
+          "time": 1791636843442,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1106.1944169999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7483.114792,
+          "time": 1791636844609,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 635.2569579999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8194.399208,
+          "time": 1791636845320,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 825.0404999999992,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1281.9244999999992,
+          "callId": "call_00_So2jnHKxbQOVjz4dWqWZ0722",
+          "tool": "skill",
+          "durationMs": 20.265291000001525,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2038.0326249999998,
+          "callId": "call_00_5tghf1C4559YRm2Rt1DP5966",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 748.0164160000004,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3404.8856659999983,
+          "callId": "call_00_ET_yrXJ1wq8H2KGuNJOrCKw6784",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 143.3059170000015,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4181.3397079999995,
+          "callId": "call_00_ET_ezm3VskMEVQ3BAZKmtWO6711",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 44.66308299999946,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5345.568040999999,
+          "callId": "call_00_E9Amykf1owkryzD076Xr7915",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select"
+          ],
+          "durationMs": 146.66358400000172,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6149.809582999998,
+          "callId": "call_00_ET_5sEnAMOwgalULfHwocQy2109",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 169.55266699999993,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7441.673665999999,
+          "callId": "call_00_ET_8xS9m6TQwAsKmy4C8Cd47633",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 43.8014170000024,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8137.602583,
+          "callId": "call_00_y8CDzKXlqS6phsLJ19mh1450",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 58.8070000000007,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 8,
+      "modelMs": 7056.080041999999,
+      "toolMs": 1375.0753750000076,
+      "actionPhase": {
+        "durationMs": 3259,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 0,
+      "mode": "batch",
+      "totalMs": 10084.712082999999,
+      "turnMs": 9612.523541000002,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12202,
+        "outputTokens": 1023,
+        "cacheReadTokens": 65792,
+        "cacheWriteTokens": 0,
+        "totalTokens": 79017
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 470.927083,
+          "time": 1791636846698,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 815.7565419999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1340.591417,
+          "time": 1791636847567,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1327.594,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3446.204375,
+          "time": 1791636849673,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 649.2583750000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4776.190708,
+          "time": 1791636851003,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 900.0057919999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5746.312375,
+          "time": 1791636851973,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1826.6685419999994,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7912.386667,
+          "time": 1791636854139,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1013.2437909999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8996.376125,
+          "time": 1791636855223,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1015.3481670000001,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1310.9359579999982,
+          "callId": "call_00_ET_n9LuJi7MrwuyYRFTh58z2718",
+          "tool": "skill",
+          "durationMs": 20.820000000003347,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2691.144042,
+          "callId": "call_00_4P5zomT6p4wLyuBKdWlA3207",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 758.9317080000001,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4115.794708000001,
+          "callId": "call_00_D3gNToVdiIdLqNhSLRAJ3195",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 664.0805,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5696.275792,
+          "callId": "call_00_wNVYRg7zvYjAYkKcHGAt2721",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 52.181165999998484,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7594.218249999998,
+          "callId": "call_00_e9tEIDfV4YkBy1NzwKY30411",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 320.4038330000003,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8945.002457999999,
+          "callId": "call_00_AgNfHlYcX1eJbjiQg59U2020",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 55.89970900000117,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 7547.875209,
+      "toolMs": 1872.3169160000034,
+      "actionPhase": {
+        "durationMs": 2166,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "mode": "auto",
+      "totalMs": 10141.597958000002,
+      "turnMs": 9686.861875000002,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12537,
+        "outputTokens": 780,
+        "cacheReadTokens": 78208,
+        "cacheWriteTokens": 0,
+        "totalTokens": 91525
+      },
+      "modelSteps": 8,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 449.579,
+          "time": 1791636856775,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 895.0686660000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1392.425625,
+          "time": 1791636857718,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 808.4612079999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4116.0755,
+          "time": 1791636860441,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1008.502375,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5199.13675,
+          "time": 1791636861524,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1058.4583330000005,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6429.92275,
+          "time": 1791636862755,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 677.924,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7301.448416,
+          "time": 1791636863627,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 881.0201669999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8247.558083,
+          "time": 1791636864573,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 764.0049999999992,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9092.849333,
+          "time": 1791636865418,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 969.5077079999992,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1370.687750000001,
+          "callId": "call_00_rX4mmfinPbtFhytdEogG0689",
+          "tool": "skill",
+          "durationMs": 19.09208299999591,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2223.747041999999,
+          "callId": "call_00_SGlURhhPzMuHPhYaA6TH2832",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1894.4544160000005,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5145.205124999997,
+          "callId": "call_00_ET_9ljMoB2Xg29YYOVlX7uW2336",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 56.720500000003085,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6278.0585420000025,
+          "callId": "call_00_lfCtCUJjiXJsj6xWy5mu1953",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select"
+          ],
+          "durationMs": 155.588874999994,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7128.673417000002,
+          "callId": "call_00_ET_e2pASsohsPNC7K9TNm4U7315",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 177.0712910000002,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8202.862458,
+          "callId": "call_00_ET_R2GSPTgPFHa77PfE02br5785",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 47.87995899999805,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9031.883166999996,
+          "callId": "call_00_Yhp1jHQ0dpfpblJtjoTR8629",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 65.73233299999993,
+          "isError": false
+        }
+      ],
+      "modelCalls": 8,
+      "toolCalls": 7,
+      "modelMs": 7062.947456999998,
+      "toolMs": 2416.5394569999917,
+      "actionPhase": {
+        "durationMs": 3049,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "mode": "batch",
+      "totalMs": 8936.491374999998,
+      "turnMs": 8477.131709000001,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12054,
+        "outputTokens": 668,
+        "cacheReadTokens": 53376,
+        "cacheWriteTokens": 0,
+        "totalTokens": 66098
+      },
+      "modelSteps": 6,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 459.725416,
+          "time": 1791636866942,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1026.593667,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1532.357541,
+          "time": 1791636868015,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 660.3234999999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4110.54175,
+          "time": 1791636870593,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 721.3094999999994,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4906.459916,
+          "time": 1791636871389,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1305.5272919999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6544.817916,
+          "time": 1791636873027,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 889.5284590000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7508.111791,
+          "time": 1791636873991,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1353.0427499999996,
+          "status": 200
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1511.5730419999963,
+          "callId": "call_00_ET_bRbiy7hq2vZcZ7n4n1RG6209",
+          "tool": "skill",
+          "durationMs": 18.331166000003577,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2215.048624999996,
+          "callId": "call_00_v9YDRmVBl4RmIZyUofpQ3546",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1898.8812920000055,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4852.3326249999955,
+          "callId": "call_00_ET_goXFiJpBLRSCEr0TD9Z11082",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 55.64445800000249,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6232.732125000002,
+          "callId": "call_00_hvHdQlhzQy5ZVDpnCKAL1991",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 314.82058299999335,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7454.495083000002,
+          "callId": "call_00_QdrH68BzETLLogl1op7w6761",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 58.62645899999916,
+          "isError": false
+        }
+      ],
+      "modelCalls": 6,
+      "toolCalls": 5,
+      "modelMs": 5956.3251679999985,
+      "toolMs": 2346.303958000004,
+      "actionPhase": {
+        "durationMs": 1639,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 1,
+      "mode": "single",
+      "totalMs": 11701.528167000004,
+      "turnMs": 11247.775875,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12271,
+        "outputTokens": 806,
+        "cacheReadTokens": 98688,
+        "cacheWriteTokens": 0,
+        "totalTokens": 111765
+      },
+      "modelSteps": 10,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 447.895375,
+          "time": 1791636875880,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1010.9950839999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1508.427417,
+          "time": 1791636876941,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 815.7254169999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4215.147375,
+          "time": 1791636879647,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 568.7908340000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4856.982625,
+          "time": 1791636880289,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 809.5802090000007,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5727.457792,
+          "time": 1791636881160,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 802.4044999999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6590.491917,
+          "time": 1791636882023,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 699.7810829999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7346.379834,
+          "time": 1791636882779,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 911.7169999999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8446.3595,
+          "time": 1791636883879,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 914.2887499999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9425.639,
+          "time": 1791636884858,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 989.7851250000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10492.346125,
+          "time": 1791636885925,
+          "type": "http_start",
+          "id": 10,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1130.5847919999997,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1486.4928330000039,
+          "callId": "call_00_ET_IZfU7S0XQHddwQs1ZXqI9230",
+          "tool": "skill",
+          "durationMs": 20.160041999995883,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2345.3673750000016,
+          "callId": "call_00_ArBHAHRBKCNEqsnKBT5v8128",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1873.0220829999962,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4803.968666000001,
+          "callId": "call_00_aJJW77qFx18YRsbfmzCt1785",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 54.855666999996174,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5686.575707999997,
+          "callId": "call_00_ET_txPwhCan16U9ReT7jCIt5673",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 41.60766700000386,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6549.876166000002,
+          "callId": "call_00_ET_aYkakU8xdxwSLjfMG3ns3209",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 43.4629999999961,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7310.255125000003,
+          "callId": "call_00_ET_nJ0Anyri0IGOBlqEwUMT2426",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 40.62975000000006,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8278.181125000003,
+          "callId": "call_00_ET_cdr7cdVKAJJ5aidOUthu8688",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 170.2443329999951,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9381.147958000001,
+          "callId": "call_00_ET_P6uHCpgJuh4C2sjL712F8465",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 47.510667000002286,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10435.755624999998,
+          "callId": "call_00_P4VtFmS3a4MbLhpY22J50403",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 61.55275000000256,
+          "isError": false
+        }
+      ],
+      "modelCalls": 10,
+      "toolCalls": 9,
+      "modelMs": 8653.652794,
+      "toolMs": 2353.045958999988,
+      "actionPhase": {
+        "durationMs": 4570,
+        "modelCalls": 5
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 2,
+      "mode": "batch",
+      "totalMs": 9398.687416000008,
+      "turnMs": 8942.698708999997,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12183,
+        "outputTokens": 743,
+        "cacheReadTokens": 65280,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78206
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 454.074792,
+          "time": 1791636887602,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1014.2908329999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1516.292208,
+          "time": 1791636888664,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 805.23125,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3107.234208,
+          "time": 1791636890255,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 977.4995840000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4761.003958,
+          "time": 1791636891909,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 948.267167,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5772.740292,
+          "time": 1791636892921,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1514.5910829999993,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7611.059417,
+          "time": 1791636894759,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 733.9530830000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8419.2075,
+          "time": 1791636895567,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 904.1843329999992,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1495.0011250000025,
+          "callId": "call_00_ET_bXzSonpox7864Oe6bR8b9505",
+          "tool": "skill",
+          "durationMs": 18.916457999999693,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2344.792625000009,
+          "callId": "call_00_oDa5BTKfjEEGVOrtwPBu0971",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 766.2821669999976,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4104.828333000005,
+          "callId": "call_00_JYFfTCdjM4uqwksjbyt77319",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 657.479250000004,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5728.983,
+          "callId": "call_00_ET_h8rKc8FHxj1mQ3PhG4cA3673",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 49.499500000005355,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7308.455374999998,
+          "callId": "call_00_LQI4ypP9Qm3B6jvvoa6h5851",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 306.66570800000045,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8365.235416999996,
+          "callId": "call_00_ekWVo2EvuC9ICCR8OIba0670",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 57.98070800000278,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 6898.017332999999,
+      "toolMs": 1856.8237910000098,
+      "actionPhase": {
+        "durationMs": 1837,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "mode": "single",
+      "totalMs": 11850.824999999997,
+      "turnMs": 11401.319834000009,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12224,
+        "outputTokens": 857,
+        "cacheReadTokens": 86784,
+        "cacheWriteTokens": 0,
+        "totalTokens": 99865
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 443.994959,
+          "time": 1791636897002,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1726.1384159999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2213.283417,
+          "time": 1791636898772,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 548.772833,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3557.371584,
+          "time": 1791636900116,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 762.1071660000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4996.89,
+          "time": 1791636901555,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1202.9785839999995,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6268.847792,
+          "time": 1791636902827,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1311.0906250000007,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7720.266792,
+          "time": 1791636904279,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 985.6194579999992,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8899.551125,
+          "time": 1791636905458,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 830.2431670000005,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9794.86075,
+          "time": 1791636906353,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 727.621000000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10599.955459,
+          "time": 1791636907158,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1175.8992499999986,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 2193.247291000007,
+          "callId": "call_00_ET_1mXCeQ8VQ3lezfC1x7aH9276",
+          "tool": "skill",
+          "durationMs": 16.097624999994878,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2785.8602079999982,
+          "callId": "call_00_3QQnZsyybKKHXGbZO8DQ3100",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 775.215458000006,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4338.590958000001,
+          "callId": "call_00_ET_WN5Ljhy21opdm2p4Xpvr8275",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 661.0700829999987,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6218.776582999999,
+          "callId": "call_00_ET_VwPdrndwmZtVaGw4oug26181",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 51.82729200000176,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7598.893666000004,
+          "callId": "call_00_ET_YQO6v2rE13gitoQ7ptWy0064",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 42.04204200000095,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7641.12608300001,
+          "callId": "call_01_ET_s2GO26neHPBul8RvkEjq5211",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 41.13545799998974,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7682.583666000006,
+          "callId": "call_02_ET_R9TGt5gFRW8wF8FEvwPF6528",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 39.77020899999479,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8725.088291000007,
+          "callId": "call_00_ET_SlaFRwtCsqqlfL5nHxxT7085",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 177.17920899999444,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9748.457083000001,
+          "callId": "call_00_ET_eRX7An3QcIyE9UvEvccQ0012",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 47.06420799999614,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10541.064125000004,
+          "callId": "call_00_4tduB3oHybyETEkcOEYq8858",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 61.31533300000592,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 9270.470499,
+      "toolMs": 1912.7169169999834,
+      "actionPhase": {
+        "durationMs": 3525,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 2,
+      "mode": "auto",
+      "totalMs": 8906.100083000012,
+      "turnMs": 8436.294125,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12146,
+        "outputTokens": 761,
+        "cacheReadTokens": 65024,
+        "cacheWriteTokens": 0,
+        "totalTokens": 77931
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 457.968708,
+          "time": 1791636908881,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1218.8421669999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1729.896458,
+          "time": 1791636910153,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 711.7482499999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3223.277916,
+          "time": 1791636911647,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 772.7282919999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4683.208458,
+          "time": 1791636913107,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 664.9143329999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5412.237416,
+          "time": 1791636913836,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1169.524292,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6898.917666,
+          "time": 1791636915322,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 882.9727089999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7861.204958,
+          "time": 1791636916285,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 968.6499999999996,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1704.8279170000023,
+          "callId": "call_00_yayd7tWk2R7BSMUcbRlU1755",
+          "tool": "skill",
+          "durationMs": 20.961999999999534,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2463.031375000006,
+          "callId": "call_00_EoCbYo533llqGIvX3yZe4546",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 764.5460829999938,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4017.9906670000055,
+          "callId": "call_00_CMZyE9rmxUhJ4ZeNqToS3903",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 667.8064999999915,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5367.414457999999,
+          "callId": "call_00_ET_KC5MGSJZQ2Nloj7R4ElC7970",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.170624999998836,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6601.751583000005,
+          "callId": "call_00_lDjlPGpdnqWQL6aUYIQt0159",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 300.961249999993,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7801.531417000006,
+          "callId": "call_00_UGIPOwe2ItiHb6o2VA6x1805",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 62.366582999995444,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 6389.380042999998,
+      "toolMs": 1862.8130409999721,
+      "actionPhase": {
+        "durationMs": 1489,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "mode": "single",
+      "totalMs": 10339.33541700001,
+      "turnMs": 9876.016292,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 11919,
+        "outputTokens": 924,
+        "cacheReadTokens": 87552,
+        "cacheWriteTokens": 0,
+        "totalTokens": 100395
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 459.327708,
+          "time": 1791636917805,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 823.499875,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1329.100583,
+          "time": 1791636918675,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 679.4384580000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2766.294083,
+          "time": 1791636920112,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 678.7029580000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4121.607166,
+          "time": 1791636921468,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 502.06816700000036,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4678.183541,
+          "time": 1791636922024,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1514.0911669999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6322.908958,
+          "time": 1791636923669,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 667.7437920000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7178.76025,
+          "time": 1791636924525,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 781.4701660000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8019.759666,
+          "time": 1791636925366,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1057.2053340000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9153.286,
+          "time": 1791636926499,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1112.2305830000005,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1310.0154159999947,
+          "callId": "call_00_Ayewf4OB7n8a46dWdNaw1798",
+          "tool": "skill",
+          "durationMs": 18.166792000003625,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2032.846915999995,
+          "callId": "call_00_qfPu2iBxmr8vmA1hz2vT7030",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 738.1870000000054,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3465.2268329999933,
+          "callId": "call_00_WVSxhKYuGq37W4gscuM48646",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 659.1022079999966,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4643.674499999994,
+          "callId": "call_00_ET_P7a1HXGPx7yyAO0fHlIK0936",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 40.466666000007535,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6213.972332999998,
+          "callId": "call_00_fARcfwkxwXVCqrdv1hsC9920",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 41.17804199999955,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6255.3007910000015,
+          "callId": "call_01_HuZ2apO8QpOvImBIw1wO7013",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 39.409499999994296,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6294.963999999993,
+          "callId": "call_02_4wcr5TAkZS9mS0bvsi8w4872",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 34.18920799999614,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7010.935916000002,
+          "callId": "call_00_OhXreUhMXl1CSiNCyfty6467",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 172.39312499998778,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7980.326665999994,
+          "callId": "call_00_ET_l2wQykCpezfpx9sxboCr8237",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 43.58208400000876,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9097.046000000002,
+          "callId": "call_00_1W0NppNCOOsG5cLcclqY6273",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 61.08383299999696,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 7816.450500000001,
+      "toolMs": 1847.7584579999966,
+      "actionPhase": {
+        "durationMs": 3340,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 3,
+      "mode": "auto",
+      "totalMs": 11125.478208,
+      "turnMs": 10661.29233299999,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12118,
+        "outputTokens": 875,
+        "cacheReadTokens": 65280,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78273
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 462.026083,
+          "time": 1791636928157,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1229.450125,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1732.356291,
+          "time": 1791636929428,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1119.9042920000002,
+          "status": 200
+        },
+        {
+          "atMs": 3632.97725,
+          "time": 1791636931328,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1184.3792910000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5492.857958,
+          "time": 1791636933188,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1026.9252080000006,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6591.338375,
+          "time": 1791636934287,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1893.5170829999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8818.757333,
+          "time": 1791636936514,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1014.6421250000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9908.161041,
+          "time": 1791636937604,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1145.1432920000007,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1715.9954169999983,
+          "callId": "call_00_ReN8urgpF1Q3osbkhOkf5160",
+          "tool": "skill",
+          "durationMs": 14.358915999997407,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2877.3946670000005,
+          "callId": "call_00_IwUlooiwLWeVtK9a0w2o6183",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 759.3446249999979,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4835.4936670000025,
+          "callId": "call_00_C6ft0XH9a9pTkWZp7jKU9149",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 658.696082999988,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6538.146999999997,
+          "callId": "call_00_ET_QqBuHkrJPWPcLtUqVrEC8767",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 52.80670800000371,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8504.375916999998,
+          "callId": "call_00_vLBAx4ibqRtFTKQGOYoO2169",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 316.12208299999475,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9851.350291999988,
+          "callId": "call_00_ZR7lytbpksXV2nthueQd7296",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 60.01104100000521,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 8613.961416000002,
+      "toolMs": 1861.339455999987,
+      "actionPhase": {
+        "durationMs": 2230,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 3,
+      "mode": "batch",
+      "totalMs": 8580.224457999997,
+      "turnMs": 8114.186999999991,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12126,
+        "outputTokens": 654,
+        "cacheReadTokens": 65024,
+        "cacheWriteTokens": 0,
+        "totalTokens": 77804
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 453.075458,
+          "time": 1791636939286,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 755.90425,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1258.71175,
+          "time": 1791636940092,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 561.3567910000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2582.304291,
+          "time": 1791636941415,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 694.0386670000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3919.8265,
+          "time": 1791636942753,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 904.243708,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4889.916375,
+          "time": 1791636943723,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 982.5135829999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6189.971708,
+          "time": 1791636945023,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 948.9811669999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7220.44325,
+          "time": 1791636946054,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1277.4914580000004,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1234.3897920000018,
+          "callId": "call_00_ET_HfF0Iu99REAmCPOsKOxD2702",
+          "tool": "skill",
+          "durationMs": 20.138791000004858,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 1839.0816250000062,
+          "callId": "call_00_oachfhJyh7NnzxV7aNKE5762",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 746.5614999999962,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3295.3911669999943,
+          "callId": "call_00_EjFzPaIRoqOlfCiK6nXw4086",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 623.5547910000023,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4842.000042,
+          "callId": "call_00_ET_ta9GUom0VZNPvwsTUAEb6567",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 50.01541599999473,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5890.645292000001,
+          "callId": "call_00_o2eAsZPqi12FTI0628rn1696",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 300.37354099999357,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7156.892374999996,
+          "callId": "call_00_ZeQ1BZOJIfyc7raVL2F90037",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 65.92799999999988,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 6124.529624000001,
+      "toolMs": 1806.5720389999915,
+      "actionPhase": {
+        "durationMs": 1299,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "mode": "auto",
+      "totalMs": 10520.298584000004,
+      "turnMs": 10041.508457999997,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12252,
+        "outputTokens": 749,
+        "cacheReadTokens": 64896,
+        "cacheWriteTokens": 0,
+        "totalTokens": 77897
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 467.771041,
+          "time": 1791636947901,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1622.176042,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2141.501375,
+          "time": 1791636949575,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 933.0115000000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3853.130458,
+          "time": 1791636951287,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1094.278667,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5643.519666,
+          "time": 1791636953077,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 923.3477919999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6636.873875,
+          "time": 1791636954071,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1301.1494160000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8255.823208,
+          "time": 1791636955690,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 883.4938330000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9222.327125,
+          "time": 1791636956656,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1213.624541000001,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 2116.6060419999994,
+          "callId": "call_00_ET_Hqhokevg4mMMk8EUQdHM1544",
+          "tool": "skill",
+          "durationMs": 22.08233299999847,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3100.3033339999965,
+          "callId": "call_00_KL3cved2gtrDn9990zfl2299",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 754.7367500000109,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4971.153625000006,
+          "callId": "call_00_pj4c5GpCAbMbVb54EFMf5907",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 675.6995420000021,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6588.510834000001,
+          "callId": "call_00_ET_tuupJfmrMDsDucfe1Akx0486",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 51.729000000006636,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7960.098084000012,
+          "callId": "call_00_48J9WyApWuSNs4y3xCgO6326",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 301.41454099997645,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9161.056499999992,
+          "callId": "call_00_ciZJo54J7Qb49zGyXuBA1339",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 65.64058400000795,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 7971.081791000001,
+      "toolMs": 1871.3027500000026,
+      "actionPhase": {
+        "durationMs": 1621,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "mode": "batch",
+      "totalMs": 10504.714875000005,
+      "turnMs": 10040.12724999999,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12306,
+        "outputTokens": 1049,
+        "cacheReadTokens": 65536,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78891
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 458.029792,
+          "time": 1791636958427,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1170.168625,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1680.950708,
+          "time": 1791636959650,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 660.8371669999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3062.539042,
+          "time": 1791636961031,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 975.681,
+          "status": 200
+        },
+        {
+          "atMs": 4705.645708,
+          "time": 1791636962675,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 721.4957919999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5486.094208,
+          "time": 1791636963455,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 2556.5817499999994,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8355.446458,
+          "time": 1791636966324,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 733.1514999999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9164.673375,
+          "time": 1791636967134,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1262.3529999999992,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1658.2306669999962,
+          "callId": "call_00_ueQRv3lapyxE4Cyht7Us3917",
+          "tool": "skill",
+          "durationMs": 19.99583299999358,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2362.2005000000063,
+          "callId": "call_00_8kggtiUnHkkjtsGf0ozK7927",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 703.9782919999852,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4061.998209000012,
+          "callId": "call_00_ET_w9F3ZUcj4JTJ9yeXd0909382",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 647.4869159999944,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5447.181125000003,
+          "callId": "call_00_ET_jljrV8LAYUV1j80acMLn6234",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 42.96837499999674,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8063.953000000009,
+          "callId": "call_00_D47xNoXVFGk9gQcXMAqL9134",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 295.12620899998,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9109.012584000011,
+          "callId": "call_00_v3cHIOF4UK4oXwWojB3l9250",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 60.82570799998939,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 8080.268833999999,
+      "toolMs": 1770.3813329999393,
+      "actionPhase": {
+        "durationMs": 2869,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 4,
+      "mode": "single",
+      "totalMs": 11558.717875000002,
+      "turnMs": 11098.99895899999,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12271,
+        "outputTokens": 840,
+        "cacheReadTokens": 86784,
+        "cacheWriteTokens": 0,
+        "totalTokens": 99895
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 456.789,
+          "time": 1791636968944,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 832.9025839999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1338.689042,
+          "time": 1791636969826,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 745.1884580000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2839.489042,
+          "time": 1791636971327,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 978.741708,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4497.459,
+          "time": 1791636972985,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 789.8688339999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5353.161584,
+          "time": 1791636973840,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1273.658125,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6765.640125,
+          "time": 1791636975253,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1054.6718339999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8005.212917,
+          "time": 1791636976493,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1244.7737920000009,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9314.763667,
+          "time": 1791636977802,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1130.4765000000007,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10520.810834,
+          "time": 1791636979008,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 968.4696660000009,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1317.509417000023,
+          "callId": "call_00_ET_r6TPyPzgxffRhVWut5fP0010",
+          "tool": "skill",
+          "durationMs": 18.292540999973426,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2109.139292000007,
+          "callId": "call_00_I3f5WP0w5cBFN1h0DRIS4168",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 734.3275830000057,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3840.0305830000143,
+          "callId": "call_00_ET_yMvXicsEvmTaIE3T8xxc4231",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 660.917541999981,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5306.954458000022,
+          "callId": "call_00_ET_KfjK1BVywFGFolyN6Lcu2406",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 49.14070899999933,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6646.8315,
+          "callId": "call_00_i91el63rKhOgMzDzPnMz2860",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 42.76916700002039,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6689.794083000015,
+          "callId": "call_01_YHb2COjWSfZy3LQS2r5a1225",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 40.9586249999993,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6731.06808300002,
+          "callId": "call_02_Xuq5lJKOqR8ZOwwKFt8K2335",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 37.749749999988126,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7839.875250000012,
+          "callId": "call_00_ET_4PGpbjz6BN9C7y9IcWEu5512",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 169.66083300000173,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9269.232707999996,
+          "callId": "call_00_ET_FZESo7RxwHonBoxS7Vtj1206",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.03170900000259,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10464.634791999997,
+          "callId": "call_00_P4qQETogsjEaQE7bnQw41434",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 61.02754100001766,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 9018.751501000002,
+      "toolMs": 1860.8759999999893,
+      "actionPhase": {
+        "durationMs": 3959,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 5,
+      "mode": "batch",
+      "totalMs": 9137.985249999998,
+      "turnMs": 8677.008208000014,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12331,
+        "outputTokens": 768,
+        "cacheReadTokens": 65024,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78123
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 455.03475,
+          "time": 1791636980514,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1227.837958,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1721.676208,
+          "time": 1791636981780,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1046.3017499999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3544.5135,
+          "time": 1791636983603,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 947.8601250000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4663.52275,
+          "time": 1791636984722,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 877.4773749999995,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5600.620583,
+          "time": 1791636985659,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1529.609875,
+          "status": 200
+        },
+        {
+          "atMs": 7442.6735,
+          "time": 1791636987501,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 600.2110830000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8128.815375,
+          "time": 1791636988187,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 935.8150829999995,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1704.239957999991,
+          "callId": "call_00_D9Q8LuhgCJ1ViEwr4nvy4573",
+          "tool": "skill",
+          "durationMs": 15.395250000001397,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2786.805416999996,
+          "callId": "call_00_cJPRx5v9Ru48YpBP0iS76668",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 760.4967910000123,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4510.778292000003,
+          "callId": "call_00_Km1EshtHwZGR453Fixbo9479",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 155.35379100000137,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5559.477167000005,
+          "callId": "call_00_ET_xymeYyJDrCbDXUlwSZDL9744",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 45.36629100001301,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7149.209042000002,
+          "callId": "call_00_zV2CtbqFUY3wMhAymSVM4227",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 295.8009580000071,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8061.179375000007,
+          "callId": "call_00_NGpQLhVXO4x8crECLgmg1234",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 66.17862500000047,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 7165.113248999999,
+      "toolMs": 1338.5917060000356,
+      "actionPhase": {
+        "durationMs": 1840,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 5,
+      "mode": "single",
+      "totalMs": 9589.644666999986,
+      "turnMs": 9138.8805,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12073,
+        "outputTokens": 977,
+        "cacheReadTokens": 87552,
+        "cacheWriteTokens": 0,
+        "totalTokens": 100602
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 446.986166,
+          "time": 1791636989658,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 724.3047089999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1219.518041,
+          "time": 1791636990430,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 526.5319589999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2017.849708,
+          "time": 1791636991229,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1001.0741249999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3700.37675,
+          "time": 1791636992911,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 658.7805000000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4426.294625,
+          "time": 1791636993637,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1474.6137079999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6042.366708,
+          "time": 1791636995253,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 639.0276670000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6863.731916,
+          "time": 1791636996074,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 623.8142500000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7551.680208,
+          "time": 1791636996762,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 945.9439579999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8579.07375,
+          "time": 1791636997790,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 945.3456249999999,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1197.9090000000142,
+          "callId": "call_00_7vtxCQVatjHEsWro5uhE8214",
+          "tool": "skill",
+          "durationMs": 18.40954199997941,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 1767.994458000001,
+          "callId": "call_00_ozkPIuQb757kz3m9pNyC8052",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 254.22070900001563,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3040.026958000002,
+          "callId": "call_00_ET_vEGHegqGbJ1I5wEnX5xo3698",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 662.4109999999928,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4378.839333000011,
+          "callId": "call_00_ET_giG6Q4AvxwPHy9VhTT3N2404",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 49.09891699999571,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5921.285250000015,
+          "callId": "call_00_sXmSJAFBd0sUh7mmZG4c0964",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 45.08108299999731,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5966.53899999999,
+          "callId": "call_01_zg1WsYDT2J1mwQZdcVaO8702",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 40.42050000000745,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6007.24549999999,
+          "callId": "call_02_5nMNQtWPPyq8f5wgMh0j4153",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 39.313417000026675,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6700.727500000008,
+          "callId": "call_00_sfZEtsQhwtjATqC83QOM3893",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 167.52129199999035,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7507.3010829999985,
+          "callId": "call_00_ET_CE18ZKttGsZSCXkplM1h1064",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.5027500000142,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8517.086792000016,
+          "callId": "call_00_Q3lSpV2zMD6elnclbrZ51693",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 65.65204099999391,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 7539.436501000001,
+      "toolMs": 1388.6312510000134,
+      "actionPhase": {
+        "durationMs": 3126,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 5,
+      "mode": "auto",
+      "totalMs": 10285.813541999989,
+      "turnMs": 9836.829125000018,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12520,
+        "outputTokens": 887,
+        "cacheReadTokens": 90496,
+        "cacheWriteTokens": 0,
+        "totalTokens": 103903
+      },
+      "modelSteps": 9,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 454.970084,
+          "time": 1791636999266,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 827.8030409999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1342.319917,
+          "time": 1791637000153,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 655.262833,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2761.010875,
+          "time": 1791637001572,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1150.7994589999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4094.283,
+          "time": 1791637002905,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 697.0989169999998,
+          "status": 200
+        },
+        {
+          "atMs": 4859.667125,
+          "time": 1791637003670,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1695.5675840000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6710.206584,
+          "time": 1791637005521,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 860.523416,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7745.487584,
+          "time": 1791637006556,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 667.9462079999994,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8476.949375,
+          "time": 1791637007288,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 860.9418339999993,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9418.689875,
+          "time": 1791637008229,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 813.3689169999998,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1309.2464579999796,
+          "callId": "call_00_dOVRX5MP2xUGgKloa44p6688",
+          "tool": "skill",
+          "durationMs": 23.8009590000147,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2015.5818750000035,
+          "callId": "call_00_5W9dJtBsQjOYIcM0KoX28131",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 748.7539169999945,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3931.9891669999924,
+          "callId": "call_00_uxkZQhh0XqxApNGf4Fjw8161",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 163.97099999999045,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4810.077208000002,
+          "callId": "call_00_ET_rcGJAf4cxDMicSW7aGDT4879",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 49.91633399997954,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6573.099208,
+          "callId": "call_00_VLMUoVxDvwBaFWgd0DBk8931",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select"
+          ],
+          "durationMs": 139.13195899999118,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7588.590999999986,
+          "callId": "call_00_qsSsDkehn5tuR1ivRzkC6053",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 158.72125000000233,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8431.108916999976,
+          "callId": "call_00_ET_SNSB2cEIWBkhRjdhDosQ0297",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 45.76404100001673,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9355.44529199999,
+          "callId": "call_00_mHIkEbnv2ECX6Ps1L8690628",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 65.709165999986,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 8,
+      "modelMs": 8229.312208999998,
+      "toolMs": 1395.7686259999755,
+      "actionPhase": {
+        "durationMs": 3617,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "mode": "single",
+      "totalMs": 11253.544124999986,
+      "turnMs": 10752.001583000005,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12049,
+        "outputTokens": 1037,
+        "cacheReadTokens": 87808,
+        "cacheWriteTokens": 0,
+        "totalTokens": 100894
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 512.297959,
+          "time": 1791637009619,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1263.499416,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1866.34725,
+          "time": 1791637010973,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1030.9347089999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3629.01575,
+          "time": 1791637012735,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 852.9044170000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5143.884834,
+          "time": 1791637014250,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 743.5393329999997,
+          "status": 200
+        },
+        {
+          "atMs": 5947.315459,
+          "time": 1791637015054,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1502.1912079999993,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7584.523584,
+          "time": 1791637016691,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 764.1287500000008,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8532.430959,
+          "time": 1791637017639,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 644.9685000000009,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9237.143042,
+          "time": 1791637018343,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 932.0991670000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10246.286,
+          "time": 1791637019353,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 944.1537090000002,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1802.2342919999792,
+          "callId": "call_00_xra8yOlG2Rqr0cKDgkI14299",
+          "tool": "skill",
+          "durationMs": 43.86312500000349,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2913.8314580000006,
+          "callId": "call_00_yqPrRbWcdbCoSXChyRgx6641",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 715.1641249999811,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4498.0667079999985,
+          "callId": "call_00_xawf7QTmnayFeeRcOovj2241",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 641.6152919999731,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5904.91833299998,
+          "callId": "call_00_ET_mNVtRfWQAjMinZZONAXy9806",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 43.274875000002794,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7465.679832999973,
+          "callId": "call_00_AHOAuQJwp51k9Mx2g4ik3579",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 43.15950000000885,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7508.984457999992,
+          "callId": "call_01_uSI5DBhpSRZdWikZNe1E3046",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 39.23554199998034,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7548.473999999987,
+          "callId": "call_02_yrbWd6UQtrHRHiwcIh1j3397",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 35.415875000006054,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8364.546875,
+          "callId": "call_00_ET_6xPSMipejRs6bS2TzjgE4213",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 167.94141699999454,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9193.781499999983,
+          "callId": "call_00_ET_e124lzSrYhOcP2D36iCo9886",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 43.169625000009546,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10185.507249999995,
+          "callId": "call_00_eU3nunYluNv8pDH3I8Wq0408",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 59.99337499999092,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 8678.419209,
+      "toolMs": 1832.8327509999508,
+      "actionPhase": {
+        "durationMs": 3289,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 6,
+      "mode": "auto",
+      "totalMs": 8641.605666999996,
+      "turnMs": 8158.381500000018,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12175,
+        "outputTokens": 667,
+        "cacheReadTokens": 64896,
+        "cacheWriteTokens": 0,
+        "totalTokens": 77738
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 463.452083,
+          "time": 1791637020840,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1020.771292,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1525.476291,
+          "time": 1791637021902,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 937.6587920000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3219.094208,
+          "time": 1791637023595,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 811.8227080000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4720.001166,
+          "time": 1791637025096,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 686.2283340000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5471.223625,
+          "time": 1791637025848,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1176.4814160000005,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6972.138541,
+          "time": 1791637027349,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 761.392167,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7813.728625,
+          "time": 1791637028190,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 742.4000410000008,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1507.2602919999918,
+          "callId": "call_00_ET_IChjt8wmo3HugWR9QAnS0381",
+          "tool": "skill",
+          "durationMs": 16.60495800001081,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2482.751874999987,
+          "callId": "call_00_CUuQF2M3rgO9OeryeuCX9659",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 738.6534580000152,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4052.319832999987,
+          "callId": "call_00_ET_Pu1MfO7nOvEdeBPBKbi86496",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 668.6976670000004,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5425.0092920000025,
+          "callId": "call_00_ET_lmTiQSh3NpisL1K6O5jF5631",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 48.39529099999345,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6667.611291999987,
+          "callId": "call_00_xKmHIyIMgzK1JQyneNEG9803",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 305.83479100000113,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7753.190375000006,
+          "callId": "call_00_7BwQkb9oySylJjqqZs158680",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 63.62362500000745,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 6136.754750000002,
+      "toolMs": 1841.8097900000284,
+      "actionPhase": {
+        "durationMs": 1500,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 6,
+      "mode": "batch",
+      "totalMs": 39046.84854200002,
+      "turnMs": 38500.154415999976,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12192,
+        "outputTokens": 977,
+        "cacheReadTokens": 65920,
+        "cacheWriteTokens": 0,
+        "totalTokens": 79089
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 546.890666,
+          "time": 1791637029580,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1115.96475,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1715.299333,
+          "time": 1791637030749,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1362.011375,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3335.873916,
+          "time": 1791637032369,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 986.7899169999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 34382.507458,
+          "time": 1791637063416,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 818.4129580000008,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 35265.067166,
+          "time": 1791637064299,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1646.0285000000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 37222.530666,
+          "time": 1791637066256,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 706.6712090000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 38007.559541,
+          "time": 1791637067041,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 973.3614999999991,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1691.2458340000012,
+          "callId": "call_00_PCFW6Khn7rOjVrCPvXcD5854",
+          "tool": "skill",
+          "durationMs": 20.190833000000566,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3101.683874999988,
+          "callId": "call_00_9b6HPeUESQxlEJNl5FUE1442",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 238.29387500000303,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4343.484709000011,
+          "callId": "call_00_q4cQJBAYABQyvC4akxmt9715",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 30031.301624999993,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 35220.405375,
+          "callId": "call_00_ITo4yw8hOgSo6nEKBYy08091",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.883874999999534,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 36931.664667000005,
+          "callId": "call_00_rYRfa9ZhBv12oEILYrZo2291",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 295.3059169999906,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 37949.526125000004,
+          "callId": "call_00_fsD3qQJwNp7rWG0FkZGk8746",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 62.62799999999697,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 7609.240209,
+      "toolMs": 30694.604124999983,
+      "actionPhase": {
+        "durationMs": 1960,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "mode": "auto",
+      "totalMs": 9152.591707999993,
+      "turnMs": 8696.568666999985,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12408,
+        "outputTokens": 785,
+        "cacheReadTokens": 64896,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78089
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 448.950625,
+          "time": 1791637068542,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 923.3211250000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1424.110833,
+          "time": 1791637069517,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 834.1997920000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3015.599125,
+          "time": 1791637071109,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 951.0939999999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4643.597958,
+          "time": 1791637072737,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 640.0319169999993,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5353.689125,
+          "time": 1791637073447,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1446.305542,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7138.482875,
+          "time": 1791637075232,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 675.4530830000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7894.022875,
+          "time": 1791637075987,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1187.9320830000006,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1398.4352499999804,
+          "callId": "call_00_0meSsjkD1ieBBzuPe4Nf3013",
+          "tool": "skill",
+          "durationMs": 20.388000000006286,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2280.572291999997,
+          "callId": "call_00_qNxsqUdyjc7w0q4qMSJD1140",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 738.8935829999973,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3986.7744999999995,
+          "callId": "call_00_GQBpre8Afq49QH8Xdufd2275",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 659.4616249999963,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5302.82254199998,
+          "callId": "call_00_ET_FgMcgpQUYKKEOBVT7JV44004",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 52.87329200000386,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6820.11170899999,
+          "callId": "call_00_KIBTba9JD0JjlV4ZTDYc3213",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 321.8766659999965,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7832.853458999976,
+          "callId": "call_00_vXa5zThKqnbhBzQpGv0U1200",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 64.75854100001743,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 6658.337542,
+      "toolMs": 1858.2517070000176,
+      "actionPhase": {
+        "durationMs": 1787,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "mode": "batch",
+      "totalMs": 9457.728915999993,
+      "turnMs": 8992.767000000022,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12265,
+        "outputTokens": 816,
+        "cacheReadTokens": 65280,
+        "cacheWriteTokens": 0,
+        "totalTokens": 78361
+      },
+      "modelSteps": 7,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 473.915042,
+          "time": 1791637077736,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 849.4333749999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1375.260167,
+          "time": 1791637078638,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1375.3805000000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3496.885542,
+          "time": 1791637080759,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 815.1977919999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4505.346,
+          "time": 1791637081768,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 703.0283340000005,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5273.840292,
+          "time": 1791637082536,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1275.6883749999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6884.117042,
+          "time": 1791637084147,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1005.0036250000003,
+          "status": 200
+        },
+        {
+          "atMs": 7982.006375,
+          "time": 1791637085244,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1419.0935419999996,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1351.8569579999894,
+          "callId": "call_00_ET_E1MeFYl1s2D9huu9h3B47520",
+          "tool": "skill",
+          "durationMs": 19.982917000015732,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2772.6546249999956,
+          "callId": "call_00_Xo4ocBZddRSQWqaYb1Qk2719",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 728.8994160000002,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4333.976874999993,
+          "callId": "call_00_aaj21r9gkajgCognUrqS3894",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 176.2530830000178,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5228.551624999993,
+          "callId": "call_00_ET_J9gLoy7KY6QE3kGwRuDu2824",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 48.39429100000416,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6570.643665999989,
+          "callId": "call_00_qO5YgGvu4iucgZXIKf8l0838",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 318.3285420000029,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7909.775208000006,
+          "callId": "call_00_yxuLEcFJTRHRDlGBtLs00871",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 76.45074999998906,
+          "isError": false
+        }
+      ],
+      "modelCalls": 7,
+      "toolCalls": 6,
+      "modelMs": 7442.825543,
+      "toolMs": 1368.3089990000299,
+      "actionPhase": {
+        "durationMs": 1612,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 7,
+      "mode": "single",
+      "totalMs": 11677.962832999998,
+      "turnMs": 11216.979458999995,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12156,
+        "outputTokens": 1161,
+        "cacheReadTokens": 87936,
+        "cacheWriteTokens": 0,
+        "totalTokens": 101253
+      },
+      "modelSteps": 9,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 462.39525,
+          "time": 1791637087190,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 843.6857499999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1351.328041,
+          "time": 1791637088078,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 766.5060839999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2898.057666,
+          "time": 1791637089625,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 673.4848749999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4249.033375,
+          "time": 1791637090976,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 563.536333,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4879.89925,
+          "time": 1791637091607,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1814.2054159999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6839.975916,
+          "time": 1791637093567,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1204.5768339999995,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8235.749291,
+          "time": 1791637094963,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 870.4991250000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9162.017375,
+          "time": 1791637095889,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 871.7455000000009,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10109.493083,
+          "time": 1791637096837,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1506.8173750000005,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1329.1230410000426,
+          "callId": "call_00_ET_THKgypazfa89r8ujfuvD5074",
+          "tool": "skill",
+          "durationMs": 17.480541999975685,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2136.8960829999996,
+          "callId": "call_00_AAzqdb9HjQS6zHQ1eBAr2459",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 761.7815830000327,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3588.554625000048,
+          "callId": "call_00_SEp0vqPNn5gnTAKDvNKA5324",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 659.4736660000053,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4829.108958000026,
+          "callId": "call_00_ET_Vl64R6cWeA2b7P1Sh3EP1321",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 50.102292000025045,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6711.306166000024,
+          "callId": "call_00_bbpatAE2wW8Az68SxN740936",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 47.96133399999235,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6759.452333000023,
+          "callId": "call_01_j1FsrAzwgmR1WXs2ckzm6422",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 42.073374999978114,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6801.932416000054,
+          "callId": "call_02_0cTkhvTG0FU8AShFp8DY7607",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 38.9932919999701,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8061.639666000032,
+          "callId": "call_00_M3PEDIFsPMCDexnJfnBx7984",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 174.20054200000595,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9122.830916000006,
+          "callId": "call_00_ET_ldFJzUX0LhdA4yst5R2l1335",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 40.167584000038914,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10050.574291000026,
+          "callId": "call_00_BCcJzu2D2Ndc9FAUOBTV7601",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 60.474916999985,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 10,
+      "modelMs": 9115.057292000001,
+      "toolMs": 1892.7091270000092,
+      "actionPhase": {
+        "durationMs": 4284,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 8,
+      "mode": "batch",
+      "totalMs": 8851.592791999981,
+      "turnMs": 8395.341249999998,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12113,
+        "outputTokens": 760,
+        "cacheReadTokens": 53888,
+        "cacheWriteTokens": 0,
+        "totalTokens": 66761
+      },
+      "modelSteps": 6,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 451.545459,
+          "time": 1791637098876,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 845.880625,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1344.815459,
+          "time": 1791637099770,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1517.1712080000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4777.333292,
+          "time": 1791637103202,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 726.8018329999995,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5571.884875,
+          "time": 1791637103997,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1140.7927920000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7035.348667,
+          "time": 1791637105460,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 780.782792,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7894.253292,
+          "time": 1791637106319,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 892.3949579999999,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1325.6698750000214,
+          "callId": "call_00_ET_v0BqqMfdPHNJgP852hcV0251",
+          "tool": "skill",
+          "durationMs": 18.896791999985,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2888.1500840000226,
+          "callId": "call_00_dxJTjSgFN88ySe4hvMHj6957",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1893.3498750000144,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5526.094792000018,
+          "callId": "call_00_ET_MYR2U5aWU7EwUrpRbFBX0848",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 49.83133299998008,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6733.997208999994,
+          "callId": "call_00_IJMduyfowNEgpVxYtxL66421",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 306.2276660000207,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7837.355749999988,
+          "callId": "call_00_AzN9gUv1jCJKi3QiH3Kw0520",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 60.852792000048794,
+          "isError": false
+        }
+      ],
+      "modelCalls": 6,
+      "toolCalls": 5,
+      "modelMs": 5903.824208,
+      "toolMs": 2329.158458000049,
+      "actionPhase": {
+        "durationMs": 1464,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 8,
+      "mode": "single",
+      "totalMs": 11898.726083000016,
+      "turnMs": 11441.454499999993,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12680,
+        "outputTokens": 941,
+        "cacheReadTokens": 111104,
+        "cacheWriteTokens": 0,
+        "totalTokens": 124725
+      },
+      "modelSteps": 11,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 455.930958,
+          "time": 1791637107745,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 946.7943340000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1451.428417,
+          "time": 1791637108741,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 937.7039580000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3138.216917,
+          "time": 1791637110428,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 917.9784579999996,
+          "status": 200
+        },
+        {
+          "atMs": 4732.803083,
+          "time": 1791637112022,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 857.1569589999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5650.491625,
+          "time": 1791637112940,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 931.7110000000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6686.061458,
+          "time": 1791637113976,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 740.423084,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7483.313667,
+          "time": 1791637114773,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 697.1416659999995,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8248.364375,
+          "time": 1791637115538,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 801.4265000000014,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9234.346833,
+          "time": 1791637116524,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 771.5493340000012,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10070.953125,
+          "time": 1791637117361,
+          "type": "http_start",
+          "id": 10,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 706.9819580000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10847.657708,
+          "time": 1791637118137,
+          "type": "http_start",
+          "id": 11,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 988.032792,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1430.0848750000005,
+          "callId": "call_00_ET_nLf0gyMQKWtFeoN6RCoO5474",
+          "tool": "skill",
+          "durationMs": 19.125208999961615,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2411.667374999961,
+          "callId": "call_00_MNI9wnlj3xbyyDFVrw953332",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 730.6901250000228,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4081.7021669999813,
+          "callId": "call_00_ET_Q7QYx2N62zvi7OevfC4A1269",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 653.9792499999749,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5609.603166999994,
+          "callId": "call_00_ET_GjYe7O8d6kID1vab7XJz6216",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 45.901749999960884,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6602.148041999957,
+          "callId": "call_00_ET_7cTg9iEwmzuqfojEcir21063",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 44.94745800003875,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6647.289333999972,
+          "callId": "call_01_ET_az0VMuuDNduakHem1niI3045",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 41.4634579999838,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7446.939458999957,
+          "callId": "call_00_9aHtxfPUgo8Cm5vEA4uA2406",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 40.07379100000253,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8200.458666999999,
+          "callId": "call_00_ET_vBv5f3wzMZRSvidJ1Wge4368",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 50.44604199996684,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9069.944291999971,
+          "callId": "call_00_fbJbWgSjf0ohR196OccX4213",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 168.87812499998836,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10026.040749999986,
+          "callId": "call_00_ET_8w0KlH0sJAgCIZfZtUxS0478",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 47.478124999965075,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10797.62374999997,
+          "callId": "call_00_DOFNtKfPXGM7Ix4yiU2n2203",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 54.98612499999581,
+          "isError": false
+        }
+      ],
+      "modelCalls": 11,
+      "toolCalls": 11,
+      "modelMs": 9296.900043000003,
+      "toolMs": 1897.9694579998613,
+      "actionPhase": {
+        "durationMs": 4418,
+        "modelCalls": 5
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 8,
+      "mode": "auto",
+      "totalMs": 10995.662000000011,
+      "turnMs": 10519.721833999967,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12660,
+        "outputTokens": 940,
+        "cacheReadTokens": 90496,
+        "cacheWriteTokens": 0,
+        "totalTokens": 104096
+      },
+      "modelSteps": 9,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 470.546541,
+          "time": 1791637119674,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 778.4248750000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1282.26525,
+          "time": 1791637120486,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 771.4840410000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 2808.35575,
+          "time": 1791637122012,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1299.020833,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4296.720333,
+          "time": 1791637123501,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 983.3069999999998,
+          "status": 200
+        },
+        {
+          "atMs": 5342.721,
+          "time": 1791637124547,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1437.8960830000005,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6949.510375,
+          "time": 1791637126153,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 606.9079579999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7740.882458,
+          "time": 1791637126945,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 978.0912919999992,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8781.750041,
+          "time": 1791637127986,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 829.9720840000009,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9681.707,
+          "time": 1791637128886,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1241.6569999999992,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1270.9587499999907,
+          "callId": "call_00_ET_4Y9fvPETMfPr5JV0kuHL9741",
+          "tool": "skill",
+          "durationMs": 13.110915999975987,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2073.694332999992,
+          "callId": "call_00_6DWE2oaLrxmumYmb4AZE4781",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 738.4587499999907,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4128.551624999964,
+          "callId": "call_00_dJrNSdpBYvh5oCQOtyUN2122",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 163.42258300003596,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5299.707208000007,
+          "callId": "call_00_ET_n1eMQbRFYVEOUI2kQflF7514",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 47.11050000000978,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6800.89154099999,
+          "callId": "call_00_QKbGSpQkOY6db0C547QC8275",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select"
+          ],
+          "durationMs": 151.38683400000446,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7577.301999999967,
+          "callId": "call_00_lrWCo2CSIsqq7YWxHmSG2865",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 167.07554099999834,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8738.52216599998,
+          "callId": "call_00_ET_uJ5AvA3ME7R1HC1bYxjo3587",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.0794590000296,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9631.44504099997,
+          "callId": "call_00_0X7bu7farHNjux3WmGub2834",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 54.676750000042375,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 8,
+      "modelMs": 8926.761166,
+      "toolMs": 1381.3213330000872,
+      "actionPhase": {
+        "durationMs": 3438,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 9,
+      "mode": "single",
+      "totalMs": 9432.838583000004,
+      "turnMs": 8984.358707999985,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 11901,
+        "outputTokens": 876,
+        "cacheReadTokens": 75776,
+        "cacheWriteTokens": 0,
+        "totalTokens": 88553
+      },
+      "modelSteps": 8,
+      "batchCalls": 0,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 443.605458,
+          "time": 1791637130656,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1078.053208,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1573.63375,
+          "time": 1791637131786,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 754.2653329999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3717.33525,
+          "time": 1791637133930,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 574.1788749999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4362.596583,
+          "time": 1791637134575,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1189.31275,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5700.75975,
+          "time": 1791637135913,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 827.1223330000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6716.2885,
+          "time": 1791637136929,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 689.1695410000002,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7467.347416,
+          "time": 1791637137680,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 832.5429590000012,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8376.63175,
+          "time": 1791637138589,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 987.3947499999995,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1550.1826659999788,
+          "callId": "call_00_PZ1hSdJ63JM2e2mmOQcj7768",
+          "tool": "skill",
+          "durationMs": 20.92808400001377,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2348.230582999997,
+          "callId": "call_00_15F2iGOFni578kpiy2tR5710",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1371.3188749999972,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4311.445082999999,
+          "callId": "call_00_ET_IaEYAYB4HdVYBlJNEzTs2179",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 52.76608299999498,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5571.770707999996,
+          "callId": "call_00_lt1qkI9FqkoWklcmWmfx6758",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 45.95404199999757,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5618.050958000007,
+          "callId": "call_01_mlCpHNzbbHLsecCVbLeh8071",
+          "tool": "browser_interact",
+          "action": "fill",
+          "durationMs": 42.1121249999851,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5660.473999999987,
+          "callId": "call_02_wwOAmFG31OPcWvmx4Lie0197",
+          "tool": "browser_interact",
+          "action": "select",
+          "durationMs": 42.69391600001836,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6547.177540999954,
+          "callId": "call_00_zAgCJhpsT5N7QonUIcil6955",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 172.6430420000106,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7424.408124999958,
+          "callId": "call_00_ET_8TgPhr6z9beXAgr4bq9v4133",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 45.26925000001211,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8318.966165999998,
+          "callId": "call_00_BbVRB90txOwZNqccZFGT6717",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 60.83024999999907,
+          "isError": false
+        }
+      ],
+      "modelCalls": 8,
+      "toolCalls": 9,
+      "modelMs": 6932.0397490000005,
+      "toolMs": 1854.5156670000288,
+      "actionPhase": {
+        "durationMs": 3105,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": []
+    },
+    {
+      "round": 9,
+      "mode": "auto",
+      "totalMs": 12041.53816700005,
+      "turnMs": 11571.661791999999,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 12809,
+        "outputTokens": 886,
+        "cacheReadTokens": 90112,
+        "cacheWriteTokens": 0,
+        "totalTokens": 103807
+      },
+      "modelSteps": 9,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 458.914542,
+          "time": 1791637140119,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1274.049333,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1767.175459,
+          "time": 1791637141428,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1287.4904999999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 3836.120292,
+          "time": 1791637143497,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 971.7565,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5466.880792,
+          "time": 1791637145127,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 725.8907920000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 6263.333667,
+          "time": 1791637145924,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1390.9091250000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7836.098125,
+          "time": 1791637147497,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1072.9953750000004,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9086.034125,
+          "time": 1791637148747,
+          "type": "http_start",
+          "id": 7,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 846.3244169999998,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 9996.982125,
+          "time": 1791637149658,
+          "type": "http_start",
+          "id": 8,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 914.1926249999997,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 10994.948584,
+          "time": 1791637150656,
+          "type": "http_start",
+          "id": 9,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 968.7492500000008,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1756.1809170000488,
+          "callId": "call_00_ssgiIU0RdpEh0X0Vecjb7446",
+          "tool": "skill",
+          "durationMs": 13.369458000001032,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 3077.059583000024,
+          "callId": "call_00_Z9DFVFvrC2j7gQWf2MsM9808",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 764.5017089999747,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 4832.85616700002,
+          "callId": "call_00_9d0VvKvoPDf6WcAT1fLz1367",
+          "tool": "browser_page",
+          "action": "navigate",
+          "durationMs": 638.7236660000053,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6213.386375000002,
+          "callId": "call_00_ET_R3vXGRVxY49EB1Yq7Eju5212",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 52.96829200000502,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 7675.27575000003,
+          "callId": "call_00_NQQAHoI8xCAJ5FVinRWU6922",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select"
+          ],
+          "durationMs": 163.3631249999744,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8929.667292000027,
+          "callId": "call_00_rbFacyB9vABWW4sK9oyw3639",
+          "tool": "browser_interact",
+          "action": "click",
+          "durationMs": 160.1868329999852,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 9952.40633300005,
+          "callId": "call_00_ET_PBgrZv5ilZEesHKrNvf45235",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 45.38987499999348,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 10930.974250000028,
+          "callId": "call_00_XgyEa955Ial92csEXjnv7070",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 68.88541699998314,
+          "isError": false
+        }
+      ],
+      "modelCalls": 9,
+      "toolCalls": 8,
+      "modelMs": 9452.357917000001,
+      "toolMs": 1907.3883749999222,
+      "actionPhase": {
+        "durationMs": 3731,
+        "modelCalls": 3
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "round": 9,
+      "mode": "batch",
+      "totalMs": 9858.461833000008,
+      "turnMs": 9378.920374999987,
+      "measurementValid": true,
+      "success": true,
+      "exitCode": 0,
+      "submissions": 1,
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "usage": {
+        "inputTokens": 11928,
+        "outputTokens": 835,
+        "cacheReadTokens": 54144,
+        "cacheWriteTokens": 0,
+        "totalTokens": 66907
+      },
+      "modelSteps": 6,
+      "batchCalls": 1,
+      "toolErrors": 0,
+      "models": [
+        {
+          "atMs": 470.03425,
+          "time": 1791637152186,
+          "type": "http_start",
+          "id": 1,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 645.9699170000001,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 1152.339292,
+          "time": 1791637152868,
+          "type": "http_start",
+          "id": 2,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1398.8286250000003,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 4483.252667,
+          "time": 1791637156199,
+          "type": "http_start",
+          "id": 3,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 940.9457499999999,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 5489.012709,
+          "time": 1791637157205,
+          "type": "http_start",
+          "id": 4,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1478.210583,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 7277.005042,
+          "time": 1791637158993,
+          "type": "http_start",
+          "id": 5,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1132.8345419999996,
+          "status": 200,
+          "closeCode": 20
+        },
+        {
+          "atMs": 8489.674,
+          "time": 1791637160205,
+          "type": "http_start",
+          "id": 6,
+          "method": "POST",
+          "path": "/anthropic/v1/messages",
+          "durationMs": 1292.1664169999985,
+          "status": 200,
+          "closeCode": 20
+        }
+      ],
+      "tools": [
+        {
+          "type": "tool/call",
+          "atMs": 1138.097167,
+          "callId": "call_00_ET_d6TDyJ3nA01ZHpyjX2va7786",
+          "tool": "skill",
+          "durationMs": 13.541083000018261,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 2574.451166999992,
+          "callId": "call_00_vPFqxbyy1AIp0sTXGgI38752",
+          "tool": "browser_session",
+          "action": "start",
+          "durationMs": 1910.5654160000267,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 5445.372957999993,
+          "callId": "call_00_x53pJUeU7SZd88Y06wNV4845",
+          "tool": "browser_inspect",
+          "action": "observe",
+          "durationMs": 46.16329200001201,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 6985.944041999988,
+          "callId": "call_00_v5iV2xicYktzxRd4hm0Y3011",
+          "tool": "browser_interact",
+          "action": "batch",
+          "batchSteps": [
+            "fill",
+            "fill",
+            "select",
+            "click"
+          ],
+          "durationMs": 289.75908300001174,
+          "isError": false
+        },
+        {
+          "type": "tool/call",
+          "atMs": 8428.568874999997,
+          "callId": "call_00_njKiwZIWqyN4Xaf1VvOU3972",
+          "tool": "browser_session",
+          "action": "stop",
+          "durationMs": 64.78029199998127,
+          "isError": false
+        }
+      ],
+      "modelCalls": 6,
+      "toolCalls": 5,
+      "modelMs": 6888.9558339999985,
+      "toolMs": 2324.80916600005,
+      "actionPhase": {
+        "durationMs": 1785,
+        "modelCalls": 1
+      },
+      "sessionStopped": true,
+      "batchResults": [
+        {
+          "status": "completed",
+          "steps": [
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "fill",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "select",
+              "status": "completed",
+              "effect_state": "committed"
+            },
+            {
+              "action": "click",
+              "status": "completed",
+              "effect_state": "committed"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

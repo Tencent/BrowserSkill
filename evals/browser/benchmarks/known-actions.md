@@ -25,8 +25,9 @@ head `2721a20a`, based on `ee13a46e`; the revised comparison uses runtime commit
 These are **local execution timings, not an agent/LLM latency experiment**. Tool
 call counts below describe the required public calls for this known plan. They do
 not include model thinking, provider latency or transport overhead. No artificial
-model delay was added. More websites, platforms, remote-daemon links and live-agent trials are needed
-before claiming an end-to-end latency improvement.
+model delay was added. The subsequent [real-model DSH experiment](known-actions-agent.md)
+measures agent latency separately. More websites, platforms and remote-daemon links
+remain unmeasured.
 
 ## R1: three-way comparison of the original implementation
 
@@ -100,7 +101,10 @@ continue with the original single actions.
   3,424 bytes. These are bytes, not tokenizer estimates. The extra typed schema is
   accepted to retain discoverability and normal argument validation; a test bounds
   the steps schema below 900 bytes. No additional public tool or default browser CI
-  job is added. Single-action parameters and observation rendering are unchanged.
+  job is added. Single-action parameters are unchanged. Subsequent real-model
+  testing found that DSH's renderer hid the existing tab ID required by batch;
+  observe/snapshot now display that ID, avoiding a separate tabs-list request.
+  No observation ID or new protocol field is added.
 
 ## Recovery and validation
 

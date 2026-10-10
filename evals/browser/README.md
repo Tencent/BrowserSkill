@@ -8,6 +8,8 @@ data-driven and discovered automatically. Adding a case does not require editing
 
 [Known-action batching measurements and reproduction](benchmarks/known-actions.md) compare
 single commands, a shell chain and harness batching on the real local browser stack.
+[Real-model DSH measurements](benchmarks/known-actions-agent.md) separately count
+actual model requests, task latency, and batch adoption.
 
 ## Design goals
 
