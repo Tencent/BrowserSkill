@@ -138,6 +138,7 @@ function isResponseFor(msg: ProtocolFrame, id: string): boolean {
  */
 export function detectBrowserMeta(ua: string = navigator.userAgent): BrowserMeta {
   const probes: Array<[RegExp, string]> = [
+    [/YaBrowser\/([0-9.]+)/, "yandex"],
     [/Edg\/([0-9.]+)/, "edge"],
     [/OPR\/([0-9.]+)/, "opera"],
     [/Brave\/([0-9.]+)/, "brave"],
