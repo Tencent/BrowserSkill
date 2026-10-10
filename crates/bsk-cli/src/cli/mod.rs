@@ -15,6 +15,7 @@ pub mod download;
 pub mod emulate;
 pub mod ensure_daemon;
 pub mod error;
+pub mod cookies;
 pub mod evaluate;
 pub mod get_html;
 pub mod human_loop;
@@ -47,6 +48,7 @@ use crate::cli::console::ConsoleArgs;
 use crate::cli::daemon::DaemonCmd;
 use crate::cli::download::DownloadArgs;
 use crate::cli::emulate::EmulateArgs;
+use crate::cli::cookies::CookiesArgs;
 use crate::cli::evaluate::EvaluateArgs;
 use crate::cli::get_html::GetHtmlArgs;
 use crate::cli::human_loop::RequestHelpArgs;
@@ -214,6 +216,8 @@ pub enum Command {
 
     /// Evaluate a JavaScript expression inside the Agent Window.
     Evaluate(EvaluateArgs),
+    /// Export cookies (incl. httpOnly) for the Agent Window tab's site.
+    Cookies(CookiesArgs),
 
     /// Wait for a page-lifecycle event.
     #[command(name = "wait-for-navigation")]

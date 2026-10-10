@@ -1,6 +1,7 @@
 //! Typed params/results for the `tool.*` RPC methods (§7).
 
 pub mod console;
+pub mod cookies;
 pub mod debug;
 pub mod dialog;
 pub mod emulate;
@@ -23,6 +24,7 @@ pub mod wheel;
 pub mod window;
 
 pub use console::*;
+pub use cookies::*;
 pub use debug::*;
 pub use dialog::*;
 pub use emulate::*;
