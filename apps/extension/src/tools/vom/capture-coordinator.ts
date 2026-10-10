@@ -7,7 +7,7 @@ import {
   omitFrameSubtrees,
 } from "@/browser-driver/frame-graph";
 import { cssViewport, GeometryContext } from "../geometry/frame-context";
-import { type CdpRunner, cdpRunnerForTarget } from "../shared";
+import { type CdpRunner, cdpRunnerForTarget, sendToCdpTarget } from "../shared";
 import { collectOverlayExcludedBackendIds } from "./capture";
 import {
   isCaptureTerminalError as isCaptureAbort,
@@ -71,6 +71,28 @@ async function collectTasks<T>(
   if (failed) throw failure;
 }
 
+/** `Accessibility.enable` keeps the renderer's accessibility tree live, updated
+ * and reported on every page change, until the domain is disabled again. A
+ * capture needs it only for its own reads, so each target that enabled it
+ * disables it again under the same worker bound. Like other cleanup, this
+ * never reconnects a replaced attachment, and nothing is queued behind a read
+ * still running past its deadline. */
+async function releaseAccessibility(
+  cdp: CdpRunner,
+  tabId: number,
+  enabled: ReadonlyMap<CdpTarget, string | undefined>,
+): Promise<void> {
+  await collectTasks([...enabled], async ([target, attachmentId]) => {
+    // A detach already disabled every domain of that attachment.
+    if (cdp.getAttachmentId?.(tabId) !== attachmentId) return;
+    const disabled =
+      cdp.sendGuarded && attachmentId !== undefined
+        ? cdp.sendGuarded(target, "Accessibility.disable", {}, { attachmentId })
+        : sendToCdpTarget(cdp, target, "Accessibility.disable", {});
+    await disabled.catch(() => {});
+  });
+}
+
 export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   cdp: CdpRunner,
   tabId: number,
@@ -129,7 +151,11 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
   const unavailable = (batch: TargetBatch<T>, stage: CaptureIssue["stage"], frameId?: string) =>
     issues.push({ target: batch.target, frameId, stage, reason: "capture-unavailable" });
   let firstFailure: unknown;
-  const axReady = new Set<TargetBatch<T>>();
+  // Targets where this capture enabled AX, with the attachment it was sent on.
+  // Each releases AX once its trees are read, or when the capture fails or is
+  // cancelled before that.
+  const axEnabled = new Map<CdpTarget, string | undefined>();
+  const releaseAx = () => releaseAccessibility(cdp, tabId, axEnabled);
   const stopped = new Set<TargetBatch<T>>();
   const isolateChildTimeout = (error: unknown, batch: TargetBatch<T>): boolean => {
     if (
@@ -230,16 +256,19 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         unavailable(batch, "ax");
         return;
       }
-      axReady.add(batch);
+      axEnabled.set(batch.target, cdp.getAttachmentId?.(tabId));
     },
     signal,
-  );
+  ).catch(async (error: unknown) => {
+    await releaseAx();
+    throw error;
+  });
 
   // Schedule AX by frame across all ready targets, rather than nesting pools.
   // Keep result slots in source order even when CDP replies arrive out of order.
   const axTasks: { batch: TargetBatch<T>; frame: CdpFrame; result?: FrameAxBatch<T> }[] =
     batches.flatMap((batch) =>
-      axReady.has(batch) ? batch.frames.map((frame) => ({ batch, frame })) : [],
+      axEnabled.has(batch.target) ? batch.frames.map((frame) => ({ batch, frame })) : [],
     );
   await collectTasks(
     axTasks,
@@ -256,6 +285,8 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
         throwCaptureAborted(signal);
         task.result = { frame, nodes: result.nodes ?? [] };
       } catch (error) {
+        // Chrome may still be running this read; queue no cleanup behind it.
+        if (error instanceof CdpReadTimeoutError) axEnabled.delete(batch.target);
         throwCaptureAborted(signal);
         if (isolateChildTimeout(error, batch)) return;
         if (isCaptureAbort(error)) throw error;
@@ -264,7 +295,7 @@ export async function captureObservationFacts<T extends FrameOwnedAxNode>(
       }
     },
     signal,
-  );
+  ).finally(releaseAx);
   for (const task of axTasks) if (task.result) task.batch.ax.push(task.result);
 
   // A snapshot claim outranks an old graph hint. Conflicting actual claims

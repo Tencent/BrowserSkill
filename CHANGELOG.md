@@ -15,6 +15,11 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
   background-execution lease resends the override and waits for a rendered frame; the
   input is sent only once the page reports `visible`, and otherwise still fails before
   dispatch.
+- Extension: an agent session no longer keeps the browser's GPU and CPU busy while the
+  agent is idle ([#391](https://github.com/Tencent/BrowserSkill/issues/391)). The control
+  glow is painted once and pulses only its opacity, twice, instead of repainting the
+  viewport every frame, and stays still under reduced motion. Observation disables
+  Chrome's Accessibility domain again once it has read the accessibility trees.
 
 ## [0.3.2] - 2026-09-30
 

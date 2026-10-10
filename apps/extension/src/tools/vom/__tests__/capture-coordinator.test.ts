@@ -1649,6 +1649,113 @@ describe("AX frame scheduling", () => {
   });
 });
 
+describe("Accessibility domain lifetime", () => {
+  const axCalls = (logs: ReturnType<typeof fixture>["logs"], sessionId?: string) =>
+    logs
+      .filter(
+        (call) => call.target.sessionId === sessionId && call.method.startsWith("Accessibility."),
+      )
+      .map((call) => call.method);
+
+  it("disables AX on each target once its trees are read", async () => {
+    const { cdp, logs } = fixture();
+    await captureObservationFacts(cdp, 4);
+    expect(axCalls(logs)).toEqual([
+      "Accessibility.enable",
+      "Accessibility.getFullAXTree",
+      "Accessibility.getFullAXTree",
+      "Accessibility.getFullAXTree",
+      "Accessibility.disable",
+    ]);
+    expect(axCalls(logs, "remote")).toEqual([
+      "Accessibility.enable",
+      "Accessibility.getFullAXTree",
+      "Accessibility.disable",
+    ]);
+    // Released before the identity and geometry phases, not at the end.
+    expect(logs.findIndex((call) => call.method === "Accessibility.disable")).toBeLessThan(
+      logs.findIndex((call) => call.method === "Page.createIsolatedWorld"),
+    );
+  });
+
+  it("sends the cleanup only on the attachment that enabled AX", async () => {
+    const { cdp, logs } = fixture();
+    const sendGuarded = vi.fn(async () => ({}) as never);
+    cdp.sendGuarded = sendGuarded;
+    await captureObservationFacts(cdp, 4);
+    expect(sendGuarded).toHaveBeenCalledTimes(2);
+    for (const target of [{ tabId: 4 }, { tabId: 4, sessionId: "remote" }])
+      expect(sendGuarded).toHaveBeenCalledWith(
+        target,
+        "Accessibility.disable",
+        {},
+        { attachmentId: "attachment" },
+      );
+    expect(logs.some((call) => call.method === "Accessibility.disable")).toBe(false);
+  });
+
+  it("leaves a replaced attachment alone", async () => {
+    const { cdp, logs } = fixture();
+    const original = cdp.sendToTarget!;
+    let attachment = "attachment";
+    cdp.getAttachmentId = () => attachment;
+    cdp.sendToTarget = async (target, method, params) => {
+      const reply = await original(target, method, params);
+      if (method === "Accessibility.getFullAXTree") attachment = "replacement";
+      return reply as never;
+    };
+    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    await expect(captureObservationFacts(cdp, 4)).rejects.toThrow("document identity");
+    expect(logs.some((call) => call.method === "Accessibility.disable")).toBe(false);
+  });
+
+  it("sends nothing behind an AX read still pending past its deadline", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const f = fixture();
+      const gate = new CdpReadGate();
+      const original = f.cdp.sendToTarget!;
+      f.cdp.sendToTarget = (target, method, params) =>
+        gate.run(target, method, () => {
+          if (target.sessionId !== "remote" || method !== "Accessibility.getFullAXTree")
+            return original(target, method, params);
+          f.logs.push({ target, method, params: (params ?? {}) as Record<string, unknown> });
+          return new Promise<never>(() => {});
+        });
+      f.cdp.send = (tabId, method, params) => f.cdp.sendToTarget!({ tabId }, method, params);
+      const work = captureObservationFacts(f.cdp, 4);
+      await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
+      const facts = await work;
+      expect(facts.documents.map((doc) => doc.frame.frameId)).toEqual(["main", "same", "nested"]);
+      expect(axCalls(f.logs).at(-1)).toBe("Accessibility.disable");
+      expect(axCalls(f.logs, "remote")).toEqual([
+        "Accessibility.enable",
+        "Accessibility.getFullAXTree",
+      ]);
+    } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("releases AX when the capture is cancelled during AX reads", async () => {
+    const { cdp, logs } = fixture();
+    const controller = new AbortController();
+    const original = cdp.sendToTarget!;
+    cdp.sendToTarget = async (target, method, params) => {
+      if (method === "Accessibility.getFullAXTree") controller.abort();
+      return original(target, method, params);
+    };
+    cdp.send = (tabId, method, params) => cdp.sendToTarget!({ tabId }, method, params);
+    await expect(captureObservationFacts(cdp, 4, controller.signal)).rejects.toMatchObject({
+      name: "AbortError",
+    });
+    expect(axCalls(logs).at(-1)).toBe("Accessibility.disable");
+    expect(axCalls(logs, "remote").at(-1)).toBe("Accessibility.disable");
+  });
+});
+
 describe("visual facts integration", () => {
   it("defaults to base facts across targets and shares semantic behavior with visual capture", async () => {
     const base = fixture({ canvas: true });

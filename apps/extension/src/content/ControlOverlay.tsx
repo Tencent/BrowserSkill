@@ -64,13 +64,27 @@ export function ControlOverlay({
 
   return (
     <>
+      {/* The glow covers the whole viewport for as long as the agent is in
+          control. box-shadow is not compositor-animatable, so animating it
+          repaints the viewport every frame. Paint both shadows once and fade
+          only the brighter layer's opacity, for a bounded number of pulses. */}
       <style>{`
         @keyframes bsk-breathe {
           0%, 100% {
-            box-shadow: inset 0 0 20px 4px rgba(249,115,22,0.25);
+            opacity: 0;
           }
           50% {
-            box-shadow: inset 0 0 40px 8px rgba(249,115,22,0.5);
+            opacity: 1;
+          }
+        }
+
+        .bsk-control-glow-pulse {
+          animation: bsk-breathe 3s ease-in-out 2;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+          .bsk-control-glow-pulse {
+            animation: none;
           }
         }
       `}</style>
@@ -82,11 +96,22 @@ export function ControlOverlay({
           inset: 0,
           zIndex: 2147483646,
           pointerEvents: "none",
-          animation: "bsk-breathe 3s ease-in-out infinite",
+          boxShadow: "inset 0 0 20px 4px rgba(249,115,22,0.25)",
           opacity: show ? 1 : 0,
           transition: "opacity 300ms ease-out",
         }}
-      />
+      >
+        <div
+          data-slot="control-overlay-pulse"
+          className="bsk-control-glow-pulse"
+          style={{
+            position: "absolute",
+            inset: 0,
+            boxShadow: "inset 0 0 40px 8px rgba(249,115,22,0.5)",
+            opacity: 0,
+          }}
+        />
+      </div>
 
       <div
         ref={blockerRef}
