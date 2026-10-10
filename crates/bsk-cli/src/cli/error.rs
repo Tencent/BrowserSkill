@@ -9,11 +9,15 @@
 //! Exit codes are documented in [`super::render_error`] and
 //! design §3.1.
 
+use std::ffi::OsString;
 use std::io::Write;
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Error;
 use bsk_protocol::{ErrorCode, RpcError};
+use clap::CommandFactory;
+use clap::error::{ContextKind, ContextValue, ErrorKind};
 use serde::Serialize;
 use thiserror::Error;
 
@@ -105,6 +109,116 @@ pub fn exit_code_for(code: ErrorCode) -> u8 {
 pub enum Format {
     Human,
     Json,
+}
+
+/// Guidance for `--session` / `--tab-id` given before the subcommand.
+const MISPLACED_COMMAND_OPTION_HINT: &str = "--session and --tab-id are command-specific \
+     options; place them after a subcommand that supports them, e.g. `bsk click --session <id> \
+     --tab-id <tab> --selector '#submit'`; run `bsk <cmd> --help` for supported options";
+
+/// Render clap failures for `args` (the full argv clap parsed) using the
+/// CLI's error contract, while preserving successful help/version output
+/// and the existing usage-error exit code.
+pub fn render_parse_error(err: clap::Error, args: &[OsString]) -> ExitCode {
+    if !err.use_stderr() {
+        let _ = err.print();
+        return ExitCode::SUCCESS;
+    }
+
+    // Parsing can fail before clap reaches --json. Only standalone flags
+    // before `--` select the error format; values stay literal.
+    let json = args
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--json");
+    let format = if json { Format::Json } else { Format::Human };
+    let (err, hint) = match misplaced_command_option_error(&err, args) {
+        Some(rebuilt) => (rebuilt, Some(MISPLACED_COMMAND_OPTION_HINT)),
+        None => (err, None),
+    };
+    let exit = exit_code_for(ErrorCode::InvalidParams);
+    match format {
+        Format::Json => {
+            let rendered = err.to_string();
+            let error = CliError::Rpc {
+                code: ErrorCode::InvalidParams,
+                message: parse_error_summary(&err, &rendered),
+                data: Some(serde_json::json!({
+                    "reason": "cli_parse_error",
+                    "details": rendered.trim_end(),
+                })),
+                source: None,
+            };
+            let hint = hint.or_else(|| render_error::hint_for_code(ErrorCode::InvalidParams));
+            println!("{}", json_error_string(&error, exit, hint));
+        }
+        Format::Human => {
+            let _ = err.print();
+        }
+    }
+    ExitCode::from(exit)
+}
+
+/// clap's own did-you-mean can point `--session` at `--version` and print
+/// `Usage: bsk --version <COMMAND>`. Rebuild the error so its tip and usage
+/// describe where the option actually belongs.
+fn misplaced_command_option_error(err: &clap::Error, args: &[OsString]) -> Option<clap::Error> {
+    let arg = match (err.kind(), err.get(ContextKind::InvalidArg)) {
+        (ErrorKind::UnknownArgument, Some(ContextValue::String(arg)))
+            if matches!(arg.as_str(), "--session" | "--tab-id") =>
+        {
+            arg.clone()
+        }
+        _ => return None,
+    };
+    let mut cmd = super::Cli::command();
+    // Like clap, name the binary after argv[0], e.g. `bsk.exe` on Windows.
+    if let Some(name) = args
+        .first()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(|name| name.to_str())
+    {
+        cmd = cmd.bin_name(name);
+    }
+    // The usage clap printed names the suggested argument when it found one;
+    // otherwise it is the usage of the command being parsed, e.g. `bsk tab`.
+    let usage = match (
+        err.get(ContextKind::SuggestedArg),
+        err.get(ContextKind::Usage),
+    ) {
+        (None, Some(ContextValue::StyledStr(usage))) => usage.clone(),
+        _ => cmd.render_usage(),
+    };
+    let mut rebuilt = clap::Error::new(ErrorKind::UnknownArgument).with_cmd(&cmd);
+    rebuilt.insert(ContextKind::InvalidArg, ContextValue::String(arg));
+    rebuilt.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![MISPLACED_COMMAND_OPTION_HINT.into()]),
+    );
+    rebuilt.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+    Some(rebuilt)
+}
+
+/// One-line `message` for JSON callers. clap renders `error: <summary>`
+/// followed by blank-line separated tips and usage, which stay in
+/// `data.details`. The summary can wrap, e.g. a missing required argument
+/// or the possible values for an invalid one, so join its lines.
+fn parse_error_summary(err: &clap::Error, rendered: &str) -> String {
+    // A bare subcommand group renders its help page instead of an error.
+    if err.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand {
+        return "a subcommand is required but one was not provided".into();
+    }
+    let rendered = rendered.strip_prefix("error: ").unwrap_or(rendered);
+    rendered
+        .split("\n\n")
+        .next()
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `--json` error shape. Top-level fields (review I2 fix to round-1):

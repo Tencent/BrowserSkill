@@ -49,6 +49,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Run Windows CLI argument error tests
+        run: cargo test -p bsk --test cli_usage_errors --test cli_parse --locked
+
       - name: Run Windows named-pipe tests
         run: cargo test -p bsk --lib --locked daemon::ipc::windows::tests
 
