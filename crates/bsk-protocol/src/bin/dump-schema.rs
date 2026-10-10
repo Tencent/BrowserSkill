@@ -132,6 +132,8 @@ fn main() {
 
     dump!(WaitForNavigationParams, "tool_wait_for_navigation_params");
     dump!(WaitForNavigationResult, "tool_wait_for_navigation_result");
+    dump!(WaitForElementParams, "tool_wait_for_element_params");
+    dump!(WaitForElementResult, "tool_wait_for_element_result");
     dump!(WaitMsParams, "tool_wait_ms_params");
     dump!(WaitMsResult, "tool_wait_ms_result");
     dump!(RequestHelpParams, "tool_request_help_params");

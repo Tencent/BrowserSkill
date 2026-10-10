@@ -66,7 +66,7 @@ use crate::cli::snapshot::SnapshotArgs;
 use crate::cli::tab::TabCmd;
 use crate::cli::update::UpdateArgs;
 use crate::cli::upload::UploadArgs;
-use crate::cli::waits::{WaitForNavigationArgs, WaitMsArgs};
+use crate::cli::waits::{WaitForElementArgs, WaitForNavigationArgs, WaitMsArgs};
 use crate::cli::wheel::WheelArgs;
 use crate::cli::window::WindowCmd;
 
@@ -219,6 +219,10 @@ pub enum Command {
     /// Wait for a page-lifecycle event.
     #[command(name = "wait-for-navigation")]
     WaitForNavigation(WaitForNavigationArgs),
+
+    /// Wait until an element becomes visible / hidden / attached / detached.
+    #[command(name = "wait-for-element")]
+    WaitForElement(WaitForElementArgs),
 
     /// Sleep for a duration on the daemon side.
     #[command(name = "wait-ms")]

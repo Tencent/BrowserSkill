@@ -118,7 +118,7 @@ A task may need more than one reference as it progresses.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| Waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, Canvas, or video | [Screenshots](references/screenshots-and-canvas.md) / [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |

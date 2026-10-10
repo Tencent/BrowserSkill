@@ -303,6 +303,7 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 | Method::ToolDownload
                 | Method::ToolEvaluate
                 | Method::ToolWaitForNavigation
+                | Method::ToolWaitForElement
                 | Method::ToolRequestHelp
                 | Method::ToolRecordStart
                 | Method::ToolRecordStop
@@ -929,6 +930,7 @@ fn tool_dispatch_transport_timeout(method: &Method, params: &Value) -> Result<Du
                 | Method::ToolNavigateForward
                 | Method::ToolReload
                 | Method::ToolWaitForNavigation
+                | Method::ToolWaitForElement
         ) {
             timeout.saturating_add(EXTENSION_RESPONSE_GRACE)
         } else {

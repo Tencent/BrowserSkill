@@ -41,6 +41,7 @@ import type {
   SelectParams,
   SnapshotParams,
   UploadParams,
+  WaitForElementParams,
   WaitForNavigationParams,
   WheelParams,
 } from "@/transport/types";
@@ -114,7 +115,7 @@ import {
   type TabSelectParams,
 } from "./tabs";
 import { handleUpload } from "./upload";
-import { handleWaitForNavigation } from "./waits";
+import { handleWaitForElement, handleWaitForNavigation } from "./waits";
 import { handleWheel } from "./wheel";
 import { handleWindowResize, type WindowResizeParams } from "./window";
 
@@ -828,6 +829,12 @@ export class ToolDispatcher {
         return handleEvaluate(
           this.sessions,
           req.params as EvaluateParams,
+          this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
+        );
+      case "tool.wait_for_element":
+        return handleWaitForElement(
+          this.sessions,
+          req.params as WaitForElementParams,
           this.cdp ? { cdp: this.cdp, tabsApi: chromeTabsApi, signal } : undefined,
         );
       case "tool.wait_for_navigation":
