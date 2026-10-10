@@ -412,7 +412,7 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
               expect(result, route).toBeDefined();
               if (route === "hang" || result.completeness === "partial") {
                 expect(["pdf", "error", "hang"], route).toContain(route);
-                expect(result.completeness, route).toBe("partial");
+                expect(result, route).toMatchObject({ state: "ready", completeness: "partial" });
                 expect(
                   route === "pdf" ? ["capture_failed", "debugger_detached"] : ["capture_failed"],
                   route,
@@ -453,6 +453,12 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 if (["empty", "download", "cancel", "error"].includes(route))
                   expect(pixels.at(-1)![2], route).toBeGreaterThan(240);
                 if (route === "blue") expect(pixels.at(-1)![1], route).toBeGreaterThan(240);
+                if (route === "pdf") {
+                  // If Chrome permits PDF capture, require the fixture's blue page,
+                  // not merely a complete status with an unchanged/neutral frame.
+                  expect(pixels.at(-1)![2], route).toBeGreaterThan(240);
+                  expect(pixels.at(-1)![0], route).toBeLessThan(15);
+                }
               }
               if (route === "hang")
                 await evaluate(
