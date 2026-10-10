@@ -3,10 +3,22 @@ import type { ToolDeps } from "./tools";
 
 export type ToolRegistrar = (definition: ToolDefinition) => void;
 
+export type SequenceRunner = (
+  args: string[],
+  label: string,
+  runnerTimeoutMs?: number,
+) => Promise<unknown>;
+
 type TerminalPresentation = { card: "terminal"; output: string; exitCode: number } | undefined;
 
 /** Existing tool runtime seams reused by the phase-one capability modules. */
 export interface PhaseOneRuntime {
+  /** Hold the existing session queue and foreground lease for a whole sequence. */
+  sequence<T>(
+    exec: ToolRunContext,
+    session: string,
+    run: (command: SequenceRunner) => Promise<T>,
+  ): Promise<T>;
   run(
     exec: ToolRunContext,
     args: string[],

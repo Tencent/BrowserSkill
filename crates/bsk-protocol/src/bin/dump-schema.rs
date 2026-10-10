@@ -75,11 +75,6 @@ fn main() {
     dump!(ReloadParams, "tool_reload_params");
     dump!(ReloadResult, "tool_reload_result");
 
-    dump!(BatchPlan, "batch_plan");
-    dump!(BatchParams, "tool_batch_params");
-    dump!(BatchStatusParams, "tool_batch_status_params");
-    dump!(BatchResult, "tool_batch_result");
-
     dump!(ClickParams, "tool_click_params");
     dump!(ClickResult, "tool_click_result");
     dump!(HoverParams, "tool_hover_params");

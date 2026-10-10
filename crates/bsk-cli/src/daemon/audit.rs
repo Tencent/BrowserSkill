@@ -660,10 +660,6 @@ fn safe_params(params: &Value) -> Value {
             data["input_redacted"] = json!(true);
         }
     }
-    if let Some(steps) = params.get("steps").and_then(Value::as_array) {
-        data["step_count"] = json!(steps.len());
-        data["input_redacted"] = json!(true);
-    }
     if let Some(files) = params.get("files").and_then(Value::as_array) {
         data["file_count"] = json!(files.len());
     }
@@ -679,27 +675,6 @@ fn safe_outcome(body: &ResponseBody) -> Value {
         }, "error_code": error.code}),
         ResponseBody::Ok(value) => {
             let mut data = json!({"status": if value.get("ok") == Some(&Value::Bool(false)) { "error" } else { "completed" }});
-            // Batch receipts report execution separately from transport success.
-            if value.get("request_id").is_some() && value.get("steps").is_some() {
-                let status = match value.get("status").and_then(Value::as_str) {
-                    Some("completed") if value.get("observation_error").is_none() => "completed",
-                    Some("stopped") => "error",
-                    _ => "unknown",
-                };
-                data["status"] = json!(status);
-                if let Some(steps) = value.get("steps").and_then(Value::as_array) {
-                    data["completed_steps"] = json!(
-                        steps
-                            .iter()
-                            .filter(|step| step["status"] == "completed")
-                            .count()
-                    );
-                    data["step_count"] = json!(steps.len());
-                    if steps.iter().any(|step| step["effect_state"] == "unknown") {
-                        data["status"] = json!("unknown");
-                    }
-                }
-            }
             for key in ["tab_id", "ref_count", "truncated", "bytes", "file_count"] {
                 if let Some(value) = value.get(key).filter(|v| v.is_number() || v.is_boolean()) {
                     data[key] = value.clone();
@@ -775,25 +750,6 @@ mod tests {
             .as_str()
             .unwrap()
             .into()
-    }
-
-    #[test]
-    fn batch_metadata_redacts_inputs_and_preserves_partial_outcomes() {
-        let params = safe_params(
-            &json!({"steps":[{"action":"fill","target":"@e1","value":"secret-value"}]}),
-        );
-        assert_eq!(params["step_count"], 1);
-        assert!(!params.to_string().contains("secret-value"));
-        let outcome = safe_outcome(&ResponseBody::Ok(json!({
-            "request_id":"r1","status":"stopped","steps":[
-                {"status":"completed","effect_state":"committed","result":{"value":"secret-value"}},
-                {"status":"failed","effect_state":"unknown"},
-                {"status":"not_run","effect_state":"none"}
-            ]
-        })));
-        assert_eq!(outcome["status"], "unknown");
-        assert_eq!(outcome["completed_steps"], 1);
-        assert!(!outcome.to_string().contains("secret-value"));
     }
 
     #[test]

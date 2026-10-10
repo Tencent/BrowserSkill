@@ -6,7 +6,7 @@
  */
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
-import { BATCH_PARAMETERS } from "./batch-tool";
+import { BATCH_PARAMETERS, BATCH_TIMEOUT_PARAM } from "./batch-tool";
 import { DEBUG_PARAMETERS } from "./debug-tool";
 import {
   BROWSER_PARAM,
@@ -193,11 +193,10 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_interact",
     description:
       "Interact with the active Agent Window tab. Actions: click, hover, wheel, scroll-to, focus, blur, fill, select, " +
-      "press, batch, batch-status. batch accepts observationId and steps for known interactions, stops on failure, and includes a final observation; use single actions after batch failures. batch-status reads requestId progress without replaying. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
+      "press, batch. batch requires tabId and known steps, stops on failure and observes; recover with single actions. click/hover/scroll-to/focus/blur/fill/select require target; fill also requires value; select requires " +
       "values; press requires key and may optionally focus target first. wheel requires a nonzero deltaX or deltaY and optionally accepts target; observe afterwards to check the response.",
     actions: {
       batch: "interact.batch",
-      "batch-status": "interact.batch-status",
       click: "interact.click",
       hover: "interact.hover",
       wheel: "interact.wheel",
@@ -237,7 +236,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
         description: "Horizontal wheel input in CSS pixels; defaults to 0.",
       },
       deltaY: { type: "number", description: "Vertical wheel input in CSS pixels; defaults to 0." },
-      timeoutMs: TIMEOUT_MS_PARAM,
+      timeoutMs: BATCH_TIMEOUT_PARAM,
       values: {
         type: "array",
         items: { type: "string" },

@@ -88,7 +88,7 @@ Prefer `observe` for text, controls and `@eN` refs. Navigation invalidates refs;
 large DOM changes can stale them too. Re-observe before the next interaction.
 Use refs for iframe/shadow-root targets; CSS selectors search the main document.
 
-Use refs from the current observation:
+Choose the relevant example, using a ref that actually appeared on the page:
 
 | Need | Command |
 | --- | --- |
@@ -103,11 +103,9 @@ Use refs from the current observation:
 
 - `select` uses the option's value, not its visible label.
 
-Use `snapshot` for static accessibility, `get-html` for markup, and screenshots for
-visuals. Obtain fresh refs before acting on these findings. Inspect unknown effects
-before retrying.
-
-For known actions, read [batching](references/batching.md); recover with single actions.
+Use `snapshot` for static accessibility, `get-html` for exact markup, and screenshots
+for visuals. Prefer `observe` to find ordinary controls. Obtain fresh refs before
+acting on HTML or screenshot findings. Inspect unknown effects before retrying.
 
 ## Read details only when needed
 
@@ -120,7 +118,7 @@ A task may need more than one reference as it progresses.
 | Website debugging, reproduction evidence, or request rules/replay | [Debugging](references/debugging.md) |
 | Required profile, existing user tab, multiple/background tabs, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
-| Hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
+| Batching, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |

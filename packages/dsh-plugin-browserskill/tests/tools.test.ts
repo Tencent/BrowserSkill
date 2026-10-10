@@ -124,6 +124,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.console": ["browser_inspect", "console"],
   "inspect.network": ["browser_inspect", "network"],
   "inspect.debug": ["browser_inspect", "debug"],
+  "interact.batch": ["browser_interact", "batch"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
   "interact.wheel": ["browser_interact", "wheel"],
@@ -230,7 +231,6 @@ const EXPECTED_ACTIONS = {
   browser_inspect: ["observe", "snapshot", "html", "screenshot", "console", "network", "debug"],
   browser_interact: [
     "batch",
-    "batch-status",
     "click",
     "hover",
     "wheel",
@@ -246,6 +246,17 @@ const EXPECTED_ACTIONS = {
 } as const;
 
 describe("tool registration", () => {
+  it("keeps the batch-specific schema bounded without observation or receipt parameters", () => {
+    const { tools } = setup({});
+    const properties = tools.get("browser_interact")!.parameters.properties as Record<
+      string,
+      unknown
+    >;
+    expect(Buffer.byteLength(JSON.stringify(properties.steps))).toBeLessThan(900);
+    expect(properties).not.toHaveProperty("observationId");
+    expect(properties).not.toHaveProperty("requestId");
+  });
+
   it("registers exactly six public schemas with the complete action contract", () => {
     const { tools } = setup({});
     expect([...tools.keys()].sort()).toEqual(Object.keys(EXPECTED_ACTIONS).sort());

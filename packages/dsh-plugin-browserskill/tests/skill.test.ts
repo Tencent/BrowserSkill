@@ -58,7 +58,6 @@ describe("registerBskSkill", () => {
     expect(isAbsolute(base.path)).toBe(true);
     const references = [...content.matchAll(/\]\((references\/[^)]+)\)/g)].map((match) => match[1]);
     expect([...new Set(references)].sort()).toEqual([
-      "references/batching.md",
       "references/debugging.md",
       "references/help-and-recovery.md",
       "references/interaction-details.md",

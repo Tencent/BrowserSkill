@@ -3,7 +3,6 @@
 use std::time::Duration;
 
 mod atomic_output;
-pub mod batch;
 pub mod browser_wait;
 pub mod browsers;
 pub mod business_rpc;
@@ -178,13 +177,6 @@ pub enum Command {
 
     /// Reload the current tab.
     Reload(ReloadArgs),
-
-    /// Execute a bounded sequence of known interactions on one observed page.
-    Batch(batch::BatchArgs),
-
-    /// Read a batch receipt without repeating any actions.
-    #[command(name = "batch-status")]
-    BatchStatus(batch::BatchStatusArgs),
 
     /// Click a snapshot ref or CSS selector.
     Click(ClickArgs),

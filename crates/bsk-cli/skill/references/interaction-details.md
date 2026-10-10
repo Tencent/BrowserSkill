@@ -1,5 +1,32 @@
 # Interaction details
 
+## Known actions in one call
+
+When all targets and values are known from the current observation, combine
+single commands with `&&` in one shell tool call. Each command keeps its normal
+validation, cancellation and audit trail; the first failure stops the chain.
+Use the actual session, observed tab ID and refs (these are only examples):
+
+```sh
+bsk fill @e1 --session "$BSK_SESSION" --tab-id "$BSK_TAB" --value "Acme" &&
+bsk fill @e2 --session "$BSK_SESSION" --tab-id "$BSK_TAB" --value "Example contact" &&
+bsk select @e3 --session "$BSK_SESSION" --tab-id "$BSK_TAB" --value "software" &&
+bsk click @e4 --session "$BSK_SESSION" --tab-id "$BSK_TAB" &&
+bsk observe --session "$BSK_SESSION" --tab-id "$BSK_TAB" --json
+```
+
+Quote shell arguments correctly. No plan file or operation history is required.
+End the chain at a navigation, a new decision, or anything that needs another
+observation. Never parallelize commands against the same session. `observe`
+is an immediate read, not a readiness wait: if submission is still loading,
+observe again or use the existing wait tools for the expected transition.
+
+On failure, keep completed work, observe the page and continue with individual
+commands. A timeout or lost connection may have had an effect; do not replay
+completed or uncertain operations. After user cancellation, stop until resumed.
+There is no rollback, deduplication or whole-chain transaction.
+
+
 - Hover markers such as `[hover first: Shoes | Bags]`, `[has-submenu]`, or
   `[expanded]` identify triggers. Hover the trigger, observe, then use the revealed
   item's ref. Listed labels are not refs; do not click the trigger unless its own

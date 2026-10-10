@@ -1,128 +1,236 @@
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import type { ToolDefinition, ToolRunContext } from "@deepseek-ai/dsh-tools";
-import { describe, expect, it, vi } from "vitest";
-import { registerBatchTools } from "../src/batch-tool";
-import type { PhaseOneRuntime } from "../src/phase-one-runtime";
-import { BskError, parseBskJson } from "../src/runner";
-import type { ToolDeps } from "../src/tools";
+import type { ToolRunContext } from "@deepseek-ai/dsh-tools";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { KeyedExecutor } from "../src/queue";
+import type { BskRunOptions, BskRunResult } from "../src/runner";
+import { SessionRegistry } from "../src/sessions";
+import { createBrowserOperationDefinitions, type ToolDeps } from "../src/tools";
 
-function fixture(run: PhaseOneRuntime["run"]) {
-  const definitions = new Map<string, ToolDefinition>();
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+const ok = (value: unknown = { tab_id: 7, ok: true }): BskRunResult => ({
+  code: 0,
+  stdout: JSON.stringify(value),
+  stderr: "",
+  aborted: false,
+  timedOut: false,
+});
+const fail = (code: string, effect = "unknown"): BskRunResult => ({
+  ...ok({ code, message: "action stopped", data: { effect_state: effect } }),
+  code: 1,
+});
+function fixture(run = async (_args: string[], _options?: BskRunOptions) => ok()) {
+  const registry = new SessionRegistry(5);
+  registry.completeStart({ sessionId: "owned", startedAtMs: Date.now() });
+  const release = vi.fn();
   const deps = {
-    registry: { resolve: vi.fn(() => "owned-session"), assertUsable: vi.fn() },
+    registry,
+    queue: new KeyedExecutor(),
+    runner: { run: vi.fn(run) },
+    observation: {
+      acquireForeground: vi.fn(() => release),
+      beginAction: vi.fn(),
+      endAction: vi.fn(),
+    },
     config: { defaultTimeoutMs: 120_000 },
   } as unknown as ToolDeps;
-  const runtime = {
-    run,
-    commandLine: () => "bsk",
-    presentTerminalResult: () => undefined,
-  } as PhaseOneRuntime;
-  registerBatchTools(deps, (definition) => definitions.set(definition.name, definition), runtime);
-  const exec = { signal: new AbortController().signal } as ToolRunContext;
-  return { definitions, deps, exec };
+  const definitions = new Map(
+    createBrowserOperationDefinitions(deps).map((tool) => [tool.name, tool]),
+  );
+  const execute = (name: string, args: object, signal = new AbortController().signal) =>
+    definitions.get(name)!.execute(args as never, { signal } as ToolRunContext);
+  return { deps, release, execute };
 }
+const plan = {
+  session: "owned",
+  tabId: 7,
+  steps: [
+    { action: "fill", target: "@e1", value: "private input" },
+    { action: "click", target: "@e2" },
+  ],
+};
 
-describe("batch agent interface", () => {
-  it("sends one private plan, retains partial results, and gives single-action recovery instructions", async () => {
-    let file = "";
-    const receipt = {
-      request_id: "r1",
+afterEach(() => vi.useRealTimers());
+
+describe("known actions through existing commands", () => {
+  it("pins the observed tab and preserves per-action instrumentation", async () => {
+    const f = fixture();
+    const result = await f.execute("interact.batch", plan);
+    expect(result).toMatchObject({
+      status: "completed",
+      steps: [
+        { status: "completed", effect_state: "committed" },
+        { status: "completed", effect_state: "committed" },
+      ],
+    });
+    const calls = vi.mocked(f.deps.runner.run).mock.calls;
+    expect(calls.map(([args]) => args[0])).toEqual(["fill", "click", "observe"]);
+    for (const [args, options] of calls) {
+      expect(args).toContain("--tab-id");
+      expect(args[args.indexOf("--tab-id") + 1]).toBe("7");
+      expect(options?.tag).toBe("owned");
+    }
+    expect(f.deps.observation.acquireForeground).toHaveBeenCalledTimes(1);
+    expect(f.deps.observation.beginAction).toHaveBeenCalledTimes(3);
+    expect(f.deps.observation.endAction).toHaveBeenCalledTimes(3);
+    expect(f.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { ...plan, steps: [] },
+    { ...plan, steps: Array(21).fill(plan.steps[0]) },
+    { ...plan, tabId: undefined },
+    { ...plan, timeoutMs: 0 },
+    { ...plan, steps: [plan.steps[0], { action: "click", target: "#selector" }] },
+    { ...plan, steps: [plan.steps[0], { action: "evaluate", target: "@e2" }] },
+    { ...plan, steps: [plan.steps[0], { action: "click", target: "@e2", value: "ignored?" }] },
+    { ...plan, steps: [plan.steps[0], { action: "select", target: "@e2", values: [] }] },
+    { ...plan, steps: [{ ...plan.steps[0], value: "x".repeat(65_536) }] },
+  ])("rejects the whole invalid plan before starting commands", async (input) => {
+    const f = fixture();
+    await expect(f.execute("interact.batch", input)).rejects.toThrow();
+    expect(f.deps.runner.run).not.toHaveBeenCalled();
+  });
+
+  it("preserves partial results, never replays and allows single-action recovery", async () => {
+    let attempts = 0;
+    const f = fixture(async (args) =>
+      args[0] === "click" && attempts++ === 0 ? fail("not_found", "none") : ok(),
+    );
+    const result = await f.execute("interact.batch", {
+      ...plan,
+      steps: [...plan.steps, plan.steps[0]],
+    });
+    expect(result).toMatchObject({
       status: "stopped",
       steps: [
-        { index: 0, action: "fill", status: "completed", effect_state: "committed" },
-        { index: 1, action: "click", status: "not_run", effect_state: "none" },
+        { status: "completed", effect_state: "committed" },
+        { status: "failed", effect_state: "none" },
+        { status: "not_run", effect_state: "none" },
       ],
-      observation: { text: "new page refs", observation_id: "new" },
-    };
-    const run = vi.fn(async (_exec, args: string[]) => {
-      file = args[args.indexOf("--file") + 1];
-      expect(JSON.parse(await readFile(file, "utf8"))).toEqual({
-        observation_id: "old",
-        steps: [
-          { action: "fill", target: "@e1", value: "private input", clear_before: false },
-          { action: "click", target: "@e2" },
-        ],
-      });
-      expect(args.join(" ")).not.toContain("private input");
-      throw new BskError("batch stopped", { data: { batch: receipt } });
     });
-    const f = fixture(run);
-    const result = await f.definitions.get("interact.batch")!.execute(
-      {
-        observationId: "old",
-        requestId: "r1",
-        steps: [
-          { action: "fill", target: "@e1", value: "private input", noClear: true },
-          { action: "click", target: "@e2" },
-        ],
-      },
-      f.exec,
-    );
-    expect(result).toMatchObject(receipt);
     expect(JSON.stringify(result)).toContain("single actions");
-    expect(run).toHaveBeenCalledTimes(1);
-    expect(existsSync(file)).toBe(false);
+    expect(vi.mocked(f.deps.runner.run).mock.calls.map(([args]) => args[0])).toEqual([
+      "fill",
+      "click",
+    ]);
+    await f.execute("inspect.observe", { session: "owned", tabId: 7 });
+    await f.execute("interact.click", { session: "owned", tabId: 7, target: "@e2" });
+    expect(attempts).toBe(2);
   });
 
-  it("does not attempt batches on observations from older extensions", async () => {
-    const run = vi.fn();
-    const f = fixture(run);
-    const result = await f.definitions
-      .get("interact.batch")!
-      .execute({ steps: [{ action: "click", target: "@e1" }] }, f.exec);
-    expect(result).toMatchObject({ status: "not_started" });
-    expect(JSON.stringify(result)).toContain("single actions");
-    expect(run).not.toHaveBeenCalled();
+  it("does not start another step or observation after cancellation", async () => {
+    const controller = new AbortController();
+    const f = fixture(async () => {
+      controller.abort();
+      return { ...ok(), code: null, aborted: true };
+    });
+    const result = await f.execute("interact.batch", plan, controller.signal);
+    expect(result).toMatchObject({
+      status: "stopped",
+      steps: [{ status: "failed", effect_state: "unknown" }, { status: "not_run" }],
+    });
+    expect(f.deps.runner.run).toHaveBeenCalledTimes(1);
+    expect(f.release).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps a request id after transport failure and never retries the batch", async () => {
-    const run = vi.fn().mockRejectedValue(new BskError("transport disconnected"));
-    const f = fixture(run);
-    const result = await f.definitions
-      .get("interact.batch")!
-      .execute(
-        { observationId: "o1", requestId: "r1", steps: [{ action: "click", target: "@e1" }] },
-        f.exec,
-      );
-    expect(result).toMatchObject({ status: "unconfirmed", request_id: "r1" });
-    expect(JSON.stringify(result)).toContain("batch-status");
-    expect(run).toHaveBeenCalledTimes(1);
+  it("leaves transport loss and UI interruption uncertain without retrying", async () => {
+    const f = fixture(async () => ({ ...ok(), code: null }));
+    const result = await f.execute("interact.batch", plan);
+    expect(result).toMatchObject({
+      status: "stopped",
+      steps: [{ effect_state: "unknown" }, { status: "not_run" }],
+    });
+    expect(f.deps.runner.run).toHaveBeenCalledTimes(1);
   });
 
-  it("queries status without joining the foreground action queue", async () => {
-    const run = vi.fn().mockResolvedValue({ status: "running", steps: [] });
-    const f = fixture(run);
-    await f.definitions.get("interact.batch-status")!.execute({ requestId: "r1" }, f.exec);
-    expect(run).toHaveBeenCalledWith(
-      f.exec,
-      ["batch-status", "--session", "owned-session", "--request-id", "r1"],
-      "batch-status",
+  it("holds the same queue across steps and releases it after failure", async () => {
+    const first = deferred();
+    const began = deferred();
+    const f = fixture(async (args) => {
+      if (args[0] === "fill") {
+        began.resolve();
+        await first.promise;
+        return fail("not_found");
+      }
+      return ok({ text: "fresh refs", ref_count: 2, tab_id: 7 });
+    });
+    const batch = f.execute("interact.batch", plan);
+    await began.promise;
+    const observe = f.execute("inspect.observe", { session: "owned" });
+    await Promise.resolve();
+    expect(f.deps.runner.run).toHaveBeenCalledTimes(1);
+    first.resolve();
+    await Promise.all([batch, observe]);
+    expect(vi.mocked(f.deps.runner.run).mock.calls.map(([args]) => args[0])).toEqual([
+      "fill",
+      "observe",
+    ]);
+  });
+
+  it("uses one total budget across commands and waits for cancellation settlement", async () => {
+    vi.useFakeTimers();
+    const f = fixture(
+      async (_args, options) =>
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve(ok()), 7);
+          options?.signal?.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              setTimeout(() => resolve({ ...ok(), code: null, aborted: true }), 2);
+            },
+            { once: true },
+          );
+        }),
     );
-    expect(f.deps.registry.assertUsable).toHaveBeenCalled();
+    const promise = f.execute("interact.batch", { ...plan, timeoutMs: 10 });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(f.release).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
+    expect(await promise).toMatchObject({
+      status: "stopped",
+      steps: [{ status: "completed" }, { status: "failed" }],
+    });
+    expect(f.deps.runner.run).toHaveBeenCalledTimes(2);
+    expect(f.release).toHaveBeenCalledTimes(1);
   });
 
-  it("the CLI parser retains structured recovery evidence on a nonzero exit", () => {
-    const receipt = { status: "stopped", steps: [{ index: 0, status: "completed" }] };
-    try {
-      parseBskJson(
-        {
-          code: 1,
-          stdout: JSON.stringify({
-            code: "not_found",
-            message: "stopped",
-            data: { batch: receipt },
-          }),
-          stderr: "",
-          aborted: false,
-          timedOut: false,
-        },
-        "batch",
-      );
-      throw new Error("expected failure");
-    } catch (error) {
-      expect(error).toBeInstanceOf(BskError);
-      expect((error as BskError).data).toEqual({ batch: receipt });
-    }
+  it("maps optional parameters to existing CLI syntax without a plan file", async () => {
+    const f = fixture();
+    await f.execute("interact.batch", {
+      ...plan,
+      steps: [
+        { action: "fill", target: "@e1", value: "", noClear: true },
+        { action: "select", target: "@e2", values: ["one", "two"] },
+        { action: "press", target: "@e1", key: "Enter", modifiers: ["shift"], holdMs: 4 },
+        { action: "click", target: "@e2", button: "right", clickCount: 2 },
+      ],
+    });
+    const args = vi.mocked(f.deps.runner.run).mock.calls.map(([args]) => args);
+    expect(args[0].slice(0, 5)).toEqual(["fill", "@e1", "--value", "", "--no-clear"]);
+    expect(args[1].slice(0, 6)).toEqual(["select", "@e2", "--value", "one", "--value", "two"]);
+    expect(args[2].slice(0, 8)).toEqual([
+      "press",
+      "Enter",
+      "--ref",
+      "@e1",
+      "--hold-ms",
+      "4",
+      "--modifiers",
+      "shift",
+    ]);
+    expect(args[3].slice(0, 6)).toEqual([
+      "click",
+      "@e2",
+      "--button",
+      "right",
+      "--click-count",
+      "2",
+    ]);
   });
 });

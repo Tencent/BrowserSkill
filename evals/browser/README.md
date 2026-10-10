@@ -6,6 +6,9 @@ data-driven and discovered automatically. Adding a case does not require editing
 
 [中文说明](README.zh-CN.md)
 
+[Known-action batching measurements and reproduction](benchmarks/known-actions.md) compare
+single commands, a shell chain and harness batching on the real local browser stack.
+
 ## Design goals
 
 - Agent-neutral: prompts describe observable page goals so the same cases can run through different

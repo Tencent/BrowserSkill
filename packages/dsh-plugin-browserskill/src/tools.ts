@@ -89,8 +89,36 @@ async function runBsk(
   runnerTimeoutMs?: number,
   initializing = false,
 ): Promise<unknown> {
-  const releaseForeground =
-    observeSession !== undefined ? deps.observation.acquireForeground(observeSession) : undefined;
+  const run = () =>
+    runBskNow(deps, exec, args, label, observeSession, runnerTimeoutMs, initializing);
+  if (observeSession === undefined) return run();
+  return inSessionQueue(deps, exec, observeSession, run);
+}
+
+async function inSessionQueue<T>(
+  deps: ToolDeps,
+  exec: ToolRunContext,
+  session: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  const release = deps.observation.acquireForeground(session);
+  try {
+    return await deps.queue.run(session, run, exec.signal);
+  } finally {
+    release();
+  }
+}
+
+/** Called only after admission to the session queue (or for unscoped commands). */
+async function runBskNow(
+  deps: ToolDeps,
+  exec: ToolRunContext,
+  args: string[],
+  label: string,
+  observeSession?: string,
+  runnerTimeoutMs?: number,
+  initializing = false,
+): Promise<unknown> {
   // beginAction must fire only when the task actually starts inside the
   // per-session queue — marking it while still queued would overwrite the
   // in-flight action's label (and flash it idle on a queued abort).
@@ -118,10 +146,7 @@ async function runBsk(
           });
         }, exec.signal);
       };
-      result =
-        observeSession !== undefined
-          ? await deps.queue.run(observeSession, runOnce, exec.signal)
-          : await runOnce();
+      result = await runOnce();
     } catch (error) {
       if (isCommandNotFound(error)) {
         throw new Error(bskInstallMessage(deps.config.bskPath));
@@ -141,7 +166,6 @@ async function runBsk(
     if (observeSession !== undefined && began) {
       deps.observation.endAction(observeSession, actionError);
     }
-    releaseForeground?.();
   }
 }
 
@@ -546,20 +570,18 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
               refCount: { type: "integer", required: true },
               truncated: { type: "boolean", required: true },
               nextCursor: { type: "string" },
-              observationId: { type: "string" },
             },
           },
           render: (_args, value) => [
             {
               type: "text",
               text:
-                (value.observationId ? `observationId=${value.observationId}\n` : "") +
-                (value.text.length > 0
+                value.text.length > 0
                   ? value.text +
                     (value.truncated && !value.nextCursor
                       ? "\n(truncated — re-run with looser caps)"
                       : "")
-                  : "(empty observation — page may still be loading)"),
+                  : "(empty observation — page may still be loading)",
             },
           ],
         },
@@ -577,7 +599,6 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             tab_id: number;
             truncated?: boolean;
             next_cursor?: string;
-            observation_id?: string;
           };
           return {
             session: sessionId,
@@ -586,7 +607,6 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             refCount: reply.ref_count,
             truncated: reply.truncated ?? false,
             ...(reply.next_cursor ? { nextCursor: reply.next_cursor } : {}),
-            ...(reply.observation_id ? { observationId: reply.observation_id } : {}),
           };
         },
         presentCall: (args) => ({
@@ -1049,6 +1069,10 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
     }),
   );
   registerPhaseOneTools(deps, register, {
+    sequence: (exec, session, run) =>
+      inSessionQueue(deps, exec, session, () =>
+        run((args, label, timeout) => runBskNow(deps, exec, args, label, session, timeout)),
+      ),
     run: (exec, args, label, observeSession, runnerTimeoutMs) =>
       runBsk(deps, exec, args, label, observeSession, runnerTimeoutMs),
     commandLine: (args) => cmdline(deps, args),

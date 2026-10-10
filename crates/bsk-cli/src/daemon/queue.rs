@@ -737,16 +737,6 @@ async fn forward_one(
     let response = match with_link_contract(&job.method, waited) {
         WaitOutcome::Response(resp) => resp,
         WaitOutcome::CancelledAfterResponse(resp) => {
-            if job.method == Method::ToolBatch
-                && let ResponseBody::Ok(value) = &resp.body
-            {
-                let mut error = cancelled_error(
-                    job.inflight.as_deref(),
-                    "batch cancelled after extension cleanup; inspect its receipt before recovery",
-                );
-                error.data = Some(serde_json::json!({ "batch": value }));
-                return Err(error);
-            }
             if matches!(job.method, Method::ToolSessionStop | Method::ToolTabBorrow)
                 && let ResponseBody::Ok(value) = &resp.body
             {
@@ -822,10 +812,7 @@ async fn forward_one(
             ResponseBody::Ok(value)
                 if matches!(
                     job.method,
-                    Method::ToolSessionStop
-                        | Method::ToolTabBorrow
-                        | Method::ToolRequestHelp
-                        | Method::ToolBatch
+                    Method::ToolSessionStop | Method::ToolTabBorrow | Method::ToolRequestHelp
                 ) || is_effect_aware_transfer(&job.method) =>
             {
                 // Preserve a completed operation or a settled human-help
@@ -1064,10 +1051,7 @@ fn input_effect_data(response: Option<&ResponseBody>) -> Value {
 fn waits_for_deadline_cleanup(method: &Method) -> bool {
     matches!(
         method,
-        Method::ToolScreenshotFullPage
-            | Method::ToolTabBorrow
-            | Method::ToolRequestHelp
-            | Method::ToolBatch
+        Method::ToolScreenshotFullPage | Method::ToolTabBorrow | Method::ToolRequestHelp
     ) || is_native_input(method)
         || is_effect_aware_transfer(method)
 }
