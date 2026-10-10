@@ -25,6 +25,7 @@ pub mod logs;
 pub mod navigate;
 pub mod network;
 pub mod observe;
+pub mod preflight;
 pub mod record;
 pub mod record_recovery;
 pub mod record_state;
@@ -57,6 +58,7 @@ use crate::cli::interaction::{
 use crate::cli::navigate::{NavigateCommand, NavigateHistoryArgs, ReloadArgs};
 use crate::cli::network::NetworkArgs;
 use crate::cli::observe::ObserveArgs;
+use crate::cli::preflight::PreflightArgs;
 use crate::cli::record::RecordCmd;
 use crate::cli::screenshot::ScreenshotArgs;
 use crate::cli::scroll::ScrollToArgs;
@@ -156,6 +158,10 @@ pub enum Command {
 
     /// Read buffered network responses / failures.
     Network(NetworkArgs),
+
+    /// Check for cross-task browser conflicts before starting another
+    /// parallel automation in the same browser.
+    Preflight(PreflightArgs),
 
     /// Opt-in website debugging: requests, page context, and recording export.
     Debug(Box<debug::DebugArgs>),
