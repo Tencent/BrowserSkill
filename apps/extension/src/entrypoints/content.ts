@@ -88,7 +88,11 @@ export default defineContentScript({
     const videoOverlay = new VideoOverlayGate(
       async (action) => {
         const response = await chrome.runtime.sendMessage({ type: VIDEO_OVERLAY, action });
-        if (!response || response.error)
+        if (
+          !response ||
+          response.error ||
+          (response.recording_id !== null && typeof response.recording_id !== "string")
+        )
           throw new Error(response?.error ?? "Video overlay unavailable");
         return response;
       },
@@ -256,7 +260,10 @@ export default defineContentScript({
     }
 
     function receiveOverlayState(state: OverlayAgentStateMessage): void {
-      if (overlayVersions.admit(state)) applyOverlayState(state);
+      if (overlayVersions.admit(state)) {
+        recoverVideoOverlay();
+        applyOverlayState(state);
+      }
     }
 
     function applyOverlayState(state: OverlayAgentStateMessage): void {
@@ -335,6 +342,7 @@ export default defineContentScript({
       }
 
       if (isRecordStartMessage(message)) {
+        recoverVideoOverlay();
         activeRecordRequestId = message.requestId;
         overlays.setAgentRecordRequest({
           id: message.requestId,
@@ -400,6 +408,7 @@ export default defineContentScript({
       }
 
       if (isHelpRequestMessage(message)) {
+        recoverVideoOverlay();
         const helpMsg = message as HelpRequestMessage;
         const previousHelp = mountHelpRequest(helpMsg);
         if (previousHelp && previousHelp.id !== helpMsg.requestId) {
@@ -411,6 +420,7 @@ export default defineContentScript({
       }
 
       if (message.type === "borrow-request") {
+        recoverVideoOverlay();
         let responded = false;
         const respond = (allowed: boolean, timedOut = false) => {
           if (responded) return;
@@ -533,17 +543,34 @@ export default defineContentScript({
       }
     }
 
+    function refreshVideoOverlay(): void {
+      // Prerendered documents are not the captured page. Discover their state
+      // on activation, when the bridge can validate the active document.
+      if ((document as Document & { prerendering?: boolean }).prerendering) return;
+      void videoOverlay
+        .initialize()
+        .then(() => videoOverlay.clean())
+        .catch((error) => {
+          console.debug(
+            "[bsk overlay] video discovery failed; will retry on activation or request",
+            error,
+          );
+        });
+    }
+
+    function recoverVideoOverlay(): void {
+      if (videoOverlay.needsDiscovery()) refreshVideoOverlay();
+    }
+
+    const onPageActivated = () => {
+      refreshVideoOverlay();
+      void requestOverlayState();
+    };
     const onPageShow = (event: PageTransitionEvent) => {
-      if (event.persisted) {
-        void videoOverlay
-          .initialize()
-          .then(() => {
-            renderAll();
-            return videoOverlay.clean();
-          })
-          .catch(() => {});
-        void requestOverlayState();
-      }
+      if (event.persisted) onPageActivated();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") recoverVideoOverlay();
     };
 
     // Live-apply popup toggles of the control-hints preference.
@@ -562,13 +589,12 @@ export default defineContentScript({
     ui.mount();
     chrome.runtime.onMessage.addListener(onMessage);
     // Start the handshake after mounting/listening; it never delays page setup.
-    void videoOverlay
-      .initialize()
-      .then(() => videoOverlay.clean())
-      .catch(() => {});
+    refreshVideoOverlay();
     void requestOverlayState();
 
     window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("prerenderingchange", onPageActivated);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     const hostObserver = new MutationObserver(() => {
       const connected = overlayHost?.isConnected ?? false;
@@ -592,11 +618,14 @@ export default defineContentScript({
     hostObserver.observe(document.documentElement, { childList: true, subtree: false });
 
     ctx.onInvalidated(() => {
+      videoOverlay.dispose();
       inputPassthrough.reset();
       hostObserver.disconnect();
       chrome.runtime.onMessage.removeListener(onMessage);
       chrome.storage.onChanged.removeListener(onStorageChange);
       window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("prerenderingchange", onPageActivated);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       activeRecordRequestId = null;
     });
   },

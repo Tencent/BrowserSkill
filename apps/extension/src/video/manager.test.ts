@@ -299,6 +299,18 @@ describe("video lifetime and access", () => {
     });
   });
 
+  it("does not turn repeated discovery for the current document into navigation", async () => {
+    const { video, start, request } = await setup();
+    const grant = await start();
+    await video.queryOverlay(7, "document");
+    await video.suspend(7, "clean", "document");
+    request.mockClear();
+    expect(await video.queryOverlay(7, "document")).toBe(grant.recording.recording_id);
+    expect(request).not.toHaveBeenCalled();
+    await video.suspend(7, "clean", "document");
+    expect((await video.stop(grant.recording.recording_id)).completeness).toBe("complete");
+  });
+
   it("rejects late navigation recovery and old document acknowledgements", async () => {
     const { video, start, request, overlay } = await setup();
     const grant = await start();

@@ -480,12 +480,18 @@ export class VideoManager {
 
   async queryOverlay(tab: number, documentId?: string): Promise<string | null> {
     const active = this.active;
+    if (active?.value.tab_id === tab && active.stopReason) return null;
     // Initial content-script discovery may overlap start's own paint handshake.
     // It is not a navigation; onBeforeNavigate separately cancels a racing start.
     if (active?.value.tab_id === tab && active.value.state === "starting") {
       active.documentId = documentId;
       return active.value.recording_id;
     }
+    // Discovery retries for the current document are reads, not a second
+    // navigation. Otherwise its own clean acknowledgement looks like an old
+    // document trying to resume the capture and leaves the recording suspended.
+    if (active?.value.tab_id === tab && documentId && active.documentId === documentId)
+      return active.value.recording_id;
     return this.suspend(tab, "navigation", documentId);
   }
 

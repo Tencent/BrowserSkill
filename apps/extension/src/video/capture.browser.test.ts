@@ -75,6 +75,12 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           response.writeHead(200, { "Content-Type": "application/pdf" }).end(bluePdf());
           return;
         }
+        if (request.url === "/prerender-start") {
+          response.setHeader("Content-Type", "text/html");
+          response.end(`<!doctype html><a href="/prerendered">Activate</a>
+            <script type="speculationrules">{"prerender":[{"source":"list","urls":["/prerendered"]}]}</script>`);
+          return;
+        }
 
         response.setHeader("Content-Type", "text/html");
         response.end(
@@ -132,17 +138,24 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
           contentPath,
           `(() => {
           const start = () => { ${content}\n };
-          if (location.pathname !== '/late-overlay') { start(); return; }
+          const route=location.pathname;
+          if (!['/late-overlay','/query-retry','/query-recover','/prerendered'].includes(route)) { start(); return; }
+          document.documentElement.dataset.videoPrerendered=String(document.prerendering);
+          let attempts=0;
           const send = chrome.runtime.sendMessage.bind(chrome.runtime);
           chrome.runtime.sendMessage = (...args) => {
             if (args[0]?.type !== 'bsk/video-overlay' || args[0]?.action !== 'query') return send(...args);
+            document.documentElement.dataset.videoQueryAttempts=String(++attempts);
+            const failures=route==='/query-recover'?3:route==='/prerendered'?0:1;
+            if(attempts<=failures)return Promise.reject(new Error('Transient video discovery failure'));
+            if(route!=='/late-overlay')return send(...args);
             document.documentElement.dataset.videoQuery = 'pending';
             return new Promise(resolve => setTimeout(resolve, 1500)).then(() => send(...args)).then(result => {
               document.documentElement.dataset.videoQuery = 'ready';
               return result;
             });
           };
-          setTimeout(start, 800);
+          if(route==='/late-overlay')setTimeout(start, 800);else start();
         })();`,
         );
         const { withChrome } = await import(
@@ -151,12 +164,30 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
             import.meta.url,
           ).href
         );
+        const attachedPages: { parent: string; session: string; prerender: boolean }[] = [];
         await withChrome(
           {
             executable: process.env.BSK_VIDEO_CHROME,
             extensionPath: extension,
             deviceScale: 1,
             zoom: 1,
+            // Prerender admission otherwise depends on the host's network-quality estimate.
+            extraArgs: ["--force-effective-connection-type=4G"],
+            onEvent: (event: {
+              method: string;
+              sessionId: string;
+              params: { sessionId: string; targetInfo: { type: string; subtype?: string } };
+            }) => {
+              if (
+                event.method === "Target.attachedToTarget" &&
+                event.params.targetInfo.type === "page"
+              )
+                attachedPages.push({
+                  parent: event.sessionId,
+                  session: event.params.sessionId,
+                  prerender: event.params.targetInfo.subtype === "prerender",
+                });
+            },
           },
           async (send: Send) => {
             await expect
@@ -543,6 +574,152 @@ describe.skipIf(!process.env.BSK_VIDEO_CHROME || !process.env.BSK_VIDEO_BSK)(
                 ).catch(() => {});
               await cli("session", "stop", task.session_id);
             }
+
+            // Ordinary, non-recorded tabs must recover their real UI after
+            // transient/exhausted discovery, without any video-state push.
+            const pageScript = async <T>(tabId: number, source: string): Promise<T> => {
+              const results = await evaluate<{ result: T }[]>(
+                workerSession.sessionId,
+                `chrome.scripting.executeScript({target:{tabId:${tabId}},func:()=>{${source}}})`,
+              );
+              return results[0].result;
+            };
+            const shadowScript = `const root=chrome.dom.openOrClosedShadowRoot(document.querySelector('browser-skill-overlay'));`;
+            const checkInteractiveOverlays = async (tabId: number) => {
+              await evaluate(
+                workerSession.sessionId,
+                `void chrome.tabs.sendMessage(${tabId},{type:'borrow-request',requestId:'recovery-borrow',isActiveTab:true,tabTitle:'Recovery test',timeoutMs:10000}).catch(()=>{});true`,
+              );
+              await expect
+                .poll(() =>
+                  pageScript(
+                    tabId,
+                    `${shadowScript}return !!root?.querySelector('[data-slot=borrow-confirmation-modal]');`,
+                  ),
+                )
+                .toBe(true);
+              await pageScript(
+                tabId,
+                `${shadowScript}root.querySelector('[data-slot=borrow-confirmation-deny-button]').click();`,
+              );
+              await evaluate(
+                workerSession.sessionId,
+                `chrome.tabs.sendMessage(${tabId},{type:'bsk-help-request',requestId:'recovery-help',prompt:'Confirm this step',selectors:[],timeoutMs:10000})`,
+              );
+              await expect
+                .poll(() =>
+                  pageScript(
+                    tabId,
+                    `${shadowScript}return !!root?.querySelector('[data-slot=help-request-banner]');`,
+                  ),
+                )
+                .toBe(true);
+              await evaluate(
+                workerSession.sessionId,
+                `chrome.tabs.sendMessage(${tabId},{type:'bsk-help-cancel',requestId:'recovery-help'})`,
+              );
+            };
+            for (const [route, attempts] of [
+              ["query-retry", 2],
+              ["query-recover", 3],
+            ] as const) {
+              const tab = await evaluate<{ id: number }>(
+                workerSession.sessionId,
+                `chrome.tabs.create({url:'http://127.0.0.1:${address.port}/${route}',active:true})`,
+              );
+              await expect
+                .poll(
+                  () =>
+                    pageScript(
+                      tab.id,
+                      "return Number(document.documentElement.dataset.videoQueryAttempts);",
+                    ),
+                  { timeout: 10_000 },
+                )
+                .toBe(attempts);
+              await checkInteractiveOverlays(tab.id);
+              await evaluate(workerSession.sessionId, `chrome.tabs.remove(${tab.id})`);
+            }
+
+            // Exercise actual Speculation Rules activation; pageshow.persisted
+            // is not involved, and the prerendered main frame has a nonzero ID.
+            const prerenderTab = await evaluate<{ id: number }>(
+              workerSession.sessionId,
+              "chrome.tabs.create({url:'about:blank#video-prerender',active:true})",
+            );
+            const targets = await send<{ targetInfos: { targetId: string; url: string }[] }>(
+              "Target.getTargets",
+              { filter: [{ type: "tab", exclude: false }] },
+            );
+            const prerenderTarget = targets.targetInfos.find((target) =>
+              target.url.endsWith("#video-prerender"),
+            )!;
+            const prerenderSession = await send<{ sessionId: string }>("Target.attachToTarget", {
+              targetId: prerenderTarget.targetId,
+              flatten: true,
+            });
+            // A legacy page-target session disables prerender. Attach through
+            // the tab target so this fixture permits document replacement.
+            await send(
+              "Target.setAutoAttach",
+              { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+              prerenderSession.sessionId,
+            );
+            const prerenderPage = attachedPages.find(
+              (page) => page.parent === prerenderSession.sessionId,
+            )!;
+            await send("Page.setPrerenderingAllowed", { isAllowed: true }, prerenderPage.session);
+            await evaluate(
+              workerSession.sessionId,
+              `chrome.tabs.update(${prerenderTab.id},{url:'http://127.0.0.1:${address.port}/prerender-start'})`,
+            );
+            type PrerenderFrame = { frameId: number; frameType: string; documentId: string };
+            const prerenderFrame = () =>
+              evaluate<PrerenderFrame | undefined>(
+                workerSession.sessionId,
+                `chrome.webNavigation.getAllFrames({tabId:${prerenderTab.id}}).then(frames=>frames.find(frame=>frame.documentLifecycle==='prerender'&&frame.url.endsWith('/prerendered')))`,
+              );
+            await expect
+              .poll(prerenderFrame, { timeout: 15_000 })
+              .toMatchObject({ frameType: "outermost_frame" });
+            const prerender = (await prerenderFrame())!;
+            expect(prerender.frameType).toBe("outermost_frame");
+            expect(prerender.frameId).toBeGreaterThan(0);
+            const pendingPage = attachedPages.find(
+              (page) => page.parent === prerenderSession.sessionId && page.prerender,
+            )!;
+            await expect
+              .poll(() =>
+                evaluate(
+                  pendingPage.session,
+                  "({prerendering:document.prerendering,injected:document.documentElement.dataset.videoPrerendered,queries:Number(document.documentElement.dataset.videoQueryAttempts||0)})",
+                ),
+              )
+              .toEqual({ prerendering: true, injected: "true", queries: 0 });
+            await pageScript(prerenderTab.id, "document.querySelector('a').click();");
+            await expect
+              .poll(
+                () =>
+                  pageScript<number>(
+                    prerenderTab.id,
+                    "return performance.getEntriesByType('navigation')[0].activationStart;",
+                  ),
+                { timeout: 10_000 },
+              )
+              .toBeGreaterThan(0);
+            await expect
+              .poll(
+                () =>
+                  pageScript<number>(
+                    prerenderTab.id,
+                    "return Number(document.documentElement.dataset.videoQueryAttempts);",
+                  ),
+                { timeout: 10_000 },
+              )
+              .toBeGreaterThan(0);
+            await checkInteractiveOverlays(prerenderTab.id);
+            await send("Target.detachFromTarget", { sessionId: prerenderSession.sessionId });
+            await evaluate(workerSession.sessionId, `chrome.tabs.remove(${prerenderTab.id})`);
 
             // The packaged DSH tool surface records before the first task
             // navigation and exports after its owned session is gone.

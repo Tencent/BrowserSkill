@@ -99,6 +99,15 @@ Content initializes the lease asynchronously after mounting and registering its
 listeners, so ordinary page setup does not wait for a video request. Until that
 state is known, control and interactive overlays stay hidden. This also covers a
 navigation completing before the new document's message listener is registered.
+Discovery makes at most three attempts, with a three-second deadline per reply.
+After those attempts fail, a foreground transition or a new control, borrow,
+help, or action-recording request can restart discovery. Healthy pages do not
+poll. Prerendered documents wait for activation, and restored documents refresh
+their state. The bridge resolves the sender by document ID and requires an active
+outermost frame, rather than assuming every top-level sender has frame ID zero.
+Background pushes cancel pending retries; late replies and disposed documents
+cannot change the gate. A failed query never grants permission to expose controls
+in an active recording.
 The start handshake hides controls before the first screenshot. Interactive
 confirmation/help overlays wait until frame intake closes and the worker switches
 to a localized user-confirmation slate. Clean rendering is acknowledged before
@@ -150,7 +159,11 @@ replace an existing destination or expose a partially written final file.
 Unit coverage includes timeline bounds, fragment salvage, bounded frame intake,
 ownership/capabilities, idempotent stops, overlay gating, slow-navigation recovery,
 and screencast sharing. A browser regression delays both content startup and video
-state discovery, then checks decoded pixels in the control pill and border regions.
+state discovery, injects a failed query, then checks decoded pixels in the control
+pill and border regions. Recovery tests mount the real control, borrow, help, and
+action-recording overlays after transient and exhausted queries. Browser coverage
+also checks borrow/help recovery without a video-state push and real Speculation
+Rules prerender activation with a nonzero outermost frame ID.
 Existing full-page screenshot lifetime tests cover cancellation and attachment
 replacement. The opt-in browser regressions use temporary Chrome profiles and an
 isolated daemon, with the production extension/encoder and real MP4 decoding:

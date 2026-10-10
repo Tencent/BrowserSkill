@@ -32,12 +32,24 @@ export function attachVideoBridge(
       return false;
     }
     if (message?.type === VIDEO_OVERLAY) {
-      if (sender.id !== chrome.runtime.id || sender.frameId !== 0 || sender.tab?.id === undefined)
-        return false;
+      if (sender.id !== chrome.runtime.id || sender.tab?.id === undefined) return false;
       const tab = sender.tab.id;
       const execute = async () => {
-        const current = await chrome.webNavigation.getFrame({ tabId: tab, frameId: 0 });
-        if (sender.documentId && current?.documentId !== sender.documentId)
+        // A prerendered outermost document can have a nonzero frameId. Resolve
+        // its stable identity and require activation before affecting capture.
+        const frame = sender.documentId
+          ? { tabId: tab, documentId: sender.documentId }
+          : { tabId: tab, frameId: sender.frameId };
+        // Chrome 106+ accepts documentId without frameId; the installed Chrome
+        // declarations still require frameId on this request type.
+        const current = await chrome.webNavigation.getFrame(
+          frame as chrome.webNavigation.GetFrameDetails,
+        );
+        if (
+          current?.frameType !== "outermost_frame" ||
+          current.documentLifecycle !== "active" ||
+          (sender.documentId && current.documentId !== sender.documentId)
+        )
           throw new Error("Video overlay document changed");
         if (message.action === "query") {
           return { recording_id: await video.queryOverlay(tab, sender.documentId) };
