@@ -65,6 +65,10 @@ the `bsk` CLI and browser extension separately when a release requires it.
 | `browser_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `browser_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
 
+For `browser_page` with `action: "wait-for-element"`, see the
+[element-wait reference](skill/references/interaction-details.md#element-waits) for
+supported conditions, timeout results and recovery with existing single actions.
+
 For native wheel input (`action: "wheel"`), see the [wheel reference](../../docs/wheel.md)
 for signed deltas, optional targets, result semantics and interruption.
 

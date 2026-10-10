@@ -1,0 +1,10 @@
+scenario,round,mode,delayMs,success,measurementValid,taskMs,processMs,modelMs,toolMs,modelCalls,toolCalls,waitCalls,waitTimeouts,waitErrors,toolErrors,htmlCalls,starts,confirmations,observed,stopped,allHttp200,inspectedBeforeClick
+timeout,0,candidate,16000,true,true,29394.735542,29866.757707999997,21841.802456999994,7208.702040000008,16,15,2,1,0,0,1,1,1,true,true,true,true
+timeout,1,candidate,16000,true,true,27028.677666999996,27482.82125,16992.89067,9714.698292000001,15,14,2,1,0,0,1,1,1,true,true,true,true
+timeout,2,candidate,16000,true,true,27836.9525,28288.689792000005,17926.860834000006,9587.08466600001,15,14,2,1,0,0,1,1,1,true,true,true,true
+unsupported,0,candidate,6000,true,true,16925.040125,17371.421459000005,14260.094999,2405.913625000001,12,11,1,0,1,1,1,1,1,true,true,true,true
+unsupported,1,candidate,6000,true,true,27712.48337499998,28162.139750000002,19951.062586,7302.356291000047,14,17,1,0,1,1,1,1,1,true,true,true,false
+unsupported,2,candidate,6000,true,true,18235.31691700002,18686.149124999996,16422.712084,1522.6690849999723,13,12,1,0,1,1,0,1,1,true,true,true,true
+stale,0,candidate,6000,true,true,20027.509625000006,20480.96316700001,14184.077207,5287.01208299998,13,12,1,0,1,1,0,1,1,true,true,true,true
+stale,1,candidate,6000,true,true,16769.435917000024,17212.14162499999,12438.135292000003,4017.408627000026,13,12,1,0,1,1,0,1,1,true,true,true,true
+stale,2,candidate,6000,true,true,17351.672708,17805.155540999986,12091.711333,4980.8201660000195,12,11,1,0,1,1,0,1,1,true,true,true,true
