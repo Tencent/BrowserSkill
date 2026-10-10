@@ -21,9 +21,9 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 ## Mandatory workflow
 
 1. Define success. Start a session and retain `sessionId`. Include the verified `browser`
-   when a profile is required. For debugging, read the reference below and start
-   capture before navigation/reproduction. Leave capture off for ordinary browsing.
-   Otherwise, for a new page:
+   when a profile is required. For debugging or requested video, read the matching
+   reference below and start capture before navigation. Leave capture off otherwise.
+   For a new page:
 
    ```text
    browser_session({ action: "start" })
@@ -33,8 +33,8 @@ For remote setup/pairing, follow the [remote guide](https://github.com/Tencent/B
 
 2. For an existing user tab, read [tab borrowing](references/tabs-and-profiles.md) first. Replace example IDs/refs with actual
    results. Pass `session` when more than one exists; never use foreign IDs.
-3. Observe after page changes; check ambiguous results once. Stop acting when success
-   is visible. On success or failure, call
+3. Observe after page changes; check ambiguous results once. Stop when success is
+   visible. Stop requested video first, then on success or failure call
    `browser_session({ action: "stop", session: "<id>" })` unless keeping the session
    open is part of the user's request. Stopping returns borrowed tabs, leaving them
    open in the user's window.
@@ -61,8 +61,7 @@ Prefer refs for frames/shadow roots; selectors search the main document. Use obs
 for ordinary controls, including before acting on HTML or screenshot findings.
 Select options by value, not visible label.
 
-Observe after the triggering action. Use `wait-for-element` only for a known pending
-condition, then check `satisfied`. Skip waits when already ready.
+Use `wait-for-element` for observed pending updates. Check `satisfied`.
 
 Inspect unknown effects before retrying. On an error or two attempts without progress,
 read [human help and recovery](references/help-and-recovery.md).
@@ -80,4 +79,5 @@ the working directory. Read the matching file before acting; do not preload all 
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
 | Element waits, hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
+| Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

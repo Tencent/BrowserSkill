@@ -1,4 +1,5 @@
 import { i18n } from "@browser-skill/i18n";
+import { type ScreencastLease, screencasts } from "@/browser-driver/screencast-coordinator";
 import { CAPTURE_SUPPRESS, type CaptureSuppressPhase } from "@/lib/capture-suppress-bridge";
 import { capturePage } from "@/long-screenshot/capture";
 import type { ScreenshotExports } from "@/long-screenshot/exports";
@@ -156,16 +157,11 @@ export async function handleFullPageScreenshot(
   const writer = new TileWriter(id, new URL(target.url).hostname);
   let retained = false;
   let rendering = false;
-  let renderingEvents: { dispose(): void } | undefined;
+  let renderingLease: ScreencastLease | undefined;
   const stopRendering = async () => {
     if (!rendering) return;
     rendering = false;
-    renderingEvents?.dispose();
-    // Cleanup must never attach to a replacement debugger connection.
-    if (deps.cdp.getAttachmentId?.(target.tabId) !== attachmentId) return;
-    await waitForReply(deps.cdp.send(target.tabId, "Page.stopScreencast"), undefined, 1000).catch(
-      () => {},
-    );
+    await renderingLease?.release().catch(() => {});
   };
   let phase = "preparing";
   let frames = 0;
@@ -190,26 +186,13 @@ export async function handleFullPageScreenshot(
       // Its pixels are unused; each tile still comes from captureScreenshot.
       checkOwnership();
       rendering = true;
-      renderingEvents = deps.cdp.onEvent?.((source, method, params) => {
-        if (
-          source.tabId !== target.tabId ||
-          source.sessionId ||
-          method !== "Page.screencastFrame" ||
-          deps.cdp.getAttachmentId?.(target.tabId) !== attachmentId
-        )
-          return;
-        const frame = params as { sessionId: number };
-        void deps.cdp
-          .send(target.tabId, "Page.screencastFrameAck", { sessionId: frame.sessionId })
-          .catch(() => {});
-      });
-      if (!renderingEvents) throw new ScreenshotError("captureFailed");
-      await waitForReply(
-        deps.cdp.send(target.tabId, "Page.startScreencast", {
+      renderingLease = await screencasts(deps.cdp).acquire(
+        target.tabId,
+        {
           format: "png",
           maxWidth: 32,
           maxHeight: 32,
-        }),
+        },
         controller.signal,
       );
     };

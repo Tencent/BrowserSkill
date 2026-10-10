@@ -32,12 +32,14 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function fixture() {
+async function fixture(pendingVideoQuery = false) {
   vi.useFakeTimers();
   let receive: (message: unknown, sender: object, ack: () => void) => void;
   vi.stubGlobal("chrome", {
     runtime: {
-      sendMessage: vi.fn(async () => {
+      sendMessage: vi.fn(async (message) => {
+        if (message.type === "bsk/video-overlay")
+          return pendingVideoQuery ? new Promise(() => {}) : { recording_id: null };
         throw new Error("Background unavailable");
       }),
       onMessage: {
@@ -81,6 +83,7 @@ async function fixture() {
       dispose = fn;
     },
   });
+  await vi.advanceTimersByTimeAsync(1000);
   const send = (message: unknown) => receive(message, {}, vi.fn());
   // Versions in the order one background worker hands them out.
   let generation = 0;
@@ -98,6 +101,17 @@ async function fixture() {
   state();
   return { send, version, state, reset, begin, active, blocking, remount: () => mount() };
 }
+
+it("mounts and registers listeners without showing controls before video discovery", async () => {
+  const f = await fixture(true);
+  expect(f.blocking()).toBe(false);
+  f.send({ type: "bsk/video-overlay", recording_id: "video" });
+  expect(f.blocking()).toBe(false);
+  f.send({ type: "bsk/video-overlay", recording_id: null });
+  expect(f.blocking()).toBe(true);
+  f.begin();
+  expect(f.active()).toBe(true);
+}, 1000);
 
 it.each([
   "paused",

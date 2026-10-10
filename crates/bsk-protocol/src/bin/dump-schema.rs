@@ -28,6 +28,10 @@ macro_rules! dump {
 }
 
 fn main() {
+    dump!(VideoParams, "tool_video_params");
+    dump!(VideoRecording, "video_recording");
+    dump!(VideoGrant, "video_grant");
+    dump!(VideoReadResult, "tool_video_read_result");
     dump!(HandshakeParams, "handshake_params");
     dump!(HandshakeResult, "handshake_result");
 

@@ -37,6 +37,7 @@ pub mod status;
 pub mod tab;
 pub mod update;
 pub mod upload;
+pub mod video;
 pub mod waits;
 pub mod wheel;
 pub mod window;
@@ -233,6 +234,8 @@ pub enum Command {
 
     /// Record user actions into a semantic `trace.json` textbook for LLMs.
     Record(RecordCmd),
+    /// Record a task tab to MP4 and save it to an explicit destination.
+    Video(video::VideoCmd),
 }
 
 #[derive(Debug, Clone, Args, Default)]

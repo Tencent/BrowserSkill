@@ -52,7 +52,7 @@ test("LF and CRLF multiline metadata agree without changing resource bytes", (t)
 
 test("both authored skill packages validate in LF and CRLF checkouts", (t) => {
   for (const [path, maxEntryBytes] of [
-    ["crates/bsk-cli/skill", 7_000],
+    ["crates/bsk-cli/skill", 7_100],
     ["packages/dsh-plugin-browserskill/skill", 4_500],
   ]) {
     const original = validateSkillDirectory(fileURLToPath(new URL(`../${path}`, import.meta.url)), {

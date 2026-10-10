@@ -63,6 +63,7 @@ describe("registerBskSkill", () => {
       "references/interaction-details.md",
       "references/screenshots-and-canvas.md",
       "references/tabs-and-profiles.md",
+      "references/video.md",
     ]);
     for (const path of references) {
       const reference = readFileSync(join(base.path, path), "utf8");
