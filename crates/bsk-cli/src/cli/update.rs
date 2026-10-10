@@ -514,20 +514,37 @@ pub(crate) fn install_verified(
     lock: UpdateLock,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Installed> {
-    let binary = match download_candidate_binary(candidate, client) {
-        Ok(binary) => binary,
-        Err(err) => {
-            record.fail(&err, Recovery::Unchanged);
-            return Err(err);
-        }
-    };
+    let binary = download_verified(candidate, client, record)?;
+    install_downloaded(candidate, target, &binary, record, lock, cancelled)
+}
+
+fn download_verified(
+    candidate: &UpdateCandidate,
+    client: &reqwest::blocking::Client,
+    record: &mut UpdateRecord,
+) -> Result<Vec<u8>> {
+    download_candidate_binary(candidate, client).inspect_err(|err| {
+        record.fail(err, Recovery::Unchanged);
+    })
+}
+
+/// Install an already verified download. The daemon holds session admission
+/// closed before entering this step, through self-check and handover or rollback.
+pub(crate) fn install_downloaded(
+    candidate: &UpdateCandidate,
+    target: &Path,
+    binary: &[u8],
+    record: &mut UpdateRecord,
+    lock: UpdateLock,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Installed> {
     if cancelled() {
         let err = anyhow::anyhow!("the daemon stopped before the update was installed");
         record.fail(&err, Recovery::Unchanged);
         return Err(err);
     }
     record.enter(UpdateStage::Install);
-    let installed = match install_binary(target, &binary, lock) {
+    let installed = match install_binary(target, binary, lock) {
         Ok(installed) => installed,
         Err(err) => {
             let recovery = match err.downcast_ref::<PreviousNotRestored>() {
@@ -550,16 +567,13 @@ pub(crate) fn install_verified(
     Ok(installed)
 }
 
-/// Daemon-side install with the daemon's own HTTP client.
-pub(crate) fn self_install_candidate(
+/// Download before closing session admission, using the daemon's HTTP client.
+pub(crate) fn self_download_candidate(
     candidate: &UpdateCandidate,
-    target: &Path,
     record: &mut UpdateRecord,
-    lock: UpdateLock,
-    cancelled: &dyn Fn() -> bool,
-) -> Result<Installed> {
+) -> Result<Vec<u8>> {
     let client = update_http_client(ARCHIVE_FETCH_TIMEOUT)?;
-    install_verified(candidate, target, &client, record, lock, cancelled)
+    download_verified(candidate, &client, record)
 }
 
 /// Where to turn when bsk cannot write next to its own executable.
@@ -603,6 +617,12 @@ pub(crate) enum AutoUpdatePolicy {
     NotWritable,
 }
 
+/// Installation may be postponed when a session starts during the download.
+pub(crate) enum InstallOutcome<T> {
+    Installed(T),
+    PostponedSessions(usize),
+}
+
 /// Outcome of one daemon auto-update step (see [`auto_update_step`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AutoUpdateOutcome<T> {
@@ -634,7 +654,7 @@ pub(crate) fn auto_update_step<T>(
     active_sessions: usize,
     last_attempt: Option<&UpdateRecord>,
     now_epoch_secs: u64,
-    install: impl FnOnce(&UpdateCandidate) -> Result<T>,
+    install: impl FnOnce(&UpdateCandidate) -> Result<InstallOutcome<T>>,
 ) -> Result<AutoUpdateOutcome<T>> {
     let Some(candidate) = candidate else {
         return Ok(AutoUpdateOutcome::UpToDate);
@@ -657,8 +677,12 @@ pub(crate) fn auto_update_step<T>(
     {
         return Ok(AutoUpdateOutcome::Deferred { latest, until });
     }
-    let installed = install(candidate)?;
-    Ok(AutoUpdateOutcome::Installed { latest, installed })
+    Ok(match install(candidate)? {
+        InstallOutcome::Installed(installed) => AutoUpdateOutcome::Installed { latest, installed },
+        InstallOutcome::PostponedSessions(sessions) => {
+            AutoUpdateOutcome::PostponedSessions { latest, sessions }
+        }
+    })
 }
 
 pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<()> {
@@ -908,7 +932,9 @@ fn cached_update_hint(
     let action = match skipped {
         Some((SkipReason::NotWritable, record)) => HintAction::Installer(&record.executable),
         Some((SkipReason::HostManaged, _)) => HintAction::CommandThenHost,
-        None => HintAction::from_auto_update(cache.auto_update.unwrap_or(auto_update)),
+        None | Some((SkipReason::ActiveSessions, _)) => {
+            HintAction::from_auto_update(cache.auto_update.unwrap_or(auto_update))
+        }
     };
     Ok(update_hint_for_cache(&cache, current_version, action))
 }
@@ -2031,7 +2057,7 @@ mod tests {
         }
     }
 
-    fn no_install(_: &UpdateCandidate) -> Result<()> {
+    fn no_install(_: &UpdateCandidate) -> Result<InstallOutcome<()>> {
         panic!("install must not run")
     }
 
@@ -2107,7 +2133,7 @@ mod tests {
             |candidate: &UpdateCandidate| {
                 installs.set(installs.get() + 1);
                 assert_eq!(candidate.latest, LATEST);
-                Ok("installed")
+                Ok(InstallOutcome::Installed("installed"))
             },
         )
         .unwrap();
@@ -2145,7 +2171,7 @@ mod tests {
                 0,
                 Some(last),
                 now,
-                |_| Ok(()),
+                |_| Ok(InstallOutcome::Installed(())),
             )
             .unwrap()
         };
@@ -2162,6 +2188,50 @@ mod tests {
     }
 
     #[test]
+    fn auto_update_step_postpones_a_download_without_failure_backoff() {
+        let candidate = test_candidate();
+        let outcome = auto_update_step(
+            Some(&candidate),
+            AutoUpdatePolicy::Install,
+            0,
+            None,
+            1_000,
+            |_| Ok(InstallOutcome::<()>::PostponedSessions(1)),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome,
+            AutoUpdateOutcome::PostponedSessions {
+                latest: LATEST,
+                sessions: 1
+            }
+        );
+        let skipped = UpdateRecord::skipped(
+            UpdateSource::Daemon,
+            &LATEST,
+            Path::new("bsk"),
+            SkipReason::ActiveSessions,
+            None,
+        );
+        assert_eq!(skipped.retry_blocked_until(&LATEST, 1_001), None);
+        assert_eq!(
+            auto_update_step(
+                Some(&candidate),
+                AutoUpdatePolicy::Install,
+                0,
+                Some(&skipped),
+                1_001,
+                |_| Ok(InstallOutcome::Installed(())),
+            )
+            .unwrap(),
+            AutoUpdateOutcome::Installed {
+                latest: LATEST,
+                installed: ()
+            }
+        );
+    }
+
+    #[test]
     fn auto_update_step_propagates_install_errors() {
         let candidate = test_candidate();
         let result = auto_update_step(
@@ -2170,7 +2240,7 @@ mod tests {
             0,
             None,
             1_000,
-            |_| -> Result<()> { bail!("boom") },
+            |_| -> Result<InstallOutcome<()>> { bail!("boom") },
         );
         assert!(result.is_err());
     }

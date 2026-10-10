@@ -1055,8 +1055,16 @@ pub(super) async fn handle_session_start(
     }
 }
 
+#[test]
+fn update_admission_error_uses_the_existing_protocol_code() {
+    let error = map_start_error(StartSessionError::DaemonUpdating);
+    assert_eq!(error.code, ErrorCode::ProtocolError);
+    assert!(error.message.contains("retry session start"));
+}
+
 fn map_start_error(err: StartSessionError) -> RpcError {
     let code = match &err {
+        StartSessionError::DaemonUpdating => ErrorCode::ProtocolError,
         StartSessionError::NoBrowserConnected => ErrorCode::NoBrowserConnected,
         StartSessionError::MultipleBrowsersOnline { .. } => ErrorCode::MultipleBrowsersOnline,
         StartSessionError::BrowserNotFound { .. } => ErrorCode::NotFound,

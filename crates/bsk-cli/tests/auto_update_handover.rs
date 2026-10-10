@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use futures_util::{SinkExt, StreamExt};
 use sha2::{Digest, Sha256};
+use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 
 const EXE: &str = if cfg!(windows) { "bsk.exe" } else { "bsk" };
 const MARKER: &[u8] = b"auto-update-handover-fixture";
@@ -31,6 +33,7 @@ const MARKER: &[u8] = b"auto-update-handover-fixture";
 struct ReleaseServer {
     url: String,
     downloads: Arc<AtomicUsize>,
+    hold_archive: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -58,9 +61,11 @@ impl ReleaseServer {
         .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let downloads = Arc::new(AtomicUsize::new(0));
+        let hold_archive = Arc::new(AtomicBool::new(false));
         let worker = {
             let stop = Arc::clone(&stop);
             let downloads = Arc::clone(&downloads);
+            let hold_archive = Arc::clone(&hold_archive);
             let archive_request = format!("GET /bsk{suffix} ");
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
@@ -86,6 +91,9 @@ impl ReleaseServer {
                     }
                     let body = if request.starts_with(archive_request.as_bytes()) {
                         downloads.fetch_add(1, Ordering::SeqCst);
+                        while hold_archive.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                            thread::sleep(Duration::from_millis(10));
+                        }
                         thread::sleep(archive_delay);
                         &archive
                     } else {
@@ -103,6 +111,7 @@ impl ReleaseServer {
         Self {
             url: format!("{base}/version.json"),
             downloads,
+            hold_archive,
             stop,
             worker: Some(worker),
         }
@@ -453,6 +462,146 @@ fn unused_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+async fn start_test_session(
+    fixture: &Fixture,
+    port: u16,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    serde_json::Value,
+) {
+    let browser_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let mut request = format!("ws://127.0.0.1:{port}/")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Origin",
+        format!("chrome-extension://{browser_id}").parse().unwrap(),
+    );
+    let (mut browser, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+    browser
+        .send(Message::Text(
+            serde_json::json!({
+                "id": "handshake", "method": "system.handshake", "params": {
+                    "client": "browser-skill-extension", "version": env!("CARGO_PKG_VERSION"),
+                    "protocol_version": bsk::daemon::state::PROTOCOL_VERSION,
+                    "instance_id": browser_id, "browser": {"name": "chrome", "version": "149"},
+                    "min_compatible_protocol": "1.0", "label": "update-race"
+                }
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let handshake = browser.next().await.unwrap().unwrap().into_text().unwrap();
+    let handshake: serde_json::Value = serde_json::from_str(&handshake).unwrap();
+    assert!(handshake.get("result").is_some(), "{handshake}");
+
+    let mut start = fixture.command();
+    start.args([
+        "--json",
+        "session",
+        "start",
+        "--browser",
+        browser_id,
+        "--no-focus",
+    ]);
+    let started = tokio::task::spawn_blocking(move || start.output().unwrap());
+    let request = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let frame = browser.next().await.unwrap().unwrap();
+            if let Message::Text(text) = frame {
+                let request: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if request["method"] == "tool.session_start" {
+                    break request;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let session_id = request["params"]["session_id"].clone();
+    browser
+        .send(Message::Text(
+            serde_json::json!({
+                "id": request["id"], "result": {"session_id": session_id, "agent_window_id": 71}
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+    let output = started.await.unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (browser, session_id)
+}
+
+#[test]
+fn a_session_started_during_download_postpones_installation() {
+    let fixture = Fixture::new(mislabelled_bsk);
+    fixture.server.hold_archive.store(true, Ordering::SeqCst);
+    let port = unused_port();
+    let pid = fixture.start_daemon(port);
+    fixture.wait_for("the blocked archive request", || {
+        fixture.server.downloads.load(Ordering::SeqCst) == 1
+    });
+
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let (_browser, session_id) = start_test_session(&fixture, port).await;
+
+        fixture.server.hold_archive.store(false, Ordering::SeqCst);
+        fixture.wait_for("the update decision after the download", || {
+            fixture
+                .record()
+                .is_some_and(|record| record["result"] != "in_progress")
+        });
+        let record = fixture.record().unwrap();
+        assert_eq!(record["result"], "skipped", "{record}");
+        assert_eq!(record["skip_reason"], "active_sessions", "{record}");
+        assert_ne!(record["stage"], "install", "{record}");
+        assert!(record.get("retry_after_epoch_secs").is_none(), "{record}");
+        assert!(fixture.installed() == fixture.original);
+        assert_eq!(fixture.info().unwrap()["pid"], pid);
+        let status = fixture
+            .command()
+            .args(["--json", "status"])
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert!(
+            status["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["session_id"] == session_id),
+            "{status}"
+        );
+    });
+}
+
+#[test]
+fn a_failed_auto_update_reopens_session_admission() {
+    for release in [mislabelled_bsk, release_whose_daemon_fails] {
+        let fixture = Fixture::new(release);
+        let port = unused_port();
+        let pid = fixture.start_daemon(port);
+        fixture.wait_for("rollback after the update failed", || {
+            fixture
+                .record()
+                .is_some_and(|record| record["result"] == "failed")
+                && fixture.info().is_some_and(|info| info["pid"] == pid)
+        });
+        assert!(fixture.installed() == fixture.original);
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (_browser, _session) = start_test_session(&fixture, port).await;
+            fixture.status_succeeds();
+        });
+    }
 }
 
 #[test]
