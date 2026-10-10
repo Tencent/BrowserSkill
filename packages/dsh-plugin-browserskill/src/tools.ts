@@ -576,12 +576,13 @@ function defineBrowserOperations(deps: ToolDeps, register: DefinitionRegistrar):
             {
               type: "text",
               text:
-                value.text.length > 0
+                `tabId: ${value.tabId}\n` +
+                (value.text.length > 0
                   ? value.text +
                     (value.truncated && !value.nextCursor
                       ? "\n(truncated — re-run with looser caps)"
                       : "")
-                  : "(empty observation — page may still be loading)",
+                  : "(empty observation — page may still be loading)"),
             },
           ],
         },

@@ -1662,6 +1662,22 @@ it("inspect.observe forwards continuation cursors and exposes the next cursor", 
   expect(value).toMatchObject({ nextCursor: "page-three", truncated: true });
 });
 
+it.each([
+  "observe",
+  "snapshot",
+])("inspect.%s gives the model the observed tab ID needed by batch", async (kind) => {
+  const { tools } = setup({
+    "session start": START_REPLY("s1"),
+    [kind]: { ...SNAPSHOT_REPLY, tab_id: 417 },
+  });
+  await startSession(tools);
+  const tool = tools.get(`inspect.${kind}`)!;
+  const value = await tool.execute({}, makeExec());
+  expect(tool.output.render({}, value as never)).toEqual([
+    { type: "text", text: `tabId: 417\n${SNAPSHOT_REPLY.text}` },
+  ]);
+});
+
 it("forwards screenshot-bound Canvas coordinates to click", async () => {
   const { tools, calls } = setup({
     "session start": START_REPLY("s1"),
