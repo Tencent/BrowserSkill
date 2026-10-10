@@ -117,6 +117,7 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "page.forward": ["browser_page", "forward"],
   "page.reload": ["browser_page", "reload"],
   "page.wait": ["browser_page", "wait"],
+  "page.wait-for-element": ["browser_page", "wait-for-element"],
   "inspect.observe": ["browser_inspect", "observe"],
   "inspect.snapshot": ["browser_inspect", "snapshot"],
   "inspect.html": ["browser_inspect", "html"],
@@ -226,7 +227,7 @@ const START_REPLY = (id: string) => ({ session_id: id, browser_instance_id: "chr
 
 const EXPECTED_ACTIONS = {
   browser_session: ["start", "stop", "list"],
-  browser_page: ["navigate", "back", "forward", "reload", "wait"],
+  browser_page: ["navigate", "back", "forward", "reload", "wait", "wait-for-element"],
   browser_inspect: [
     "observe",
     "snapshot",
@@ -973,6 +974,170 @@ describe("phase-one navigation tools", () => {
       "2500ms",
     ]);
     expect(calls[4].options.timeoutMs).toBe(120_000);
+  });
+});
+
+describe("page.wait-for-element", () => {
+  const reply = {
+    tab_id: 7,
+    used_ref: "e3",
+    satisfied: true,
+    attached: true,
+    visible: true,
+    elapsed_ms: 101,
+  };
+
+  it.each([
+    "visible",
+    "hidden",
+    "attached",
+    "detached",
+  ])("passes %s and optional targeting/polling through the public tool", async (state) => {
+    const attached = state !== "detached";
+    const visible = state === "visible";
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "wait-for-element": { ...reply, attached, visible },
+    });
+    await startSession(tools);
+    const tool = tools.get("page.wait-for-element")!;
+    const args = { target: "@e3", state, tabId: 7, pollMs: 200, timeoutMs: 300_000 };
+    const signal = new AbortController().signal;
+    const value = (await tool.execute(args, makeExec({ signal }))) as Record<
+      string,
+      string | number | boolean | null
+    >;
+    expect(value).toMatchObject({
+      session: "s1",
+      tabId: 7,
+      target: "@e3",
+      state,
+      satisfied: true,
+      attached,
+      visible,
+      elapsedMs: 101,
+    });
+    expect(calls[1]).toEqual({
+      args: [
+        "wait-for-element",
+        "--session",
+        "s1",
+        "--state",
+        state,
+        "--timeout",
+        "300000ms",
+        "--tab-id",
+        "7",
+        "--poll-ms",
+        "200",
+        "@e3",
+      ],
+      options: { signal, timeoutMs: 315_000, tag: "s1" },
+    });
+    expect(tool.isConcurrencySafe?.(args)).toBe(false);
+    expect(tool.output.render(args, value)).toEqual([
+      { type: "text", text: expect.stringContaining("satisfied=true") },
+    ]);
+  });
+
+  it("keeps an unobserved timeout distinct from success and permits single-action recovery", async () => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "wait-for-element": {
+        ...reply,
+        satisfied: false,
+        attached: null,
+        visible: null,
+        elapsed_ms: 10_002,
+      },
+      observe: SNAPSHOT_REPLY,
+      click: { tab_id: 7 },
+    });
+    await startSession(tools);
+    const tool = tools.get("page.wait-for-element")!;
+    const args = { target: "#results" };
+    const value = (await tool.execute(args, makeExec())) as Record<
+      string,
+      string | number | boolean | null
+    >;
+    expect(value).toMatchObject({
+      state: "visible",
+      satisfied: false,
+      attached: null,
+      visible: null,
+    });
+    expect(calls[1].args).toEqual([
+      "wait-for-element",
+      "--session",
+      "s1",
+      "--state",
+      "visible",
+      "--timeout",
+      "10000ms",
+      "#results",
+    ]);
+    const rendered = tool.output.render(args, value);
+    expect(rendered).toEqual([
+      { type: "text", text: expect.stringMatching(/satisfied=false.*attached=unknown.*Timed out/) },
+    ]);
+    expect(tool.presentResult?.(args, { content: rendered, isError: false })).toMatchObject({
+      card: "terminal",
+      output: expect.stringContaining("condition was not met"),
+    });
+    await tools.get("inspect.observe")!.execute({}, makeExec());
+    await tools.get("interact.click")!.execute({ target: "@e1" }, makeExec());
+    expect(calls.slice(1).map(({ args }) => args[0])).toEqual([
+      "wait-for-element",
+      "observe",
+      "click",
+    ]);
+  });
+
+  it.each([
+    {},
+    { target: "" },
+    { target: "  " },
+    { target: "#x", state: "enabled" },
+    { target: "#x", timeoutMs: 0 },
+    { target: "#x", timeoutMs: 300_001 },
+    { target: "#x", timeoutMs: 1.5 },
+    { target: "#x", pollMs: 15 },
+    { target: "#x", pollMs: 2001 },
+    { target: "#x", pollMs: 100.5 },
+  ])("rejects invalid element wait arguments before running the CLI: %j", async (args) => {
+    const { tools, calls } = setup({});
+    await expect(tools.get("page.wait-for-element")!.execute(args, makeExec())).rejects.toThrow();
+    expect(calls).toEqual([]);
+  });
+
+  it.each([
+    "stale ref",
+    "unrecognized subcommand 'wait-for-element'",
+  ])("surfaces %s without retrying and leaves observation usable", async (message) => {
+    const { tools, calls } = setup({
+      "session start": START_REPLY("s1"),
+      "wait-for-element": new Error(message),
+      observe: SNAPSHOT_REPLY,
+    });
+    await startSession(tools);
+    await expect(
+      tools.get("page.wait-for-element")!.execute({ target: "@e3", state: "hidden" }, makeExec()),
+    ).rejects.toThrow(message);
+    await tools.get("inspect.observe")!.execute({}, makeExec());
+    expect(calls.slice(1).map(({ args }) => args[0])).toEqual(["wait-for-element", "observe"]);
+  });
+
+  it("retains session ownership and queued cancellation checks", async () => {
+    const { tools, calls } = setup({ "session start": START_REPLY("s1") });
+    await startSession(tools);
+    const tool = tools.get("page.wait-for-element")!;
+    await expect(tool.execute({ target: "#x", session: "foreign" }, makeExec())).rejects.toThrow();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      tool.execute({ target: "#x" }, makeExec({ signal: controller.signal })),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(calls).toHaveLength(1);
   });
 });
 

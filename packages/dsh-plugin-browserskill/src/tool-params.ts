@@ -41,6 +41,26 @@ export const WAIT_UNTIL_PARAM = {
   description: "Page lifecycle phase to wait for (default: load).",
 } as const;
 
+export const ELEMENT_WAIT_PARAMS = {
+  target: {
+    type: "string",
+    description:
+      "wait-for-element: fresh @eN ref or an observed main-document CSS selector. " +
+      "CSS only: no text=, XPath, or Playwright locators.",
+  },
+  state: {
+    type: "string",
+    enum: ["visible", "hidden", "attached", "detached"],
+    description:
+      "wait-for-element state (default: visible). hidden includes absence; detached requires " +
+      "absence. visible does not mean enabled or ready for interaction.",
+  },
+  pollMs: {
+    type: "integer",
+    description: "wait-for-element poll interval, 16..2000 ms (default: 100).",
+  },
+} as const;
+
 export const TIMEOUT_MS_PARAM = {
   type: "integer",
   description: "Command timeout in milliseconds; must be greater than zero.",

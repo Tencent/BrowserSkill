@@ -3,11 +3,18 @@ import {
   appendTabId,
   appendWaitOptions,
   type PhaseOneRuntime,
+  requireNonEmpty,
   requirePositive,
   runnerTimeout,
   type ToolRegistrar,
 } from "./phase-one-runtime";
-import { SESSION_PARAM, TAB_ID_PARAM, TIMEOUT_MS_PARAM, WAIT_UNTIL_PARAM } from "./tool-params";
+import {
+  ELEMENT_WAIT_PARAMS,
+  SESSION_PARAM,
+  TAB_ID_PARAM,
+  TIMEOUT_MS_PARAM,
+  WAIT_UNTIL_PARAM,
+} from "./tool-params";
 import type { ToolDeps } from "./tools";
 
 interface RawHistoryResult {
@@ -42,13 +49,116 @@ function mapHistory(sessionId: string, reply: RawHistoryResult) {
   };
 }
 
-/** Add browser history, reload, and explicit lifecycle waiting. */
+/** Add browser history, reload, and lifecycle/element waiting. */
 export function registerPhaseOneNavigationTools(
   deps: ToolDeps,
   register: ToolRegistrar,
   runtime: PhaseOneRuntime,
 ): void {
   const { registry } = deps;
+
+  register(
+    defineTool({
+      name: "page.wait-for-element",
+      description: "Wait for one observed element condition; a timeout returns satisfied=false.",
+      parameters: {
+        session: SESSION_PARAM,
+        tabId: TAB_ID_PARAM,
+        timeoutMs: TIMEOUT_MS_PARAM,
+        ...ELEMENT_WAIT_PARAMS,
+        target: { ...ELEMENT_WAIT_PARAMS.target, required: true },
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            session: { type: "string", required: true },
+            tabId: { type: "integer", required: true },
+            target: { type: "string", required: true },
+            state: { ...ELEMENT_WAIT_PARAMS.state, required: true },
+            satisfied: { type: "boolean", required: true },
+            attached: { oneOf: [{ type: "boolean" }, { type: "null" }], required: true },
+            visible: { oneOf: [{ type: "boolean" }, { type: "null" }], required: true },
+            elapsedMs: { type: "integer", required: true },
+          },
+        },
+        render: (_args, value) => [
+          {
+            type: "text",
+            text:
+              `[session ${value.session}] element wait on tab ${value.tabId}: ` +
+              `target=${value.target} state=${value.state} satisfied=${value.satisfied} ` +
+              `attached=${value.attached ?? "unknown"} visible=${value.visible ?? "unknown"} ` +
+              `elapsedMs=${value.elapsedMs}. ` +
+              (value.satisfied
+                ? "Condition matched. Observe for fresh refs before choosing the next action."
+                : "Timed out; the condition was not met. Observe the current page before deciding how to continue."),
+          },
+        ],
+      },
+      async execute(args, exec) {
+        requireNonEmpty(args.target, "target");
+        const timeoutMs = args.timeoutMs ?? 10_000;
+        if (timeoutMs < 1 || timeoutMs > 300_000) {
+          throw new Error("timeoutMs must be in 1..300000 for wait-for-element");
+        }
+        if (args.pollMs !== undefined && (args.pollMs < 16 || args.pollMs > 2000)) {
+          throw new Error("pollMs must be in 16..2000");
+        }
+        const sessionId = registry.resolve(args.session, "browser_page(action=wait-for-element)");
+        const state = args.state ?? "visible";
+        const cmdArgs = [
+          "wait-for-element",
+          "--session",
+          sessionId,
+          "--state",
+          state,
+          "--timeout",
+          `${timeoutMs}ms`,
+        ];
+        appendTabId(cmdArgs, args.tabId);
+        if (args.pollMs !== undefined) cmdArgs.push("--poll-ms", String(args.pollMs));
+        cmdArgs.push(args.target);
+        const reply = (await runtime.run(
+          exec,
+          cmdArgs,
+          "wait-for-element",
+          sessionId,
+          runnerTimeout(deps, timeoutMs),
+        )) as {
+          tab_id: number;
+          satisfied: boolean;
+          attached: boolean | null;
+          visible: boolean | null;
+          elapsed_ms: number;
+        };
+        return {
+          session: sessionId,
+          tabId: reply.tab_id,
+          target: args.target,
+          state,
+          satisfied: reply.satisfied,
+          attached: reply.attached,
+          visible: reply.visible,
+          elapsedMs: reply.elapsed_ms,
+        };
+      },
+      presentCall: (args) => ({
+        card: "terminal",
+        title: runtime.commandLine([
+          "wait-for-element",
+          args.target,
+          "--state",
+          args.state ?? "visible",
+          "--session",
+          args.session ?? "(current)",
+        ]),
+        description: "Wait for an element condition",
+      }),
+      presentResult: runtime.presentTerminalResult,
+    }),
+  );
 
   const registerHistory = (direction: "back" | "forward") => {
     const toolName = `page.${direction}` as const;

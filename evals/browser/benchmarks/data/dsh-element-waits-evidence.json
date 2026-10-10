@@ -1,0 +1,591 @@
+{
+  "runs": {
+    "initial": {
+      "startedAt": "2026-10-10T13:42:57.135Z",
+      "sourceRevision": "f1c388d751c9e52f74a1e421e5910b9d3e4b608d",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 10,
+      "modes": ["main", "candidate"],
+      "cases": ["static", "results", "enabled"],
+      "hashes": {
+        "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
+        "candidate": "ffa80d1fccab91b2eddf41816689724b6d5413c2aeba36df90716a22bb694837",
+        "cli": "d7e08ec13ee7126f40f770dc7f16ccdad7b3b17dcbdb7fe1dfa6213846d4aad2"
+      },
+      "baselineRevision": "5590e48cd6442a74aeb19d4e8658d5502dfa55b0",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 15
+    },
+    "final": {
+      "startedAt": "2026-10-10T13:49:42.616Z",
+      "sourceRevision": "fdab6be073f2d4544a394de58a942a653a20d2e6",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 10,
+      "modes": ["main", "candidate"],
+      "cases": ["static", "results", "enabled"],
+      "hashes": {
+        "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
+        "candidate": "03ab37ad2459f22ddf30520e76bf01b44764045361576b518074db28e4a519de",
+        "cli": "d7e08ec13ee7126f40f770dc7f16ccdad7b3b17dcbdb7fe1dfa6213846d4aad2"
+      },
+      "baselineRevision": "5590e48cd6442a74aeb19d4e8658d5502dfa55b0",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 60
+    },
+    "recovery": {
+      "startedAt": "2026-10-10T14:09:31.313Z",
+      "sourceRevision": "fdab6be073f2d4544a394de58a942a653a20d2e6",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 3,
+      "modes": ["candidate"],
+      "cases": ["timeout", "unsupported", "stale"],
+      "hashes": {
+        "baseline": "f649a1b32cf1afe2e1c80516badc9741750ddc87a3317341b80014aa7215f3ff",
+        "candidate": "03ab37ad2459f22ddf30520e76bf01b44764045361576b518074db28e4a519de",
+        "cli": "d7e08ec13ee7126f40f770dc7f16ccdad7b3b17dcbdb7fe1dfa6213846d4aad2"
+      },
+      "baselineRevision": "5590e48cd6442a74aeb19d4e8658d5502dfa55b0",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 9
+    },
+    "latest": {
+      "startedAt": "2026-10-10T14:20:55.319Z",
+      "sourceRevision": "32cd37f4e5bb659c7885663bd538ef8a47a2cfc4",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 3,
+      "modes": ["main", "candidate"],
+      "cases": ["static", "results", "enabled"],
+      "hashes": {
+        "baseline": "cfe179e31fbbec7529f4e033018ba045197a13bb9af5d2d7163844b503d1afb7",
+        "candidate": "e1f65c7c33ae9562d7adfbc45449747bc3819a2bd2706da681a38e11dbd9b914",
+        "cli": "abb36bf5f3dbfb6fe83f1bdfd1f2ba8c7558c76d4e4bb591193c64d9da41bd17"
+      },
+      "baselineRevision": "63c16570ae4d6be54df386098ed14119cc3115b8",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 18
+    },
+    "latest-recovery": {
+      "startedAt": "2026-10-10T14:26:36.036Z",
+      "sourceRevision": "32cd37f4e5bb659c7885663bd538ef8a47a2cfc4",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 3,
+      "modes": ["candidate"],
+      "cases": ["timeout", "unsupported", "stale"],
+      "hashes": {
+        "baseline": "cfe179e31fbbec7529f4e033018ba045197a13bb9af5d2d7163844b503d1afb7",
+        "candidate": "e1f65c7c33ae9562d7adfbc45449747bc3819a2bd2706da681a38e11dbd9b914",
+        "cli": "abb36bf5f3dbfb6fe83f1bdfd1f2ba8c7558c76d4e4bb591193c64d9da41bd17"
+      },
+      "baselineRevision": "63c16570ae4d6be54df386098ed14119cc3115b8",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 9
+    },
+    "packaged-smoke": {
+      "startedAt": "2026-10-10T14:38:39.291Z",
+      "sourceRevision": "98f1b991cc47dcda291efd7d275b8e7e9abfc379",
+      "dshVersion": "0.2.0-rc.2",
+      "nodeVersion": "v26.6.0",
+      "chromeVersion": "Google Chrome for Testing 149.0.7827.55",
+      "samples": 1,
+      "modes": ["candidate"],
+      "cases": ["static", "results", "enabled", "timeout", "unsupported", "stale"],
+      "hashes": {
+        "baseline": "cfe179e31fbbec7529f4e033018ba045197a13bb9af5d2d7163844b503d1afb7",
+        "candidate": "06e9d71c505ac0f9b2bb5fa9b0e3de3ad91902d8ee69fe04ea9d4de643ebe802",
+        "cli": "abb36bf5f3dbfb6fe83f1bdfd1f2ba8c7558c76d4e4bb591193c64d9da41bd17"
+      },
+      "baselineRevision": "63c16570ae4d6be54df386098ed14119cc3115b8",
+      "modelConfig": {
+        "provider": "deepseek-official",
+        "model": "deepseek-flash",
+        "maxTokens": 256000,
+        "reasoningEffort": "high"
+      },
+      "completed": 6
+    }
+  },
+  "recovery": {
+    "recovery": [
+      {
+        "scenario": "timeout",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_inspect.html",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=@e2 state=hidden satisfied=false attached=true visible=true elapsedMs=100. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "visible",
+            "timeoutMs": 30000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=true attached=true visible=true elapsedMs=5544. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "timeout",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=false attached=true visible=false elapsedMs=102. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "visible",
+            "timeoutMs": 25000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=true attached=true visible=true elapsedMs=8078. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "timeout",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=false attached=true visible=false elapsedMs=104. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "visible",
+            "timeoutMs": 25000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=true attached=true visible=true elapsedMs=7919. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 15000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": false,
+        "afterFault": [
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_page.wait",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_inspect.screenshot",
+          "browser_inspect.html",
+          "browser_tabs.list",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 5000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 15000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_inspect.screenshot",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 60000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: {\"code\":-32000,\"message\":\"Node with given id does not belong to the document\"} (hint: confirm the tab is still in a loaded state and retry; reloading the tab usually resets a stuck DevTools session)"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 60000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: {\"code\":-32000,\"message\":\"Node with given id does not belong to the document\"} (hint: confirm the tab is still in a loaded state and retry; reloading the tab usually resets a stuck DevTools session)"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 120000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: ref @e2 unknown for tab in session bbuy (hint: rerun `bsk observe` for the current tab and use one of the returned refs)"
+          }
+        ]
+      }
+    ],
+    "latest-recovery": [
+      {
+        "scenario": "timeout",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=false attached=true visible=false elapsedMs=103. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "visible",
+            "timeoutMs": 25000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=true attached=true visible=true elapsedMs=8998. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "timeout",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_inspect.html",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=@e2 state=hidden satisfied=false attached=true visible=true elapsedMs=100. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "visible",
+            "timeoutMs": 25000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=#confirm state=visible satisfied=true attached=true visible=true elapsedMs=8270. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "timeout",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_page.wait-for-element",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 100,
+            "isError": false,
+            "satisfied": "false",
+            "result": "[session] element wait on tab: target=@e2 state=hidden satisfied=false attached=true visible=true elapsedMs=103. Timed out; the condition was not met. Observe the current page before deciding how to continue."
+          },
+          {
+            "state": "hidden",
+            "timeoutMs": 20000,
+            "isError": false,
+            "satisfied": "true",
+            "result": "[session] element wait on tab: target=@e2 state=hidden satisfied=true attached=true visible=false elapsedMs=11122. Condition matched. Observe for fresh refs before choosing the next action."
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 15000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_page.wait",
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "visible",
+            "timeoutMs": 20000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "unsupported",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_inspect.screenshot",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 15000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: error: unrecognized subcommand 'wait-for-element'"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 0,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 30000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: {\"code\":-32000,\"message\":\"Node with given id does not belong to the document\"} (hint: confirm the tab is still in a loaded state and retry; reloading the tab usually resets a stuck DevTools session)"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 1,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 300000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: ref @e2 unknown for tab in session glnh (hint: rerun `bsk observe` for the current tab and use one of the returned refs)"
+          }
+        ]
+      },
+      {
+        "scenario": "stale",
+        "round": 2,
+        "success": true,
+        "inspectedBeforeClick": true,
+        "afterFault": [
+          "browser_inspect.observe",
+          "browser_interact.click",
+          "browser_inspect.observe",
+          "browser_session.stop"
+        ],
+        "waitEvidence": [
+          {
+            "state": "hidden",
+            "timeoutMs": 30000,
+            "isError": true,
+            "satisfied": null,
+            "result": "Error: bsk wait-for-element failed: ref @e2 unknown for tab in session ljqn (hint: rerun `bsk observe` for the current tab and use one of the returned refs)"
+          }
+        ]
+      }
+    ]
+  }
+}

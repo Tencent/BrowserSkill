@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>异步处理测试</title>
+<style>
+  body { font: 18px sans-serif; max-width: 700px; margin: 60px auto; }
+  button { font: inherit; padding: 12px; margin: 12px; }
+  [hidden] { display: none !important; }
+</style>
+<h1>异步处理</h1>
+<p>开始处理后会异步生成结果。请等处理完成，再确认结果。</p>
+<button id="start">开始处理</button>
+<button id="busy" disabled hidden>处理中</button>
+<section id="results" hidden><p id="code"></p></section>
+<button id="confirm" disabled>确认结果</button>
+<output id="done"></output>
+<script>
+  const config = /* CONFIG */ {};
+  const start = document.querySelector('#start');
+  const busy = document.querySelector('#busy');
+  const confirm = document.querySelector('#confirm');
+  const results = document.querySelector('#results');
+  let ready = false;
+  const record = (type, data = {}) => fetch('/api/events', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ runId: config.runId, type, data }),
+  });
+  function complete() {
+    ready = true;
+    busy.hidden = true;
+    document.querySelector('#code').textContent = `校验码 ${config.token}`;
+    results.hidden = false;
+    confirm.disabled = false;
+    confirm.hidden = false;
+    return record('waits.ready');
+  }
+  if (config.scenario !== 'enabled') confirm.hidden = true;
+  if (config.completed) {
+    start.disabled = true;
+    complete();
+  }
+  start.addEventListener('click', async () => {
+    start.disabled = true;
+    busy.hidden = false;
+    await record('waits.started');
+    setTimeout(() => {
+      if (config.scenario === 'stale') {
+        const url = new URL(location.href);
+        url.searchParams.set('completed', 'yes');
+        location.href = url;
+      } else {
+        complete();
+      }
+    }, config.delayMs);
+  });
+  confirm.addEventListener('click', async () => {
+    await record('waits.confirmed', { ready, token: config.token });
+    document.querySelector('#done').textContent = ready ? `完成 ${config.token}` : '尚未就绪';
+    confirm.disabled = true;
+  });
+</script>
+</html>

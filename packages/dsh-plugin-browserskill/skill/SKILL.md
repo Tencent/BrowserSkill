@@ -75,7 +75,7 @@ the working directory. Read the matching file before acting; do not preload all 
 | --- | --- |
 | Website failure, request/performance investigation, reproduction evidence, or an HTTP experiment | [Website debugging](references/debugging.md) |
 | Required profile, borrowing/returning user tabs with `browser_tabs`, or remote tab ownership | [Tabs and profiles](references/tabs-and-profiles.md) |
-| Hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
+| Element waits, hover menus, scrolling, `nextCursor`, console/network, or window/device settings with `browser_assist` | [Interaction details](references/interaction-details.md) |
 | Screenshot or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, disabled help, failed operations, or interrupted cleanup | [Human help and recovery](references/help-and-recovery.md) |

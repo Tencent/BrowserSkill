@@ -210,6 +210,10 @@ pnpm eval:browser run-agent \
 Keep browser runs sequential to avoid session contention. Use fresh profiles and alternate adapter
 order in larger experiments to reduce warm-cache bias.
 
+For an opt-in DSH comparison using the locally configured model, see the
+[element-wait benchmark and measured results](benchmarks/dsh-element-waits.md).
+It records actual model requests, end-to-end task time, page assertions and recovery behavior.
+
 ## Reading results
 
 ```sh

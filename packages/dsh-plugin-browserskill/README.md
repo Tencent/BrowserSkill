@@ -59,11 +59,15 @@ the `bsk` CLI and browser extension separately when a release requires it.
 | Tool | Actions | Purpose |
 | --- | --- | --- |
 | `browser_session` | `start`, `stop`, `list` | Manage plugin-owned Agent Window sessions. |
-| `browser_page` | `navigate`, `back`, `forward`, `reload`, `wait` | Navigate the active tab and wait for page lifecycle events. |
+| `browser_page` | `navigate`, `back`, `forward`, `reload`, `wait`, `wait-for-element` | Navigate the active tab; wait for page lifecycle events or one element condition. |
 | `browser_inspect` | `observe`, `snapshot`, `html`, `screenshot`, `console`, `network`, `debug`, `video` | Inspect page state, debug websites, and capture screenshots or requested task videos. |
 | `browser_interact` | `click`, `hover`, `wheel`, `scroll-to`, `focus`, `blur`, `fill`, `select`, `press` | Interact with controls using fresh refs or selectors. |
 | `browser_tabs` | `list`, `create`, `select`, `close`, `borrow`, `return` | Manage Agent Window tabs and temporarily borrow user tabs. |
 | `browser_assist` | `resize`, `emulate`, `request-help` | Resize or emulate the browser and pause for human-only steps. |
+
+For `browser_page` with `action: "wait-for-element"`, see the
+[element-wait reference](skill/references/interaction-details.md#element-waits) for
+supported conditions, timeout results and recovery with existing single actions.
 
 For native wheel input (`action: "wheel"`), see the [wheel reference](../../docs/wheel.md)
 for signed deltas, optional targets, result semantics and interruption.
