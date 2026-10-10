@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDisconnectCleanup } from "@/session-manager/disconnect-cleanup";
 import { SessionManager } from "@/session-manager/manager";
 import * as recording from "../record";
 import { handleSessionStop } from "../session";
@@ -474,7 +475,10 @@ describe("handleSessionStop browser compatibility (issue #272)", () => {
     expect(f.aw.remove).not.toHaveBeenCalled();
   });
 
-  it("preserves a user tab opened after the final agent tab was deferred and allows retry", async () => {
+  it.each([
+    "session stop",
+    "disconnect cleanup",
+  ])("finishes %s when a user tab is opened after the final agent tab was deferred", async (operation) => {
     const f = await setup([10]);
     const query = f.query.query;
     let calls = 0;
@@ -482,17 +486,43 @@ describe("handleSessionStop browser compatibility (issue #272)", () => {
       if (++calls === 2) f.state.tabs.set(99, { id: 99, windowId: 100 } as chrome.tabs.Tab);
       return query(params);
     });
+    if (operation === "disconnect cleanup") {
+      const cleanup = createDisconnectCleanup({ manager: f.manager, sessionStopDeps: f.deps });
+      expect(await cleanup()).toEqual({ stoppedSessionIds: ["aa11"], failures: [] });
+    } else {
+      expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({
+        window_released: true,
+      });
+    }
+    expect(f.tabs.remove).toHaveBeenCalledExactlyOnceWith(10);
+    expect([...f.state.tabs.keys()]).toEqual([99]);
+    expect(f.aw.remove).not.toHaveBeenCalled();
+    expect(f.manager.has("aa11")).toBe(false);
+  });
+
+  it("preserves user tabs and session ownership if removing a deferred tab fails", async () => {
+    const f = await setup([10]);
+    const query = f.query.query;
+    let calls = 0;
+    f.query.query = vi.fn(async (params) => {
+      if (++calls === 2) f.state.tabs.set(99, { id: 99, windowId: 100 } as chrome.tabs.Tab);
+      return query(params);
+    });
+    vi.mocked(f.tabs.remove).mockRejectedValueOnce(new Error("remove failed"));
     expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toMatchObject({
       code: "protocol_error",
+      data: { reason: "cleanup_failed" },
     });
     expect(f.aw.remove).not.toHaveBeenCalled();
-    expect(f.tabs.remove).not.toHaveBeenCalled();
+    expect([...f.state.tabs.keys()]).toEqual([10, 99]);
     expect(f.manager.has("aa11")).toBe(true);
+    expect(f.ctx.agentCreatedTabs.has(10)).toBe(true);
     expect(await handleSessionStop(f.manager, { session_id: "aa11" }, f.deps)).toEqual({
       window_released: true,
     });
     expect([...f.state.tabs.keys()]).toEqual([99]);
     expect(f.aw.remove).not.toHaveBeenCalled();
+    expect(f.manager.has("aa11")).toBe(false);
   });
 
   it("keeps a failed window close retryable", async () => {

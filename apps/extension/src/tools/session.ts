@@ -5,6 +5,7 @@ import {
 } from "@/lib/interaction-preferences";
 import { withTaskPreviewStop } from "@/lib/task-preview";
 import { type SessionManager, SessionStartCleanupError } from "@/session-manager/manager";
+import { detectBrowserMeta } from "@/transport/handshake";
 import type { InteractionPolicy, RpcError } from "@/transport/types";
 import { rpcError } from "./errors";
 import { clearRecordingForSession } from "./record";
@@ -322,7 +323,7 @@ async function stopSession(
     // closes the last tab of a window (issue #272). Closing the window
     // through windows.remove does not trigger that browser bug. Keep
     // the last owned tab for Step 5, which still checks for user-created tabs.
-    const closeLastTabWithWindow = /\bYaBrowser\//.test(globalThis.navigator?.userAgent ?? "");
+    const closeLastTabWithWindow = detectBrowserMeta().name === "yandex";
     const deferredAgentTabs = new Set<number>();
 
     if (tabsApi) {
@@ -360,9 +361,28 @@ async function stopSession(
           if (t.id === undefined) return false;
           return !ctx.agentCreatedTabs.has(t.id);
         });
-        const leakedAgentTabs = liveWindowTabs.filter(
-          (t) => t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
+        let leakedAgentTabs = liveWindowTabs.filter(
+          (t): t is chrome.tabs.Tab & { id: number } =>
+            t.id !== undefined && ctx.agentCreatedTabs.has(t.id),
         );
+        if (
+          userTabs.length > 0 &&
+          leakedAgentTabs.length > 0 &&
+          tabsApi &&
+          leakedAgentTabs.every((tab) => deferredAgentTabs.has(tab.id))
+        ) {
+          // A user opened a tab after Step 4 deferred the final agent tab.
+          // It is now safe to remove that tab without closing the window.
+          for (const tab of leakedAgentTabs) {
+            try {
+              await tabsApi.remove(tab.id);
+              ctx.agentCreatedTabs.delete(tab.id);
+            } catch (err) {
+              console.warn(`[bsk session_stop] failed to close deferred agent tab ${tab.id}`, err);
+            }
+          }
+          leakedAgentTabs = leakedAgentTabs.filter((tab) => ctx.agentCreatedTabs.has(tab.id));
+        }
         if (leakedAgentTabs.length > 0 && userTabs.length > 0) {
           // Neither releasing ownership nor closing this mixed window is safe.
           // Keep the binding so a later stop can retry only the agent tabs.
@@ -376,9 +396,7 @@ async function stopSession(
             },
           );
         }
-        const failedAgentTabs = leakedAgentTabs.filter(
-          (tab) => tab.id !== undefined && !deferredAgentTabs.has(tab.id),
-        );
+        const failedAgentTabs = leakedAgentTabs.filter((tab) => !deferredAgentTabs.has(tab.id));
         if (failedAgentTabs.length > 0) {
           console.warn(
             `[bsk session_stop] ${failedAgentTabs.length} agent tab(s) failed to close; forcing window close instead of release`,
