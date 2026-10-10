@@ -5,6 +5,7 @@
 When all targets and values are known from the current observation, combine
 single commands with `&&` in one shell tool call. Each command keeps its normal
 validation, cancellation and audit trail; the first failure stops the chain.
+Use your shell's stop-on-error equivalent if it lacks `&&`.
 Use the actual session, observed tab ID and refs (these are only examples):
 
 ```sh

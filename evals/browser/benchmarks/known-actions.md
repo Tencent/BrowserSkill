@@ -18,14 +18,14 @@ also includes writing and removing its private plan file.
 Each variant gets one discarded warmup and 20 measured trials. Order rotates each
 round. Median averages the two middle samples; p95 uses nearest rank. Audit is
 disabled during timing and verified separately. The initial comparison uses PR
-head `2721a20a`, based on `ee13a46e`; the revised comparison uses the DSH harness
-implementation in this PR. [Original samples](data/known-actions-before.csv) and
+head `2721a20a`, based on `ee13a46e`; the revised comparison uses runtime commit `63b907d9`, after merging main
+`5590e48c` (#407). Only documentation was edited during that final run. [Original samples](data/known-actions-before.csv) and
 [revised samples](data/known-actions-after.csv) include every measured trial.
 
 These are **local execution timings, not an agent/LLM latency experiment**. Tool
 call counts below describe the required public calls for this known plan. They do
 not include model thinking, provider latency or transport overhead. No artificial
-model delay was added. More websites, platforms and live-agent trials are needed
+model delay was added. More websites, platforms, remote-daemon links and live-agent trials are needed
 before claiming an end-to-end latency improvement.
 
 ## R1: three-way comparison of the original implementation
@@ -55,12 +55,17 @@ not a general readiness guarantee.
 
 | Revised path | Public calls | CLI processes | Median | p95 | Correct submissions |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Separate single actions + observe | 5 | 5 | 283.3 ms | 292.3 ms | 20/20 |
-| One shell `&&` chain + observe | 1 | 5 | 291.3 ms | 300.3 ms | 20/20 |
-| DSH batch through existing commands | 1 | 5 | 279.4 ms | 292.9 ms | 20/20 |
+| Separate single actions + observe | 5 | 5 | 284.3 ms | 381.9 ms | 20/20 |
+| One shell `&&` chain + observe | 1 | 5 | 294.8 ms | 535.5 ms | 20/20 |
+| DSH batch through existing commands | 1 | 5 | 281.5 ms | 400.1 ms | 20/20 |
 
-The harness loop has roughly the same local execution cost as single commands;
-its benefit is removing four opportunities for agent/tool round trips. It does
+The final run shows substantial tail variation; no outliers were discarded and
+no p95 improvement is claimed. The two tables were separate runs on different
+main revisions, not a controlled before/after speedup experiment.
+
+The harness loop has roughly the same local median execution cost as single commands;
+its benefit is removing four opportunities for agent/tool round trips. Plans that
+need intermediate observations or decisions must still use individual calls. It does
 not make individual browser actions faster. This also works with older backends
 that already implement the individual actions.
 
@@ -87,7 +92,7 @@ continue with the original single actions.
   steps are reported to the caller, not invented as audit operations.
 - Removed observation IDs from the protocol, JSON and human-readable results.
   Ref-store generations remain internal; no new stability contract is introduced.
-  Restored the original general skill guidance. Each entry only adds “Batching”
+  Restored the original general skill guidance. Each entry only adds a batching trigger
   to its existing interaction-details routing row; detailed instructions are lazy.
 - The DSH schema adds only `steps` and one action value. Serializing each public
   tool's `{name, description, parameters}` with `JSON.stringify` gives **15,581 →
@@ -107,7 +112,7 @@ The audit API returns two fills, the failed select, the recovery select and clic
 with refs, names and statuses; the synthetic private input is absent from the audit.
 The audit page renders every target name using its existing localized action labels.
 
-Unit coverage exercises pre-dispatch validation, session ownership/queuing, partial
+Unit coverage exercises pre-dispatch validation, session queuing, partial
 results, uncertain effects, cancellation, total-budget settlement, CLI argument
 mapping and single-action recovery. Existing DSH tests and type checking pass.
 The real browser run also passes all six `core` cases and generated-form seeds
