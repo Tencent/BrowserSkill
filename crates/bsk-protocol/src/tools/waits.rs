@@ -1,4 +1,5 @@
-//! Timing helpers (`tool.wait_for_navigation`, `tool.wait_ms`).
+//! Timing helpers (`tool.wait_for_navigation`, `tool.wait_for_element`,
+//! `tool.wait_ms`).
 //!
 //! M9.2: `wait_for_navigation` mirrors the `navigate` wire shape — it
 //! waits on a CDP `Page.lifecycleEvent` and reports back via `reached`
@@ -8,6 +9,13 @@
 //! M9.3: `wait_ms` is a pure daemon-side sleep (no extension hop, no
 //! session needed). The result echoes the requested duration so the
 //! caller can confirm a 0ms wait still went through the IPC layer.
+//!
+//! `wait_for_element` is the **element-level** counterpart of
+//! `wait_for_navigation`: it asks a question about one target
+//! (`visible` / `hidden` / `attached` / `detached`) and answers it as
+//! soon as it is true, instead of waiting on a lifecycle phase or
+//! burning a fixed sleep. Callers that used to poll `evaluate` +
+//! `wait_ms` in a loop get one RPC and one answer.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -75,6 +83,105 @@ impl WaitForNavigationReached {
 }
 
 // ---------------------------------------------------------------------------
+// wait_for_element (element state)
+// ---------------------------------------------------------------------------
+
+/// Which state the caller is waiting for.
+///
+/// `Visible` / `Hidden` ask about **visibility**; `Attached` /
+/// `Detached` ask about **presence in the DOM**.
+///
+/// `Hidden` is the opposite of `Visible`: absent or attached but not visible,
+/// including an element absent at the first probe. `Detached` requires absence.
+/// The result's `attached` field distinguishes removal from a hidden node.
+/// Invalid refs and inspection failures remain errors for every state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum ElementState {
+    #[serde(rename = "visible")]
+    Visible,
+    #[serde(rename = "hidden")]
+    Hidden,
+    #[serde(rename = "attached")]
+    Attached,
+    #[serde(rename = "detached")]
+    Detached,
+}
+
+impl ElementState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+            Self::Attached => "attached",
+            Self::Detached => "detached",
+        }
+    }
+
+    /// Does an observation of `(attached, visible)` satisfy this state?
+    pub fn satisfied_by(self, attached: bool, visible: bool) -> bool {
+        match self {
+            Self::Visible => visible,
+            Self::Hidden => !visible,
+            Self::Attached => attached,
+            Self::Detached => !attached,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WaitForElementParams {
+    pub session_id: String,
+    /// Optional `@e<N>` ref from the latest snapshot or observe.
+    /// Mutually exclusive with `selector`.
+    #[serde(
+        rename = "ref",
+        alias = "ref_",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ref_: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// State to wait for.
+    pub state: ElementState,
+    /// Target tab. Defaults to the Agent Window's active tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<i64>,
+    /// Element inspection budget, including probes. Defaults to 10s (1..=300000ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 300000))]
+    pub timeout_ms: Option<u32>,
+    /// Polling interval, shortened near the deadline to allow a final probe.
+    /// Defaults to 100ms; values outside 16..=2000ms are rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 16, max = 2000))]
+    pub poll_ms: Option<u32>,
+}
+
+/// Outcome of a `wait_for_element`. A timeout returns `satisfied: false` and
+/// CLI exit code 0; callers must inspect the result before continuing.
+/// `attached` / `visible` describe the last probe completed before the deadline,
+/// not a new observation at return time. Both are null if no probe completed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct WaitForElementResult {
+    pub tab_id: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_selector: Option<String>,
+    /// Whether the requested state was reached before the deadline.
+    pub satisfied: bool,
+    /// DOM attachment at the last completed probe; null if unobserved.
+    pub attached: Option<bool>,
+    /// Visibility at the last completed probe; false if detached, null if unobserved.
+    pub visible: Option<bool>,
+    /// Monotonic elapsed time spent inspecting and waiting, including probes.
+    pub elapsed_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dialogs: Vec<JavaScriptDialogInfo>,
+}
+
+// ---------------------------------------------------------------------------
 // wait_ms
 // ---------------------------------------------------------------------------
 
@@ -129,6 +236,100 @@ mod tests {
             "reached": "painted"
         }));
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn wait_for_element_state_satisfaction_matrix() {
+        // 存在 + 可见
+        assert!(ElementState::Visible.satisfied_by(true, true));
+        assert!(!ElementState::Hidden.satisfied_by(true, true));
+        assert!(ElementState::Attached.satisfied_by(true, true));
+        assert!(!ElementState::Detached.satisfied_by(true, true));
+        // 存在但不可见
+        assert!(!ElementState::Visible.satisfied_by(true, false));
+        assert!(ElementState::Hidden.satisfied_by(true, false));
+        assert!(ElementState::Attached.satisfied_by(true, false));
+        assert!(!ElementState::Detached.satisfied_by(true, false));
+        // Absence satisfies both hidden and detached; the evidence stays distinct.
+        assert!(!ElementState::Visible.satisfied_by(false, false));
+        assert!(ElementState::Hidden.satisfied_by(false, false));
+        assert!(!ElementState::Attached.satisfied_by(false, false));
+        assert!(ElementState::Detached.satisfied_by(false, false));
+    }
+
+    #[test]
+    fn wait_for_element_params_omit_optionals_and_serialise_ref() {
+        let p = WaitForElementParams {
+            session_id: "abcd".into(),
+            ref_: Some("@e3".into()),
+            selector: None,
+            state: ElementState::Visible,
+            tab_id: None,
+            timeout_ms: None,
+            poll_ms: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["ref"], "@e3");
+        assert!(v.get("ref_").is_none());
+        assert_eq!(v["state"], "visible");
+        assert!(v.get("tab_id").is_none());
+        assert!(v.get("timeout_ms").is_none());
+        assert!(v.get("poll_ms").is_none());
+        let round: WaitForElementParams = serde_json::from_value(v).unwrap();
+        assert_eq!(round, p);
+        // `ref_` 是别名，老调用方给哪个都要认。
+        let aliased: WaitForElementParams = serde_json::from_value(json!({
+            "session_id": "s",
+            "ref_": "@e1",
+            "state": "hidden"
+        }))
+        .unwrap();
+        assert_eq!(aliased.ref_.as_deref(), Some("@e1"));
+    }
+
+    #[test]
+    fn wait_for_element_rejects_unknown_state() {
+        let res = serde_json::from_value::<WaitForElementParams>(json!({
+            "session_id": "s",
+            "selector": "#a",
+            "state": "clickable"
+        }));
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn wait_for_element_result_round_trips_timeout_evidence() {
+        let r = WaitForElementResult {
+            tab_id: 4,
+            used_ref: None,
+            used_selector: Some(".el-loading-mask".into()),
+            satisfied: false,
+            attached: Some(true),
+            visible: Some(false),
+            elapsed_ms: 10_004,
+            dialogs: vec![],
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["satisfied"], false);
+        assert_eq!(v["attached"], true);
+        assert_eq!(v["visible"], false);
+        assert_eq!(v["elapsed_ms"], 10_004);
+        let round: WaitForElementResult = serde_json::from_value(v).unwrap();
+        assert_eq!(round, r);
+    }
+
+    #[test]
+    fn wait_for_element_timeout_without_observation_is_unknown() {
+        let result: WaitForElementResult = serde_json::from_value(json!({
+            "tab_id": 4, "satisfied": false, "attached": null,
+            "visible": null, "elapsed_ms": 100
+        }))
+        .unwrap();
+        assert_eq!(result.attached, None);
+        assert_eq!(result.visible, None);
+        let value = serde_json::to_value(result).unwrap();
+        assert!(value["attached"].is_null());
+        assert!(value["visible"].is_null());
     }
 
     #[test]
