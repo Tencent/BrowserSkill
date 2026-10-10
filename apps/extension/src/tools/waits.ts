@@ -14,20 +14,14 @@
 //
 // `tool.wait_for_element` — wait until one element reaches a requested
 // state (`visible` / `hidden` / `attached` / `detached`). It is the
-// element-level counterpart of the lifecycle wait, and it exists so a
-// caller does not have to write its own `evaluate` + `wait-ms` polling
-// loop: that loop spends one full round trip per probe (agent → daemon
-// → extension → page) and, when it runs its clock inside the page, it
-// is at the mercy of background-tab timer throttling. Here the loop
-// lives next to the browser, so a ten-second wait costs one RPC instead
-// of one per probe, and no page timer is involved at all.
+// element-level counterpart of the lifecycle wait. One caller RPC replaces
+// a hand-written `evaluate` + `wait-ms` loop with shared state semantics.
+// This reduces caller round trips; it does not guarantee lower latency or
+// prevent the browser from throttling the page's own work.
 //
 // `wait_for_element` probes deliberately go through the shared
 // `resolveBackendNode` instead of a page-side promise. That keeps ref /
-// selector / frame handling identical to every other tool, and it keeps
-// the loop completely independent of page timers (a
-// `MutationObserver`-driven in-page wait would be cheaper per probe,
-// but only for the selector path — see the note on `probeState`).
+// selector / frame handling identical to every other tool.
 
 import { ChromiumCdp } from "@/browser-driver/chromium-cdp";
 import { type CdpTarget, cdpTargetKey } from "@/browser-driver/frame-graph";
@@ -260,7 +254,7 @@ export function satisfiesState(state: ElementState, attached: boolean, visible: 
     case "visible":
       return visible;
     case "hidden":
-      return attached && !visible;
+      return !visible;
     case "attached":
       return attached;
     case "detached":

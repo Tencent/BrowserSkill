@@ -771,8 +771,8 @@ export interface WaitForNavigationResult {
 /**
  * Element states `wait-for-element` can wait on. `visible` / `hidden` ask about
  * visibility; `attached` / `detached` ask about presence in the DOM.
- * `hidden` means present-but-not-visible — an element that was never
- * there does not satisfy it (use `detached` for that).
+ * `hidden` is the opposite of `visible`: absent or attached but not visible.
+ * The `attached` result distinguishes these two observations.
  */
 export type ElementState = "visible" | "hidden" | "attached" | "detached";
 

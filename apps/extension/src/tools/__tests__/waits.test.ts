@@ -212,7 +212,7 @@ describe("handleWaitForNavigation", () => {
 });
 
 describe("satisfiesState", () => {
-  it("keeps hidden and detached apart", () => {
+  it("treats hidden as the opposite of visible while preserving presence", () => {
     // 存在 + 可见
     expect(satisfiesState("visible", true, true)).toBe(true);
     expect(satisfiesState("hidden", true, true)).toBe(false);
@@ -223,10 +223,9 @@ describe("satisfiesState", () => {
     expect(satisfiesState("hidden", true, false)).toBe(true);
     expect(satisfiesState("attached", true, false)).toBe(true);
     expect(satisfiesState("detached", true, false)).toBe(false);
-    // 不存在：「还在 DOM 里但不可见」与「压根没出现过」不是一回事，
-    // 超时报告要靠这个区分，所以 hidden 在 absent 时**不**成立。
+    // Absence satisfies hidden and detached; attached still distinguishes removal.
     expect(satisfiesState("visible", false, false)).toBe(false);
-    expect(satisfiesState("hidden", false, false)).toBe(false);
+    expect(satisfiesState("hidden", false, false)).toBe(true);
     expect(satisfiesState("attached", false, false)).toBe(false);
     expect(satisfiesState("detached", false, false)).toBe(true);
   });
@@ -320,7 +319,7 @@ describe("handleWaitForElement outcomes", () => {
     );
   });
 
-  it("treats a selector that matches nothing as detached, not as a fault", async () => {
+  it.each(["hidden", "detached"] as const)("an unmatched selector satisfies %s", async (state) => {
     const manager = await sessionWithRef();
     const fake = makeFakeCdp({
       handlers: {
@@ -330,7 +329,7 @@ describe("handleWaitForElement outcomes", () => {
     });
     const res = await handleWaitForElement(
       manager,
-      { session_id: "aa11", selector: ".el-loading-mask", state: "detached", timeout_ms: 5_000 },
+      { session_id: "aa11", selector: ".el-loading-mask", state, timeout_ms: 5_000 },
       { cdp: fake.cdp, tabsApi: fake.tabsApi },
     );
     expect(res).toMatchObject({
@@ -382,8 +381,10 @@ describe("wait-for-element regression coverage", () => {
   const params = { session_id: "aa11", ref: "@e1", state: "detached" as const, timeout_ms: 100 };
 
   it.each([
-    { ref: "@e999" },
-    { ref: "@e1", tab_id: 7 },
+    { ref: "@e999", state: "detached" as const },
+    { ref: "@e999", state: "hidden" as const },
+    { ref: "@e1", tab_id: 7, state: "detached" as const },
+    { ref: "@e1", tab_id: 7, state: "hidden" as const },
   ])("preserves ref_not_found for %j", async (target) => {
     const manager = await sessionWithRef();
     const fake = makeFakeCdp();
@@ -408,10 +409,12 @@ describe("wait-for-element regression coverage", () => {
         },
       },
     });
-    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({
-      code: "cdp_failed",
-      message,
-    });
+    for (const state of ["detached", "hidden"] as const) {
+      expect(await handleWaitForElement(manager, { ...params, state }, fake)).toMatchObject({
+        code: "cdp_failed",
+        message,
+      });
+    }
   });
 
   it.each([
@@ -426,15 +429,17 @@ describe("wait-for-element regression coverage", () => {
         },
       },
     });
-    expect(await handleWaitForElement(manager, params, fake)).toMatchObject({
-      satisfied: true,
-      attached: false,
-      visible: false,
-      used_ref: "e1",
-    });
+    for (const state of ["detached", "hidden"] as const) {
+      expect(await handleWaitForElement(manager, { ...params, state }, fake)).toMatchObject({
+        satisfied: true,
+        attached: false,
+        visible: false,
+        used_ref: "e1",
+      });
+    }
   });
 
-  it("recognizes an existing ref's node becoming disconnected", async () => {
+  it.each(["detached", "hidden"] as const)("node removal satisfies %s", async (requestedState) => {
     const manager = await sessionWithRef();
     const state = { attached: true, visible: true };
     const fake = makeFakeCdp({ handlers: probeHandlers(state) });
@@ -442,7 +447,11 @@ describe("wait-for-element regression coverage", () => {
       state.attached = false;
       state.visible = false;
     }, 50);
-    const pending = handleWaitForElement(manager, { ...params, poll_ms: 100 }, fake);
+    const pending = handleWaitForElement(
+      manager,
+      { ...params, state: requestedState, poll_ms: 100 },
+      fake,
+    );
     await vi.advanceTimersByTimeAsync(100);
     expect(await pending).toMatchObject({
       satisfied: true,
@@ -450,6 +459,54 @@ describe("wait-for-element regression coverage", () => {
       visible: false,
       used_ref: "e1",
     });
+  });
+
+  it.each([
+    "detached",
+    "hidden",
+  ] as const)("%s preserves ref invalidation after a successful probe", async (state) => {
+    const manager = await sessionWithRef();
+    const fake = makeFakeCdp({ handlers: probeHandlers({ attached: true, visible: true }) });
+    const pending = handleWaitForElement(manager, { ...params, state }, fake);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fake.sent.filter((c) => c.method === "Runtime.callFunctionOn")).toHaveLength(1);
+    // Navigation and debugger detachment both invalidate refs. Invalidation
+    // alone cannot prove removal, even when a previous probe found the node.
+    manager.invalidateTabRefs(4);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({
+      code: "not_found",
+      data: { reason: "ref_not_found" },
+    });
+    expect(fake.sent.filter((c) => c.method === "Runtime.callFunctionOn")).toHaveLength(1);
+  });
+
+  it.each([
+    "detached",
+    "hidden",
+  ] as const)("%s preserves a child-frame session failure after a successful probe", async (state) => {
+    const manager = await sessionWithRef();
+    manager.get("aa11")?.refStore.set("e1", 555, { tabId: 4, cdpSessionId: "child-frame" });
+    const fake = makeFakeCdp();
+    const handlers = probeHandlers({ attached: true, visible: true });
+    let detached = false;
+    const message = "Session with given id not found.";
+    const sendToTarget = vi.fn(async (_target, method: string) => {
+      if (detached) throw new Error(message);
+      return handlers[method as keyof typeof handlers]?.() ?? {};
+    });
+    fake.cdp.sendToTarget = sendToTarget as CdpRunner["sendToTarget"];
+    const pending = handleWaitForElement(manager, { ...params, state }, fake);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sendToTarget).toHaveBeenCalledWith(
+      { tabId: 4, sessionId: "child-frame" },
+      "Runtime.callFunctionOn",
+      expect.any(Object),
+    );
+    detached = true;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ code: "cdp_failed", message });
+    expect(fake.sent).toHaveLength(0);
   });
 
   it.each([

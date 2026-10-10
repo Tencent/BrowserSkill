@@ -78,9 +78,10 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
               satisfied: true,
               attached: false,
             });
-            expect(await wait("#absent", "hidden", 30)).toMatchObject({
-              satisfied: false,
+            expect(await wait("#absent", "hidden")).toMatchObject({
+              satisfied: true,
               attached: false,
+              visible: false,
             });
             await evaluate(
               `setTimeout(() => { document.querySelector('#result').style.display = ''; document.querySelector('#mask').remove(); }, 100)`,
@@ -93,6 +94,47 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
             expect(await wait("#mask", "detached")).toMatchObject({
               satisfied: true,
               attached: false,
+            });
+
+            // Two table masks: a broad selector only checks the first match.
+            // Scope waits to the table whose request is still running.
+            await evaluate(`document.body.insertAdjacentHTML('beforeend',
+              '<section id="idle-panel"><div class="el-loading-mask" style="display:none">Idle</div></section>' +
+              '<section id="orders-panel"><div class="el-loading-mask">Loading</div></section>')`);
+            expect(await wait(".el-loading-mask", "hidden")).toMatchObject({
+              satisfied: true,
+              attached: true,
+              visible: false,
+            });
+            const mask = "#orders-panel .el-loading-mask";
+            expect(await wait(mask, "hidden", 100)).toMatchObject({
+              satisfied: false,
+              attached: true,
+              visible: true,
+            });
+
+            // v-loading retains the node and hides it with v-show (display:none).
+            await evaluate(
+              `setTimeout(() => { document.querySelector('${mask}').style.display = 'none'; }, 100)`,
+            );
+            expect(await wait(mask, "hidden")).toMatchObject({
+              satisfied: true,
+              attached: true,
+              visible: false,
+            });
+            expect(await wait(mask, "detached", 100)).toMatchObject({
+              satisfied: false,
+              attached: true,
+              visible: false,
+            });
+
+            // Loading.service removes the node after its leave transition.
+            await evaluate(`document.querySelector('${mask}').style.display = '';
+              setTimeout(() => document.querySelector('${mask}').remove(), 100)`);
+            expect(await wait(mask, "hidden")).toMatchObject({
+              satisfied: true,
+              attached: false,
+              visible: false,
             });
 
             // Visibility alone does not promise that an element is enabled or unoccluded.
@@ -129,6 +171,13 @@ describe.skipIf(!process.env.BSK_CLICK_CHROME)("real browser element waits", () 
                 deps,
               ),
             ).toMatchObject({ satisfied: true, attached: false, used_ref: "e1" });
+            expect(
+              await handleWaitForElement(
+                manager,
+                { session_id: ctx.sessionId, ref: "@e1", state: "hidden", timeout_ms: 100 },
+                deps,
+              ),
+            ).toMatchObject({ satisfied: true, attached: false, visible: false, used_ref: "e1" });
             expect(
               await handleWaitForElement(
                 manager,

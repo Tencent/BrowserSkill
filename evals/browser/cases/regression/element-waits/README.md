@@ -50,7 +50,9 @@ background pages runnable; therefore `document.visibilityState` may remain
 `visible` and is recorded separately. This is the product's normal background
 execution policy, not a measurement of native background timer throttling.
 The separate `waits.browser.test.ts` regression also exercises the wait handler
-against a truly hidden document without the dispatcher's visibility override:
+against a truly hidden document without the dispatcher's visibility override. It
+covers masks hidden in place or removed (the two Element UI loading lifecycles),
+initial absence, and scoping a selector when another table's mask is already hidden:
 
 ```bash
 BSK_CLICK_CHROME=/path/to/chromium pnpm --filter @browser-skill/extension \

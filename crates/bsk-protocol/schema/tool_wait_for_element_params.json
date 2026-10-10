@@ -62,7 +62,7 @@
   },
   "definitions": {
     "ElementState": {
-      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` / `Detached` ask about **presence in the DOM**. They are deliberately not collapsed into one pair: a page that keeps its spinner mounted and merely hides it satisfies `Hidden` long before it satisfies `Detached`, and a caller that cares about \"the mask is really gone from the tree\" needs to be able to say so.\n\n`Hidden` means *present but not visible* — an element that was never there does **not** satisfy it (use `Detached` for that). Keeping those two apart is what makes a timeout report useful: \"it is still there but hidden\" and \"it never appeared\" are different bugs.",
+      "description": "Which state the caller is waiting for.\n\n`Visible` / `Hidden` ask about **visibility**; `Attached` / `Detached` ask about **presence in the DOM**.\n\n`Hidden` is the opposite of `Visible`: absent or attached but not visible, including an element absent at the first probe. `Detached` requires absence. The result's `attached` field distinguishes removal from a hidden node. Invalid refs and inspection failures remain errors for every state.",
       "type": "string",
       "enum": [
         "visible",

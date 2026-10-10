@@ -6,11 +6,9 @@
 //! `bsk wait-for-element` is the element-level counterpart of
 //! `wait-for-navigation`: one RPC that answers "is `#mask` hidden yet?"
 //! instead of a caller-side `evaluate` + `wait-ms` polling loop. The
-//! re-checking runs inside the extension
-//! (`apps/extension/src/tools/waits.ts`), so a ten-second wait costs one
-//! IPC round trip instead of one per probe — and it does not depend on
-//! the page's own timers, which a background tab has throttled to a
-//! second or worse.
+//! re-checking runs inside the extension (`apps/extension/src/tools/waits.ts`),
+//! reducing caller round trips and providing shared state semantics. It does
+//! not guarantee lower latency or bypass throttling of the page's own work.
 //!
 //! A `wait-for-element` timeout is **reported, not raised**: the result
 //! carries the evidence (`attached` / `visible`) so the caller can tell
@@ -156,8 +154,7 @@ pub struct WaitForElementArgs {
     pub selector: Option<String>,
 
     /// State to wait for: `visible`, `hidden`, `attached`, `detached`.
-    /// `hidden` means present-but-not-visible; use `detached` when the
-    /// element is expected to leave the DOM entirely.
+    /// `hidden` means absent or not visible; `detached` requires absence.
     #[arg(long, value_enum, default_value_t = CliElementState::Visible)]
     pub state: CliElementState,
 

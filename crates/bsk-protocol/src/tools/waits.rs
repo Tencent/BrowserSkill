@@ -89,16 +89,12 @@ impl WaitForNavigationReached {
 /// Which state the caller is waiting for.
 ///
 /// `Visible` / `Hidden` ask about **visibility**; `Attached` /
-/// `Detached` ask about **presence in the DOM**. They are deliberately
-/// not collapsed into one pair: a page that keeps its spinner mounted
-/// and merely hides it satisfies `Hidden` long before it satisfies
-/// `Detached`, and a caller that cares about "the mask is really gone
-/// from the tree" needs to be able to say so.
+/// `Detached` ask about **presence in the DOM**.
 ///
-/// `Hidden` means *present but not visible* — an element that was never
-/// there does **not** satisfy it (use `Detached` for that). Keeping
-/// those two apart is what makes a timeout report useful: "it is still
-/// there but hidden" and "it never appeared" are different bugs.
+/// `Hidden` is the opposite of `Visible`: absent or attached but not visible,
+/// including an element absent at the first probe. `Detached` requires absence.
+/// The result's `attached` field distinguishes removal from a hidden node.
+/// Invalid refs and inspection failures remain errors for every state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ElementState {
     #[serde(rename = "visible")]
@@ -125,7 +121,7 @@ impl ElementState {
     pub fn satisfied_by(self, attached: bool, visible: bool) -> bool {
         match self {
             Self::Visible => visible,
-            Self::Hidden => attached && !visible,
+            Self::Hidden => !visible,
             Self::Attached => attached,
             Self::Detached => !attached,
         }
@@ -254,15 +250,10 @@ mod tests {
         assert!(ElementState::Hidden.satisfied_by(true, false));
         assert!(ElementState::Attached.satisfied_by(true, false));
         assert!(!ElementState::Detached.satisfied_by(true, false));
-        // 不存在：`hidden` **不**成立——「还在 DOM 里但不可见」与「压根没出现过」
-        // 是两种不同的 bug，超时报告要靠这个区分。
-        for state in [
-            ElementState::Visible,
-            ElementState::Hidden,
-            ElementState::Attached,
-        ] {
-            assert!(!state.satisfied_by(false, false), "{}", state.as_str());
-        }
+        // Absence satisfies both hidden and detached; the evidence stays distinct.
+        assert!(!ElementState::Visible.satisfied_by(false, false));
+        assert!(ElementState::Hidden.satisfied_by(false, false));
+        assert!(!ElementState::Attached.satisfied_by(false, false));
         assert!(ElementState::Detached.satisfied_by(false, false));
     }
 

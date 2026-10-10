@@ -15,10 +15,16 @@
 ## Element waits
 
 `wait-for-element` polls one selector/ref inside the extension. `hidden` means
-attached but not visible; `detached` includes an element absent from the start.
+absent or not visible; `detached` requires absence. Both include initial absence.
 `visible` does not imply enabled, unobstructed or application-ready. Choose an
-actual post-action readiness signal; an absent mask may not have appeared yet.
-Unknown/cross-tab refs and CDP failures remain errors, not evidence of detachment.
+actual post-action readiness signal; an absent or hidden mask may not have started
+loading yet. Selectors check only the first match in the main document: scope a
+mask selector to its component, for example `#orders-panel .el-loading-mask`.
+Use fresh refs for frame/shadow-root targets. Unknown/invalidated/cross-tab refs
+and CDP failures remain errors for every state. Full-document navigation invalidates
+old refs: use `wait-for-navigation`, then `observe`. A removed out-of-process iframe
+can invalidate its CDP session; to wait for the frame's removal, target the parent
+document's `<iframe>` element rather than a ref inside it.
 
 Timeout returns `satisfied: false`, still with CLI exit code 0. Never rely on `&&`
 alone. `attached`/`visible` reflect the last completed probe, or `null` when there
@@ -40,9 +46,12 @@ fi
 bsk observe --session "$session"
 ```
 
-Use `--state detached` for an already present loading mask that will be removed,
-or `--state hidden` if it stays in the DOM. Observe after success before using
-new refs. End the session on success and error as required by the task workflow.
+Use `--state hidden` for an already visible loading mask, whether it will be hidden
+in place (`v-loading`) or removed (`Loading.service`). Use `detached` when actual
+removal is required. Observe after success before using new refs. End the session
+on success and error as required by the task workflow. This API reduces caller
+round trips and standardizes state checks; it promises neither lower latency nor
+an escape from browser background throttling.
 
 ### Large observations
 
