@@ -264,8 +264,10 @@ async function resolveVisibleTargetTab(
   // tab_id is unaffected, so local reads of a user tab still work.
   if (!isAgentControlledTab(ctx, first.id)) {
     return {
-      code: "not_found",
-      message: `no tab this session controls is active in Agent Window ${ctx.agentWindowId}; pass tab_id, or retry once the foreign tab has been moved out`,
+      code: "permission_denied",
+      data: { reason: "agent_window_scope" },
+      message:
+        "the Agent Window's active tab is not a task-created or borrowed tab; pass tab_id to name one",
     };
   }
   return {

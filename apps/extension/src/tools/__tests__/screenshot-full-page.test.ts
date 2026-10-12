@@ -93,10 +93,8 @@ describe("full-page screenshot target policy", () => {
     ).toMatchObject({ code: "permission_denied" });
     tab.windowId = 100;
     manager.get("one")!.agentCreatedTabs.clear();
-    // An omitted tab_id is refused while resolving the target, before the scope
-    // check an explicit tab_id reaches.
     expect(await handleFullPageScreenshot(manager, { session_id: "one" }, deps)).toMatchObject({
-      code: "not_found",
+      code: "permission_denied",
     });
     expect(deps.cdp.send).not.toHaveBeenCalled();
   });

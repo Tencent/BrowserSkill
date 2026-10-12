@@ -144,7 +144,7 @@ describe("handleScreenshot", () => {
       { session_id: "aa11" },
       makeScreenshotDeps({ captureVisibleTab: capture, query }),
     );
-    expect(res).toMatchObject({ code: "not_found" });
+    expect(res).toMatchObject({ code: "permission_denied" });
     expect(capture).not.toHaveBeenCalled();
   });
 
