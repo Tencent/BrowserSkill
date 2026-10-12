@@ -16,6 +16,15 @@ export interface BskErrorBody {
   data?: unknown;
 }
 
+/** One entry of the connected-browser list a selector miss carries in `data`. */
+interface BskBrowserCandidate {
+  instance_id?: unknown;
+  browser_name?: unknown;
+  browser_version?: unknown;
+  label?: unknown;
+  session_count?: unknown;
+}
+
 /** A failed `bsk` invocation (non-zero exit, timeout, or spawn failure). */
 export class BskError extends Error {
   readonly code?: string;
@@ -370,6 +379,47 @@ export function bskInstallMessage(bskPath: string): string {
 }
 
 /**
+ * Render the connected browsers a selector miss reports in `data.browsers`.
+ *
+ * The CLI prints them as a table for a human; the JSON path carries the same
+ * list, and a caller that cannot see it has to probe every browser in turn.
+ * It goes into the message because that is the only channel the model reads,
+ * and it stays on ONE line because the action card keeps only the first line.
+ *
+ * Every other envelope renders nothing: `reason` drives the session-busy
+ * retry, and an empty list means a miss against an empty registry, which the
+ * CLI also leaves unrendered.
+ */
+function renderBrowserCandidates(data: unknown): string {
+  if (typeof data !== "object" || data === null) return "";
+  const browsers = (data as { browsers?: unknown }).browsers;
+  if (!Array.isArray(browsers) || browsers.length === 0) return "";
+  const rows = browsers.map(describeBrowser).filter((row) => row.length > 0);
+  return rows.length > 0 ? `; connected browsers: ${rows.join("; ")}` : "";
+}
+
+/** `alpha (chrome 131, label "Personal", 0 sessions)`, or "" without an id. */
+function describeBrowser(entry: unknown): string {
+  if (typeof entry !== "object" || entry === null) return "";
+  const candidate = entry as BskBrowserCandidate;
+  const id = candidate.instance_id;
+  if (typeof id !== "string" || id.length === 0) return "";
+  const parts: string[] = [];
+  const name = candidate.browser_name;
+  if (typeof name === "string" && name.length > 0) {
+    const version = candidate.browser_version;
+    parts.push(typeof version === "string" && version.length > 0 ? `${name} ${version}` : name);
+  }
+  const label = candidate.label;
+  if (typeof label === "string" && label.length > 0) parts.push(`label "${label}"`);
+  const sessions = candidate.session_count;
+  if (typeof sessions === "number") {
+    parts.push(`${sessions} session${sessions === 1 ? "" : "s"}`);
+  }
+  return parts.length > 0 ? `${id} (${parts.join(", ")})` : id;
+}
+
+/**
  * Interpret one finished run: throw `BskError` on timeout / non-zero exit
  * (parsing the CLI's JSON error envelope when present), otherwise parse and
  * return the stdout JSON payload.
@@ -393,9 +443,14 @@ export function parseBskJson(result: BskRunResult, commandLabel: string): unknow
     }
     const message =
       parsed?.message ?? (result.stderr.trim() || body || `bsk ${commandLabel} failed`);
+    // A selector miss lists what is connected so the caller can pick a real
+    // instance or label instead of probing every browser in turn. Rendered
+    // before the hint, matching the order the CLI's own output uses.
+    const withCandidates = `${message}${renderBrowserCandidates(parsed?.data)}`;
     // Surface the envelope's actionable hint in the model-facing message; a
     // hint the model cannot see cannot be followed.
-    const withHint = parsed?.hint !== undefined ? `${message} (hint: ${parsed.hint})` : message;
+    const withHint =
+      parsed?.hint !== undefined ? `${withCandidates} (hint: ${parsed.hint})` : withCandidates;
     throw new BskError(`bsk ${commandLabel} failed: ${withHint}`, {
       code: parsed?.code,
       hint: parsed?.hint,
