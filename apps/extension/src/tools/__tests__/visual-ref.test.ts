@@ -167,7 +167,7 @@ describe("typed visual refs", () => {
               mode,
               files: [{ transfer_id: "test", name: "test.txt", staged_path: "/unused/test.txt" }],
             },
-            { cdp, tabsApi },
+            { cdp, tabsApi, isAllowedFileSchemeAccess: async () => true },
           );
     expect(result).toMatchObject({ code: "unsupported", data: { reason: "ref_kind_unsupported" } });
     expect(send).not.toHaveBeenCalled();

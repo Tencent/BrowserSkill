@@ -8,6 +8,7 @@ import {
 } from "@/lib/capture-suppress-bridge";
 import type { SessionManager } from "@/session-manager/manager";
 import type { RpcError, UploadParams, UploadResult } from "@/transport/types";
+import { transferError } from "./errors";
 import { uploadThroughFileDrop } from "./file-drop-transaction";
 import { uploadThroughActivatedFileInput } from "./file-input-transaction";
 import { clickResolvedTarget, type InteractionDeps, resolveActionTarget } from "./interaction";
@@ -24,6 +25,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 export interface UploadDeps extends InteractionDeps {
   cdp: CdpRunner;
   sendToTab?: CaptureSuppressSendToTab;
+  isAllowedFileSchemeAccess?: () => Promise<boolean>;
 }
 
 export async function handleUpload(
@@ -43,6 +45,17 @@ export async function handleUpload(
     params.files.some((file) => !file.staged_path)
   ) {
     return { code: "invalid_params", message: "upload requires daemon-staged files" };
+  }
+  const fileAccessAllowed = await (deps.isAllowedFileSchemeAccess
+    ? deps.isAllowedFileSchemeAccess()
+    : new Promise<boolean>((resolve) => chrome.extension.isAllowedFileSchemeAccess(resolve)));
+  if (!fileAccessAllowed) {
+    return transferError(
+      "cdp_failed",
+      "set_file_input_failed",
+      "Enable BrowserSkill's 'Allow access to file URLs' permission in the browser extension settings before uploading",
+      { effectState: "none", phase: "preflight" },
+    );
   }
   const address = await resolveActionTarget(deps.cdp, ctx, target, params, "upload");
   if (isRpcError(address)) return address;

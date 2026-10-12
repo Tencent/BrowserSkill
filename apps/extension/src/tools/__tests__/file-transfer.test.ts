@@ -255,6 +255,35 @@ function dropCdp(
 
 describe("file transfer tools", () => {
   it.each([
+    "input",
+    "drop",
+  ] as const)("rejects %s uploads without file URL access before interacting with the page", async (mode) => {
+    const manager = sessions();
+    await manager.start("s1");
+    const cdp = silentCdp();
+    const isAllowedFileSchemeAccess = vi.fn(async () => false);
+
+    const result = await handleUpload(
+      manager,
+      {
+        session_id: "s1",
+        selector: "#hidden-file-input",
+        mode,
+        files: [{ transfer_id: "tr_1", name: "one.png", staged_path: "/stage/one.png" }],
+      },
+      { cdp, tabsApi: tabsApi(), isAllowedFileSchemeAccess },
+    );
+
+    expect(result).toMatchObject({
+      code: "cdp_failed",
+      message: expect.stringContaining("Allow access to file URLs"),
+      data: { reason: "set_file_input_failed", effect_state: "none", phase: "preflight" },
+    });
+    expect(isAllowedFileSchemeAccess).toHaveBeenCalledOnce();
+    expect(cdp.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
     false,
     true,
   ])("uploads staged paths through the requested click (covered=%s)", async (covered) => {
@@ -279,7 +308,12 @@ describe("file transfer tools", () => {
           { transfer_id: "tr_2", name: "two.png", staged_path: "/private/stage/two" },
         ],
       },
-      { cdp, tabsApi: tabsApi(), sendInputPassthrough },
+      {
+        cdp,
+        tabsApi: tabsApi(),
+        sendInputPassthrough,
+        isAllowedFileSchemeAccess: async () => true,
+      },
     );
     expect(sendInputPassthrough.mock.calls.map(([, m]) => m.phase)).toEqual(
       covered ? ["begin", "end"] : [],
@@ -446,6 +480,7 @@ describe("file transfer tools", () => {
       {
         cdp,
         tabsApi: tabsApi(),
+        isAllowedFileSchemeAccess: async () => true,
         sendToTab: vi.fn(async (_tabId, message) => {
           overlayPhases.push(message.phase);
           lifecycle.push(`overlay:${message.phase}`);

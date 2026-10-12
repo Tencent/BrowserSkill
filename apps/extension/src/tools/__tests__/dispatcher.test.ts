@@ -670,6 +670,13 @@ describe("ToolDispatcher", () => {
     const dispatcher = new ToolDispatcher({ transport, sessions, cdp: cdp as TestDispatcherCdp });
     dispatcher.start();
 
+    vi.stubGlobal("chrome", {
+      ...chrome,
+      extension: {
+        isAllowedFileSchemeAccess: (callback: (allowed: boolean) => void) => callback(true),
+      },
+    });
+
     deliver(
       makeRequest("tool.upload", {
         session_id: "aa11",

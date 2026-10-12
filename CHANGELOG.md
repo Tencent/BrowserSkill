@@ -9,6 +9,9 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- Extension: report missing "Allow access to file URLs" permission before upload target
+  lookup or page interaction ([#385](https://github.com/Tencent/BrowserSkill/issues/385)).
+
 - Extension: input to a background Agent Window tab no longer keeps failing with
   `input_not_ready` after Chrome drops the session's focus override without a detach
   ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's
