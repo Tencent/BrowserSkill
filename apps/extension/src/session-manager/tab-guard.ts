@@ -133,7 +133,10 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
     // first, so the read above is not final: wait for what the session already
     // has in flight, then read again. Waiting on the operation rather than on a
     // delay is what makes this correct instead of merely usually right.
-    await manager.settlePendingTabClaims(ctx.sessionId);
+    // Giving up on a slow claim is not evidence the tab is someone else's. The
+    // tool may still be mid-create, and evicting here moves a tab the session
+    // is about to own, after which create resolves reporting the old window.
+    if ((await manager.settlePendingTabClaims(ctx.sessionId)) === "expired") return;
     if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
 
     const target = await resolveUserWindow(manager, windows, recentUserWindows);
@@ -141,13 +144,18 @@ export function attachAgentWindowTabGuard(options: TabGuardOptions): { dispose: 
     // above can find nothing in flight and return at once. The claim is then
     // registered while this lookup is still running. Settle again rather than
     // treat the first empty read as final.
-    await manager.settlePendingTabClaims(ctx.sessionId);
+    if ((await manager.settlePendingTabClaims(ctx.sessionId)) === "expired") return;
     // Every await above is a point where the tab may have been claimed, moved
     // by the user, or the session torn down. Re-read both before touching it.
     if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
     const current = await tabs.get(tabId);
     if (!current || current.windowId !== windowId) return;
     if (!stillForeign(ctx, tabId, windowId, openerTabId)) return;
+    // The read above is itself a gap a claim can register in. Completed claims
+    // are not the whole picture: recognition still running is a tab that may
+    // turn out to be the session's, so leave it where it is and let a later
+    // event decide. A foreign tab lingering costs less than moving a task tab.
+    if (manager.hasPendingTabClaims(ctx.sessionId)) return;
 
     if (target === null) {
       await windows.createWithTab(tabId);

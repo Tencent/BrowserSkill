@@ -280,22 +280,32 @@ export class SessionManager {
     });
   }
 
+  /** Whether this session has a claim in flight whose outcome is not yet known. */
+  hasPendingTabClaims(sessionId: string): boolean {
+    const inFlight = this.pendingTabClaims.get(sessionId);
+    return inFlight !== undefined && inFlight.size > 0;
+  }
+
   /**
    * Settle every claim this session has in flight, so the caller can re-read
    * ownership. A claim may register another while we wait, so this drains
    * rather than awaiting one round; the bound keeps a misbehaving tool from
    * holding the guard open forever.
+   *
+   * Reports which of the two happened. Giving up on a slow claim says nothing
+   * about who owns the tab, so a caller that treats the two alike will act on
+   * an answer it never got.
    */
   async settlePendingTabClaims(
     sessionId: string,
     timeoutMs: number = SETTLE_PENDING_TAB_CLAIMS_TIMEOUT_MS,
-  ): Promise<void> {
+  ): Promise<"settled" | "expired"> {
     const deadline = Date.now() + timeoutMs;
     for (let round = 0; round < 8; round += 1) {
       const inFlight = this.pendingTabClaims.get(sessionId);
-      if (!inFlight || inFlight.size === 0) return;
+      if (!inFlight || inFlight.size === 0) return "settled";
       const remaining = deadline - Date.now();
-      if (remaining <= 0) return;
+      if (remaining <= 0) return "expired";
       // The round bound alone leaves a claim that never settles holding
       // Promise.all open, and with it every other tab in this session.
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -307,11 +317,14 @@ export class SessionManager {
           Promise.all([...inFlight]).then(() => "settled" as const),
           expired,
         ]);
-        if (settled === "expired") return;
+        if (settled === "expired") return "expired";
       } finally {
         if (timer !== undefined) clearTimeout(timer);
       }
     }
+    // Eight rounds and still more work queued: the outcome is unknown, which is
+    // the same answer as running out of time.
+    return this.hasPendingTabClaims(sessionId) ? "expired" : "settled";
   }
 
   /**

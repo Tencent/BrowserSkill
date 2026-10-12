@@ -181,18 +181,33 @@ describe("agent window tab guard", () => {
     expect(h.tabs.update).not.toHaveBeenCalled();
   });
 
-  it("gives up on a claim that never settles instead of blocking the session", async () => {
-    // The round bound caps how many times the guard re-reads, not how long one
-    // Promise.all waits. A claim that never settles would hold every other tab
-    // in the session behind it.
+  it("leaves the tab alone while a claim is still unresolved", async () => {
+    // Giving up on a slow claim is not evidence the tab belongs to someone
+    // else. tab_create may still be mid-flight, and moving the tab here lets
+    // creation resolve reporting a window the tab is no longer in.
     const h = await setup();
     h.manager.trackPendingTabClaim(h.ctx.sessionId, new Promise(() => {}));
 
     h.emitCreated({ id: 42, windowId: AGENT_WINDOW });
-    // Two settles per eviction, so the stuck claim can cost at most two bounds.
     await new Promise((resolve) => setTimeout(resolve, 2_400));
 
-    expect(h.tabs.move).toHaveBeenCalledWith(42, { windowId: USER_WINDOW, index: -1 });
+    expect(h.tabs.move).not.toHaveBeenCalled();
+    expect(h.windows.focus).not.toHaveBeenCalled();
+    expect(h.tabs.update).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("stops waiting on an unresolved claim rather than hanging", async () => {
+    // The wait still has to end: the round bound caps how many times the guard
+    // re-reads, not how long one Promise.all blocks.
+    const h = await setup();
+    h.manager.trackPendingTabClaim(h.ctx.sessionId, new Promise(() => {}));
+
+    const started = Date.now();
+    const outcome = await h.manager.settlePendingTabClaims(h.ctx.sessionId);
+    const elapsed = Date.now() - started;
+
+    expect(outcome).toBe("expired");
+    expect(elapsed).toBeLessThan(2_000);
   }, 10_000);
 
   it("keeps a popup whose claim is registered while the destination is being chosen", async () => {
@@ -248,6 +263,61 @@ describe("agent window tab guard", () => {
 
     expect(h.ctx.observedTabs?.has(POPUP)).toBe(true);
     expect(h.tabs.move).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  }, 10_000);
+
+  it("keeps a popup whose claim is registered during the final tab read", async () => {
+    // The second settle closes the destination-lookup gap, but the read right
+    // before the move is a gap of its own. A claim landing there is recognition
+    // still in progress, not an absent owner.
+    const h = await setup();
+    const POPUP = 78;
+    const SOURCE = HOME_TAB;
+    h.ctx.agentCreatedTabs.add(SOURCE);
+
+    const targetListeners = new Set<
+      (e: { sourceTabId: number; sourceFrameId: number; tabId: number }) => void
+    >();
+    vi.stubGlobal("chrome", {
+      webNavigation: {
+        onCreatedNavigationTarget: {
+          addListener: (fn: never) => targetListeners.add(fn),
+          removeListener: (fn: never) => targetListeners.delete(fn),
+        },
+      },
+      tabs: {
+        get: async (id: number) => ({ id, windowId: AGENT_WINDOW }),
+        onRemoved: { addListener: () => {}, removeListener: () => {} },
+        onDetached: { addListener: () => {}, removeListener: () => {} },
+      },
+    });
+
+    // Hold the guard's own last read open, so the claim lands inside it.
+    let releaseRead = () => {};
+    const readReached = new Promise<void>((resolve) => {
+      h.tabs.get.mockImplementationOnce(async (tabId: number) => {
+        resolve();
+        await new Promise<void>((r) => {
+          releaseRead = r;
+        });
+        return { id: tabId, windowId: AGENT_WINDOW, openerTabId: undefined };
+      });
+    });
+
+    await withTaskPopups(h.manager, { session_id: h.ctx.sessionId }, async (inputSent) => {
+      inputSent(SOURCE);
+      h.emitCreated({ id: POPUP, windowId: AGENT_WINDOW });
+      await readReached;
+      for (const fn of targetListeners) {
+        fn({ sourceTabId: SOURCE, sourceFrameId: 0, tabId: POPUP });
+      }
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(h.tabs.move).not.toHaveBeenCalled();
+    expect(h.ctx.observedTabs?.has(POPUP)).toBe(true);
     vi.unstubAllGlobals();
   }, 10_000);
 
