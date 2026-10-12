@@ -258,6 +258,16 @@ async function resolveVisibleTargetTab(
       message: `no active tab in Agent Window ${ctx.agentWindowId}`,
     };
   }
+  // A tab the OS routed into the Agent Window is active there until the guard
+  // evicts it, and eviction is asynchronous. Say so rather than reaching past
+  // it for another tab, which would act on a page nobody asked for. An explicit
+  // tab_id is unaffected, so local reads of a user tab still work.
+  if (!isAgentControlledTab(ctx, first.id)) {
+    return {
+      code: "not_found",
+      message: `no tab this session controls is active in Agent Window ${ctx.agentWindowId}; pass tab_id, or retry once the foreign tab has been moved out`,
+    };
+  }
   return {
     tabId: first.id,
     windowId: ctx.agentWindowId,
@@ -406,5 +416,17 @@ export function enforceToolTargetScope(
   toolName: string,
 ): RpcError | null {
   if (effect === "passive_read" && !ctx.remote) return null;
-  return enforceAgentWindow(ctx, target, toolName);
+  const scope = enforceAgentWindow(ctx, target, toolName);
+  if (scope) return scope;
+  // Sitting in the Agent Window is not the same as belonging to the session:
+  // an unevicted foreign tab is there too, and it is the one the user is
+  // typing into. Reads may still touch it; anything that dispatches input or
+  // mutates may not.
+  if (!isAgentControlledTab(ctx, target.tabId)) {
+    return {
+      code: "permission_denied",
+      message: `${toolName} needs a tab this session controls`,
+    };
+  }
+  return null;
 }
