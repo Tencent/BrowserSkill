@@ -268,3 +268,21 @@ it("distinguishes browser deadlines from refused reads and describes actual reco
   expect(blocked.message).toContain("Navigation alone does not clear the read gate");
   expect(blocked.message).toContain("command settles or its debugger session detaches");
 });
+
+it("refuses the Accessibility cleanup only behind its own session's pending read", async () => {
+  vi.useFakeTimers();
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const gate = new CdpReadGate();
+  const child = { tabId: 4, sessionId: "child" };
+  const stuck = gate.run(child, "Accessibility.getFullAXTree", () => new Promise<never>(() => {}));
+  const stuckRejected = expect(stuck).rejects.toBeInstanceOf(CdpReadTimeoutError);
+  await vi.advanceTimersByTimeAsync(CAPTURE_READ_TIMEOUT_MS);
+  await stuckRejected;
+  const send = vi.fn(async () => ({}));
+  await expect(gate.run(child, "Accessibility.disable", send)).rejects.toMatchObject({
+    phase: "blocked",
+  });
+  expect(send).not.toHaveBeenCalled();
+  await gate.run({ tabId: 4 }, "Accessibility.disable", send);
+  expect(send).toHaveBeenCalledTimes(1);
+});

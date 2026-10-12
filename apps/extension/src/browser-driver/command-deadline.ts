@@ -35,6 +35,8 @@ export function isRendererRead(method: string): boolean {
 // Frame discovery opts into a deadline; navigation's frame-tree reads retain
 // their caller's budget. These other capture queries need no new deadline, but
 // must not be queued behind a read that is still running after its timeout.
+// The capture's Accessibility cleanup waits for no such read either; the next
+// capture on that target releases the domain again.
 const GUARDED_READS = new Set([
   ...READ_COMMANDS,
   "Page.getFrameTree",
@@ -47,6 +49,7 @@ const GUARDED_READS = new Set([
   "DOM.getContentQuads",
   "Runtime.evaluate",
   "Runtime.callFunctionOn",
+  "Accessibility.disable",
 ]);
 
 export class CdpReadTimeoutError extends Error {
