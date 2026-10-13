@@ -1,7 +1,7 @@
 // Real CLI, daemon, extension and plugin; all browser/profile/runtime state is isolated.
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -84,21 +84,18 @@ it
           { timeout: 15000 },
         )
         .toBeGreaterThan(0);
-      const extension = path.join(directory, "extension");
-      await cp(path.resolve("../../apps/extension/dist/chrome-mv3"), extension, {
-        recursive: true,
-      });
+      const { copyPairingExtension, pairLocalBrowser } = await import(
+        new URL("../../../evals/browser/local-pairing.mjs", import.meta.url).href
+      );
+      const extension = await copyPairingExtension(
+        path.resolve("../../apps/extension/dist/chrome-mv3"),
+        path.join(directory, "extension"),
+        port,
+      );
       const manifestPath = path.join(extension, "manifest.json");
       const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
       manifest.name = "BrowserSkill cooperation settlement regression";
       await writeFile(manifestPath, JSON.stringify(manifest));
-      const backgroundPath = path.join(extension, "background.js");
-      const background = await readFile(backgroundPath, "utf8");
-      expect(background).toContain("ws://127.0.0.1:52800");
-      await writeFile(
-        backgroundPath,
-        background.replaceAll("ws://127.0.0.1:52800", `ws://127.0.0.1:${port}`),
-      );
       const { withChrome } = await import(
         new URL(
           "../../../evals/browser/cases/regression/snapshot-coordinates/chrome.mjs",
@@ -113,10 +110,11 @@ it
           zoom: 1,
         },
         async (send: BrowserSend) => {
+          const worker = await attachVideoBackground(send, manifest.name);
+          await pairLocalBrowser(send, { executable, env, worker });
           await expect
             .poll(async () => (await cli("browsers")).length, { timeout: 15000 })
             .toBeGreaterThan(0);
-          const worker = await attachVideoBackground(send, manifest.name);
           const evaluate = async <T>(expression: string) => {
             const reply = await send<{ result: { value: T }; exceptionDetails?: unknown }>(
               "Runtime.evaluate",

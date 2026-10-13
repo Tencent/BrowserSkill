@@ -311,6 +311,22 @@ describe("ConnectionController connectionEnabled", () => {
     expect(transport.connect).toHaveBeenCalledTimes(2);
   });
 
+  it("shows required pairing when the daemon has explicitly enabled strict mode", async () => {
+    vi.useFakeTimers();
+    const controller = new ConnectionController();
+    const transport = makeMockTransport();
+    await controller.attach(transport, { name: "Chrome", version: "120" }, true);
+    controller.setLocalAuth({ state: "unverified_local", reason: "unpaired" });
+    const request = transport.send.mock.calls[0]?.[0] as { id: string };
+    transport.emitMessage({
+      id: request.id,
+      error: { code: "pairing_required", message: "pairing required" },
+    });
+    await vi.waitFor(() => expect(transport.disconnect).toHaveBeenCalledOnce());
+    expect(controller.snapshot().localAuth).toEqual({ state: "pairing_required" });
+    await controller.setConnectionEnabled(false);
+  });
+
   const oldDaemonError: RpcError = {
     code: "version_too_old",
     message: "local protocol 1.3 is below peer min_compatible_protocol 1.6",
