@@ -106,6 +106,13 @@ pub fn info_for(code: ErrorCode) -> RenderInfo {
             ),
             exit_code: 6,
         },
+        ErrorCode::PairingRequired => RenderInfo {
+            summary: "local browser pairing is required",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            exit_code: 1,
+        },
         ErrorCode::UnknownMethod => RenderInfo {
             summary: "daemon does not recognise this RPC method",
             hint: Some(
