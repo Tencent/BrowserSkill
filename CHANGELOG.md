@@ -4,7 +4,36 @@ All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 See the [Chinese changelog](CHANGELOG.zh-CN.md). Update both versions in the same PR.
 
-Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
+CLI, Extension and DSH Plugin may release separately during staged rollouts;
+protocol compatibility determines which versions can connect.
+
+## [Unreleased]
+
+### Added
+
+- Local pairing with mutual proofs, durable key rotation and interruption recovery.
+  Paired connections verify the daemon before sending business traffic; activation
+  invalidates the original link. Device revocation and browser registration are
+  serialized, and successful revocation completes live connection cleanup.
+- `bsk daemon pair --replace`, local device listing/revocation, `daemon rotate`
+  and `daemon trust-local on|off`; status and doctor expose pairing guidance.
+- Extension 0.4.2 pairing settings, staged verification, ten-language guidance,
+  explicit bypass confirmation and retained remote grants when using local mode.
+  Pairing is optional for new installs and upgrades; unpaired connections remain
+  usable with an identity warning and a link to the official security overview.
+  Paired connections and saved recovery candidates never automatically downgrade.
+- `bsk daemon pair` reuses or starts the daemon before returning a usable link.
+  Explicit Required mode remains available; unverified connections cannot claim
+  an existing paired identity under the default policy.
+
+### Changed
+
+- Extension 0.4.3 removes obsolete migration flags and version gates while keeping
+  pairing optional. There is no automatic enforcement deadline.
+
+- Initial pairing-capable CLI defaults to Warn during distribution. Required mode
+  and extension 0.4.3 migration retirement have separate release prerequisites;
+  see the [local pairing rollout](docs/local-pairing.md#release-prerequisites).
 
 ## [Unreleased]
 
