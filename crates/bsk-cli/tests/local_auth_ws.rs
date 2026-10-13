@@ -59,12 +59,9 @@ impl Pairing {
     }
 }
 async fn daemon() -> daemon::DaemonHandle {
-    daemon::run(
-        DaemonConfig::new(0).with_local_auth(LocalAuthMode::Required),
-        None,
-    )
-    .await
-    .unwrap()
+    let handle = daemon::run(DaemonConfig::new(0), None).await.unwrap();
+    assert_eq!(handle.state().local_auth.mode(), LocalAuthMode::Required);
+    handle
 }
 async fn connect(handle: &daemon::DaemonHandle) -> Socket {
     let mut request = format!("ws://{}/", handle.ws_addr())

@@ -12,8 +12,8 @@ use std::{path::Path, sync::Mutex};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LocalAuthMode {
-    #[default]
     Warn,
+    #[default]
     Required,
     TrustLocal,
 }

@@ -31,6 +31,7 @@ const MARKER: &[u8] = b"auto-update-handover-fixture";
 struct ReleaseServer {
     url: String,
     downloads: Arc<AtomicUsize>,
+    hold_archive: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -58,9 +59,11 @@ impl ReleaseServer {
         .unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let downloads = Arc::new(AtomicUsize::new(0));
+        let hold_archive = Arc::new(AtomicBool::new(false));
         let worker = {
             let stop = Arc::clone(&stop);
             let downloads = Arc::clone(&downloads);
+            let hold_archive = Arc::clone(&hold_archive);
             let archive_request = format!("GET /bsk{suffix} ");
             thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
@@ -86,6 +89,9 @@ impl ReleaseServer {
                     }
                     let body = if request.starts_with(archive_request.as_bytes()) {
                         downloads.fetch_add(1, Ordering::SeqCst);
+                        while hold_archive.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst) {
+                            thread::sleep(Duration::from_millis(10));
+                        }
                         thread::sleep(archive_delay);
                         &archive
                     } else {
@@ -103,6 +109,7 @@ impl ReleaseServer {
         Self {
             url: format!("{base}/version.json"),
             downloads,
+            hold_archive,
             stop,
             worker: Some(worker),
         }
@@ -493,6 +500,138 @@ fn auto_update_exits_only_after_the_new_daemon_serves() {
         fixture.server.downloads.load(Ordering::SeqCst),
         1,
         "the replacement must not download the release again"
+    );
+}
+
+#[test]
+fn l11b_revocation_during_auto_update_survives_process_handover() {
+    use bsk::daemon::local_auth::store::{PairingStore, Pending, now, random};
+    use bsk_protocol::local_auth::*;
+    use bsk_protocol::{ResponseBody, ResponseFrame};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+
+    let fixture = Fixture::new(newer_bsk);
+    fixture.server.hold_archive.store(true, Ordering::SeqCst);
+    let store = PairingStore::open(&fixture.home).unwrap();
+    store.pair(52800, None).unwrap();
+    let id = store.devices()[0].device_id.clone();
+    let pending = Pending {
+        txn: random(),
+        r#gen: 1,
+        key: random(),
+        created_at: now(),
+    };
+    store
+        .stage_rotation(&id, 0, None, pending.clone(), "a1b2c3d4")
+        .unwrap();
+    store.commit(&id, pending.txn, "a1b2c3d4").unwrap();
+
+    let port = unused_port();
+    let old_pid = fixture.start_daemon(port);
+    fixture.wait_for("an update download in flight", || {
+        fixture.server.downloads.load(Ordering::SeqCst) == 1
+    });
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let probe = || {
+        runtime.block_on(async {
+            let mut request = format!("ws://127.0.0.1:{port}/")
+                .into_client_request()
+                .unwrap();
+            request.headers_mut().insert(
+                "Origin",
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+                    .parse()
+                    .unwrap(),
+            );
+            let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            let hello = Probe {
+                id: "handover".into(),
+                method: ProbeMethod::Ping,
+                params: ProbeParams {
+                    local_auth: Hello {
+                        v: V1,
+                        client_nonce: random(),
+                        instance_id: "a1b2c3d4".into(),
+                        credentials: vec![Credential {
+                            role: CredentialRole::Active,
+                            device_id: Bytes::decode(&id).unwrap(),
+                            r#gen: 1,
+                            pending: None,
+                        }],
+                    },
+                },
+            };
+            socket
+                .send(Message::Text(serde_json::to_string(&hello).unwrap()))
+                .await
+                .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let frame: ResponseFrame = serde_json::from_str(&reply.into_text().unwrap()).unwrap();
+            let ResponseBody::Ok(value) = frame.body else {
+                panic!("expected authentication reply")
+            };
+            let response: ChallengeResponse =
+                serde_json::from_value(value["local_auth"].clone()).unwrap();
+            let _ = socket.close(None).await;
+            response
+        })
+    };
+    assert!(matches!(probe(), ChallengeResponse::Challenge { .. }));
+
+    let revoked = fixture
+        .command()
+        .args(["daemon", "revoke", &id])
+        .output()
+        .unwrap();
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    assert_eq!(fixture.info().unwrap()["pid"], old_pid);
+    fixture.server.hold_archive.store(false, Ordering::SeqCst);
+    fixture.wait_for("the replacement daemon to load the revocation", || {
+        fixture
+            .info()
+            .is_some_and(|info| info["pid"] != old_pid && info["ws_port"] == port)
+    });
+    fixture.wait_for("the revoked device's previous daemon to exit", || {
+        fixture.daemon_exited()
+    });
+    assert_eq!(fixture.record().unwrap()["result"], "succeeded");
+    assert!(matches!(
+        probe(),
+        ChallengeResponse::PairingRequired {
+            legacy_accepted: false,
+            ..
+        }
+    ));
+    let devices = fixture
+        .command()
+        .args(["daemon", "devices"])
+        .output()
+        .unwrap();
+    assert!(devices.status.success());
+    let devices: serde_json::Value = serde_json::from_slice(&devices.stdout).unwrap();
+    assert_eq!(devices[0]["device_id"], id);
+    assert_eq!(devices[0]["status"], "revoked");
+    let browsers = fixture
+        .command()
+        .args(["--json", "browsers"])
+        .output()
+        .unwrap();
+    assert!(browsers.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&browsers.stdout).unwrap(),
+        serde_json::json!([])
     );
 }
 

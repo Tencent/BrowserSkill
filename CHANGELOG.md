@@ -23,9 +23,11 @@ protocol compatibility determines which versions can connect.
 
 ### Changed
 
-- Initial pairing-capable CLI defaults to Warn during distribution. Required mode
-  and extension 0.4.1 migration retirement have separate release prerequisites;
+- CLI now requires local pairing by default and rejects legacy handshakes with
+  `pairing_required`. Explicit TrustLocal and persisted Warn policies produce
+  doctor warnings. This release requires pairing support in both extension stores;
   see the [local pairing rollout](docs/local-pairing.md#release-prerequisites).
+  Extension 0.4.1 migration retirement follows distribution of this CLI.
 
 ### Fixed
 

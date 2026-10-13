@@ -83,6 +83,12 @@ async fn reply(ws: &mut Ws, request: RequestFrame, body: ResponseBody) {
 
 async fn start_with_protocol(protocol: &str) -> (tempfile::TempDir, Child, Ws) {
     let temp = tempfile::tempdir().unwrap();
+    // This fixture models legacy peers to test interaction preferences, not auth.
+    bsk::daemon::local_auth::write_mode(
+        temp.path(),
+        bsk::daemon::local_auth::LocalAuthMode::TrustLocal,
+    )
+    .unwrap();
     let mut daemon = command(
         temp.path(),
         &["daemon", "start", "--foreground", "--port", "0"],

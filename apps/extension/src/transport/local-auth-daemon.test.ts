@@ -10,7 +10,11 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { authenticateLocal, createLocalAuthenticator, LegacyReconnect } from "./local-auth";
-import { initializeLocalMigration, readLocalState } from "./local-credentials";
+import {
+  initializeLocalMigration,
+  readLocalState,
+  setSkipLocalVerification,
+} from "./local-credentials";
 import { verifyLocalPairing } from "./pairing-verifier";
 
 // Opt-in process tests: BSK_TEST_BINARY is a current build; BSK_TEST_OLD_BINARY
@@ -134,6 +138,34 @@ it.skipIf(!current)(
     await revoked;
     const devices = JSON.parse(await cli(current!, "daemon", "devices"));
     expect(devices[0].status).toBe("revoked");
+  },
+  20_000,
+);
+it.skipIf(!current)(
+  "Required default rejects skipping until the daemon explicitly trusts local peers",
+  async () => {
+    const url = await start(current!);
+    const status = JSON.parse(await cli(current!, "--json", "status"));
+    expect(status.local_auth.mode).toBe("required");
+    await setSkipLocalVerification(true);
+    const authenticate = createLocalAuthenticator({
+      instanceId: async () => instance,
+      origin,
+      status: vi.fn(),
+    });
+    let ws = await opened(url);
+    const send = vi.spyOn(ws, "send");
+    await authenticate(browserSocket(ws), AbortSignal.timeout(5000));
+    expect(send).not.toHaveBeenCalled();
+    expect((await handshake(ws)).error.code).toBe("pairing_required");
+    await cli(current!, "daemon", "trust-local", "on");
+    ws = await opened(url);
+    await authenticate(browserSocket(ws), AbortSignal.timeout(5000));
+    expect((await handshake(ws)).result).toBeDefined();
+    const revoked = once(ws, "close");
+    await cli(current!, "daemon", "trust-local", "off");
+    await revoked;
+    expect(JSON.parse(await cli(current!, "--json", "browsers"))).toEqual([]);
   },
   20_000,
 );

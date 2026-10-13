@@ -126,7 +126,7 @@ fn l16_local_keys_are_not_remote_bearer_grants() {
 #[test]
 fn settings_preserve_unrelated_fields_and_absence_uses_release_default() {
     let home = tempfile::tempdir().unwrap();
-    assert_eq!(read_mode(home.path()).unwrap(), LocalAuthMode::default());
+    assert_eq!(read_mode(home.path()).unwrap(), LocalAuthMode::Required);
     fs::write(
         home.path().join("settings.json"),
         br#"{"custom":{"enabled":true}}"#,

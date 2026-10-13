@@ -656,17 +656,26 @@ fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
                 .and_then(|mode| serde_json::to_value(mode).ok())
                 .and_then(|value| value.as_str().map(str::to_owned))
         });
-    if mode.as_deref() == Some("trust_local") {
-        CheckResult::warn(
+    match mode.as_deref() {
+        Some("trust_local") => CheckResult::warn(
             "local connection verification",
             "unverified local connections are allowed",
             "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
-        )
-    } else {
-        CheckResult::ok(
+        ),
+        Some("required") => CheckResult::ok(
             "local connection verification",
-            "local pairing verification is available",
-        )
+            "local pairing verification is required",
+        ),
+        Some("warn") => CheckResult::warn(
+            "local connection verification",
+            "migration mode still accepts unpaired local connections",
+            "update the extension, pair it, then run `bsk daemon trust-local off`",
+        ),
+        _ => CheckResult::warn(
+            "local connection verification",
+            "local verification policy is unavailable",
+            "check the daemon status and local settings before connecting",
+        ),
     }
 }
 
@@ -815,6 +824,30 @@ mod m2_tests {
             browsers,
             sessions: Vec::new(),
             version_skew_browsers: skew,
+        }
+    }
+
+    #[test]
+    fn local_auth_diagnostics_distinguish_required_from_bypasses() {
+        for (mode, expected) in [
+            ("required", CheckStatus::Ok),
+            ("warn", CheckStatus::Warning),
+            ("trust_local", CheckStatus::Warning),
+        ] {
+            let mut status = fake_status(Vec::new(), Vec::new());
+            status.local_auth = Some(bsk_protocol::system::LocalAuthStatus {
+                mode: mode.into(),
+                paired_devices: 0,
+                last_unpaired_attempt: None,
+            });
+            let check = check_local_auth(Some(&status));
+            assert_eq!(check.status, expected);
+            if mode == "required" {
+                assert!(check.detail.contains("required"));
+                assert!(check.hint.is_none());
+            } else {
+                assert!(check.hint.unwrap().contains("trust-local off"));
+            }
         }
     }
 

@@ -89,10 +89,15 @@ you can switch back without a new link; after expiry, pair with the server again
 
 ## Rollout and security boundaries
 
-The first compatible CLI release defaults to **Warn**: it supports pairing and
-accepts legacy connections during distribution. Paired connections use mutual
-HMAC proofs, but legacy connections still trust the peer at the configured port.
-Origin checks alone do not authenticate a native local program.
+The CLI now defaults to **Required**. Unpaired legacy handshakes are rejected
+with `pairing_required`, including peers claiming an official extension Origin.
+A peer must prove its local key before registration or browser control. Explicit
+TrustLocal mode remains available as a bypass; doctor reports it as unverified.
+
+The earlier distribution stage used **Warn** to keep old extensions working.
+An explicitly persisted Warn setting still accepts legacy peers and now produces
+a doctor warning. Run `bsk daemon trust-local off` after pairing to require
+verification. Origin checks alone do not authenticate a native local program.
 
 Extension **0.4.0** enables temporary compatibility only for an update from a
 version before 0.4.0 that has never paired. New installations do not get it. The
