@@ -1,5 +1,7 @@
 //! Local pairing credentials and policy. Remote grants use a separate store.
+pub(crate) mod handshake;
 pub mod maintenance;
+pub(crate) mod read_limit;
 pub mod store;
 
 use anyhow::Result;
@@ -41,6 +43,7 @@ fn write_mode(home: &Path, mode: LocalAuthMode) -> Result<()> {
 pub struct LocalAuth {
     pub store: store::PairingStore,
     mode: Mutex<LocalAuthMode>,
+    gates: Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
 impl LocalAuth {
     /// The caller keeps this lifecycle lock until all daemon work has stopped.
@@ -49,13 +52,25 @@ impl LocalAuth {
         Ok(Self {
             store: store::PairingStore::open(lock)?,
             mode: Mutex::new(read_mode(home)?),
+            gates: Default::default(),
         })
     }
     pub fn memory(mode: LocalAuthMode) -> Self {
         Self {
             store: store::PairingStore::memory(),
             mode: Mutex::new(mode),
+            gates: Default::default(),
         }
+    }
+    pub(crate) fn device_gate(&self, id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.gates.lock().expect("local device gates poisoned");
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(id).and_then(std::sync::Weak::upgrade) {
+            return gate;
+        }
+        let gate = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        gates.insert(id.into(), std::sync::Arc::downgrade(&gate));
+        gate
     }
     pub fn mode(&self) -> LocalAuthMode {
         *self.mode.lock().expect("local auth mode poisoned")

@@ -200,9 +200,12 @@ async fn run_record_stop(home: &Path, output: &Path) -> std::process::Output {
 async fn setup_daemon(temp: &Path) -> (bsk::daemon::DaemonHandle, PathBuf, PathBuf) {
     let home = temp.join("bsk-home");
     let sock = temp.join("daemon.sock");
-    let daemon = daemon::run(DaemonConfig::new(0), Some(sock.clone()))
-        .await
-        .unwrap();
+    let daemon = daemon::run(
+        DaemonConfig::new(0).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal),
+        Some(sock.clone()),
+    )
+    .await
+    .unwrap();
     bsk::daemon::info::write_to_path(
         &DaemonInfo::now(
             std::process::id(),

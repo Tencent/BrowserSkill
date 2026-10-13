@@ -47,7 +47,8 @@ fn tempfile_path(prefix: &str) -> PathBuf {
 async fn spawn_daemon() -> (daemon::DaemonHandle, PathBuf) {
     let port = 0;
 
-    let config = DaemonConfig::new(port);
+    let config =
+        DaemonConfig::new(port).with_local_auth(bsk::daemon::local_auth::LocalAuthMode::TrustLocal);
     let sock = tempfile_path("bsk-test-user-interrupt");
     let handle = daemon::run(config, Some(sock.clone())).await.unwrap();
     (handle, sock)
