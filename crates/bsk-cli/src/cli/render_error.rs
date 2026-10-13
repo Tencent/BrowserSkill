@@ -229,6 +229,13 @@ pub fn info_for_error(code: ErrorCode, data: Option<&serde_json::Value>) -> Rend
         return base;
     };
     match (code, reason) {
+        (ErrorCode::NoBrowserConnected, "local_pairing_required") => RenderInfo {
+            summary: "the extension needs local pairing",
+            hint: Some(
+                "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+            ),
+            ..base
+        },
         (_, "user_denied") => RenderInfo {
             summary: "the user denied the tab borrow",
             hint: Some("do not repeat the same authorization request"),

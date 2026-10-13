@@ -162,6 +162,23 @@ impl PairingStore {
     pub(crate) fn changes(&self) -> tokio::sync::watch::Receiver<()> {
         self.changed.subscribe()
     }
+    pub(crate) fn persisted_active(&self, id: &str) -> bool {
+        let Some(path) = &self.path else {
+            return self
+                .device(id)
+                .is_some_and(|d| d.status == DeviceStatus::Active);
+        };
+        super::super::json_store::read::<State>(path)
+            .ok()
+            .is_some_and(|state| {
+                state.version == 1
+                    && state.daemon_id == self.daemon_id()
+                    && state
+                        .devices
+                        .get(id)
+                        .is_some_and(|d| d.status == DeviceStatus::Active && d.valid())
+            })
+    }
     pub fn daemon_id(&self) -> Bytes<16> {
         self.state.lock().unwrap().daemon_id
     }

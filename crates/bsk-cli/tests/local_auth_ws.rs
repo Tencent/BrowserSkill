@@ -616,3 +616,95 @@ async fn l17_legacy_handshake_obeys_daemon_policy() {
         handle.shutdown().await;
     }
 }
+
+#[tokio::test]
+async fn l11_pair_activate_call_and_revoke_cleans_up_before_success() {
+    let handle = daemon().await;
+    let mut pair = Pairing::create(&handle, None);
+    let mut socket = connect(&handle).await;
+    authenticate(&mut socket, &mut pair).await;
+    handshake(&mut socket, INSTANCE).await;
+    let state = handle.state();
+    let browser = state.browsers.select(Some(INSTANCE)).unwrap();
+    let session = state
+        .sessions
+        .reserve_id(browser.id.clone(), 1, || 0)
+        .unwrap();
+    let waiter = browser
+        .dispatch(bsk_protocol::RequestFrame {
+            id: "snapshot".into(),
+            method: bsk_protocol::Method::ToolSnapshot,
+            params: Some(json!({"session_id":session})),
+        })
+        .unwrap();
+    let request: Value = serde_json::from_str(&receive(&mut socket).await).unwrap();
+    assert_eq!(request["method"], "tool.snapshot");
+    send(
+        &mut socket,
+        json!({"id":"snapshot", "result":{"text":"page"}}),
+    )
+    .await;
+    assert!(matches!(waiter.await.unwrap().body, ResponseBody::Ok(_)));
+    let pending = browser
+        .dispatch(bsk_protocol::RequestFrame {
+            id: "unfinished".into(),
+            method: bsk_protocol::Method::ToolSnapshot,
+            params: None,
+        })
+        .unwrap();
+    let _ = receive(&mut socket).await;
+    daemon::local_auth::lifecycle::revoke(state.clone(), Some(pair.device.encode()))
+        .await
+        .unwrap();
+    assert!(state.browsers.is_empty());
+    assert!(state.sessions.get(&session).is_none());
+    assert!(pending.await.is_err());
+    closed(&mut socket).await;
+    let mut replay = connect(&handle).await;
+    assert!(matches!(
+        probe(&mut replay, vec![pair.offer()], INSTANCE).await.1,
+        ChallengeResponse::PairingRequired { .. }
+    ));
+    closed(&mut replay).await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn l10_revocation_after_authentication_prevents_late_registration() {
+    let handle = daemon().await;
+    let mut pair = Pairing::create(&handle, None);
+    let mut socket = connect(&handle).await;
+    authenticate(&mut socket, &mut pair).await;
+    daemon::local_auth::lifecycle::revoke(handle.state(), Some(pair.device.encode()))
+        .await
+        .unwrap();
+    send(
+        &mut socket,
+        json!({"id":"late","method":"system.handshake","params":{
+        "client":"browser-skill-extension","version":"0.4.0","protocol_version":"1.3",
+        "instance_id":INSTANCE,"browser":{"name":"Chrome","version":"130"}}}),
+    )
+    .await;
+    closed(&mut socket).await;
+    assert!(handle.state().browsers.is_empty());
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn warn_records_only_pairing_capable_unpaired_attempts() {
+    let state = daemon::DaemonState::new(DaemonConfig::new(0).with_local_auth(LocalAuthMode::Warn));
+    state.record_unpaired(Some("0.3.0"), false);
+    assert!(state.recent_unpaired().is_none());
+    state.record_unpaired(Some("0.4.0"), true);
+    let status = state.local_auth_status().unwrap();
+    assert_eq!(status.mode, "warn");
+    assert_eq!(status.paired_devices, 0);
+    assert_eq!(
+        status
+            .last_unpaired_attempt
+            .unwrap()
+            .extension_version
+            .as_deref(),
+        Some("0.4.0")
+    );
+}

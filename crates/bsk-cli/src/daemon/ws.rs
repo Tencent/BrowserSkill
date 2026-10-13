@@ -160,7 +160,7 @@ async fn handle_connection(
     let origin = captured_origin.lock().unwrap().clone().unwrap_or_default();
     let authentication = tokio::time::timeout(
         HANDSHAKE_FIRST_FRAME_TIMEOUT,
-        super::local_auth::handshake::accept(state.local_auth.clone(), &mut ws, &origin),
+        super::local_auth::handshake::accept(state.clone(), &mut ws, &origin),
     )
     .await;
     let (authorization, first) = match authentication {
@@ -314,6 +314,7 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // can be told apart from the previous BrowserClient — the old
     // socket's cleanup path uses `remove_if_generation_matches` to
     // avoid clobbering the newer entry (review M4/M5 round 2 #1).
+    let registration = authorization.registration_guard().await;
     if !authorization.authorized().await || !authorization.matches_instance(&params.instance_id) {
         return Err(anyhow!(
             "device authorization ended or browser identity mismatch"
@@ -355,6 +356,8 @@ pub(super) async fn drive_connection<S: tokio::io::AsyncRead + tokio::io::AsyncW
     // Restore opt-in before making the browser available to CLI callers.
     let audit_ready = state.audit.configure(&browser_id.0, audit_enabled).is_ok();
     state.browsers.insert(Arc::clone(&client));
+    authorization.register(&client);
+    drop(registration);
     info!(
         id = %browser_id,
         name = %params.browser.name,

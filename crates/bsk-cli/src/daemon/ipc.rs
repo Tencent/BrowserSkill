@@ -96,6 +96,7 @@ impl DaemonStatus {
     /// fields are empty.
     pub fn snapshot(&self) -> StatusResult {
         StatusResult {
+            local_auth: None,
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -138,6 +139,7 @@ impl DaemonStatus {
             .map(|s| s.status_entry())
             .collect();
         StatusResult {
+            local_auth: state.local_auth_status(),
             daemon_version: self.daemon_version.to_string(),
             protocol_version: self.protocol_version.to_string(),
             pid: std::process::id(),
@@ -1134,7 +1136,11 @@ pub(super) async fn handle_session_start(
             if recoverable && let StartSessionError::CleanupFailed { session_id, .. } = &err {
                 state.tool_queues.spawn(session_id.clone());
             }
-            Err(map_start_error(err))
+            let mut error = map_start_error(err);
+            if error.code == ErrorCode::NoBrowserConnected && state.recent_unpaired().is_some() {
+                error.data = Some(serde_json::json!({"reason":"local_pairing_required"}));
+            }
+            Err(error)
         }
     }
 }

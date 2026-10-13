@@ -581,6 +581,8 @@ pub struct VersionSkewEntry {
 /// `system.status` reply: daemon meta + connected browsers + live sessions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct StatusResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_auth: Option<LocalAuthStatus>,
     /// Semver of the daemon binary (`env!("CARGO_PKG_VERSION")`).
     pub daemon_version: String,
     /// Logical protocol revision (e.g. `"1.0"`).
@@ -602,6 +604,18 @@ pub struct StatusResult {
     /// `BrowserStatusEntry.version_skew`.
     #[serde(default)]
     pub version_skew_browsers: Vec<VersionSkewEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LocalAuthStatus {
+    pub mode: String,
+    pub paired_devices: usize,
+    pub last_unpaired_attempt: Option<UnpairedAttempt>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UnpairedAttempt {
+    pub at: String,
+    pub extension_version: Option<String>,
 }
 
 #[cfg(test)]

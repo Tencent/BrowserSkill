@@ -25,6 +25,16 @@
       "description": "Semver of the daemon binary (`env!(\"CARGO_PKG_VERSION\")`).",
       "type": "string"
     },
+    "local_auth": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/LocalAuthStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "pid": {
       "description": "Daemon process id.",
       "type": "integer",
@@ -146,6 +156,33 @@
         }
       }
     },
+    "LocalAuthStatus": {
+      "type": "object",
+      "required": [
+        "mode",
+        "paired_devices"
+      ],
+      "properties": {
+        "last_unpaired_attempt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UnpairedAttempt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "mode": {
+          "type": "string"
+        },
+        "paired_devices": {
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0.0
+        }
+      }
+    },
     "RequestHelpPolicy": {
       "type": "string",
       "enum": [
@@ -189,6 +226,23 @@
         },
         "session_id": {
           "type": "string"
+        }
+      }
+    },
+    "UnpairedAttempt": {
+      "type": "object",
+      "required": [
+        "at"
+      ],
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "extension_version": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },

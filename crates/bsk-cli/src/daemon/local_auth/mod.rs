@@ -1,5 +1,6 @@
 //! Local pairing credentials and policy. Remote grants use a separate store.
 pub(crate) mod handshake;
+pub mod lifecycle;
 pub mod maintenance;
 pub(crate) mod read_limit;
 pub mod store;
@@ -46,6 +47,7 @@ pub fn write_mode(home: &Path, mode: LocalAuthMode) -> Result<()> {
 #[derive(Debug)]
 pub struct LocalAuth {
     pub store: store::PairingStore,
+    pub lifecycle: lifecycle::Lifecycle,
     mode: Mutex<LocalAuthMode>,
     gates: Mutex<std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>,
 }
@@ -55,6 +57,7 @@ impl LocalAuth {
             store: store::PairingStore::open(home)?,
             mode: Mutex::new(read_mode(home)?),
             gates: Default::default(),
+            lifecycle: Default::default(),
         })
     }
     pub fn memory(mode: LocalAuthMode) -> Self {
@@ -62,6 +65,7 @@ impl LocalAuth {
             store: store::PairingStore::memory(),
             mode: Mutex::new(mode),
             gates: Default::default(),
+            lifecycle: Default::default(),
         }
     }
     pub(crate) fn device_gate(&self, id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
@@ -81,6 +85,7 @@ impl LocalAuth {
         let mut current = self.mode.lock().expect("local auth mode poisoned");
         write_mode(home, mode)?;
         *current = mode;
+        self.lifecycle.notify();
         Ok(())
     }
 }

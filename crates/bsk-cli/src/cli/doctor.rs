@@ -169,7 +169,7 @@ enum DaemonState {
     NoListener(DaemonInfo),
     ProbeError(anyhow::Error),
     Verified {
-        status: StatusResult,
+        status: Box<StatusResult>,
         local_identity_error: Option<String>,
         /// Owned by a terminal or supervisor, which must restart it.
         host_managed: bool,
@@ -204,6 +204,7 @@ fn collect_checks(state: DaemonState) -> Vec<CheckResult> {
         check_version_compatible(state.status()),
         check_auto_update(state.status(), state.host_managed()),
         check_extension_connected(state.status()),
+        check_local_auth(state.status()),
         check_browsers_protocol_compatible(state.status()),
     ]
 }
@@ -403,7 +404,7 @@ fn current_state(browser_wait: Duration) -> DaemonState {
                 .err()
                 .map(|err| format!("{err:#}")),
             host_managed: daemon.info.host_managed,
-            status: daemon.status,
+            status: Box::new(daemon.status),
         },
         Ok(Probe::Absent(Some(info))) => DaemonState::NoListener(info),
         Ok(Probe::Absent(None)) => DaemonState::Missing,
@@ -644,6 +645,31 @@ fn display_protocol(value: &str) -> &str {
     if value.is_empty() { "unknown" } else { value }
 }
 
+fn check_local_auth(status: Option<&StatusResult>) -> CheckResult {
+    let mode = status
+        .and_then(|s| s.local_auth.as_ref())
+        .map(|s| s.mode.clone())
+        .or_else(|| {
+            paths::bsk_home()
+                .ok()
+                .and_then(|home| crate::daemon::local_auth::read_mode(&home).ok())
+                .and_then(|mode| serde_json::to_value(mode).ok())
+                .and_then(|value| value.as_str().map(str::to_owned))
+        });
+    if mode.as_deref() == Some("trust_local") {
+        CheckResult::warn(
+            "local connection verification",
+            "unverified local connections are allowed",
+            "run `bsk daemon trust-local off` and turn off skipping in the extension to restore verification",
+        )
+    } else {
+        CheckResult::ok(
+            "local connection verification",
+            "local pairing verification is available",
+        )
+    }
+}
+
 fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
     let name = "extension connected";
     let Some(status) = status else {
@@ -653,6 +679,18 @@ fn check_extension_connected(status: Option<&StatusResult>) -> CheckResult {
             "start the daemon and load the extension first",
         );
     };
+    if status.browsers.is_empty()
+        && status
+            .local_auth
+            .as_ref()
+            .is_some_and(|auth| auth.last_unpaired_attempt.is_some())
+    {
+        return CheckResult::fail(
+            name,
+            "extension is waiting for local pairing",
+            "run `bsk daemon pair`, then paste the link into the extension's connection settings",
+        );
+    }
     let browsers = status.browsers.len();
     let unresponsive = status
         .browsers
@@ -767,6 +805,7 @@ mod m2_tests {
 
     fn fake_status(browsers: Vec<BrowserStatusEntry>, skew: Vec<VersionSkewEntry>) -> StatusResult {
         StatusResult {
+            local_auth: None,
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             protocol_version: "1.0".into(),
             pid: 1,
@@ -938,7 +977,7 @@ mod m2_tests {
     #[test]
     fn unverified_local_identity_warns_without_failing_usable_ipc() {
         let state = DaemonState::Verified {
-            status: fake_status(Vec::new(), Vec::new()),
+            status: Box::new(fake_status(Vec::new(), Vec::new())),
             local_identity_error: Some("peer identity is unavailable".into()),
             host_managed: false,
         };
