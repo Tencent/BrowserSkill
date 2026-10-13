@@ -67,6 +67,25 @@ describe("App", () => {
     vi.unstubAllGlobals();
   });
 
+  it("keeps an unpaired connection enabled and displays a nonblocking warning", async () => {
+    mockUseConnectionState.mockReturnValue({
+      snapshot: {
+        ...baseSnapshot,
+        state: "connected",
+        localAuth: { state: "unverified_local", reason: "unpaired" },
+      },
+      statusState: "connected",
+      setLabel,
+      setConnectionEnabled,
+    });
+    render(<App />);
+    expect(screen.getByText("已连接")).toBeTruthy();
+    expect(screen.getByText("未配对")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "为什么建议配对？" })).toBeTruthy();
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(setConnectionEnabled).not.toHaveBeenCalled();
+  });
+
   it("adds only a current-task section and keeps existing home controls accessible", async () => {
     mockUseConnectionState.mockReturnValue({
       snapshot: { ...baseSnapshot, state: "connected" },
