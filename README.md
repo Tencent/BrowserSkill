@@ -89,7 +89,7 @@ If an already-running agent cannot find `bsk`, restart it to pick up the new PAT
 
 #### 2. Connect the extension
 
-Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg). Open its popup, enable the local connection, and check its status after starting the CLI.
+Install it from the [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) or [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg). Start or reuse the local daemon, run `bsk daemon pair`, and paste the complete link into the popup’s **Connection settings → Pairing link**. Enable the connection and wait for **Connected · Verified**. Pairing is remembered across restarts and upgrades. See [local pairing](docs/local-pairing.md) for replacement, revocation and troubleshooting.
 
 #### 3. Install the skill for your agent
 

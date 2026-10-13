@@ -111,8 +111,15 @@ for Chrome and other Chromium browsers,
 [Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg)
 for Microsoft Edge — and ask them to install it on the computer with that browser.
 
-- **Local:** ask the user to open the popup, enable the connection and confirm the
-  port matches the local daemon; wait for the connected status.
+- **Local:** run `bsk daemon pair` with the intended daemon’s `BSK_HOME`. Ask the user
+  to paste the complete link into the popup’s **Connection settings → Pairing link**
+  and save it. The link sets the port. Enable the connection and wait for
+  **Connected · Verified**; generating a link alone does not complete pairing.
+  Keep the link private and do not add it to logs, issues or shared transcripts.
+  On `already_paired`, retain the current connection; use `--replace BROWSER_ID`
+  only for an intended replacement. On `replace_mismatch`, use a normal link
+  for the new profile and revoke an unused device separately. Do not enable
+  verification skipping to work around a failure. See [local pairing](docs/local-pairing.md).
 - **Remote:** ask the user to select **Remote connection**, paste the pairing link
   and save it. Follow the [remote verification steps](docs/remote-extension-connection.md#pair-and-verify);
   installing the extension or generating a link alone does not establish a connection.

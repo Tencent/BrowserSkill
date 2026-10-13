@@ -3,9 +3,29 @@
 All notable changes to BrowserSkill will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
-Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
+CLI, Extension and DSH Plugin may release separately during staged rollouts;
+protocol compatibility determines which versions can connect.
 
 ## [Unreleased]
+
+### Added
+
+- Local pairing with mutual proofs, durable key rotation and interruption recovery.
+  The extension verifies the daemon before sending business traffic; activation
+  invalidates the original link. Device revocation and browser registration are
+  serialized, and successful revocation completes live connection cleanup.
+- `bsk daemon pair --replace`, local device listing/revocation, `daemon rotate`
+  and `daemon trust-local on|off`; status and doctor expose pairing guidance.
+- Extension 0.4.0 pairing settings, staged verification, ten-language guidance,
+  explicit bypass confirmation and retained remote grants when using local mode.
+  Eligible existing installations receive temporary migration compatibility;
+  new installations do not. Pairing clears compatibility permanently.
+
+### Changed
+
+- Initial pairing-capable CLI defaults to Warn during distribution. Required mode
+  and extension 0.4.1 migration retirement have separate release prerequisites;
+  see the [local pairing rollout](docs/local-pairing.md#release-prerequisites).
 
 ### Fixed
 

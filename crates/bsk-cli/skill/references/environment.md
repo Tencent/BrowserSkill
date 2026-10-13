@@ -125,3 +125,12 @@ If installation or browser-side connection steps are needed, direct the user to
 the [extension setup guide](https://github.com/Tencent/BrowserSkill/blob/main/AGENT_INSTALL.md#4-connect-the-browser-extension).
 After setup or repair, rerun `bsk doctor` with the same environment and address
 any remaining `fail` checks before starting a session.
+
+On `pairing_required` or a local-pairing hint, run `bsk daemon pair` with that
+same environment and have the user paste the private link into extension
+connection settings. Wait for Connected / Verified, then recheck doctor.
+Do not put pairing secrets in logs or shared reports. `already_paired` preserves
+the current connection; use `pair --replace BROWSER_ID` only for an intended
+replacement. `replace_mismatch` needs a normal link for the new profile; revoke
+an unused old device separately. Never enable skip/trust-local automatically.
+Independent bsk homes require separate pairings.

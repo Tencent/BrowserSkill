@@ -89,7 +89,7 @@ bsk --version
 
 #### 2. 连接扩展
 
-从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展。打开弹窗，开启本地连接，在 CLI 启动后检查连接状态。
+从 [Chrome Web Store](https://chromewebstore.google.com/detail/hhcmgoofomhgciiibhipgmgkgnoenaoi) 或 [Edge 加载项商店](https://microsoftedge.microsoft.com/addons/detail/browserskill/emacgiaaaiojkkpkddmmdfhmokgmnikg) 安装扩展。启动或复用本机 daemon，运行 `bsk daemon pair`，将完整链接粘贴到弹窗的**连接设置 → 配对链接**。开启连接，等待显示**已连接 · 已验证**。重启和升级后无需重复配对；替换、撤销与排障见[本机配对指南](docs/local-pairing.md)。
 
 #### 3. 给 Agent 安装 skill
 

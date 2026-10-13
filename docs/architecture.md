@@ -52,7 +52,9 @@ Key modules:
 
 - In local mode, listens on loopback WebSocket (default **52800**, configurable with `bsk daemon start --port`) for extensions. The extension popup saves the matching connection port; saving ends existing sessions and reconnects when enabled.
 - Server mode supports authenticated remote extension connections with device pairing, renewal and revocation. Native TLS or a TLS reverse proxy provides WSS; the deployment supervisor owns server restarts.
-- Validates `Origin: chrome-extension://…` on handshake.
+- Validates `Origin: chrome-extension://…` on upgrade and authenticates paired
+  local peers with nonce-bound HMAC proofs before the business handshake.
+  Origin is transcript context, not authorization. See [local pairing](local-pairing.md).
 - Maintains `browsers` (connected extensions) and `sessions` (Agent Window bindings).
 - **Per-session queue** serializes tool calls targeting one session.
 - Forwards `tool.*` RPCs to the correct extension connection.
@@ -62,6 +64,8 @@ State files under `~/.bsk/`:
 | File | Purpose |
 | --- | --- |
 | `daemon.lock` | Advisory lock — single daemon instance |
+| `local-pairings.json` | Local daemon identity, active/unactivated devices and pending key transactions; private atomic storage |
+| `settings.json` | Persistent local authentication policy |
 | `daemon.json` | `{ sock_path, pid, ws_port, version }` |
 | `daemon.log` | Rolling trace log |
 | `daemon.pid` | PID for status/doctor |
@@ -209,3 +213,28 @@ directory, registered with a module-relative `resourceBase` so agents can read r
 on demand regardless of their working directory. CI validates local links, entry point
 budgets, Cargo contents and the actual npm archive, including resource resolution from
 the unpacked runtime.
+
+## Local authorization lifecycle
+
+The extension first sends `system.ping` with `params.local_auth`. The daemon
+selects an offered active or staged credential and proves possession of its key;
+only then does the extension send its client proof. No business frames, registry
+updates or session purges happen before authorization succeeds.
+
+Activation and requested rotation persist a candidate, send `ready.rotation`,
+wait for the extension's strict IndexedDB commit and confirmation, then durably
+commit before sending `committed`. Recovery uses `ready.commit`, the saved key,
+and the current connection transcript. The extension promotes the candidate
+strictly before its business handshake. Exactly one final message is accepted.
+
+Device gates serialize the prelude, rotation, final authorization plus registry
+insertion, and revocation. Replacement activates the new record and revokes the
+old one atomically; socket and session cleanup finishes before success is reported.
+The daemon owns its loaded store only after acquiring `daemon.lock`. Online
+maintenance uses IPC; offline maintenance holds that same lock. Persistent
+revocation is also checked every second without blocking the async executor.
+
+The extension shares IndexedDB version 2 between independent `connection`, `local`
+and `migration` stores. Keys never enter `chrome.storage`, URLs sent over the
+network, or logs. A staged verifier has its own socket and no business dispatcher.
+The business transport reports connected only after its authenticator finishes.

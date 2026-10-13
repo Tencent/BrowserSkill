@@ -66,6 +66,12 @@ necessarily select the directory that the agent's user expects. Configure
 `BSK_HOME` explicitly on both sides instead of guessing a username or changing
 the process's global `HOME`.
 
+Each independent `BSK_HOME` has its own local pairing identity. Pair the intended
+browser with each home you use; changing directories to bypass an error does not
+reuse authorization. Run `bsk daemon pair` with the same environment as status
+and session commands, then have the user paste its private link in the extension.
+See [local pairing](local-pairing.md).
+
 ## 2. Check for an existing daemon
 
 From the agent's command environment, disable implicit startup and check the
