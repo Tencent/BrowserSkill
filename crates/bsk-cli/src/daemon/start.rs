@@ -56,6 +56,7 @@ pub(crate) const DAEMON_REPLACEMENT_WAIT_ENV: &str = "BSK_DAEMON_REPLACES_PID";
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
     pub server: Option<super::remote::ServerConfig>,
+    pub local_auth: super::local_auth::LocalAuthMode,
     pub ws_port: u16,
     pub session_idle: Duration,
     pub daemon_idle: Duration,
@@ -86,6 +87,7 @@ impl DaemonConfig {
     pub fn new(port: u16) -> Self {
         Self {
             server: None,
+            local_auth: Default::default(),
             ws_port: port,
             session_idle: Duration::from_secs(60 * 5),
             daemon_idle: Duration::from_secs(60 * 30),
@@ -123,6 +125,7 @@ impl From<&StartArgs> for DaemonConfig {
     fn from(args: &StartArgs) -> Self {
         Self {
             server: None,
+            local_auth: Default::default(),
             ws_port: args.resolved_port(),
             session_idle: args.resolved_session_idle(),
             daemon_idle: args.resolved_daemon_idle(),
@@ -454,24 +457,38 @@ fn run_daemon(cfg: &DaemonConfig) -> Result<()> {
 /// Take the daemon lock. A replacement waits for its predecessor, which
 /// keeps serving until the replacement has started and then releases it.
 fn acquire_daemon_lock(predecessor: Option<u32>) -> Result<lockfile::DaemonLock> {
-    let Some(pid) = predecessor else {
-        return lockfile::acquire().context("acquire daemon lock");
+    let wait = if let Some(pid) = predecessor {
+        info!(
+            predecessor = pid,
+            "replacement daemon waiting for the daemon lock"
+        );
+        handover::REPLACEMENT_LOCK_WAIT
+    } else {
+        Duration::from_secs(2)
     };
-    info!(
-        predecessor = pid,
-        "replacement daemon waiting for its predecessor to release the daemon lock"
-    );
-    let deadline = Instant::now() + handover::REPLACEMENT_LOCK_WAIT;
+    let deadline = Instant::now() + wait;
+    let initial_info = daemon_info::read()?;
+    let mut contended = false;
     loop {
+        if predecessor.is_none() && contended && daemon_info::read()? != initial_info {
+            anyhow::bail!("another daemon won startup while waiting for the lifecycle lock");
+        }
         match lockfile::acquire() {
             Ok(lock) => return Ok(lock),
             Err(err) if err.is::<lockfile::AlreadyLocked>() && Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(50));
+                // Retry a short offline-maintenance lock, but stop as soon as
+                // another daemon is serving. A losing starter must not linger
+                // and take over when that daemon is explicitly stopped.
+                if predecessor.is_none()
+                    && matches!(probe::probe(PROBE_TIMEOUT), Ok(Probe::Ready(_)))
+                {
+                    return Err(err).context("another daemon is already serving");
+                }
+                contended = true;
+                std::thread::sleep(Duration::from_millis(10));
             }
             Err(err) => {
-                return Err(
-                    err.context(format!("acquire daemon lock released by predecessor {pid}"))
-                );
+                return Err(err.context("acquire daemon lifecycle lock"));
             }
         }
     }
@@ -554,7 +571,11 @@ fn serve(cfg: &DaemonConfig, resumed: Option<&mut UpdateRecord>) -> Result<Stopp
             .await
             .with_context(|| format!("bind IPC endpoint {}", sock_path.display()))?;
 
-        let state = Arc::new(DaemonState::new(cfg.clone()));
+        // serve is entered only while holding daemon.lock, including handover
+        // recovery. Never preload authorization before acquiring that lock.
+        let mut daemon_state = DaemonState::new(cfg.clone());
+        daemon_state.local_auth = Arc::new(super::local_auth::LocalAuth::open(&paths::ensure_bsk_home()?)?);
+        let state = Arc::new(daemon_state);
         state
             .transfers
             .initialize()

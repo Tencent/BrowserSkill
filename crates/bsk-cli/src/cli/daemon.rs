@@ -24,10 +24,14 @@ pub enum DaemonCmd {
     /// Stop then start the daemon.
     Restart(StartArgs),
 
-    /// Generate a one-use remote browser pairing link.
-    Pair,
+    /// Generate a local pairing link (or a remote link in server mode).
+    Pair {
+        /// Replace this local browser/device after successful activation.
+        #[arg(long)]
+        replace: Option<String>,
+    },
 
-    /// List paired remote browsers (no credentials are displayed).
+    /// List local and remote devices (no credentials are displayed).
     Devices,
 
     /// Revoke a device grant, or all grants and outstanding pairing links.
@@ -37,6 +41,19 @@ pub enum DaemonCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Rotate a local device key on its next connection.
+    Rotate { device_id: String },
+    /// Explicitly allow or stop allowing unverified local connections.
+    TrustLocal {
+        #[arg(value_enum)]
+        setting: TrustSetting,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TrustSetting {
+    On,
+    Off,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -182,37 +199,107 @@ pub fn dispatch(cmd: DaemonCmd) -> anyhow::Result<()> {
             daemon::start::run_stop().map_err(|e| e.context("restart failed during stop phase"))?;
             daemon::start::run_start(args)
         }
-        DaemonCmd::Pair => {
-            println!("{}", authorization_store()?.pair()?);
+        DaemonCmd::Pair { replace } => {
+            let value = maintain(
+                bsk_protocol::Method::LocalAuthPair,
+                serde_json::json!({"replace":replace}),
+            )?;
+            println!(
+                "{}",
+                value["link"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("invalid pairing reply"))?
+            );
             Ok(())
         }
         DaemonCmd::Devices => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&authorization_store()?.devices()?)?
+                serde_json::to_string_pretty(&maintain(
+                    bsk_protocol::Method::LocalAuthDevices,
+                    serde_json::json!({})
+                )?)?
             );
             Ok(())
         }
         DaemonCmd::Revoke { device_id, all } => {
-            let store = authorization_store()?;
-            if all {
-                store.revoke_all()?;
-            } else {
-                anyhow::ensure!(
-                    store.revoke(device_id.as_deref().unwrap_or_default())?,
-                    "device grant not found"
-                );
-            }
+            maintain(
+                bsk_protocol::Method::LocalAuthRevoke,
+                serde_json::json!({"device_id":device_id,"all":all}),
+            )?;
             println!("Authorization revoked");
+            Ok(())
+        }
+        DaemonCmd::Rotate { device_id } => {
+            maintain(
+                bsk_protocol::Method::LocalAuthRotate,
+                serde_json::json!({"device_id":device_id}),
+            )?;
+            println!("Key rotation scheduled for the next connection");
+            Ok(())
+        }
+        DaemonCmd::TrustLocal { setting } => {
+            use daemon::local_auth::LocalAuthMode;
+            let mode = match setting {
+                TrustSetting::On => LocalAuthMode::TrustLocal,
+                TrustSetting::Off => LocalAuthMode::Required,
+            };
+            maintain(
+                bsk_protocol::Method::LocalAuthSetMode,
+                serde_json::json!({"mode":mode}),
+            )?;
+            match setting {
+                TrustSetting::On => println!(
+                    "Warning: unverified local connections are allowed. Enable skipping in the extension separately."
+                ),
+                TrustSetting::Off => println!("Local pairing verification is required"),
+            }
             Ok(())
         }
     }
 }
 
-fn authorization_store() -> anyhow::Result<daemon::remote::authorization::AuthorizationStore> {
-    Ok(daemon::remote::authorization::AuthorizationStore::at_home(
-        &daemon::paths::ensure_bsk_home()?,
-    ))
+fn maintain(
+    method: bsk_protocol::Method,
+    params: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let home = daemon::paths::ensure_bsk_home()?;
+    match daemon::lockfile::acquire() {
+        Ok(_lock) => {
+            let local = daemon::local_auth::LocalAuth::open(&home)?;
+            daemon::local_auth::maintenance::execute(
+                &local,
+                &home,
+                DEFAULT_WS_PORT,
+                false,
+                method,
+                params,
+            )
+        }
+        Err(error) if error.is::<daemon::lockfile::AlreadyLocked>() => {
+            // Once another process owns the lifecycle lock, never touch files
+            // offline, even if IPC is not ready yet or the request fails.
+            let running = daemon::probe::wait_for_ready(Duration::from_secs(10))?;
+            let path = running.info.sock_path.clone();
+            drop(running);
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let mut client = crate::ipc_client::Client::connect_path(path).await?;
+                    client
+                        .call(method, &params, Duration::from_secs(10))
+                        .await?
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "{}; if the daemon is older, run `bsk update` and restart it",
+                                error.message
+                            )
+                        })
+                })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

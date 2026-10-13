@@ -8,6 +8,8 @@ pub mod file_transfer;
 pub mod inflight;
 pub mod info;
 pub mod ipc;
+pub(crate) mod json_store;
+pub mod local_auth;
 pub mod lockfile;
 pub mod paths;
 pub(crate) mod probe;

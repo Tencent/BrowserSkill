@@ -29,6 +29,7 @@ pub const SERVER_NAME: &str = "browser-skill-daemon";
 pub struct DaemonState {
     pub audit: Arc<super::audit::AuditStore>,
     pub config: DaemonConfig,
+    pub local_auth: Arc<super::local_auth::LocalAuth>,
     pub browsers: Arc<BrowserRegistry>,
     pub sessions: Arc<SessionRegistry>,
     pub session_requests: super::session_requests::SessionRequests,
@@ -79,6 +80,7 @@ impl DaemonState {
         let transfers = Arc::new(TransferRegistry::new().expect("initialise transfer staging"));
         Self {
             audit,
+            local_auth: Arc::new(super::local_auth::LocalAuth::memory(config.local_auth)),
             config,
             browsers,
             sessions,

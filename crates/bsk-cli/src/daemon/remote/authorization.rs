@@ -1,14 +1,10 @@
 //! Device grants stored as hashes, with atomic writes shared by CLI and server.
 
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use fs2::FileExt;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -105,66 +101,17 @@ impl AuthorizationStore {
     }
 
     fn transaction<T>(&self, write: bool, work: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-        // Writers publish complete snapshots using atomic replacement. Readers
-        // can safely open either snapshot without contending with durable writes.
-        if !write {
-            return work(&mut self.read_state()?);
-        }
-        let parent = self
-            .path
-            .parent()
-            .context("authorization directory missing")?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.path.with_extension("lock"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            lock.set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
-        // All callers, including blocking tasks cancelled by a disconnected
-        // client, must eventually release their thread rather than wait forever.
-        let deadline = Instant::now() + Duration::from_millis(500);
-        loop {
-            match FileExt::try_lock_exclusive(&lock) {
-                Ok(()) => break,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err(error).context("authorization store is busy");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(error.into()),
+        crate::daemon::json_store::transaction(&self.path, write, |state: &mut State| {
+            ensure!(
+                state.version <= 1,
+                "unsupported authorization store version"
+            );
+            let result = work(state)?;
+            if write {
+                state.version = 1;
             }
-        }
-        let mut state = self.read_state()?;
-        let result = work(&mut state)?;
-        state.version = 1;
-        let mut file = tempfile::NamedTempFile::new_in(parent)?;
-        serde_json::to_writer(file.as_file_mut(), &state)?;
-        file.as_file_mut().flush()?;
-        file.as_file().sync_all()?;
-        file.persist(&self.path).map_err(|err| err.error)?;
-        if let Ok(directory) = fs::File::open(parent) {
-            let _ = directory.sync_all();
-        }
-        Ok(result)
-    }
-
-    fn read_state(&self) -> Result<State> {
-        let state: State = match fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).context("invalid authorization store")?,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => State::default(),
-            Err(err) => return Err(err.into()),
-        };
-        ensure!(
-            state.version <= 1,
-            "unsupported authorization store version"
-        );
-        Ok(state)
+            Ok(result)
+        })
     }
 
     pub fn configure(&self, config: &ServerConfig) -> Result<()> {
@@ -359,6 +306,7 @@ impl AuthorizationStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::Duration;
 
     fn setup() -> (tempfile::TempDir, AuthorizationStore) {
