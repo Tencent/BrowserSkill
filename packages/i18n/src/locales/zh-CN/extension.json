@@ -133,6 +133,11 @@
       "promptTemplate": "本次任务使用 BrowserSkill 的浏览器 {{name}}（实例 ID：{{instanceId}}）。为本次任务创建每个新会话时，请使用对应接口：\nCLI：{{command}}\nDeepSeek Harness：{{toolCall}}\n在 DeepSeek Harness 中请使用工具调用，不要另行执行 CLI 命令。\n如果此实例未连接，请停止并让我重新连接此 Profile。不要省略 --browser / browser，也不要切换到其他实例。",
       "title": "当前浏览器",
       "unnamed": "未命名浏览器"
+    },
+    "bookmarks": {
+      "title": "书签访问",
+      "scope": "允许 Agent 读取和修改此 Chrome 配置的全部书签。默认关闭。",
+      "failed": "无法读取或更改书签权限。请重新打开设置后重试。"
     }
   },
   "controlOverlay": {

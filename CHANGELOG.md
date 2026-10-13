@@ -7,6 +7,12 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ## [Unreleased]
 
+### Added
+
+- Optional local-profile bookmark access: read the native tree, move nodes,
+  create folders, and remove empty folders through CLI and DSH tools. Access
+  is off by default and can be granted or revoked in the extension settings.
+
 ### Fixed
 
 - Extension: input to a background Agent Window tab no longer keeps failing with

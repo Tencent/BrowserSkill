@@ -124,6 +124,10 @@ const ACTION_ROUTES: Record<string, readonly [string, string]> = {
   "inspect.screenshot": ["browser_inspect", "screenshot"],
   "inspect.console": ["browser_inspect", "console"],
   "inspect.network": ["browser_inspect", "network"],
+  "inspect.bookmarks": ["browser_inspect", "bookmarks"],
+  "assist.bookmarks-move": ["browser_assist", "bookmarks-move"],
+  "assist.bookmarks-create-folder": ["browser_assist", "bookmarks-create-folder"],
+  "assist.bookmarks-remove-empty-folder": ["browser_assist", "bookmarks-remove-empty-folder"],
   "inspect.debug": ["browser_inspect", "debug"],
   "interact.click": ["browser_interact", "click"],
   "interact.hover": ["browser_interact", "hover"],
@@ -237,6 +241,7 @@ const EXPECTED_ACTIONS = {
     "network",
     "debug",
     "video",
+    "bookmarks",
   ],
   browser_interact: [
     "click",
@@ -250,8 +255,75 @@ const EXPECTED_ACTIONS = {
     "press",
   ],
   browser_tabs: ["list", "create", "select", "close", "borrow", "return"],
-  browser_assist: ["resize", "emulate", "request-help"],
+  browser_assist: [
+    "bookmarks-move",
+    "bookmarks-create-folder",
+    "bookmarks-remove-empty-folder",
+    "resize",
+    "emulate",
+    "request-help",
+  ],
 } as const;
+
+describe("bookmark tools", () => {
+  it("routes owned profile operations and protects positional folder titles", async () => {
+    const { tools, calls, registry } = setup({ bookmarks: { nodes: [] } });
+    registry.reserveStart();
+    registry.completeStart({
+      sessionId: "bookmark-session",
+      browserInstanceId: "chrome-1",
+      startedAtMs: Date.now(),
+    });
+    await tools.get("inspect.bookmarks")!.execute({ session: "bookmark-session" }, makeExec());
+    await tools
+      .get("assist.bookmarks-move")!
+      .execute({ session: "bookmark-session", nodeId: "5", parentId: "2", index: 0 }, makeExec());
+    await tools
+      .get("assist.bookmarks-create-folder")!
+      .execute({ session: "bookmark-session", parentId: "2", title: "--help" }, makeExec());
+    await tools
+      .get("assist.bookmarks-remove-empty-folder")!
+      .execute({ session: "bookmark-session", nodeId: "5" }, makeExec());
+    expect(calls.map((call) => call.args)).toEqual([
+      ["bookmarks", "--session", "bookmark-session", "tree"],
+      [
+        "bookmarks",
+        "--session",
+        "bookmark-session",
+        "move",
+        "--parent",
+        "2",
+        "--index",
+        "0",
+        "--",
+        "5",
+      ],
+      [
+        "bookmarks",
+        "--session",
+        "bookmark-session",
+        "create-folder",
+        "--parent",
+        "2",
+        "--",
+        "--help",
+      ],
+      ["bookmarks", "--session", "bookmark-session", "remove-empty-folder", "--", "5"],
+    ]);
+    await expect(
+      tools
+        .get("assist.bookmarks-move")!
+        .execute(
+          { session: "bookmark-session", nodeId: "5", parentId: "2", index: -1 },
+          makeExec(),
+        ),
+    ).rejects.toThrow(/nonnegative/);
+    await expect(
+      tools.get("inspect.bookmarks")!.execute({ session: "foreign" }, makeExec()),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(4);
+  });
+});
 
 describe("tool registration", () => {
   it("registers exactly six public schemas with the complete action contract", () => {

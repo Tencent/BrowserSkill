@@ -6,6 +6,7 @@ import { AuditPanel } from "@/components/audit-panel";
 import { compareProtocol } from "@/lib/semver";
 import { PROTOCOL_VERSION } from "@/transport/handshake";
 import functionIconUrl from "../../../assets/function.svg";
+import { BookmarkSettings } from "./bookmark-settings";
 import { BrowserProfile } from "./browser-profile";
 import { ConnectionSettings } from "./connection-settings";
 import { ConnectionStatusIndicator } from "./connection-status-indicator";
@@ -275,6 +276,7 @@ export function App() {
           </section>
 
           <InteractionSettings />
+          <BookmarkSettings />
 
           <CurrentTasks enabled={connectionLive} />
 

@@ -268,7 +268,11 @@ pub fn full_handler(status: DaemonStatus, state: Arc<DaemonState>) -> RpcHandler
                 Method::TransferRead => handle_transfer_read(&state, params),
                 Method::TransferRelease => handle_transfer_release(&state, params),
                 Method::ToolVideo => handle_video(&state, rpc_id, params).await,
-                Method::ToolTabList
+                Method::ToolBookmarksTree
+                | Method::ToolBookmarksMove
+                | Method::ToolBookmarksCreateFolder
+                | Method::ToolBookmarksRemoveEmptyFolder
+                | Method::ToolTabList
                 | Method::ToolTabCreate
                 | Method::ToolTabClose
                 | Method::ToolTabSelect

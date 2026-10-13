@@ -1,6 +1,6 @@
 # BrowserSkill — Privacy Policy
 
-**Last updated:** September 30, 2026
+**Last updated:** October 13, 2026
 
 This Privacy Policy describes how the **BrowserSkill** browser extension (the "Extension") handles information when you install and use it. BrowserSkill is published as part of the open-source [BrowserSkill](https://github.com/Tencent/BrowserSkill) project. The source code is publicly auditable.
 
@@ -27,6 +27,7 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 | **Web page content** | The DOM, accessibility tree, HTML, and screenshots of pages controlled in the "Agent Window," tabs borrowed according to the browser's confirmation setting, or pages selected for user-initiated Quick Actions. | Required to read pages, locate elements, verify results, and capture requested screenshots. |
 | **User input simulated by the agent** | Mouse clicks, keystrokes, and form values that the AI agent dispatches through the Chrome DevTools Protocol (CDP). | Required to perform automation actions the user has asked the agent to do. |
 | **Website debugging evidence** | For the selected tab while capture is active: request URLs, methods, headers, request and response bodies when available, status, timing, errors and related network metadata; console messages; agent actions and supported manual input, click, submission and navigation events; bounded visible page text, form-field values and page/performance context. Configured HTTP rules and replay outcomes are also recorded. | Used to inspect and reproduce website behavior, associate operations with requests and page changes, analyze performance, and review or export debugging history. |
+| **Profile bookmarks (optional)** | Bookmark IDs, folder structure, order, titles, URLs, and node metadata in the selected local Chrome profile. | Used to read or organize bookmarks when the user grants bookmark access and requests an operation. |
 | **Tab and window metadata** | Tab IDs, URLs, titles and window IDs, including user tabs listed to select a tab for borrowing. | Required to target automation commands at the correct tab/window. |
 | **Local extension storage** | A randomly generated 8-character instance ID, an optional user-supplied label, feature preferences including the audit toggle, and optionally a paired endpoint and device credential. | Used to recognize this browser instance and restore user settings. |
 | **File transfers requested by the agent** | Local files explicitly supplied to `bsk upload`, and the file created by a single `bsk download` action. | Required to attach a task file to a web page or return a browser-generated download to the invoking local agent. |
@@ -37,15 +38,17 @@ Depending on the commands the user (via their AI agent) sends to the selected da
 
 - The Extension sends automation results only to the daemon or gateway the user selects. BrowserSkill's authors do not receive telemetry or operate a mandatory hosted service.
 - The Extension does not independently call LLM, AI or cloud APIs and contains no AI provider API keys.
-- BrowserSkill does not enumerate the browser's browsing-history database, bookmarks, saved passwords or autofill databases. Website debugging creates its own history of the selected tab's activity during capture; this is separate from the browser's browsing-history database. Download handling supports user-requested screenshot exports and the download initiated by an active local `bsk download` call; it does not enumerate download history.
+- BrowserSkill does not enumerate the browser's browsing-history database, saved passwords or autofill databases. Website debugging creates its own history of the selected tab's activity during capture; this is separate from the browser's browsing-history database. Download handling supports user-requested screenshot exports and the download initiated by an active local `bsk download` call; it does not enumerate download history.
 - Website debugging starts only when explicitly requested by the user or their agent. Each capture targets one task-created or borrowed tab per task, including network evidence from its frames. Merely opening a tab or moving it into the Agent Window does not authorize capture. During capture, supported manual actions in the selected page are recorded as well as agent actions.
 - Stopping capture, returning or closing its tab, ending its task, or disconnecting stops new collection but does not delete saved debugging history. After a browser or extension restart, unfinished captures are recovered as interrupted rather than automatically resumed.
 - Automation uses the existing browser profile. Controlled pages may expose personal data and signed-in website sessions; pairing with a server allows its Agent to operate those pages.
 - The Extension includes no analytics, advertising, fingerprinting or cross-site tracking system and does not sell user data.
 
+Bookmark access is off by default. The user grants or revokes the optional permission in the Extension settings. It covers all bookmarks in that profile, not only the Agent Window. Bookmark operations reject remote sessions. Results go to the invoking local agent; the Extension does not save a separate bookmark database. Backups saved by the agent or user remain at their chosen destination.
+
 ## 5. Permissions Justification
 
-The Extension requests the following Chrome permissions. Each is used solely for the single purpose described above.
+The Extension requests the following Chrome permissions. The optional `bookmarks` permission allows reading the profile tree, moving nodes, creating folders, and removing empty folders only after the user grants access. Each is used solely for the single purpose described above.
 
 - **`debugger`** — Attach the Chrome DevTools Protocol to tabs selected for automation or user-initiated capture, so BrowserSkill can observe, interact with, and capture those pages. During explicitly started website debugging, it also reads network headers and bodies, console and performance evidence, observes page actions and field values, and applies explicitly configured task-local HTTP rules and request replays.
 - **`activeTab`** — Allow temporary access to the active tab when the user invokes the Extension, for user-initiated Quick Actions.

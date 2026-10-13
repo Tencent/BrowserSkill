@@ -187,6 +187,14 @@ Request replay sends a new request using the page's current session and can chan
 
 ## More workflows
 
+### Manage profile bookmarks
+
+Enable **Bookmark access** in the extension settings for the required profile.
+Use `bsk bookmarks --session <id> tree --json` to read its tree. The CLI and
+DSH tools can move nodes, create folders, and remove empty folders. Access is
+local-only and off by default. Save a backup before edits. See [bookmarks](docs/bookmarks.md).
+
+
 ### Capture a full page
 
 Use **Quick Actions → Full-page screenshot** for automatic scrolling, a long image you scroll yourself, or the visible area. This extension feature also works without an agent or daemon connection.

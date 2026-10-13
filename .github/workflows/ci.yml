@@ -284,6 +284,11 @@ jobs:
           cargo build -p bsk --locked
           pnpm --filter @browser-skill/extension build
           pnpm --filter @wxg-prc-cpg/browser-skill-dsh-plugin build
+      - name: Validate local bookmark CLI and extension
+        working-directory: apps/extension
+        env:
+          BSK_BOOKMARKS_BSK: ../../target/debug/bsk
+        run: BSK_BOOKMARKS_CHROME="$BSK_VIDEO_CHROME" pnpm exec vitest run src/tools/__tests__/bookmarks.browser.test.ts
       - name: Validate capture, playback, recovery and CLI/DSH export
         working-directory: apps/extension
         env:

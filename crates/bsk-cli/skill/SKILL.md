@@ -8,9 +8,8 @@ description: |
 
 # browser-skill
 
-Use `bsk` in an **Agent Window** with the user's existing logins. User tabs
-require explicit borrowing. This skill does not install the extension or handle
-advice-only tasks. Never extract credentials, cookies, tokens, or other secrets.
+Use `bsk` in an **Agent Window** with existing logins. Borrow user tabs explicitly.
+Never extract credentials, cookies, tokens, or other secrets.
 
 ## Before acting
 
@@ -120,6 +119,7 @@ A task may need more than one reference as it progresses.
 | Missing CLI, daemon startup failure, sandboxed startup, connection failure, or remote pairing | [Environment](references/environment.md) |
 | Waits, hover menus/probing, scrolling, `next_cursor`/`@more`, console/network, emulation, evaluation, or recording | [Interaction details](references/interaction-details.md) |
 | Screenshot, full-page capture, or `[visual:screenshot]`/Canvas interaction | [Screenshots and Canvas](references/screenshots-and-canvas.md) |
+| Local bookmarks | [Bookmarks](references/bookmarks.md) |
 | Video recording or MP4 export | [Video](references/video.md) |
 | Upload or download | [Files](references/files.md) |
 | Login/CAPTCHA/OTP/consent/payment confirmation, two attempts without progress, or an operation error | [Human help and recovery](references/help-and-recovery.md) |

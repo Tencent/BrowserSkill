@@ -6,6 +6,7 @@
  */
 
 import { defineTool, type ParameterSchemaSpec, type ToolDefinition } from "@deepseek-ai/dsh-tools";
+import { BOOKMARK_PARAMETERS } from "./bookmark-tools";
 import { DEBUG_PARAMETERS } from "./debug-tool";
 import {
   BROWSER_PARAM,
@@ -169,7 +170,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     name: "browser_inspect",
     description:
       "Inspect page state and explicitly control task-scoped debugging. Actions: observe, snapshot, html, " +
-      "screenshot, console, network, video. video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. Prefer observe, then snapshot, then bounded html; use screenshot " +
+      "screenshot, console, network, bookmarks, video. bookmarks reads the local profile tree with optional permission.  video with videoAction starts/stops a requested recording, checks status, lists, saves or discards MP4 artifacts. Start video before task operations and stop before session teardown. Prefer observe, then snapshot, then bounded html; use screenshot " +
       "for visual evidence. console/network support cursor fields since/limit/maxTextChars. " +
       "debug with debugAction starts/stops capture, reads/exports evidence, or explicitly controls network traffic. " +
       "rule_add/rule_enable can block, modify or mock live requests; replay sends a new request and may change server data. Start capture before visiting the page.",
@@ -182,6 +183,7 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       network: "inspect.network",
       debug: "inspect.debug",
       video: "inspect.video",
+      bookmarks: "inspect.bookmarks",
     },
     parameters: {
       session: SESSION_PARAM,
@@ -293,8 +295,11 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
     description:
       "Display and human-assistance operations. Actions: resize, emulate, request-help. resize " +
       "requires width/height; emulate accepts device or width/height/mobile, or off alone; " +
-      "request-help requires prompt and can wait for explicit completion criteria.",
+      "request-help requires prompt and can wait for explicit completion criteria. Local bookmark actions: bookmarks-move, bookmarks-create-folder, bookmarks-remove-empty-folder. Back up the tree before edits. nodeId identifies an existing node; parentId identifies the destination; remove-empty-folder refuses URL bookmarks and nonempty folders.",
     actions: {
+      "bookmarks-move": "assist.bookmarks-move",
+      "bookmarks-create-folder": "assist.bookmarks-create-folder",
+      "bookmarks-remove-empty-folder": "assist.bookmarks-remove-empty-folder",
       resize: "assist.resize",
       emulate: "assist.emulate",
       "request-help": "assist.request-help",
@@ -308,7 +313,12 @@ const BROWSER_TOOL_SPECS: BrowserToolSpec[] = [
       mobile: { type: "boolean", description: "Enable a mobile viewport with width/height." },
       off: { type: "boolean", description: "Clear emulation; use alone." },
       prompt: { type: "string", description: "Instructions shown to the user for request-help." },
-      title: { type: "string", description: "Optional request-help title." },
+      title: {
+        type: "string",
+        description:
+          "Optional request-help title; required folder title for bookmarks-create-folder.",
+      },
+      ...BOOKMARK_PARAMETERS,
       targets: {
         type: "array",
         items: { type: "string" },

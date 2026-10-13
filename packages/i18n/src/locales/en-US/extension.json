@@ -133,6 +133,11 @@
       "promptTemplate": "For this task, use BrowserSkill in browser {{name}} (instance ID: {{instanceId}}). Start every new session for this task with the appropriate interface:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nIn DeepSeek Harness, use the tool call instead of running the CLI command separately.\nIf this instance is not connected, stop and ask me to reconnect this profile. Do not omit --browser / browser or switch to another instance.",
       "title": "Current browser",
       "unnamed": "Unnamed browser"
+    },
+    "bookmarks": {
+      "title": "Bookmark access",
+      "scope": "Allow agents to read and edit all bookmarks in this Chrome profile. Off by default.",
+      "failed": "Could not read or change bookmark access. Reopen settings and try again."
     }
   },
   "controlOverlay": {

@@ -133,6 +133,11 @@
       "promptTemplate": "이 작업에는 브라우저 {{name}}(인스턴스 ID: {{instanceId}})의 BrowserSkill을 사용하세요. 이 작업의 새 세션을 시작할 때마다 해당 인터페이스를 사용하세요:\nCLI: {{command}}\nDeepSeek Harness: {{toolCall}}\nDeepSeek Harness에서는 CLI 명령을 별도로 실행하지 말고 도구 호출을 사용하세요.\n이 인스턴스가 연결되어 있지 않으면 중단하고 이 프로필을 다시 연결해 달라고 요청하세요. --browser / browser를 생략하거나 다른 인스턴스로 전환하지 마세요.",
       "title": "현재 브라우저",
       "unnamed": "이름 없는 브라우저"
+    },
+    "bookmarks": {
+      "title": "북마크 접근",
+      "scope": "에이전트가 이 Chrome 프로필의 모든 북마크를 읽고 수정하도록 허용합니다. 기본적으로 꺼져 있습니다.",
+      "failed": "북마크 권한을 읽거나 변경하지 못했습니다. 설정을 다시 열고 재시도하세요."
     }
   },
   "controlOverlay": {

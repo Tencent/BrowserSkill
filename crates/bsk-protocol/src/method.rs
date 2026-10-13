@@ -82,6 +82,15 @@ pub enum Method {
     ToolClick,
     #[serde(rename = "tool.hover")]
     ToolHover,
+    #[serde(rename = "tool.bookmarks_tree")]
+    ToolBookmarksTree,
+    #[serde(rename = "tool.bookmarks_move")]
+    ToolBookmarksMove,
+    #[serde(rename = "tool.bookmarks_create_folder")]
+    ToolBookmarksCreateFolder,
+    #[serde(rename = "tool.bookmarks_remove_empty_folder")]
+    ToolBookmarksRemoveEmptyFolder,
+
     #[serde(rename = "tool.wheel")]
     ToolWheel,
     #[serde(rename = "tool.scroll_to")]
@@ -184,7 +193,10 @@ impl Method {
     pub fn effect(&self) -> MethodEffect {
         match self {
             // Browser/page mutations — gated by pending-interrupt.
-            Method::ToolTabCreate
+            Method::ToolBookmarksMove
+            | Method::ToolBookmarksCreateFolder
+            | Method::ToolBookmarksRemoveEmptyFolder
+            | Method::ToolTabCreate
             | Method::ToolTabClose
             | Method::ToolTabBorrow
             | Method::ToolTabReturn
@@ -218,7 +230,8 @@ impl Method {
             // `record_stop` / `record_await` observe / finish a recording
             // without driving new automation gestures, so they stay
             // ungated (teardown after interrupt must still work).
-            Method::ToolTabList
+            Method::ToolBookmarksTree
+            | Method::ToolTabList
             | Method::ToolSnapshot
             | Method::ToolGetHtml
             | Method::ToolScreenshot
